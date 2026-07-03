@@ -12,6 +12,8 @@
 // calls resolve to {ok:false}; heuristic fallbacks keep the app usable.
 // ============================================================
 
+import "./http.js"; // configure proxy dispatcher for server-side fetch
+
 export type ProviderId = "anthropic" | "openai" | "google";
 
 /** Map a UI model label (or raw id) to provider + API model id. */

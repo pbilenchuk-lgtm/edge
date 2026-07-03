@@ -6,6 +6,8 @@ import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import {
   loadPolymarketConfig, getQuotes, fetchMidpointCents,
+  normalizeEvent, eventToMarketSnapshots, titleMatchScore,
+  findMatchEvent, fetchEventBySlug, listSportEvents,
 } from "../src/lib/polymarket.js";
 import {
   resolveModel, apiKeyFor, callLLM, generateStrategyName, heuristicName,
@@ -79,6 +81,67 @@ test("polymarket: live fetch success and graceful error fallback", async () => {
   assert.equal(fell[0].source, "error");
   assert.equal(fell[0].priceCents, 46); // fell back to snapshot
   assert.equal(fell[0].stale, true);
+});
+
+// ---------------- Polymarket discovery: match -> event -> markets ----------------
+// Fixture mirrors the real Gamma shape (JSON-STRING fields, cents=prob*100).
+const EVENT_FIXTURE = [{
+  id: "42", slug: "atp-doig-gonzal-2026-07-04",
+  title: "Wimbledon Juniors, Boys: Connor Doig vs Eudald Gonzalez",
+  startDate: "2026-07-03T16:00:39Z",
+  markets: [
+    { groupItemTitle: "", question: "Connor Doig vs Eudald Gonzalez",
+      outcomes: '["Connor Doig","Eudald Gonzalez"]', outcomePrices: '["0.62","0.38"]',
+      clobTokenIds: '["tok-a","tok-b"]', liquidity: "1234", conditionId: "0xabc" },
+    { groupItemTitle: "Total Sets: O/U 2.5", question: "…O/U 2.5",
+      outcomes: '["Over 2.5","Under 2.5"]', outcomePrices: '["0.45","0.55"]',
+      clobTokenIds: '["tok-c","tok-d"]', liquidity: "500", conditionId: "0xdef" },
+    { groupItemTitle: "No price yet", question: "x",
+      outcomes: '["Yes","No"]', outcomePrices: "[]", clobTokenIds: "[]", liquidity: null },
+  ],
+}];
+const eventsFetch = (async () => ({ ok: true, json: async () => EVENT_FIXTURE })) as unknown as typeof fetch;
+
+test("polymarket: normalizeEvent parses Gamma JSON-string fields to cents", () => {
+  const ev = normalizeEvent(EVENT_FIXTURE[0]);
+  assert.equal(ev.markets.length, 3);
+  assert.equal(ev.markets[0].label, "Connor Doig vs Eudald Gonzalez"); // falls back to question
+  assert.deepEqual(ev.markets[0].outcomes, ["Connor Doig", "Eudald Gonzalez"]);
+  assert.equal(ev.markets[0].priceCents, 62); // 0.62 -> 62¢
+  assert.deepEqual(ev.markets[0].tokenIds, ["tok-a", "tok-b"]);
+  assert.equal(ev.markets[2].priceCents, null); // no price
+});
+
+test("polymarket: eventToMarketSnapshots drops priceless markets", () => {
+  const snaps = eventToMarketSnapshots(normalizeEvent(EVENT_FIXTURE[0]), "2026-07-03T00:00:00Z");
+  assert.equal(snaps.length, 2); // the priceless one is dropped
+  assert.deepEqual(snaps[0], { label: "Connor Doig vs Eudald Gonzalez", price: 62, external_ref: "tok-a", liquidity: "1234" });
+  assert.equal(snaps[1].label, "Total Sets: O/U 2.5");
+});
+
+test("polymarket: titleMatchScore matches on surnames", () => {
+  const t = "Wimbledon Juniors, Boys: Connor Doig vs Eudald Gonzalez";
+  assert.equal(titleMatchScore(t, "Connor Doig", "Eudald Gonzalez"), 2);
+  assert.equal(titleMatchScore(t, "Doig", "Gonzalez"), 2);
+  assert.equal(titleMatchScore(t, "Alcaraz", "Sinner"), 0);
+});
+
+test("polymarket: findMatchEvent / bySlug / listSportEvents via mocked Gamma", async () => {
+  const cfg = loadPolymarketConfig({ POLYMARKET_ENABLED: "true" });
+  const ev = await findMatchEvent(cfg, { sport: "tennis", home: "Connor Doig", away: "Eudald Gonzalez" }, { fetchImpl: eventsFetch });
+  assert.ok(ev);
+  assert.equal(ev!.slug, "atp-doig-gonzal-2026-07-04");
+
+  // wrong names -> no confident match
+  assert.equal(await findMatchEvent(cfg, { sport: "tennis", home: "Nadal", away: "Federer" }, { fetchImpl: eventsFetch }), null);
+  // unknown sport -> null without any fetch
+  assert.equal(await findMatchEvent(cfg, { sport: "curling", home: "a", away: "b" }, { fetchImpl: eventsFetch }), null);
+
+  const bySlug = await fetchEventBySlug(cfg, "atp-doig-gonzal-2026-07-04", { fetchImpl: eventsFetch });
+  assert.equal(bySlug!.title, EVENT_FIXTURE[0].title);
+
+  assert.deepEqual(await listSportEvents(cfg, "curling", 10, { fetchImpl: eventsFetch }), []);
+  assert.equal((await listSportEvents(cfg, "football", 10, { fetchImpl: eventsFetch })).length, 1);
 });
 
 // ---------------- LLM abstraction graceful (§5.3, §6, §9.9) ----------------

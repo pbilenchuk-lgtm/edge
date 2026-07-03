@@ -20,7 +20,7 @@
 | Пороги из промта → числа + **сайзинг ставок кодом** (§3.2, §9.6) | ✅ |
 | Settlement, payout, CLV (§3.4) | ✅ |
 | Метрики: Brier, CLV, калибровка, вердикт (§2.14) | ✅ |
-| Клиент котировок Polymarket + graceful-фолбэк (§5.1) | ✅ |
+| Клиент котировок Polymarket + маппинг матч→рынок + graceful-фолбэк (§5.1) — **проверено на живом API** | ✅ |
 | Абстракция LLM-провайдеров, ключи из env (§5.3, §9.9) | ✅ |
 | UI (6 экранов), спорт-API, триггеры переоценок, improvement-цикл | ⏳ дальше |
 
@@ -74,39 +74,56 @@ tests/              Модульные + интеграционные тесты
 ## Котировки Polymarket — что за API и как подключается (ТЗ §5.1)
 
 **Ключ для чтения котировок НЕ нужен.** Ключ/подпись кошелька требуется только
-чтобы торговать реально — здесь этого нет. Используются два публичных API:
+чтобы торговать реально — здесь этого нет. Всё ниже **проверено на живом API**.
 
 | API | База | Для чего |
 |---|---|---|
-| **Gamma** | `https://gamma-api.polymarket.com` | Список рынков/событий. Поле `clobTokenIds` рынка = ID токенов исходов. |
-| **CLOB** | `https://clob.polymarket.com` | Цены по токену: `/price?token_id=…&side=buy\|sell`, `/midpoint?token_id=…`, `/book?token_id=…` |
+| **Gamma** | `https://gamma-api.polymarket.com` | События/рынки. `/events?tag_id=<sport>&closed=false`, `/events?slug=<slug>` |
+| **CLOB** | `https://clob.polymarket.com` | Цена по токену: `/midpoint?token_id=…` → `{"mid":"0.55"}`, `/price?token_id=…&side=buy\|sell`, `/book?token_id=…` |
 | **WebSocket** | `wss://ws-subscribe-clob.polymarket.com/ws/market` | Реалтайм-обновления цен/стакана (вместо поллинга) |
 
-Модель данных: **рынок → пара outcome-токенов (Yes/No) → у каждого свой `token_id`**.
-Сначала Gamma даёт `token_id`, потом CLOB по нему даёт цену. **Цена = вероятность:**
-`midpoint` (0…1) × 100 = центы 0–100¢, ровно как в макете. Официальная документация —
-**docs.polymarket.com** (разделы CLOB API и Gamma Markets API).
+**Модель данных (как оно есть на самом деле):**
+**спортивный матч = Gamma-*событие*** с заголовком «A vs B», slug вида
+`atp-alcaraz-sinner-2026-07-04` и тегом `games`. Внутри события — массив
+**рынков**: победитель матча (исходы = стороны, напр. `["Alcaraz","Sinner"]`),
+победители сетов, тоталы `["Over","Under"]` / `["Over 2.5",…]`, «Completed Match»
+и т.д. У каждого рынка есть `outcomePrices` (снимок) и `clobTokenIds` (токены для
+CLOB). Gamma отдаёт `outcomes`/`outcomePrices`/`clobTokenIds` как **JSON-строки** —
+парсим `parseJsonArray()`. **Цена = вероятность:** `mid`/`outcomePrices[0]` (0…1)
+× 100 = центы 0–100¢, ровно как в макете.
 
-### Как это встроено здесь
+> ⚠️ **Ловушка тегов:** у Polymarket тег `football` (id 10) — это **американский**
+> футбол. Наш «football» = soccer = tag **100350**. Tennis = tag **864**. См.
+> `SPORT_TAG_IDS` в `polymarket.ts`.
 
-Котировки тянутся **с сервера, а не из браузера** (`src/lib/polymarket.ts`):
-это обходит CORS, держит egress под контролем и позволяет мягко деградировать.
-`getQuotes()` никогда не бросает исключение — каждый токен возвращает `Quote` с
-полем `source`:
+### Как это встроено здесь (`src/lib/polymarket.ts`, server-only)
 
-- `live` — свежая цена с CLOB;
-- `snapshot`/`disabled` — последний сохранённый снимок, когда live выключен;
-- `error` — сеть/таймаут/блокировка: отдаём последний snapshot и `stale: true`
-  (ТЗ §6: «API котировок недоступен → показать последний snapshot»).
+- `findMatchEvent({sport, home, away})` — ищет событие по тегу спорта и сверяет
+  заголовок с фамилиями (скоринг 0..2). `listSportEvents()` / `fetchEventBySlug()` —
+  для списка/точечной выборки.
+- `eventToMarketSnapshots(event)` — превращает рынки события в строки для таблицы
+  `markets` (label, цена в центах, `external_ref` = CLOB token, ликвидность).
+- `getQuotes(tokens)` — реалтайм-цены с CLOB; **никогда не бросает** — каждый токен
+  возвращает `Quote` с полем `source`: `live` / `snapshot` / `disabled` / `error`
+  (при сбое отдаём последний snapshot и `stale:true`, ТЗ §6).
+- Node `fetch` сам по себе **не** ходит через `HTTPS_PROXY` — поэтому `src/lib/http.ts`
+  ставит undici `ProxyAgent`, если прокси задан (в обычном деплое — no-op).
 
-Переключатель `POLYMARKET_ENABLED` в `.env` включает/выключает живой фетч.
+Тянем **с сервера, а не из браузера**: обход CORS + контроль egress + graceful-фолбэк.
+Официальная документация — **docs.polymarket.com** (CLOB API и Gamma Markets API).
 
-> **Важно про окружение.** В этой sandbox-сессии сетевая политика **блокирует**
-> хосты Polymarket (`gamma-api.polymarket.com` и `clob.polymarket.com` отдают
-> `403` на CONNECT). Поэтому здесь live-путь всегда сваливается в фолбэк на
-> snapshot. Код при этом рабочий — вживую котировки поедут в твоём деплое или
-> при добавлении этих хостов в whitelist сетевой политики окружения.
-> Тогда достаточно поставить `POLYMARKET_ENABLED=true`.
+### Проверка вживую
+
+```bash
+POLYMARKET_ENABLED=true npm run pm:probe                 # ближайший теннисный матч
+npm run pm:probe -- tennis Alcaraz Sinner                # поиск по именам
+npm run pm:probe -- football Португалия Хорватия
+```
+
+Проба находит событие, печатает рынки (снимок Gamma в центах) и подтягивает
+реалтайм-`midpoint` по CLOB для первых рынков. Валидировано на живом API
+(например, Wimbledon Juniors Doig vs Gonzalez → 16 рынков, live-котировки).
+Для боевого включения живого фетча в приложении — `POLYMARKET_ENABLED=true` в `.env`.
 
 ## LLM-провайдеры (ТЗ §5.3)
 
@@ -115,8 +132,9 @@ tests/              Модульные + интеграционные тесты
 **мягко** отключает провайдера, а плохой ответ модели не роняет систему (ТЗ §6) —
 вызывающий код получает `{ ok: false }` и решает сам (например, `assessment.status='failed'`).
 Для порогов и генерации названий есть эвристический фолбэк, так что система
-работает и без ключей. Провайдеры Polymarket и LLM в этой sandbox тоже
-заблокированы egress-политикой — живые вызовы деградируют, эвристики держат UX.
+работает и без ключей. Живые вызовы к LLM-провайдерам идут через тот же
+proxy-aware `http.ts`; если хост провайдера заблокирован egress-политикой или
+ключа нет — вызов мягко деградирует, эвристики держат UX.
 
 ## Инварианты (ТЗ §9, проверяются в `checkInvariants`)
 
