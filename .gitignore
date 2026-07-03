@@ -1,0 +1,26 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next/
+/out/
+next-env.d.ts
+
+# production
+/build
+
+# local data (SQLite) — never commit the paper-trading DB
+/data/*.db
+/data/*.db-journal
+/data/*.db-wal
+/data/*.db-shm
+
+# env — secrets (API keys) live here, never committed (ТЗ §4.6, §9.9)
+.env
+.env.local
+.env*.local
+
+# misc
+*.log
+.DS_Store
+.tsbuildinfo

@@ -1,0 +1,182 @@
+-- ============================================================
+-- EDGE LAB — logical schema (ТЗ §2)
+-- Dialect: SQLite (node:sqlite). PostgreSQL is recommended for
+-- production (JSON columns + transactions), but the schema is kept
+-- portable: jsonb -> TEXT(JSON), timestamp -> TEXT(ISO-8601),
+-- numeric -> REAL, bool -> INTEGER(0/1).
+-- Every CLV / version / status field from the audit is present from
+-- day one (ТЗ §7: "их больно добавлять потом").
+-- ============================================================
+
+PRAGMA foreign_keys = ON;
+
+-- §2.1 sports
+CREATE TABLE IF NOT EXISTS sports (
+  id    TEXT PRIMARY KEY,          -- 'football', 'tennis'
+  label TEXT NOT NULL              -- «Футбол»
+);
+
+-- §2.2 competitions (турниры)
+CREATE TABLE IF NOT EXISTS competitions (
+  id         TEXT PRIMARY KEY,     -- 'wc2026'
+  sport_id   TEXT NOT NULL REFERENCES sports(id),
+  name       TEXT NOT NULL,
+  budget     REAL NOT NULL DEFAULT 0,  -- бюджет турнира в $ (из казны). 0 = не распределён
+  created_at TEXT NOT NULL
+);
+
+-- §2.3 treasury (казна — одна строка, глобальная; инвариант: свободно >= 0)
+CREATE TABLE IF NOT EXISTS treasury (
+  id            INTEGER PRIMARY KEY CHECK (id = 1),
+  total_balance REAL NOT NULL
+);
+
+-- §2.4 analytics_prompts (аналитические промты; scope = sport | competition)
+CREATE TABLE IF NOT EXISTS analytics_prompts (
+  id         TEXT PRIMARY KEY,
+  scope      TEXT NOT NULL CHECK (scope IN ('sport', 'competition')),
+  scope_id   TEXT NOT NULL,        -- sport_id или competition_id
+  body       TEXT NOT NULL,
+  model      TEXT,                 -- модель ИИ для этого анализа
+  updated_at TEXT NOT NULL
+);
+
+-- §2.5 strategies
+CREATE TABLE IF NOT EXISTS strategies (
+  id         TEXT PRIMARY KEY,
+  sport_id   TEXT NOT NULL REFERENCES sports(id),
+  name       TEXT NOT NULL,
+  tag        TEXT,
+  color      TEXT,                 -- hex for UI
+  version    INTEGER NOT NULL DEFAULT 1,
+  prompt     TEXT NOT NULL,        -- цельный промт словами
+  params     TEXT NOT NULL DEFAULT '{}',  -- jsonb: пороги, извлечённые движком (§3.2)
+  model      TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- §2.6 strategy_versions (история версий — откат и сравнение)
+CREATE TABLE IF NOT EXISTS strategy_versions (
+  id          TEXT PRIMARY KEY,
+  strategy_id TEXT NOT NULL REFERENCES strategies(id),
+  version     INTEGER NOT NULL,
+  prompt      TEXT NOT NULL,
+  params      TEXT NOT NULL DEFAULT '{}',
+  reason      TEXT,                -- обоснование изменения (от ИИ)
+  created_at  TEXT NOT NULL
+);
+
+-- §2.7 strategy_shares (доли стратегий в турнире; инвариант: SUM(pct) <= 100)
+CREATE TABLE IF NOT EXISTS strategy_shares (
+  competition_id TEXT NOT NULL REFERENCES competitions(id),
+  strategy_id    TEXT NOT NULL REFERENCES strategies(id),
+  pct            REAL NOT NULL DEFAULT 0,   -- доля в % (0..100)
+  PRIMARY KEY (competition_id, strategy_id)
+);
+
+-- §2.8 matches
+CREATE TABLE IF NOT EXISTS matches (
+  id             TEXT PRIMARY KEY,
+  competition_id TEXT NOT NULL REFERENCES competitions(id),
+  home           TEXT NOT NULL,
+  away           TEXT NOT NULL,
+  state          TEXT NOT NULL CHECK (state IN ('upcoming','lineup','live','finished')),
+  lineup_out     INTEGER NOT NULL DEFAULT 0,
+  kickoff_at     TEXT,
+  minute         INTEGER,
+  score_home     INTEGER,
+  score_away     INTEGER,
+  final_score    TEXT,
+  kickoff_time   TEXT,
+  end_time       TEXT,
+  duration       TEXT,
+  end_note       TEXT,             -- «основное время»/«доп. время»/«серия пенальти»
+  external_ref   TEXT              -- ID матча во внешнем спортивном API
+);
+
+-- §2.9 assessments (оценки матча — от аналитики; один pre + один post, post приоритетнее)
+CREATE TABLE IF NOT EXISTS assessments (
+  id         TEXT PRIMARY KEY,
+  match_id   TEXT NOT NULL REFERENCES matches(id),
+  stage      TEXT NOT NULL CHECK (stage IN ('pre_lineup','post_lineup')),
+  confidence TEXT,                 -- 'низкая'/'средняя'/'высокая'
+  short      TEXT,
+  body       TEXT,
+  verdict    TEXT,
+  model      TEXT,
+  status     TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok','failed')),
+  created_at TEXT NOT NULL,
+  UNIQUE (match_id, stage)         -- одна оценка каждой стадии на матч
+);
+
+-- §2.10 markets (котировки рынков, Polymarket-стиль; версионируются по snapshot_at)
+CREATE TABLE IF NOT EXISTS markets (
+  id           TEXT PRIMARY KEY,
+  match_id     TEXT NOT NULL REFERENCES matches(id),
+  label        TEXT NOT NULL,      -- «Under 2.5», «Team to Advance — Португалия»
+  price        REAL NOT NULL,      -- цена в центах 0..100 (доля 0..1$)
+  ai_prob      REAL,               -- вероятность по оценке ИИ (0..1)
+  liquidity    TEXT,               -- «$2.5M» (справочно)
+  external_ref TEXT,               -- CLOB token_id рынка в Polymarket
+  snapshot_at  TEXT NOT NULL,
+  is_closing   INTEGER NOT NULL DEFAULT 0  -- цена закрытия рынка? (для CLV)
+);
+CREATE INDEX IF NOT EXISTS idx_markets_match ON markets(match_id, snapshot_at);
+
+-- §2.11 bets (ставки / позиции стратегии)
+CREATE TABLE IF NOT EXISTS bets (
+  id             TEXT PRIMARY KEY,
+  match_id       TEXT NOT NULL REFERENCES matches(id),
+  strategy_id    TEXT NOT NULL REFERENCES strategies(id),
+  market_label   TEXT NOT NULL,
+  status         TEXT NOT NULL CHECK (status IN
+                   ('proposed','open','not_filled','settled_won','settled_lost')),
+  proposed_price REAL,             -- цена на момент предложения (центы)
+  entry_price    REAL,             -- ФАКТИЧЕСКАЯ цена входа (может != proposed)
+  current_price  REAL,             -- текущая цена (mark-to-market)
+  closing_price  REAL,             -- цена закрытия рынка (для CLV)
+  ai_prob        REAL,             -- вероятность ИИ на входе
+  stake          REAL,             -- сумма ставки ($)
+  rationale      TEXT,             -- обоснование словами
+  entered_minute TEXT,             -- «3'», «20' (добавлено)»
+  result         TEXT CHECK (result IN ('won','lost') OR result IS NULL),
+  payout         REAL,
+  created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bets_match_strat ON bets(match_id, strategy_id);
+
+-- §2.12 reassessments (переоценки — отдельно от лога, по триггеру)
+CREATE TABLE IF NOT EXISTS reassessments (
+  id          TEXT PRIMARY KEY,
+  match_id    TEXT NOT NULL REFERENCES matches(id),
+  strategy_id TEXT NOT NULL REFERENCES strategies(id),
+  minute      TEXT,
+  body        TEXT NOT NULL,
+  confidence  TEXT,
+  trigger     TEXT CHECK (trigger IN ('goal','red_card','price_move','time','manual')),
+  created_at  TEXT NOT NULL
+);
+
+-- §2.13 trade_log (сухой журнал сделок)
+CREATE TABLE IF NOT EXISTS trade_log (
+  id          TEXT PRIMARY KEY,
+  match_id    TEXT NOT NULL REFERENCES matches(id),
+  strategy_id TEXT NOT NULL REFERENCES strategies(id),
+  minute      TEXT,
+  type        TEXT NOT NULL CHECK (type IN ('enter','exit','settle')),
+  text        TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+
+-- §2.14 quality_metrics (метрики качества стратегии; пересчитываются по расписанию)
+CREATE TABLE IF NOT EXISTS quality_metrics (
+  strategy_id TEXT PRIMARY KEY REFERENCES strategies(id),
+  samples     INTEGER NOT NULL DEFAULT 0,
+  brier       REAL,
+  clv         REAL,
+  calibration TEXT NOT NULL DEFAULT '[]',  -- jsonb: [{bucket, predicted, actual}]
+  updated_at  TEXT NOT NULL
+);
+
+-- §2.15 event_feed — агрегируется из bets/reassessments/trade_log/matches (view),
+-- поэтому отдельной таблицы нет: строится в репозитории по времени.

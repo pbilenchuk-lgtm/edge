@@ -1,0 +1,268 @@
+// ============================================================
+// EDGE LAB — repository (domain queries over the DB)  [SERVER-ONLY]
+// Boolean <-> INTEGER(0/1) and JSON <-> TEXT are handled here so callers
+// work with the clean domain types from types.ts.
+// ============================================================
+
+import { randomUUID } from "node:crypto";
+import type { Database } from "./db.js";
+import type {
+  Assessment,
+  Bet,
+  Competition,
+  Market,
+  Match,
+  QualityMetrics,
+  Reassessment,
+  Strategy,
+  StrategyParams,
+  StrategyShare,
+  TradeLogEntry,
+  Treasury,
+} from "./types.js";
+
+export const uid = () => randomUUID();
+export const nowIso = () => new Date().toISOString();
+
+// ---------- treasury ----------
+export function setTreasury(db: Database, total: number): void {
+  db.prepare(
+    `INSERT INTO treasury(id,total_balance) VALUES(1,?)
+     ON CONFLICT(id) DO UPDATE SET total_balance=excluded.total_balance`,
+  ).run(total);
+}
+export function getTreasury(db: Database): Treasury {
+  const row = db.prepare(`SELECT * FROM treasury WHERE id=1`).get();
+  return row ?? { id: 1, total_balance: 0 };
+}
+
+// ---------- sports / competitions ----------
+export function upsertSport(db: Database, id: string, label: string): void {
+  db.prepare(
+    `INSERT INTO sports(id,label) VALUES(?,?)
+     ON CONFLICT(id) DO UPDATE SET label=excluded.label`,
+  ).run(id, label);
+}
+export function upsertCompetition(db: Database, c: Competition): void {
+  db.prepare(
+    `INSERT INTO competitions(id,sport_id,name,budget,created_at)
+     VALUES(?,?,?,?,?)
+     ON CONFLICT(id) DO UPDATE SET
+       sport_id=excluded.sport_id, name=excluded.name, budget=excluded.budget`,
+  ).run(c.id, c.sport_id, c.name, c.budget, c.created_at);
+}
+export function listCompetitions(db: Database, sportId?: string): Competition[] {
+  const rows = sportId
+    ? db.prepare(`SELECT * FROM competitions WHERE sport_id=? ORDER BY name`).all(sportId)
+    : db.prepare(`SELECT * FROM competitions ORDER BY name`).all();
+  return rows as Competition[];
+}
+export function setCompetitionBudget(db: Database, id: string, budget: number): void {
+  db.prepare(`UPDATE competitions SET budget=? WHERE id=?`).run(budget, id);
+}
+
+// ---------- analytics prompts (§2.4) ----------
+export function upsertAnalyticsPrompt(
+  db: Database,
+  scope: "sport" | "competition",
+  scopeId: string,
+  body: string,
+  model: string | null,
+): void {
+  db.prepare(
+    `INSERT INTO analytics_prompts(id,scope,scope_id,body,model,updated_at)
+     VALUES(?,?,?,?,?,?)`,
+  ).run(uid(), scope, scopeId, body, model, nowIso());
+}
+/** Analytics prompt for a match: base (sport) + optional competition override (§2.4). */
+export function analyticsPromptFor(
+  db: Database,
+  sportId: string,
+  competitionId: string,
+): { body: string; model: string | null } {
+  const base = db
+    .prepare(`SELECT * FROM analytics_prompts WHERE scope='sport' AND scope_id=? ORDER BY updated_at DESC LIMIT 1`)
+    .get(sportId);
+  const override = db
+    .prepare(`SELECT * FROM analytics_prompts WHERE scope='competition' AND scope_id=? ORDER BY updated_at DESC LIMIT 1`)
+    .get(competitionId);
+  const parts = [base?.body, override?.body].filter(Boolean);
+  return { body: parts.join("\n\n"), model: base?.model ?? null };
+}
+
+// ---------- strategies ----------
+export function insertStrategy(db: Database, s: Strategy): void {
+  db.prepare(
+    `INSERT INTO strategies(id,sport_id,name,tag,color,version,prompt,params,model,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    s.id, s.sport_id, s.name, s.tag, s.color, s.version, s.prompt,
+    JSON.stringify(s.params), s.model, s.created_at,
+  );
+}
+export function listStrategies(db: Database, sportId?: string): Strategy[] {
+  const rows = sportId
+    ? db.prepare(`SELECT * FROM strategies WHERE sport_id=? ORDER BY created_at`).all(sportId)
+    : db.prepare(`SELECT * FROM strategies ORDER BY created_at`).all();
+  return (rows as any[]).map(mapStrategy);
+}
+export function getStrategy(db: Database, id: string): Strategy | null {
+  const row = db.prepare(`SELECT * FROM strategies WHERE id=?`).get(id);
+  return row ? mapStrategy(row) : null;
+}
+/** Bump a strategy to a new version, archiving the previous one (§2.6, §3.5). */
+export function saveStrategyVersion(
+  db: Database, strategyId: string, prompt: string, params: StrategyParams, reason: string,
+): number {
+  const cur = getStrategy(db, strategyId);
+  if (!cur) throw new Error(`strategy ${strategyId} not found`);
+  db.prepare(
+    `INSERT INTO strategy_versions(id,strategy_id,version,prompt,params,reason,created_at)
+     VALUES(?,?,?,?,?,?,?)`,
+  ).run(uid(), strategyId, cur.version, cur.prompt, JSON.stringify(cur.params), reason, nowIso());
+  const next = cur.version + 1;
+  db.prepare(`UPDATE strategies SET prompt=?,params=?,version=? WHERE id=?`)
+    .run(prompt, JSON.stringify(params), next, strategyId);
+  return next;
+}
+function mapStrategy(r: any): Strategy {
+  return { ...r, params: safeJson<StrategyParams>(r.params, {}) };
+}
+
+// ---------- shares ----------
+export function setShare(db: Database, s: StrategyShare): void {
+  db.prepare(
+    `INSERT INTO strategy_shares(competition_id,strategy_id,pct) VALUES(?,?,?)
+     ON CONFLICT(competition_id,strategy_id) DO UPDATE SET pct=excluded.pct`,
+  ).run(s.competition_id, s.strategy_id, s.pct);
+}
+export function sharesForComp(db: Database, competitionId: string): StrategyShare[] {
+  return db.prepare(`SELECT * FROM strategy_shares WHERE competition_id=?`)
+    .all(competitionId) as StrategyShare[];
+}
+
+// ---------- matches ----------
+export function insertMatch(db: Database, m: Match): void {
+  db.prepare(
+    `INSERT INTO matches(id,competition_id,home,away,state,lineup_out,kickoff_at,minute,
+       score_home,score_away,final_score,kickoff_time,end_time,duration,end_note,external_ref)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    m.id, m.competition_id, m.home, m.away, m.state, m.lineup_out ? 1 : 0,
+    m.kickoff_at, m.minute, m.score_home, m.score_away, m.final_score,
+    m.kickoff_time, m.end_time, m.duration, m.end_note, m.external_ref,
+  );
+}
+export function getMatch(db: Database, id: string): Match | null {
+  const r = db.prepare(`SELECT * FROM matches WHERE id=?`).get(id);
+  return r ? mapMatch(r) : null;
+}
+export function listMatches(db: Database, competitionId: string): Match[] {
+  return (db.prepare(`SELECT * FROM matches WHERE competition_id=?`).all(competitionId) as any[])
+    .map(mapMatch);
+}
+function mapMatch(r: any): Match {
+  return { ...r, lineup_out: !!r.lineup_out };
+}
+
+// ---------- assessments ----------
+export function upsertAssessment(db: Database, a: Assessment): void {
+  db.prepare(
+    `INSERT INTO assessments(id,match_id,stage,confidence,short,body,verdict,model,status,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(match_id,stage) DO UPDATE SET
+       confidence=excluded.confidence, short=excluded.short, body=excluded.body,
+       verdict=excluded.verdict, model=excluded.model, status=excluded.status`,
+  ).run(a.id, a.match_id, a.stage, a.confidence, a.short, a.body, a.verdict, a.model, a.status, a.created_at);
+}
+export function assessmentsForMatch(db: Database, matchId: string): Assessment[] {
+  return db.prepare(`SELECT * FROM assessments WHERE match_id=?`).all(matchId) as Assessment[];
+}
+
+// ---------- markets ----------
+export function insertMarket(db: Database, m: Market): void {
+  db.prepare(
+    `INSERT INTO markets(id,match_id,label,price,ai_prob,liquidity,external_ref,snapshot_at,is_closing)
+     VALUES(?,?,?,?,?,?,?,?,?)`,
+  ).run(m.id, m.match_id, m.label, m.price, m.ai_prob, m.liquidity, m.external_ref, m.snapshot_at, m.is_closing ? 1 : 0);
+}
+/** Latest snapshot per market label (or only closing prices). */
+export function latestMarkets(db: Database, matchId: string, closingOnly = false): Market[] {
+  const rows = db.prepare(
+    `SELECT * FROM markets WHERE match_id=? ${closingOnly ? "AND is_closing=1" : ""}
+     ORDER BY snapshot_at DESC`,
+  ).all(matchId) as any[];
+  const seen = new Set<string>();
+  const out: Market[] = [];
+  for (const r of rows) {
+    if (seen.has(r.label)) continue;
+    seen.add(r.label);
+    out.push({ ...r, is_closing: !!r.is_closing });
+  }
+  return out;
+}
+
+// ---------- bets ----------
+export function insertBet(db: Database, b: Bet): void {
+  db.prepare(
+    `INSERT INTO bets(id,match_id,strategy_id,market_label,status,proposed_price,entry_price,
+       current_price,closing_price,ai_prob,stake,rationale,entered_minute,result,payout,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    b.id, b.match_id, b.strategy_id, b.market_label, b.status, b.proposed_price, b.entry_price,
+    b.current_price, b.closing_price, b.ai_prob, b.stake, b.rationale, b.entered_minute,
+    b.result, b.payout, b.created_at,
+  );
+}
+export function updateBet(db: Database, id: string, patch: Partial<Bet>): void {
+  const keys = Object.keys(patch);
+  if (!keys.length) return;
+  const set = keys.map((k) => `${k}=?`).join(", ");
+  db.prepare(`UPDATE bets SET ${set} WHERE id=?`).run(...keys.map((k) => (patch as any)[k]), id);
+}
+export function betsForMatch(db: Database, matchId: string, strategyId?: string): Bet[] {
+  const rows = strategyId
+    ? db.prepare(`SELECT * FROM bets WHERE match_id=? AND strategy_id=?`).all(matchId, strategyId)
+    : db.prepare(`SELECT * FROM bets WHERE match_id=?`).all(matchId);
+  return rows as Bet[];
+}
+export function openBets(db: Database): Bet[] {
+  return db.prepare(`SELECT * FROM bets WHERE status='open'`).all() as Bet[];
+}
+
+// ---------- reassessments / trade log ----------
+export function insertReassessment(db: Database, r: Reassessment): void {
+  db.prepare(
+    `INSERT INTO reassessments(id,match_id,strategy_id,minute,body,confidence,trigger,created_at)
+     VALUES(?,?,?,?,?,?,?,?)`,
+  ).run(r.id, r.match_id, r.strategy_id, r.minute, r.body, r.confidence, r.trigger, r.created_at);
+}
+export function insertTradeLog(db: Database, e: TradeLogEntry): void {
+  db.prepare(
+    `INSERT INTO trade_log(id,match_id,strategy_id,minute,type,text,created_at) VALUES(?,?,?,?,?,?,?)`,
+  ).run(e.id, e.match_id, e.strategy_id, e.minute, e.type, e.text, e.created_at);
+}
+
+// ---------- quality metrics ----------
+export function upsertQuality(db: Database, q: QualityMetrics): void {
+  db.prepare(
+    `INSERT INTO quality_metrics(strategy_id,samples,brier,clv,calibration,updated_at)
+     VALUES(?,?,?,?,?,?)
+     ON CONFLICT(strategy_id) DO UPDATE SET
+       samples=excluded.samples, brier=excluded.brier, clv=excluded.clv,
+       calibration=excluded.calibration, updated_at=excluded.updated_at`,
+  ).run(q.strategy_id, q.samples, q.brier, q.clv, JSON.stringify(q.calibration), q.updated_at);
+}
+export function getQuality(db: Database, strategyId: string): QualityMetrics | null {
+  const r = db.prepare(`SELECT * FROM quality_metrics WHERE strategy_id=?`).get(strategyId);
+  return r ? { ...r, calibration: safeJson(r.calibration, []) } : null;
+}
+
+function safeJson<T>(s: unknown, fallback: T): T {
+  if (typeof s !== "string") return (s as T) ?? fallback;
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    return fallback;
+  }
+}
