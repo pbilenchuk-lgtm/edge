@@ -27,6 +27,8 @@ export interface Competition {
   sport_id: string;
   name: string;
   budget: number;
+  /** ESPN league code for auto-import (e.g. 'fifa.world'); null = manual only */
+  external_league: string | null;
   created_at: string;
 }
 

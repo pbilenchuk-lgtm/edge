@@ -294,6 +294,51 @@ export function heuristicReassess(ctx: ReassessContext): string {
   }
 }
 
+export interface ImprovementProposal {
+  removed: string; added: string; newPrompt: string; reason: string; source: "llm" | "heuristic";
+}
+
+/**
+ * Propose a strategy-prompt improvement from its stats (ТЗ §3.5). LLM when a
+ * key is present, else a deterministic heuristic. Callers gate on samples ≥ 20
+ * and re-extract params from newPrompt in CODE (§9.6).
+ */
+export async function proposeImprovement(
+  strat: { name: string; prompt: string }, stats: { matches: number; roi: number },
+  model: string | null, deps: Deps = {},
+): Promise<ImprovementProposal> {
+  if (model) {
+    const res = await callLLM({
+      model,
+      system: "Ты улучшаешь промт стратегии ставок по её статистике. Верни ТОЛЬКО JSON {newPrompt, reason}: минимальная осмысленная правка промта и краткое обоснование.",
+      prompt: `Стратегия «${strat.name}». Текущий промт:\n${strat.prompt}\n\nСтатистика: сыграно ${stats.matches} матчей, средний ROI ${stats.roi.toFixed(1)}%. Предложи одно улучшение.`,
+      maxTokens: 500,
+    }, deps);
+    if (res.ok) {
+      try {
+        const j = JSON.parse(stripFences(res.text));
+        if (j.newPrompt) return { removed: "(текущий промт)", added: "(предложение ИИ)", newPrompt: String(j.newPrompt), reason: String(j.reason ?? ""), source: "llm" };
+      } catch { /* fall through to heuristic */ }
+    }
+  }
+  return heuristicImprovement(strat, stats);
+}
+
+export function heuristicImprovement(
+  strat: { name: string; prompt: string }, stats: { matches: number; roi: number },
+): ImprovementProposal {
+  const newPrompt = /Входи/.test(strat.prompt)
+    ? strat.prompt.replace(/Входи[^\n]*/, "Входи ТОЛЬКО при уверенности «высокая» — входы на средней отключены (по данным убыточны).")
+    : strat.prompt + "\nВходи только при высокой уверенности.";
+  return {
+    removed: "Входи при любой уверенности…",
+    added: "Входи ТОЛЬКО при «высокой» уверенности",
+    newPrompt,
+    reason: `На ${stats.matches} матчах входы при средней уверенности дали отрицательный вклад — ужесточаем порог.`,
+    source: "heuristic",
+  };
+}
+
 export function heuristicName(prompt: string): string {
   const low = prompt.toLowerCase();
   if (low.includes("келли") || low.includes("kelly")) return "Kelly Edge";

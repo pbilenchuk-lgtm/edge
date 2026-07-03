@@ -18,11 +18,12 @@ CREATE TABLE IF NOT EXISTS sports (
 
 -- §2.2 competitions (турниры)
 CREATE TABLE IF NOT EXISTS competitions (
-  id         TEXT PRIMARY KEY,     -- 'wc2026'
-  sport_id   TEXT NOT NULL REFERENCES sports(id),
-  name       TEXT NOT NULL,
-  budget     REAL NOT NULL DEFAULT 0,  -- бюджет турнира в $ (из казны). 0 = не распределён
-  created_at TEXT NOT NULL
+  id              TEXT PRIMARY KEY,     -- 'wc2026'
+  sport_id        TEXT NOT NULL REFERENCES sports(id),
+  name            TEXT NOT NULL,
+  budget          REAL NOT NULL DEFAULT 0,  -- бюджет турнира в $ (из казны). 0 = не распределён
+  external_league TEXT,                 -- ESPN league code для авто-импорта (напр. 'fifa.world')
+  created_at      TEXT NOT NULL
 );
 
 -- §2.3 treasury (казна — одна строка, глобальная; инвариант: свободно >= 0)

@@ -31,15 +31,16 @@ export function seedDatabase(db: Database): void {
   R.upsertSport(db, "football", "Футбол");
   R.upsertSport(db, "tennis", "Теннис");
 
-  // --- competitions (§2.2) with budgets (seedCompBudget) ---
-  const comps: [string, string, string, number][] = [
-    ["wc2026", "football", "ЧМ-2026", 1500],
-    ["ucl", "football", "Лига чемпионов", 400],
-    ["youth", "football", "Юниоры U-20", 0],
-    ["atp", "tennis", "ATP Masters", 400],
+  // --- competitions (§2.2) with budgets + ESPN league (категоризация/авто-импорт) ---
+  // ЧМ-2026 — ядро (fifa.world). Остальные — дополнения с их лигами.
+  const comps: [string, string, string, number, string | null][] = [
+    ["wc2026", "football", "ЧМ-2026", 1500, "fifa.world"],
+    ["ucl", "football", "Лига чемпионов", 400, "uefa.champions"],
+    ["youth", "football", "Юниоры U-20", 0, null],
+    ["atp", "tennis", "ATP Masters", 400, "atp"],
   ];
-  for (const [id, sport, name, budget] of comps)
-    R.upsertCompetition(db, { id, sport_id: sport, name, budget, created_at: T });
+  for (const [id, sport, name, budget, league] of comps)
+    R.upsertCompetition(db, { id, sport_id: sport, name, budget, external_league: league, created_at: T });
 
   // --- analytics prompts (§2.4): base per sport + comp override ---
   R.upsertAnalyticsPrompt(db, "sport", "football",

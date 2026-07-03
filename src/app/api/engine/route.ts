@@ -36,15 +36,12 @@ export async function POST(req: Request) {
         const cfg = loadSportsConfig();
         const provider = loadSportsProvider(cfg);
         if (!provider) return NextResponse.json({ ok: false, error: "SPORTS_ENABLED=false — спортивный провайдер выключен" }, { status: 400 });
-        const results = [];
-        for (const sport of Object.keys(cfg.leagues)) {
-          const statuses = await provider.scoreboard(sport, cfg.leagues[sport]);
-          for (const s of statuses) {
-            const r = await engine.syncMatchStatus(db, s, {});
-            if (r) results.push(r);
-          }
-        }
-        return NextResponse.json({ ok: true, synced: results.length, results });
+        // Import + categorize matches per linked competition (ЧМ-2026 = fifa.world),
+        // refresh status, and attach Polymarket odds to new matches when enabled.
+        const { loadPolymarketConfig } = await import("@/lib/polymarket");
+        const linkOdds = loadPolymarketConfig().enabled;
+        const results = await engine.syncCompetitions(db, provider, {}, { linkOdds });
+        return NextResponse.json({ ok: true, synced: results.length, imported: results.filter((r) => r.created).length, results });
       }
       default:
         return NextResponse.json({ ok: false, error: `неизвестное действие: ${body.action}` }, { status: 400 });

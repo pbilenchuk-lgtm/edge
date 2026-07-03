@@ -64,6 +64,11 @@ export function initSchema(db: Database): void {
   const here = dirname(fileURLToPath(import.meta.url));
   const sql = readFileSync(join(here, "schema.sql"), "utf8");
   db.exec(sql);
+  // Additive migrations for pre-existing databases (CREATE TABLE IF NOT EXISTS
+  // won't add new columns). Each guarded so re-runs are harmless.
+  for (const alter of ["ALTER TABLE competitions ADD COLUMN external_league TEXT"]) {
+    try { db.exec(alter); } catch { /* column already exists */ }
+  }
 }
 
 /** For tests: drop the memoized connection. */

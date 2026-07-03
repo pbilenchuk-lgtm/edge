@@ -18,7 +18,8 @@ import type { SportsMatchStatus } from "./sports.js";
 import { reassessNarrative } from "./llm.js";
 import { settleBet, resolveFootballMarket } from "./settlement.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
-import { loadPolymarketConfig, getQuotes, type PolymarketConfig } from "./polymarket.js";
+import { loadPolymarketConfig, getQuotes, findMatchEvent, eventToMarketSnapshots, type PolymarketConfig } from "./polymarket.js";
+import type { SportsProvider } from "./sports.js";
 
 export interface EngineConfig {
   reassessGapMinutes: number; // §9.7 rate limit
@@ -242,6 +243,74 @@ export async function syncMatchStatus(
   }
 
   return { matchId: match.id, from, to: status.state, goals, reassessments, settlement };
+}
+
+// ------------------------------------------------------------
+// Auto-import & categorization: pull a competition's matches from the
+// sports provider and file them under that competition (ТЗ иерархия §1).
+// ------------------------------------------------------------
+
+/** Create the match under a competition if it's new (keyed by external_ref). */
+export function upsertImportedMatch(
+  db: Database, competitionId: string, status: SportsMatchStatus,
+): { match: Match; created: boolean } {
+  const existing = R.matchByExternalRef(db, status.externalRef);
+  if (existing) return { match: existing, created: false };
+  const match: Match = {
+    id: R.uid(), competition_id: competitionId, home: status.home, away: status.away,
+    state: status.state, lineup_out: status.state !== "upcoming", kickoff_at: status.detail ?? null,
+    minute: status.minute, score_home: status.scoreHome, score_away: status.scoreAway,
+    final_score: status.state === "finished" ? `${status.scoreHome ?? 0}:${status.scoreAway ?? 0}` : null,
+    kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: status.externalRef,
+  };
+  R.insertMatch(db, match);
+  return { match, created: true };
+}
+
+/** Best-effort: attach Polymarket markets to a match that has none. */
+export async function linkMatchOdds(
+  db: Database, match: Match, sport: string, deps: EngineDeps = {},
+): Promise<number> {
+  if (R.latestMarkets(db, match.id).length) return 0;
+  const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
+  if (!poly.enabled) return 0;
+  const ev = await findMatchEvent(poly, { sport, home: match.home, away: match.away }, { fetchImpl: deps.fetchImpl });
+  if (!ev) return 0;
+  const now = nowFn(deps)();
+  const snaps = eventToMarketSnapshots(ev, now);
+  for (const s of snaps) {
+    R.insertMarket(db, {
+      id: R.uid(), match_id: match.id, label: s.label, price: s.price, ai_prob: null,
+      liquidity: s.liquidity, external_ref: s.external_ref, snapshot_at: now, is_closing: false,
+    });
+  }
+  return snaps.length;
+}
+
+export interface CompetitionSyncItem {
+  competition: string; match: string; created: boolean; state: string; oddsLinked?: number;
+}
+
+/**
+ * Sync every competition that is linked to an external league: import new
+ * matches into it (categorized), refresh live status, and optionally attach
+ * Polymarket odds to freshly imported matches.
+ */
+export async function syncCompetitions(
+  db: Database, provider: SportsProvider, deps: EngineDeps = {}, opts: { linkOdds?: boolean } = {},
+): Promise<CompetitionSyncItem[]> {
+  const out: CompetitionSyncItem[] = [];
+  for (const c of R.linkedCompetitions(db)) {
+    const statuses = await provider.scoreboard(c.sport_id, c.external_league as string);
+    for (const s of statuses) {
+      const { match, created } = upsertImportedMatch(db, c.id, s);
+      let oddsLinked: number | undefined;
+      if (created && opts.linkOdds) oddsLinked = await linkMatchOdds(db, match, c.sport_id, deps);
+      const r = await syncMatchStatus(db, s, deps);
+      out.push({ competition: c.id, match: `${s.home}–${s.away}`, created, state: r?.to ?? s.state, oddsLinked });
+    }
+  }
+  return out;
 }
 
 const fmt = (n: number) => `$${n.toFixed(1)}`;

@@ -15,7 +15,7 @@ export async function POST(req: Request) {
     const R = await import("@/lib/repo");
     const { canSetBudget, sharesValid, freeBalance } = await import("@/lib/money");
     const { extractThresholds, extractThresholdsHeuristic } = await import("@/lib/thresholds");
-    const { heuristicName } = await import("@/lib/llm");
+    const { heuristicName, proposeImprovement } = await import("@/lib/llm");
 
     const db = getDb();
     const body = (await req.json()) as any;
@@ -55,6 +55,20 @@ export async function POST(req: Request) {
         const { id, patch } = body;
         R.updateStrategy(db, id, patch);
         return ok();
+      }
+      case "proposeImprovement": {
+        const { strategyId } = body;
+        const strat = R.getStrategy(db, strategyId);
+        if (!strat) return bad("стратегия не найдена");
+        const q = R.getQuality(db, strategyId);
+        const samples = q?.samples ?? 0;
+        if (samples < 20) {
+          // §3.5 gate: too few matches — improving now overfits noise.
+          return NextResponse.json({ ok: false, gated: true, samples, error: `Рано улучшать: ${samples}/20 матчей (§3.5)` }, { status: 400 });
+        }
+        const proposal = await proposeImprovement(strat, { matches: samples, roi: q?.clv ?? 0 }, strat.model);
+        const params = await extractThresholds(proposal.newPrompt); // params computed in CODE (§9.6)
+        return ok({ proposal: { ...proposal, params, version: strat.version + 1 } });
       }
       case "improveStrategy": {
         const { id, prompt, params, reason } = body;

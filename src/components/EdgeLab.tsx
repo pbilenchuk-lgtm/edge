@@ -904,9 +904,19 @@ function PromptModal({ title, strat, availableModels, onGoModels, onClose, onSav
 
 function ImproveModal({ strat, stats, onClose, onAccept }: any) {
   const [stage, setStage] = useState("stats");
+  const [proposal, setProposal] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
   const enough = stats.matches >= 20;
-  const improvedPrompt = strat.prompt.replace(/Входи[^\n]*/, "Входи ТОЛЬКО при уверенности «высокая» (входы на «средней» отключены — убыточны).");
-  const improvedParams = { ...strat.params, minConfidence: "высокая" };
+
+  const request = async () => {
+    setLoading(true); setErr(null);
+    const res = await mutate({ type: "proposeImprovement", strategyId: strat.id });
+    setLoading(false);
+    if (res.proposal) { setProposal(res.proposal); setStage("proposal"); }
+    else setErr(res.error || "не удалось получить предложение");
+  };
+
   return (
     <Modal title={`Улучшить: ${strat.name} v${strat.version}`} onClose={onClose}>
       {stage === "stats" ? <>
@@ -917,13 +927,16 @@ function ImproveModal({ strat, stats, onClose, onAccept }: any) {
         </div>
         <div style={S.statNote}>{stats.note}</div>
         {enough ? <div style={S.okBox}>✓ Данных достаточно ({stats.matches} матчей). Улучшение опирается на статистику.</div> : <div style={S.warnBox}>✕ Рано улучшать: только {stats.matches} матчей, нужно 20+. Собери ещё {20 - stats.matches}.</div>}
-        <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Закрыть</button><button style={{ ...S.saveBtn, opacity: enough ? 1 : 0.4 }} disabled={!enough} onClick={() => setStage("proposal")}>→ Запросить у ИИ</button></div>
+        {err && <div style={S.warnBox}>{err}</div>}
+        <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Закрыть</button><button style={{ ...S.saveBtn, opacity: enough && !loading ? 1 : 0.4 }} disabled={!enough || loading} onClick={request}>{loading ? "ИИ думает…" : "→ Запросить у ИИ"}</button></div>
       </> : <>
-        <div style={S.diffLabel}>ИИ предлагает (diff)</div>
-        <div style={S.diffBox}><div style={S.diffRemoved}>− Входи при любой уверенности…</div><div style={S.diffAdded}>+ Входи ТОЛЬКО при «высокой» (средняя убыточна)</div></div>
-        <div style={S.reasonBox}><b>Обоснование:</b> входы при средней уверенности дали отрицательный вклад.</div>
-        <div style={S.newVerNote}>Принятие создаст <b>v{strat.version + 1}</b>.</div>
-        <div style={S.modalActions}><button style={S.cancelBtn} onClick={() => setStage("stats")}>← Назад</button><button style={S.saveBtn} onClick={() => onAccept(improvedPrompt, improvedParams)}>Принять v{strat.version + 1}</button></div>
+        <div style={S.diffLabel}>ИИ предлагает {proposal?.source === "llm" ? "(модель)" : "(эвристика)"}</div>
+        <div style={S.diffBox}><div style={S.diffRemoved}>− {proposal?.removed}</div><div style={S.diffAdded}>+ {proposal?.added}</div></div>
+        <div style={S.promptLabel}>Новый промт</div>
+        <pre style={S.promptBox}>{proposal?.newPrompt}</pre>
+        <div style={S.reasonBox}><b>Обоснование:</b> {proposal?.reason}</div>
+        <div style={S.newVerNote}>Принятие создаст <b>v{strat.version + 1}</b> (пороги пересчитаны движком).</div>
+        <div style={S.modalActions}><button style={S.cancelBtn} onClick={() => setStage("stats")}>← Назад</button><button style={S.saveBtn} onClick={() => onAccept(proposal.newPrompt, proposal.params)}>Принять v{strat.version + 1}</button></div>
       </>}
     </Modal>
   );

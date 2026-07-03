@@ -45,11 +45,16 @@ export function upsertSport(db: Database, id: string, label: string): void {
 }
 export function upsertCompetition(db: Database, c: Competition): void {
   db.prepare(
-    `INSERT INTO competitions(id,sport_id,name,budget,created_at)
-     VALUES(?,?,?,?,?)
+    `INSERT INTO competitions(id,sport_id,name,budget,external_league,created_at)
+     VALUES(?,?,?,?,?,?)
      ON CONFLICT(id) DO UPDATE SET
-       sport_id=excluded.sport_id, name=excluded.name, budget=excluded.budget`,
-  ).run(c.id, c.sport_id, c.name, c.budget, c.created_at);
+       sport_id=excluded.sport_id, name=excluded.name, budget=excluded.budget,
+       external_league=excluded.external_league`,
+  ).run(c.id, c.sport_id, c.name, c.budget, c.external_league, c.created_at);
+}
+/** Competitions linked to an external league (for auto-import/sync). */
+export function linkedCompetitions(db: Database): Competition[] {
+  return db.prepare(`SELECT * FROM competitions WHERE external_league IS NOT NULL AND external_league != ''`).all() as Competition[];
 }
 export function listCompetitions(db: Database, sportId?: string): Competition[] {
   const rows = sportId

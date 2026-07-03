@@ -13,6 +13,7 @@
     "pm:probe": "node --import tsx scripts/polymarket-probe.ts",
     "sports:probe": "node --import tsx scripts/sports-probe.ts",
     "simulate": "node --experimental-sqlite --import tsx scripts/simulate.ts",
+    "sync:once": "node --experimental-sqlite --import tsx scripts/sync-once.ts",
     "test": "node --experimental-sqlite --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
