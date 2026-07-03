@@ -176,13 +176,25 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   };
 
   const doAnalyze = async (matchId: string) => {
-    const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "analyze", matchId }) });
-    const j = await r.json();
-    // reload the (assessment + ai_prob + proposed bets are all in matchDb)
+    // Kick off (returns immediately with 202 / "analyzing"), then poll until the
+    // background LLM run settles. The request is never held open for the whole
+    // model round-trip, so nothing "hangs" on slow/timeout-y analyses.
+    const post = (action: string) => fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, matchId }) }).then((x) => x.json());
+    const kick = await post("analyze");
+    if (kick.ok === false) return kick; // validation error (no markets / not found) — show at once
+
+    let failed = false;
+    for (let i = 0; i < 60; i++) { // ~90s ceiling; the result persists regardless
+      const s = await post("analyzeStatus");
+      if (s.status !== "analyzing") { failed = !!s.failed; break; }
+      await new Promise((res) => setTimeout(res, 1500));
+    }
+
+    // reload (assessment + ai_prob + proposed bets are all in matchDb)
     const app = await (await fetch("/api/app")).json();
     if (app.matchDb) setMatchDb(app.matchDb);
     if (app.catalog) setCatalog(app.catalog);
-    return j;
+    return failed ? { ok: false, error: "оценка не удалась" } : { ok: true };
   };
 
   const sportStrats = catalog.filter((s) => s.sport === sportId);

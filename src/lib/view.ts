@@ -100,7 +100,9 @@ export function buildAppData(db: Database, env = process.env): AppData {
   const matchDb: Record<string, MatchView> = {};
   for (const c of comps) {
     for (const m of R.listMatches(db, c.id)) {
-      const assessments = R.assessmentsForMatch(db, m.id);
+      // Only surface completed assessments; a failed run (§6) is reported to
+      // the user via the analyze poll, not as an empty analysis card.
+      const assessments = R.assessmentsForMatch(db, m.id).filter((a) => a.status !== "failed");
       const pre = assessments.find((a) => a.stage === "pre_lineup");
       const post = assessments.find((a) => a.stage === "post_lineup");
       const markets = R.latestMarkets(db, m.id).map((mk) => ({

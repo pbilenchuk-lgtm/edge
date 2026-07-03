@@ -28,9 +28,15 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: r.created, source: r.source, reassessment: last ? { min: last.minute, text: last.body, conf: last.confidence } : null });
       }
       case "analyze": {
-        const { analyzeMatch } = await import("@/lib/analysis");
-        const res = await analyzeMatch(db, body.matchId, {});
-        return NextResponse.json(res, { status: res.ok ? 200 : 422 });
+        // Kick the expensive LLM path into the background and return at once
+        // (§9.5 split). The client polls `analyzeStatus` for completion.
+        const { startAnalysis } = await import("@/lib/analysis");
+        const res = startAnalysis(db, body.matchId, {});
+        return NextResponse.json(res, { status: res.ok ? 202 : 422 });
+      }
+      case "analyzeStatus": {
+        const { analysisStatus } = await import("@/lib/analysis");
+        return NextResponse.json(analysisStatus(db, body.matchId));
       }
       case "refreshOdds": {
         const res = await engine.refreshMatchOdds(db, body.matchId, {});

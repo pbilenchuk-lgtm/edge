@@ -110,3 +110,57 @@ export async function analyzeMatch(
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+
+// ============================================================
+// Async, per-match orchestration (discover/analyze split).
+//
+// The list route (buildAppData) and `sync` are pure/DB-only — matches show up
+// instantly. The expensive LLM path is dragged POINTWISE, per match, and runs
+// OFF the request/response cycle: `startAnalysis` validates cheaply, kicks the
+// model call into the background, and returns at once, so the HTTP request is
+// never held open for the whole round-trip (no gateway timeouts / "hangs").
+// The UI polls `analysisStatus` until it flips off "analyzing", then reloads.
+// In-flight state is a process-local set (single-process Node server); on
+// restart nothing is in flight and status falls back to the stored assessment.
+// ============================================================
+
+const inFlight = new Set<string>();
+
+export interface StartResult { ok: boolean; status?: "analyzing"; error?: string }
+
+/**
+ * Cheap synchronous pre-checks (match/markets exist), then fire the model call
+ * WITHOUT awaiting. Idempotent while running: a second call for the same match
+ * just reports "analyzing" instead of launching a duplicate LLM request.
+ */
+export function startAnalysis(db: Database, matchId: string, deps: AnalyzeDeps = {}): StartResult {
+  const match = R.getMatch(db, matchId);
+  if (!match) return { ok: false, error: "матч не найден" };
+  if (!R.latestMarkets(db, matchId).length) {
+    return { ok: false, error: "у матча нет рынков — сначала подтяни котировки (Polymarket)" };
+  }
+  if (inFlight.has(matchId)) return { ok: true, status: "analyzing" };
+
+  inFlight.add(matchId);
+  // Fire-and-forget: analyzeMatch records its own success/failure assessment
+  // (§6), so we only need to release the in-flight slot when it settles.
+  void analyzeMatch(db, matchId, deps)
+    .catch(() => {}) // analyzeMatch is graceful; guard against unexpected throws
+    .finally(() => inFlight.delete(matchId));
+  return { ok: true, status: "analyzing" };
+}
+
+export interface AnalysisStatus {
+  status: "analyzing" | "done" | "idle";
+  failed?: boolean;
+  stage?: string;
+}
+
+/** Poll target: "analyzing" while the model runs, else the stored outcome. */
+export function analysisStatus(db: Database, matchId: string): AnalysisStatus {
+  if (inFlight.has(matchId)) return { status: "analyzing" };
+  const rows = R.assessmentsForMatch(db, matchId);
+  if (!rows.length) return { status: "idle" };
+  const latest = rows.reduce((a, b) => (a.created_at >= b.created_at ? a : b));
+  return { status: "done", failed: latest.status === "failed", stage: latest.stage };
+}
