@@ -14,6 +14,7 @@
     "sports:probe": "node --import tsx scripts/sports-probe.ts",
     "simulate": "node --experimental-sqlite --import tsx scripts/simulate.ts",
     "sync:once": "node --experimental-sqlite --import tsx scripts/sync-once.ts",
+    "tick:once": "node --experimental-sqlite --import tsx scripts/tick.ts",
     "test": "node --experimental-sqlite --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

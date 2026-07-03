@@ -145,6 +145,34 @@ export async function refreshMatchOdds(
 }
 
 // ------------------------------------------------------------
+// Refresh odds across all active matches (scheduler/cron path)
+// ------------------------------------------------------------
+
+export interface OddsRefreshItem { matchId: string; match: string; updated: number; reassessments: number; }
+
+/**
+ * Re-quote every non-finished match that has Polymarket-backed markets. This is
+ * the LLM-free half of the cron (no match ANALYSIS is triggered): only the live
+ * engine's own price_move reassessments can fire — rate-limited (§9.7), only for
+ * strategies already holding an open bet, and with a heuristic fallback, exactly
+ * as the manual per-match refresh button behaves.
+ */
+export async function refreshActiveOdds(db: Database, deps: EngineDeps = {}): Promise<OddsRefreshItem[]> {
+  const out: OddsRefreshItem[] = [];
+  for (const c of R.listCompetitions(db)) {
+    for (const m of R.listMatches(db, c.id)) {
+      if (m.state === "finished") continue;
+      if (!R.latestMarkets(db, m.id).some((mk) => mk.external_ref)) continue;
+      const r = await refreshMatchOdds(db, m.id, deps);
+      if (r.updated || r.triggers.length) {
+        out.push({ matchId: m.id, match: `${m.home}–${m.away}`, updated: r.updated, reassessments: r.triggers.filter((t) => t.created).length });
+      }
+    }
+  }
+  return out;
+}
+
+// ------------------------------------------------------------
 // Settlement + metrics (on finish)
 // ------------------------------------------------------------
 

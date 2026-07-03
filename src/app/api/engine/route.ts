@@ -43,6 +43,25 @@ export async function POST(req: Request) {
         const markets = R.latestMarkets(db, body.matchId).map((m) => ({ id: m.id, label: m.label, price: m.price, tokenId: m.external_ref }));
         return NextResponse.json({ ok: true, updated: res.updated, markets });
       }
+      case "refreshAllOdds": {
+        const items = await engine.refreshActiveOdds(db, {});
+        return NextResponse.json({ ok: true, matches: items.length, updated: items.reduce((n, r) => n + r.updated, 0), items });
+      }
+      case "tick": {
+        // LLM-free scheduler tick (same as `npm run tick:once`): sync + odds.
+        const cfg = loadSportsConfig();
+        const provider = loadSportsProvider(cfg);
+        const { loadPolymarketConfig } = await import("@/lib/polymarket");
+        const synced = provider
+          ? await engine.syncCompetitions(db, provider, {}, { linkOdds: loadPolymarketConfig().enabled })
+          : [];
+        const odds = await engine.refreshActiveOdds(db, {});
+        return NextResponse.json({
+          ok: true,
+          synced: synced.length, imported: synced.filter((r) => r.created).length,
+          oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),
+        });
+      }
       case "sync": {
         const cfg = loadSportsConfig();
         const provider = loadSportsProvider(cfg);
