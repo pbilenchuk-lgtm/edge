@@ -11,6 +11,8 @@
     "db:seed": "node --experimental-sqlite --import tsx scripts/seed.ts",
     "smoke": "node --experimental-sqlite --import tsx scripts/smoke.ts",
     "pm:probe": "node --import tsx scripts/polymarket-probe.ts",
+    "sports:probe": "node --import tsx scripts/sports-probe.ts",
+    "simulate": "node --experimental-sqlite --import tsx scripts/simulate.ts",
     "test": "node --experimental-sqlite --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

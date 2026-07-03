@@ -253,6 +253,47 @@ export async function generateStrategyName(
   return heuristicName(prompt);
 }
 
+export interface ReassessContext {
+  match: string; minute: number | null; trigger: string;
+  scoreHome: number | null; scoreAway: number | null;
+  strategyName: string; strategyPrompt: string;
+}
+
+/**
+ * Narrative reassessment for a strategy on a live event (ТЗ §2.12). Uses the
+ * LLM when a key is present, otherwise a deterministic heuristic so triggers
+ * still produce a reasoned note without any provider.
+ */
+export async function reassessNarrative(
+  ctx: ReassessContext, model: string | null, deps: Deps = {},
+): Promise<{ body: string; confidence: string; source: "llm" | "heuristic" }> {
+  if (model) {
+    const res = await callLLM({
+      model,
+      system: "Ты стратег ставок. По событию матча дай краткую переоценку (2–3 предложения): держать/добавить/фиксировать и почему. Учитывай правила стратегии.",
+      prompt: `Матч ${ctx.match}, ${ctx.minute ?? "?"}', счёт ${ctx.scoreHome ?? "?"}:${ctx.scoreAway ?? "?"}. Триггер: ${ctx.trigger}. Стратегия «${ctx.strategyName}»: ${ctx.strategyPrompt}`,
+      maxTokens: 200,
+    }, deps);
+    if (res.ok) return { body: res.text, confidence: "средняя", source: "llm" };
+  }
+  return { body: heuristicReassess(ctx), confidence: "средняя", source: "heuristic" };
+}
+
+export function heuristicReassess(ctx: ReassessContext): string {
+  const score = `${ctx.scoreHome ?? 0}:${ctx.scoreAway ?? 0}`;
+  const at = ctx.minute != null ? `${ctx.minute}'` : "по ходу";
+  switch (ctx.trigger) {
+    case "goal":
+      return `Гол (${at}, счёт ${score}). Цена рынка сдвинулась — по правилам «${ctx.strategyName}» пересматриваю: если край сузился ниже порога, фиксирую часть позиции, иначе держу.`;
+    case "red_card":
+      return `Удаление (${at}). Баланс сил изменился; переоцениваю вероятности и экспозицию по дисциплине «${ctx.strategyName}».`;
+    case "price_move":
+      return `Значимое движение цены (${at}, счёт ${score}). Проверяю остаточный край против порога входа стратегии «${ctx.strategyName}».`;
+    default:
+      return `Переоценка (${at}, счёт ${score}) по стратегии «${ctx.strategyName}»: держу позицию, если край сохраняется.`;
+  }
+}
+
 export function heuristicName(prompt: string): string {
   const low = prompt.toLowerCase();
   if (low.includes("келли") || low.includes("kelly")) return "Kelly Edge";

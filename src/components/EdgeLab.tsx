@@ -161,6 +161,20 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     });
   };
 
+  const doReassess = async (matchId: string, strategyId: string) => {
+    const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "reassess", matchId, strategyId }) });
+    const j = await r.json();
+    if (j.reassessment) {
+      setMatchDb((prev) => {
+        const nm = { ...prev[matchId] };
+        const list = { ...(nm.reassessByStrat || {}) };
+        list[strategyId] = [...(list[strategyId] || []), j.reassessment];
+        nm.reassessByStrat = list;
+        return { ...prev, [matchId]: nm };
+      });
+    }
+  };
+
   const sportStrats = catalog.filter((s) => s.sport === sportId);
   const compStrats = sportStrats.filter((s) => (shares[comp?.id]?.[s.id] || 0) > 0 && compBudget[comp?.id] > 0);
 
@@ -236,7 +250,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 
           <main style={S.main}>
             {comp?.matches.length === 0 && <div style={S.empty}>В этом турнире пока нет матчей.</div>}
-            {comp?.matches.map((mid) => <MatchCard key={mid} match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} />)}
+            {comp?.matches.map((mid) => <MatchCard key={mid} match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} />)}
           </main>
         </>
       ) : screen === "strategies" ? (
@@ -263,7 +277,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   );
 }
 
-function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds }: any) {
+function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess }: any) {
   const meta = STATE_META[match.state];
   const hasLog = match.state === "live" || match.state === "finished";
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
@@ -383,7 +397,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds }: 
               <div>
                 <div style={S.reassessTop}>
                   <span style={S.reassessHint}>Развёрнутые переоценки ИИ по ходу матча (в отличие от сухого лога).</span>
-                  {match.state === "live" && <button style={S.reassessBtn}>↻ Сделать переоценку</button>}
+                  {match.state === "live" && logStrat && <button style={S.reassessBtn} onClick={() => onReassess(match.id, logStrat)}>↻ Сделать переоценку</button>}
                 </div>
                 <div style={S.logStratBar}>{compStrats.map((st: any) => <button key={st.id} onClick={() => setLogStrat(st.id)} style={{ ...S.logStratBtn, ...(logStrat === st.id ? { background: st.color + "22", color: st.color, borderColor: st.color + "66" } : {}) }}>{st.name}</button>)}</div>
                 <div style={S.reassessList}>

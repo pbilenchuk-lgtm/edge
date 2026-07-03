@@ -176,6 +176,21 @@ export function listMatches(db: Database, competitionId: string): Match[] {
   return (db.prepare(`SELECT * FROM matches WHERE competition_id=?`).all(competitionId) as any[])
     .map(mapMatch);
 }
+export function updateMatch(db: Database, id: string, patch: Partial<Match>): void {
+  const map: Record<string, unknown> = { ...patch };
+  if ("lineup_out" in map) map.lineup_out = patch.lineup_out ? 1 : 0;
+  const keys = Object.keys(map);
+  if (!keys.length) return;
+  db.prepare(`UPDATE matches SET ${keys.map((k) => `${k}=?`).join(", ")} WHERE id=?`)
+    .run(...keys.map((k) => map[k]), id);
+}
+export function allMatches(db: Database): Match[] {
+  return (db.prepare(`SELECT * FROM matches`).all() as any[]).map(mapMatch);
+}
+export function matchByExternalRef(db: Database, ref: string): Match | null {
+  const r = db.prepare(`SELECT * FROM matches WHERE external_ref=?`).get(ref);
+  return r ? mapMatch(r) : null;
+}
 function mapMatch(r: any): Match {
   return { ...r, lineup_out: !!r.lineup_out };
 }
@@ -243,6 +258,11 @@ export function betsForMatch(db: Database, matchId: string, strategyId?: string)
 }
 export function openBets(db: Database): Bet[] {
   return db.prepare(`SELECT * FROM bets WHERE status='open'`).all() as Bet[];
+}
+export function settledBetsForStrategy(db: Database, strategyId: string): Bet[] {
+  return db.prepare(
+    `SELECT * FROM bets WHERE strategy_id=? AND status IN ('settled_won','settled_lost')`,
+  ).all(strategyId) as Bet[];
 }
 
 // ---------- reassessments / trade log ----------
