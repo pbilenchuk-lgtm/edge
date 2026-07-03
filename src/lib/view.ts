@@ -27,6 +27,8 @@ export interface MatchView {
   lineupOut: boolean; kickoff: string | null; oddsUpdated: string | null;
   finalScore: string | null; kickoffTime: string | null; endTime: string | null;
   duration: string | null; endNote: string | null;
+  /** a per-match LLM analyze run is in flight (durable; survives reload) */
+  analyzing: boolean;
   preLineup: AssessmentView | null; postLineup: AssessmentView | null;
   markets: MarketView[];
   bets: Record<string, { rationale: string | null; items: BetItemView[] }>;
@@ -140,6 +142,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
         minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
         kickoff: m.kickoff_at, oddsUpdated: null, finalScore: m.final_score, kickoffTime: m.kickoff_time,
         endTime: m.end_time, duration: m.duration, endNote: m.end_note,
+        analyzing: R.getAnalysisJob(db, m.id)?.status === "running",
         preLineup: pre ? view(pre) : null, postLineup: post ? view(post) : null,
         markets, bets, reassessByStrat, logByStrat, settledBets, result,
       };

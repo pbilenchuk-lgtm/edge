@@ -126,23 +126,23 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 // OFF the request/response cycle: `startAnalysis` validates cheaply, kicks the
 // model call into the background, and returns at once, so the HTTP request is
 // never held open for the whole round-trip (no gateway timeouts / "hangs").
-// The UI polls `analysisStatus` until it flips off "analyzing", then reloads.
-// In-flight state is a process-local set (single-process Node server); on
-// restart nothing is in flight and status falls back to the stored assessment.
+//
+// Run state lives in the DB (`analysis_jobs`), not process memory, so it
+// survives navigation/reload (the UI re-derives "analyzing" from the payload
+// and resumes polling) and process restart (orphaned 'running' rows are
+// reconciled to 'failed' on boot — see db.ts). With a shared DB it is also
+// visible across instances; the background promise still runs on one instance.
 // ============================================================
 
-const inFlight = new Set<string>();
-// Outcome of the most recent background run per match. Lets the poll report a
-// failed run even when we deliberately kept the previous good assessment in the
-// DB (so the model failure is visible without destroying usable analysis).
-const lastRun = new Map<string, { failed: boolean; error?: string }>();
+const now = (deps: AnalyzeDeps) => deps.now ?? (() => new Date().toISOString());
 
 export interface StartResult { ok: boolean; status?: "analyzing"; error?: string }
 
 /**
  * Cheap synchronous pre-checks (match/markets exist), then fire the model call
  * WITHOUT awaiting. Idempotent while running: a second call for the same match
- * just reports "analyzing" instead of launching a duplicate LLM request.
+ * sees the 'running' job and reports "analyzing" instead of launching a
+ * duplicate LLM request.
  */
 export function startAnalysis(db: Database, matchId: string, deps: AnalyzeDeps = {}): StartResult {
   const match = R.getMatch(db, matchId);
@@ -150,17 +150,15 @@ export function startAnalysis(db: Database, matchId: string, deps: AnalyzeDeps =
   if (!R.latestMarkets(db, matchId).length) {
     return { ok: false, error: "у матча нет рынков — сначала подтяни котировки (Polymarket)" };
   }
-  if (inFlight.has(matchId)) return { ok: true, status: "analyzing" };
+  if (R.getAnalysisJob(db, matchId)?.status === "running") return { ok: true, status: "analyzing" };
 
-  inFlight.add(matchId);
-  lastRun.delete(matchId); // clear any stale prior-run outcome
+  R.startAnalysisJob(db, matchId, now(deps)());
   // Fire-and-forget: analyzeMatch records its own success/failure assessment
-  // (§6). Capture the outcome so the poll can report a failed run, then release
-  // the in-flight slot when it settles.
+  // (§6); we mirror the outcome onto the durable job so any client/instance can
+  // see that this run failed even when we kept the previous good assessment.
   void analyzeMatch(db, matchId, deps)
-    .then((r) => lastRun.set(matchId, { failed: !r.ok, error: r.error }))
-    .catch((e) => lastRun.set(matchId, { failed: true, error: e instanceof Error ? e.message : String(e) }))
-    .finally(() => inFlight.delete(matchId));
+    .then((r) => R.finishAnalysisJob(db, matchId, !r.ok, r.error ?? null, now(deps)()))
+    .catch((e) => R.finishAnalysisJob(db, matchId, true, e instanceof Error ? e.message : String(e), now(deps)()));
   return { ok: true, status: "analyzing" };
 }
 
@@ -168,18 +166,12 @@ export interface AnalysisStatus {
   status: "analyzing" | "done" | "idle";
   failed?: boolean;
   error?: string;
-  stage?: string;
 }
 
-/** Poll target: "analyzing" while the model runs, else the latest outcome. */
+/** Poll target: "analyzing" while the model runs, else the last run's outcome. */
 export function analysisStatus(db: Database, matchId: string): AnalysisStatus {
-  if (inFlight.has(matchId)) return { status: "analyzing" };
-  // Prefer this process's last-run outcome (knows a failure even when we kept
-  // the previous good assessment); fall back to what's persisted.
-  const lr = lastRun.get(matchId);
-  if (lr) return { status: "done", failed: lr.failed, error: lr.error };
-  const rows = R.assessmentsForMatch(db, matchId);
-  if (!rows.length) return { status: "idle" };
-  const latest = rows.reduce((a, b) => (a.created_at >= b.created_at ? a : b));
-  return { status: "done", failed: latest.status === "failed", stage: latest.stage };
+  const job = R.getAnalysisJob(db, matchId);
+  if (!job) return { status: "idle" };
+  if (job.status === "running") return { status: "analyzing" };
+  return { status: "done", failed: job.status === "failed", error: job.error ?? undefined };
 }

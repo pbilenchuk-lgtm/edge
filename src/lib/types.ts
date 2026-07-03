@@ -122,6 +122,14 @@ export interface Assessment {
   created_at: string;
 }
 
+export interface AnalysisJob {
+  match_id: string;
+  status: "running" | "done" | "failed";
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
 export interface Market {
   id: string;
   match_id: string;

@@ -7,6 +7,7 @@
 import { randomUUID } from "node:crypto";
 import type { Database } from "./db.js";
 import type {
+  AnalysisJob,
   Assessment,
   Bet,
   Competition,
@@ -212,6 +213,33 @@ export function upsertAssessment(db: Database, a: Assessment): void {
 }
 export function assessmentsForMatch(db: Database, matchId: string): Assessment[] {
   return db.prepare(`SELECT * FROM assessments WHERE match_id=?`).all(matchId) as Assessment[];
+}
+
+// ---------- analysis jobs (durable per-match analyze state) ----------
+export function getAnalysisJob(db: Database, matchId: string): AnalysisJob | undefined {
+  return db.prepare(`SELECT * FROM analysis_jobs WHERE match_id=?`).get(matchId) as AnalysisJob | undefined;
+}
+export function startAnalysisJob(db: Database, matchId: string, at: string): void {
+  db.prepare(
+    `INSERT INTO analysis_jobs(match_id,status,error,started_at,finished_at)
+     VALUES(?,'running',NULL,?,NULL)
+     ON CONFLICT(match_id) DO UPDATE SET status='running', error=NULL, started_at=excluded.started_at, finished_at=NULL`,
+  ).run(matchId, at);
+}
+export function finishAnalysisJob(db: Database, matchId: string, failed: boolean, error: string | null, at: string): void {
+  db.prepare(
+    `UPDATE analysis_jobs SET status=?, error=?, finished_at=? WHERE match_id=?`,
+  ).run(failed ? "failed" : "done", failed ? error : null, at, matchId);
+}
+export function runningAnalysisJobs(db: Database): AnalysisJob[] {
+  return db.prepare(`SELECT * FROM analysis_jobs WHERE status='running'`).all() as AnalysisJob[];
+}
+/** Restart reconciliation: a 'running' row with no live process is orphaned. */
+export function failStaleAnalysisJobs(db: Database, error: string, at: string): number {
+  const r = db.prepare(
+    `UPDATE analysis_jobs SET status='failed', error=?, finished_at=? WHERE status='running'`,
+  ).run(error, at);
+  return r.changes;
 }
 
 // ---------- markets ----------

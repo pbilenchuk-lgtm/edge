@@ -179,5 +179,16 @@ CREATE TABLE IF NOT EXISTS quality_metrics (
   updated_at  TEXT NOT NULL
 );
 
+-- analysis_jobs — durable state of the per-match LLM analyze run (discover⟂
+-- analyze split). Survives navigation/reload and process restart, and is
+-- visible to any instance sharing the DB. One row per match (latest run).
+CREATE TABLE IF NOT EXISTS analysis_jobs (
+  match_id    TEXT PRIMARY KEY REFERENCES matches(id),
+  status      TEXT NOT NULL CHECK (status IN ('running','done','failed')),
+  error       TEXT,
+  started_at  TEXT NOT NULL,
+  finished_at TEXT
+);
+
 -- §2.15 event_feed — агрегируется из bets/reassessments/trade_log/matches (view),
 -- поэтому отдельной таблицы нет: строится в репозитории по времени.

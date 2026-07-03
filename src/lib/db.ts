@@ -47,6 +47,12 @@ export function getDb(path = dbPath()): Database {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
   initSchema(db);
+  // Reconcile analyze jobs orphaned by a crash/restart: the background promise
+  // that would finish them does not survive a process restart, so any leftover
+  // 'running' row is stale and must not read as "analyzing" forever.
+  try {
+    db.exec("UPDATE analysis_jobs SET status='failed', error='прервано рестартом сервера', finished_at=CURRENT_TIMESTAMP WHERE status='running'");
+  } catch { /* table may not exist on a very old DB; schema just created it */ }
   _db = db;
   return db;
 }

@@ -5,7 +5,7 @@
 // persists money/strategy/analytics edits via /api/mutations, and refreshes
 // the odds column live via /api/quotes (Polymarket).
 // ============================================================
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import type { AppData } from "@/lib/view";
 
 const INK = "#12161d", PANEL = "#1a2029", PANEL2 = "#212936", LINE = "#2c3543", TEXT = "#e6e9ef", MUTE = "#8b95a5";
@@ -175,25 +175,32 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     }
   };
 
+  const engine = (action: string, matchId: string) => fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, matchId }) }).then((x) => x.json());
+  const reloadApp = async () => {
+    const app = await (await fetch("/api/app")).json();
+    if (app.matchDb) setMatchDb(app.matchDb);
+    if (app.catalog) setCatalog(app.catalog);
+  };
+  // Poll the durable job until it settles, then reload. Used both after a fresh
+  // kick and to RESUME a run already in flight (e.g. after navigating back — the
+  // server tracks the job, so the card picks the analysis back up on its own).
+  const pollAnalyze = async (matchId: string) => {
+    let failed = false;
+    for (let i = 0; i < 60; i++) { // ~90s ceiling; the result persists regardless
+      const s = await engine("analyzeStatus", matchId);
+      if (s.status !== "analyzing") { failed = !!s.failed; break; }
+      await new Promise((res) => setTimeout(res, 1500));
+    }
+    await reloadApp();
+    return failed;
+  };
   const doAnalyze = async (matchId: string) => {
     // Kick off (returns immediately with 202 / "analyzing"), then poll until the
     // background LLM run settles. The request is never held open for the whole
     // model round-trip, so nothing "hangs" on slow/timeout-y analyses.
-    const post = (action: string) => fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, matchId }) }).then((x) => x.json());
-    const kick = await post("analyze");
+    const kick = await engine("analyze", matchId);
     if (kick.ok === false) return kick; // validation error (no markets / not found) — show at once
-
-    let failed = false;
-    for (let i = 0; i < 60; i++) { // ~90s ceiling; the result persists regardless
-      const s = await post("analyzeStatus");
-      if (s.status !== "analyzing") { failed = !!s.failed; break; }
-      await new Promise((res) => setTimeout(res, 1500));
-    }
-
-    // reload (assessment + ai_prob + proposed bets are all in matchDb)
-    const app = await (await fetch("/api/app")).json();
-    if (app.matchDb) setMatchDb(app.matchDb);
-    if (app.catalog) setCatalog(app.catalog);
+    const failed = await pollAnalyze(matchId);
     return failed ? { ok: false, error: "оценка не удалась" } : { ok: true };
   };
 
@@ -272,7 +279,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 
           <main style={S.main}>
             {comp?.matches.length === 0 && <div style={S.empty}>В этом турнире пока нет матчей.</div>}
-            {comp?.matches.map((mid) => <MatchCard key={mid} match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} />)}
+            {comp?.matches.map((mid) => <MatchCard key={mid} match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} onResumeAnalyze={pollAnalyze} />)}
           </main>
         </>
       ) : screen === "strategies" ? (
@@ -299,7 +306,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   );
 }
 
-function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess, onAnalyze }: any) {
+function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess, onAnalyze, onResumeAnalyze }: any) {
   const meta = STATE_META[match.state];
   const hasLog = match.state === "live" || match.state === "finished";
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
@@ -319,6 +326,18 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
 
   const doRefresh = async () => { setRefreshing(true); await onRefreshOdds(match.id); setRefreshing(false); };
+
+  // Resume a run already in flight on the server (durable job): if the user
+  // kicked analysis then navigated away, the card picks the poll back up on
+  // mount instead of silently stalling until a manual reload.
+  const resumed = useRef(false);
+  useEffect(() => {
+    if (match.analyzing && !resumed.current && onResumeAnalyze) {
+      resumed.current = true;
+      setAnalyzing(true); setAnalyzeErr(null);
+      onResumeAnalyze(match.id).then((failed: boolean) => { if (failed) setAnalyzeErr("оценка не удалась"); setAnalyzing(false); });
+    }
+  }, [match.analyzing, match.id, onResumeAnalyze]);
 
   return (
     <section style={{ ...S.card, borderColor: meta.color + "55" }}>
