@@ -57,8 +57,15 @@ export async function analyzeMatch(
   );
 
   if (!a.ok) {
-    // ТЗ §6: record the failure, don't block the match.
-    R.upsertAssessment(db, { id: R.uid(), match_id: matchId, stage, confidence: null, short: null, body: null, verdict: null, model, status: "failed", created_at: now() });
+    // ТЗ §6: record the failure, don't block the match — but never clobber a
+    // previously GOOD assessment of this stage with an empty failed row (a
+    // failed re-run must not destroy the last usable analysis). The failure is
+    // still surfaced to the caller (and, for the async path, via the run
+    // registry) so the user sees it.
+    const priorOk = R.assessmentsForMatch(db, matchId).some((x) => x.stage === stage && x.status === "ok");
+    if (!priorOk) {
+      R.upsertAssessment(db, { id: R.uid(), match_id: matchId, stage, confidence: null, short: null, body: null, verdict: null, model, status: "failed", created_at: now() });
+    }
     return { ok: false, error: a.error ?? "оценка не удалась", stage };
   }
 
@@ -125,6 +132,10 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 // ============================================================
 
 const inFlight = new Set<string>();
+// Outcome of the most recent background run per match. Lets the poll report a
+// failed run even when we deliberately kept the previous good assessment in the
+// DB (so the model failure is visible without destroying usable analysis).
+const lastRun = new Map<string, { failed: boolean; error?: string }>();
 
 export interface StartResult { ok: boolean; status?: "analyzing"; error?: string }
 
@@ -142,10 +153,13 @@ export function startAnalysis(db: Database, matchId: string, deps: AnalyzeDeps =
   if (inFlight.has(matchId)) return { ok: true, status: "analyzing" };
 
   inFlight.add(matchId);
+  lastRun.delete(matchId); // clear any stale prior-run outcome
   // Fire-and-forget: analyzeMatch records its own success/failure assessment
-  // (§6), so we only need to release the in-flight slot when it settles.
+  // (§6). Capture the outcome so the poll can report a failed run, then release
+  // the in-flight slot when it settles.
   void analyzeMatch(db, matchId, deps)
-    .catch(() => {}) // analyzeMatch is graceful; guard against unexpected throws
+    .then((r) => lastRun.set(matchId, { failed: !r.ok, error: r.error }))
+    .catch((e) => lastRun.set(matchId, { failed: true, error: e instanceof Error ? e.message : String(e) }))
     .finally(() => inFlight.delete(matchId));
   return { ok: true, status: "analyzing" };
 }
@@ -153,12 +167,17 @@ export function startAnalysis(db: Database, matchId: string, deps: AnalyzeDeps =
 export interface AnalysisStatus {
   status: "analyzing" | "done" | "idle";
   failed?: boolean;
+  error?: string;
   stage?: string;
 }
 
-/** Poll target: "analyzing" while the model runs, else the stored outcome. */
+/** Poll target: "analyzing" while the model runs, else the latest outcome. */
 export function analysisStatus(db: Database, matchId: string): AnalysisStatus {
   if (inFlight.has(matchId)) return { status: "analyzing" };
+  // Prefer this process's last-run outcome (knows a failure even when we kept
+  // the previous good assessment); fall back to what's persisted.
+  const lr = lastRun.get(matchId);
+  if (lr) return { status: "done", failed: lr.failed, error: lr.error };
   const rows = R.assessmentsForMatch(db, matchId);
   if (!rows.length) return { status: "idle" };
   const latest = rows.reduce((a, b) => (a.created_at >= b.created_at ? a : b));
