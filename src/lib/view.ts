@@ -158,7 +158,10 @@ export function buildAppData(db: Database, env = process.env): AppData {
     ...p, hasKey: providerEnabled(p.id as any, env),
   }));
 
-  return { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers };
+  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers };
+  // node:sqlite rows have a null prototype; React Server Components can't pass
+  // those to a client component. A JSON round-trip yields plain objects.
+  return JSON.parse(JSON.stringify(payload));
 }
 
 function view(a: { confidence: string | null; short: string | null; body: string | null; verdict: string | null; status: string }): AssessmentView {
