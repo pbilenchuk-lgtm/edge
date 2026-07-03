@@ -125,6 +125,18 @@ export function saveStrategyVersion(
     .run(prompt, JSON.stringify(params), next, strategyId);
   return next;
 }
+export function updateStrategy(
+  db: Database, id: string,
+  patch: Partial<Pick<Strategy, "name" | "prompt" | "model" | "tag">> & { params?: StrategyParams },
+): void {
+  const cols: string[] = [];
+  const vals: unknown[] = [];
+  for (const k of ["name", "prompt", "model", "tag"] as const)
+    if (patch[k] !== undefined) { cols.push(`${k}=?`); vals.push(patch[k]); }
+  if (patch.params !== undefined) { cols.push(`params=?`); vals.push(JSON.stringify(patch.params)); }
+  if (!cols.length) return;
+  db.prepare(`UPDATE strategies SET ${cols.join(", ")} WHERE id=?`).run(...vals, id);
+}
 function mapStrategy(r: any): Strategy {
   return { ...r, params: safeJson<StrategyParams>(r.params, {}) };
 }
@@ -139,6 +151,9 @@ export function setShare(db: Database, s: StrategyShare): void {
 export function sharesForComp(db: Database, competitionId: string): StrategyShare[] {
   return db.prepare(`SELECT * FROM strategy_shares WHERE competition_id=?`)
     .all(competitionId) as StrategyShare[];
+}
+export function clearShares(db: Database, competitionId: string): void {
+  db.prepare(`DELETE FROM strategy_shares WHERE competition_id=?`).run(competitionId);
 }
 
 // ---------- matches ----------
@@ -241,6 +256,28 @@ export function insertTradeLog(db: Database, e: TradeLogEntry): void {
   db.prepare(
     `INSERT INTO trade_log(id,match_id,strategy_id,minute,type,text,created_at) VALUES(?,?,?,?,?,?,?)`,
   ).run(e.id, e.match_id, e.strategy_id, e.minute, e.type, e.text, e.created_at);
+}
+export function reassessmentsForMatch(db: Database, matchId: string): Reassessment[] {
+  return db.prepare(`SELECT * FROM reassessments WHERE match_id=? ORDER BY created_at`).all(matchId) as Reassessment[];
+}
+export function tradeLogForMatch(db: Database, matchId: string): TradeLogEntry[] {
+  return db.prepare(`SELECT * FROM trade_log WHERE match_id=? ORDER BY created_at`).all(matchId) as TradeLogEntry[];
+}
+/** All analytics prompts (for building the base/override maps). */
+export function allAnalyticsPrompts(db: Database): {
+  scope: "sport" | "competition"; scope_id: string; body: string; model: string | null;
+}[] {
+  return db.prepare(`SELECT scope,scope_id,body,model FROM analytics_prompts ORDER BY updated_at`).all() as any[];
+}
+export function updateAnalyticsPrompt(
+  db: Database, scope: "sport" | "competition", scopeId: string, body: string,
+): void {
+  const existing = db.prepare(`SELECT id FROM analytics_prompts WHERE scope=? AND scope_id=? ORDER BY updated_at DESC LIMIT 1`).get(scope, scopeId);
+  if (existing) db.prepare(`UPDATE analytics_prompts SET body=?, updated_at=? WHERE id=?`).run(body, nowIso(), existing.id);
+  else upsertAnalyticsPrompt(db, scope, scopeId, body, null);
+}
+export function setAnalyticsModel(db: Database, sportId: string, model: string): void {
+  db.prepare(`UPDATE analytics_prompts SET model=?, updated_at=? WHERE scope='sport' AND scope_id=?`).run(model, nowIso(), sportId);
 }
 
 // ---------- quality metrics ----------

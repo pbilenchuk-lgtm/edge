@@ -1,0 +1,1251 @@
+"use client";
+// ============================================================
+// EDGE LAB — UI (ported from edge-lab-v18.jsx, driven by real data)
+// Receives the server-built AppData payload, keeps editable slices in state,
+// persists money/strategy/analytics edits via /api/mutations, and refreshes
+// the odds column live via /api/quotes (Polymarket).
+// ============================================================
+import React, { useState, useRef } from "react";
+import type { AppData } from "@/lib/view";
+
+const INK = "#12161d", PANEL = "#1a2029", PANEL2 = "#212936", LINE = "#2c3543", TEXT = "#e6e9ef", MUTE = "#8b95a5";
+const PALETTE = ["#e8a838", "#5b9bd5", "#70b56a", "#c98bdb", "#e07a5f", "#4fc3c7"];
+const STATE_META: Record<string, { label: string; color: string; bg: string }> = {
+  upcoming: { label: "СКОРО", color: "#8b95a5", bg: "#232a35" },
+  lineup: { label: "СОСТАВ", color: "#e8a838", bg: "#2e2a1a" },
+  live: { label: "LIVE", color: "#ff6b6b", bg: "#2e1f22" },
+  finished: { label: "ЗАВЕРШЁН", color: "#70b56a", bg: "#1f2a22" },
+};
+
+const impliedProb = (o: number) => (o > 1 ? 1 / o : 0);
+const fmtMoney = (n: number) => (n < 0 ? "-$" : "$") + Math.abs(n).toFixed(2);
+const fmtMoney0 = (n: number) => (n < 0 ? "-$" : "$") + Math.abs(n).toFixed(0);
+
+async function mutate(action: any): Promise<any> {
+  const r = await fetch("/api/mutations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(action) });
+  return r.json();
+}
+
+function stratBudget(compBudget: Record<string, number>, compId: string, shares: any, stratId: string) {
+  const pct = shares[compId]?.[stratId] || 0;
+  return Math.round((compBudget[compId] || 0) * pct / 100);
+}
+function betItems(raw: any) {
+  if (!raw) return [];
+  return Array.isArray(raw) ? raw : (raw.items || []);
+}
+function describeParam(k: string, v: any): { label: string; value: string } {
+  const pct = (x: number) => `${Math.round(x * 100)}%`;
+  switch (k) {
+    case "maxPerBet": return { label: "макс. на одну ставку", value: pct(v) };
+    case "stop": return { label: "стоп-лосс портфеля", value: `${Math.round(v * 100)}%` };
+    case "minEdge": return { label: "мин. край для входа", value: `${v}%` };
+    case "flatSize": return { label: "фикс. размер ставки", value: pct(v) };
+    case "kellyFraction": return { label: "доля Келли", value: `${v}×` };
+    case "cap": return { label: "потолок размера", value: pct(v) };
+    case "minConfidence": return { label: "мин. уверенность", value: v === "high" ? "высокая" : String(v) };
+    case "tiers": return { label: "лесенка размеров (край → доля)", value: (Array.isArray(v) ? v.map(([e, s]: any) => `≥${e}% → ${Math.round(s * 100)}%`).join(",  ") : String(v)) };
+    case "note": return { label: "примечание", value: String(v) };
+    default: return { label: k, value: Array.isArray(v) ? JSON.stringify(v) : String(v) };
+  }
+}
+function stratEquityOnComp(matchDb: any, comp: any, stratId: string, budget: number) {
+  let realized = 0, unreal = 0;
+  for (const mid of comp.matches) {
+    const m = matchDb[mid];
+    if (!m) continue;
+    if (m.state === "finished" && m.result?.[stratId] != null) realized += m.result[stratId];
+    for (const b of betItems(m.bets?.[stratId])) {
+      if (b.status === "open") {
+        if (b.currentPrice != null && b.entryPrice != null) unreal += b.stake * (b.currentPrice / b.entryPrice) - b.stake;
+      }
+    }
+  }
+  return { equity: budget + realized + unreal, realized, unreal };
+}
+function stratOverall(competitions: any[], matchDb: any, stratId: string, sportId: string, compBudget: any, shares: any) {
+  const comps = competitions.filter((c) => c.sport === sportId);
+  let sumPnl = 0, sumBudget = 0; const roiList: number[] = [];
+  for (const c of comps) {
+    const pct = shares[c.id]?.[stratId] || 0;
+    if (pct <= 0 || (compBudget[c.id] || 0) <= 0) continue;
+    const budget = Math.round((compBudget[c.id]) * pct / 100);
+    const e = stratEquityOnComp(matchDb, c, stratId, budget);
+    const pnl = e.equity - budget;
+    sumPnl += pnl; sumBudget += budget;
+    if (budget > 0) roiList.push((pnl / budget) * 100);
+  }
+  const avgRoi = roiList.length ? roiList.reduce((a, b) => a + b, 0) / roiList.length : 0;
+  return { avgRoi, pnl: sumPnl, budget: sumBudget, active: roiList.length };
+}
+function collectPortfolio(competitions: any[], matchDb: any, catalog: any[], compBudget: any, shares: any) {
+  const positions: any[] = [];
+  for (const comp of competitions) {
+    for (const mid of comp.matches) {
+      const m = matchDb[mid];
+      if (!m || m.state !== "live") continue;
+      for (const st of catalog) {
+        if (st.sport !== comp.sport) continue;
+        if ((shares[comp.id]?.[st.id] || 0) <= 0 || (compBudget[comp.id] || 0) <= 0) continue;
+        for (const b of betItems(m.bets?.[st.id])) {
+          if (b.status !== "open") continue;
+          const live = b.currentPrice != null && b.entryPrice != null ? b.stake * (b.currentPrice / b.entryPrice) - b.stake : 0;
+          positions.push({
+            sport: comp.sport, compName: comp.name, compId: comp.id,
+            match: `${m.home}–${m.away}`, minute: m.minute,
+            strat: st.name, stratColor: st.color, stratId: st.id,
+            market: b.market, stake: b.stake, entryPrice: b.entryPrice, currentPrice: b.currentPrice,
+            live, entered: b.entered,
+          });
+        }
+      }
+    }
+  }
+  return positions;
+}
+
+export default function EdgeLab({ initial }: { initial: AppData }) {
+  const SPORTS = initial.sports;
+  const PROVIDERS = initial.providers;
+  const QUALITY = initial.quality;
+  const EVENT_FEED = initial.eventFeed;
+  const COMPETITIONS = initial.competitions;
+  const TOTAL_BALANCE = initial.treasuryTotal;
+
+  const [screen, setScreen] = useState("matches");
+  const [catalog, setCatalog] = useState(initial.catalog);
+  const [compBudget, setCompBudget] = useState(initial.compBudget);
+  const [shares, setShares] = useState(initial.shares);
+  const [analysis, setAnalysis] = useState(initial.analysis);
+  const [matchDb, setMatchDb] = useState(initial.matchDb);
+
+  const [sportId, setSportId] = useState("football");
+  const sportComps = COMPETITIONS.filter((c) => c.sport === sportId);
+  const [compId, setCompId] = useState(sportComps[0]?.id);
+  const comp = COMPETITIONS.find((c) => c.id === compId) || sportComps[0];
+  const [compModal, setCompModal] = useState<string | null>(null);
+  const [shareModal, setShareModal] = useState<string | null>(null);
+
+  const onSport = (id: string) => { setSportId(id); setCompId(COMPETITIONS.find((c) => c.sport === id)!.id); };
+
+  const allocatedSum = Object.values(compBudget).reduce((a, b) => a + b, 0);
+  const freeBalance = TOTAL_BALANCE - allocatedSum;
+
+  const setBudget = (cid: string, amt: number) => {
+    setCompBudget((p) => ({ ...p, [cid]: amt })); setCompModal(null);
+    mutate({ type: "setBudget", compId: cid, amount: amt });
+  };
+  const saveShares = (cid: string, newShares: any) => {
+    setShares((p) => ({ ...p, [cid]: newShares })); setShareModal(null);
+    mutate({ type: "setShares", compId: cid, shares: newShares });
+  };
+
+  const refreshOdds = async (matchId: string) => {
+    const m = matchDb[matchId];
+    if (!m) return;
+    const markets = m.markets.map((mk) => ({ tokenId: mk.tokenId, snapshotCents: mk.price }));
+    const r = await fetch("/api/quotes", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ markets }) });
+    const { quotes } = await r.json();
+    const byTok: Record<string, any> = {};
+    for (const q of quotes || []) byTok[q.tokenId] = q;
+    let anyLive = false;
+    setMatchDb((prev) => {
+      const nm = { ...prev[matchId] };
+      nm.markets = nm.markets.map((mk) => {
+        const q = mk.tokenId ? byTok[mk.tokenId] : null;
+        if (q && q.priceCents != null) { if (q.source === "live") anyLive = true; return { ...mk, price: q.priceCents }; }
+        return mk;
+      });
+      nm.oddsUpdated = anyLive ? "только что · live" : "только что · snapshot";
+      return { ...prev, [matchId]: nm };
+    });
+  };
+
+  const sportStrats = catalog.filter((s) => s.sport === sportId);
+  const compStrats = sportStrats.filter((s) => (shares[comp?.id]?.[s.id] || 0) > 0 && compBudget[comp?.id] > 0);
+
+  return (
+    <div style={S.root}>
+      <style>{CSS}</style>
+
+      <div style={S.treasury}>
+        <div style={S.trBrand}><span style={S.mark}>&#9670;</span><span style={S.trBrandTxt}>EDGE LAB</span></div>
+        <div style={S.trCell}><div style={S.trLbl}>Общий баланс</div><div style={S.trVal}>{fmtMoney0(TOTAL_BALANCE)}</div></div>
+        <div style={S.trDiv} />
+        <div style={S.trCell}><div style={S.trLbl}>Распределено</div><div style={{ ...S.trVal, color: "#e8a838" }}>{fmtMoney0(allocatedSum)}</div></div>
+        <div style={S.trDiv} />
+        <div style={S.trCell}><div style={S.trLbl}>Свободно</div><div style={{ ...S.trVal, color: freeBalance >= 0 ? "#5fd08a" : "#ff6b6b" }}>{fmtMoney0(freeBalance)}</div></div>
+      </div>
+
+      <div style={S.screenSwitch} className="el-screen-switch">
+        {[["matches", "Матчи"], ["feed", "Лента"], ["portfolio", "Портфель"], ["metrics", "Метрики"], ["strategies", "Стратегии"], ["models", "Модели"]].map(([k, lbl]) => (
+          <button key={k} onClick={() => setScreen(k)} style={{ ...S.screenBtn, ...(screen === k ? S.screenOn : {}) }}>{lbl}</button>
+        ))}
+      </div>
+
+      {(screen === "matches" || screen === "strategies") && (
+        <nav style={S.sportTabs}>
+          {SPORTS.map((s) => <button key={s.id} onClick={() => onSport(s.id)} style={{ ...S.sportTab, ...(sportId === s.id ? S.sportTabOn : {}) }}>{s.label}</button>)}
+        </nav>
+      )}
+
+      {screen === "matches" ? (
+        <>
+          <div style={S.compRow}>
+            {sportComps.map((c) => {
+              const budget = compBudget[c.id] || 0;
+              const cStrats = sportStrats.filter((s) => (shares[c.id]?.[s.id] || 0) > 0);
+              const eq = cStrats.reduce((a, s) => a + stratEquityOnComp(matchDb, c, s.id, stratBudget(compBudget, c.id, shares, s.id)).equity, 0);
+              const delta = eq - budget;
+              return (
+                <div key={c.id} style={{ ...S.compCard, ...(c.id === comp?.id ? S.compOn : {}) }}>
+                  <button style={S.compMain} onClick={() => setCompId(c.id)}>
+                    <div style={S.compName}>{c.name}</div>
+                    {budget > 0 ? <>
+                      <div style={S.compBudget}>{fmtMoney0(eq)} <span style={{ color: MUTE }}>из {fmtMoney0(budget)}</span></div>
+                      <div style={{ ...S.compDelta, color: delta >= 0 ? "#5fd08a" : "#ff6b6b" }}>{delta >= 0 ? "+" : ""}{fmtMoney(delta)} <span style={S.compRoi}>({delta >= 0 ? "+" : ""}{((delta / budget) * 100).toFixed(1)}%)</span></div>
+                    </> : <div style={S.compUnalloc}>{c.matches.length ? "нет бюджета" : "нет матчей"}</div>}
+                  </button>
+                  <button style={S.allocIcon} title="Бюджет турнира" onClick={() => setCompModal(c.id)}>$</button>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={S.stratStripHead}>
+            <span style={S.stratStripTitle}>Стратегии на «{comp?.name}»</span>
+            {compBudget[comp?.id] > 0 && <button style={S.shareBtn} onClick={() => setShareModal(comp.id)}>⚙ Распределить доли %</button>}
+          </div>
+          <div style={S.bankStrip}>
+            {(compBudget[comp?.id] || 0) === 0 && <div style={S.noStrat}>У «{comp?.name}» нет бюджета. Нажми $ на плашке турнира.</div>}
+            {compBudget[comp?.id] > 0 && compStrats.length === 0 && <div style={S.noStrat}>Бюджет есть, но доли стратегий не заданы. Нажми «Распределить доли %».</div>}
+            {compBudget[comp?.id] > 0 && compStrats.map((st) => {
+              const pct = shares[comp.id][st.id];
+              const budget = stratBudget(compBudget, comp.id, shares, st.id);
+              const e = stratEquityOnComp(matchDb, comp, st.id, budget);
+              const d = e.equity - budget;
+              return (
+                <div key={st.id} style={S.bankCell}>
+                  <span style={{ ...S.dot, background: st.color }} />
+                  <div style={S.bankInfo}><span style={S.bankNm}>{st.name}</span><span style={S.bankBudget}>{pct}% · {fmtMoney0(budget)}</span></div>
+                  <div style={S.bankNums}><span style={S.bankEq}>{fmtMoney(e.equity)}</span><span style={{ ...S.bankD, color: d >= 0 ? "#5fd08a" : "#ff6b6b" }}>{d >= 0 ? "▲" : "▼"}{fmtMoney(d)} ({d >= 0 ? "+" : ""}{budget ? ((d / budget) * 100).toFixed(1) : "0.0"}%)</span></div>
+                </div>
+              );
+            })}
+          </div>
+
+          <main style={S.main}>
+            {comp?.matches.length === 0 && <div style={S.empty}>В этом турнире пока нет матчей.</div>}
+            {comp?.matches.map((mid) => <MatchCard key={mid} match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} />)}
+          </main>
+        </>
+      ) : screen === "strategies" ? (
+        <StrategyScreen sportId={sportId} sportLabel={SPORTS.find((s) => s.id === sportId)!.label} catalog={catalog} setCatalog={setCatalog}
+          competitions={COMPETITIONS} matchDb={matchDb} compBudget={compBudget} shares={shares} providers={PROVIDERS} quality={QUALITY}
+          analysis={analysis} setAnalysis={setAnalysis} onGoModels={() => setScreen("models")} />
+      ) : screen === "portfolio" ? (
+        <PortfolioScreen positions={collectPortfolio(COMPETITIONS, matchDb, catalog, compBudget, shares)} onGoMatches={() => setScreen("matches")} />
+      ) : screen === "feed" ? (
+        <FeedScreen feed={EVENT_FEED} />
+      ) : screen === "metrics" ? (
+        <MetricsScreen catalog={catalog} quality={QUALITY} />
+      ) : (
+        <ModelsScreen providers={PROVIDERS} />
+      )}
+
+      {compModal && <BudgetModal comp={COMPETITIONS.find((c) => c.id === compModal)!} current={compBudget[compModal] || 0} free={freeBalance} onClose={() => setCompModal(null)} onSave={(amt: number) => setBudget(compModal, amt)} />}
+      {shareModal && <SharesModal comp={COMPETITIONS.find((c) => c.id === shareModal)!} strats={catalog.filter((s) => s.sport === COMPETITIONS.find((c) => c.id === shareModal)!.sport)} budget={compBudget[shareModal]} current={shares[shareModal] || {}} onClose={() => setShareModal(null)} onSave={(sh: any) => saveShares(shareModal, sh)} />}
+
+      <footer style={S.footer}>
+        Два уровня денег: казна→турнир ($), турнир→стратегии (%). Данные — из БД; котировки обновляются через сервер (Polymarket). Правки бюджета/долей/стратегий сохраняются.
+      </footer>
+    </div>
+  );
+}
+
+function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds }: any) {
+  const meta = STATE_META[match.state];
+  const hasLog = match.state === "live" || match.state === "finished";
+  const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
+  const hasReassess = Object.keys(match.reassessByStrat || {}).length > 0;
+  const hasSettled = Object.keys(match.settledBets || {}).length > 0;
+  const tabs: any[] = [];
+  if (match.preLineup || match.postLineup) tabs.push({ id: "analysis", label: "Анализ" });
+  tabs.push({ id: "strat", label: "Ставки стратегий" });
+  if (hasReassess) tabs.push({ id: "reassess", label: "Переоценки" });
+  if (hasSettled) tabs.push({ id: "settle", label: "Расчёт" });
+  if (hasLog) tabs.push({ id: "log", label: "Лог" });
+  const defaultTab = hasSettled ? "settle" : (match.preLineup || match.postLineup) ? "analysis" : "strat";
+  const [tab, setTab] = useState(defaultTab);
+  const [logStrat, setLogStrat] = useState(compStrats[0]?.id);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const doRefresh = async () => { setRefreshing(true); await onRefreshOdds(match.id); setRefreshing(false); };
+
+  return (
+    <section style={{ ...S.card, borderColor: meta.color + "55" }}>
+      <div style={S.cardHead}>
+        <div>
+          <div style={S.matchup}>{match.home}{match.state === "live" || match.state === "finished" ? <span style={S.score}> {match.scoreHome}:{match.scoreAway} </span> : <span style={S.vs}> — </span>}{match.away}</div>
+          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && match.kickoff}{match.state === "live" && `LIVE · ${match.minute}'`}{match.state === "finished" && (match.endTime ? `завершён ${match.endTime}` : "финал")}{"  ·  "}<span style={{ color: match.lineupOut ? "#70b56a" : "#8b95a5" }}>{match.lineupOut ? "✓ состав" : "○ без состава"}</span></div>
+          {match.state === "finished" && match.duration && <div style={S.finishTiming}>{match.kickoffTime}–{match.endTime} · длительность {match.duration}{match.endNote && ` · ${match.endNote}`}</div>}
+        </div>
+        <div style={{ ...S.stateBadge, background: meta.bg, color: meta.color }}>{match.state === "live" && <span style={S.pulse} />}{meta.label}</div>
+      </div>
+
+      <div style={S.matchBody} className="el-match-body">
+        <div style={S.matchLeft}>
+          <div style={S.tabBar} className="el-tab-buttons">{tabs.map((t) => <button key={t.id} onClick={() => setTab(t.id)} style={{ ...S.tabBtn, ...(tab === t.id ? S.tabBtnOn : {}) }}>{t.label}</button>)}</div>
+          <select style={S.tabSelect} className="el-tab-select" value={tab} onChange={(e) => setTab(e.target.value)}>
+            {tabs.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </select>
+          <div style={S.tabBody}>
+            {tab === "analysis" && (
+              <div style={S.analysisFlow}>
+                {match.preLineup && (
+                  <div style={S.analysisStage}>
+                    <div style={S.analysisStageLabel}><span style={S.stageNum}>1</span> До состава</div>
+                    <Assessment a={match.preLineup} />
+                  </div>
+                )}
+                {match.postLineup && (
+                  <div style={S.analysisStage}>
+                    <div style={S.analysisStageLabel}><span style={{ ...S.stageNum, background: "#e8a838", color: "#12161d" }}>2</span> После состава <span style={S.stagePriority}>приоритетная</span></div>
+                    <Assessment a={match.postLineup} />
+                  </div>
+                )}
+                {!match.postLineup && <div style={S.analysisPending}>Оценка после состава появится, когда объявят составы.</div>}
+                {compStrats.length > 0 && compStrats.some((st: any) => { const r = match.bets?.[st.id]; return r && r.rationale; }) && (
+                  <div style={S.analysisStage}>
+                    <div style={S.analysisStageLabel}><span style={{ ...S.stageNum, background: "#5b9bd5", color: "#12161d" }}>3</span> Решения стратегий</div>
+                    <div style={S.decisionList}>
+                      {compStrats.map((st: any) => {
+                        const raw = match.bets?.[st.id];
+                        const rationale = raw ? raw.rationale : null;
+                        const items = betItems(raw);
+                        return (
+                          <div key={st.id} style={S.decisionItem}>
+                            <div style={S.decisionHead}>
+                              <span style={{ ...S.dot, background: st.color }} />
+                              <span style={S.decisionName}>{st.name}</span>
+                              <span style={S.decisionVerdict}>{items.length === 0 ? "пропуск" : `${items.length} ${items.length === 1 ? "ставка" : "ставки"}`}</span>
+                            </div>
+                            <p style={S.decisionText}>{rationale || (items.length === 0 ? "Край недостаточен — стратегия воздерживается." : "—")}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {tab === "strat" && (
+              <div style={S.stratListGrid} className="el-strat-grid">
+                {compStrats.length === 0 && <div style={S.noPos}>Нет стратегий с долей на этом турнире.</div>}
+                {compStrats.map((st: any) => {
+                  const budget = stratBudget(compBudget, comp.id, shares, st.id);
+                  const raw = match.bets?.[st.id];
+                  const items = betItems(raw);
+                  return (
+                    <div key={st.id} style={S.stratBlock}>
+                      <div style={S.stratBlockHead}><span style={{ ...S.dot, background: st.color }} /><span style={S.stratName}>{st.name}</span><span style={S.stratBudgetChip}>{shares[comp.id][st.id]}% · {fmtMoney0(budget)}</span></div>
+                      {items.length === 0 ? <div style={S.noBets}>ставок нет — край недостаточен, стратегия пропускает матч</div> : (
+                        <div style={S.betList}>
+                          {items.map((b: any, i: number) => {
+                            const impl = b.price != null ? b.price / 100 : impliedProb(b.odds);
+                            const edge = (b.aiProb - impl) * 100;
+                            const stake = b.stake != null ? b.stake : Math.round(budget * (b.pct || 0));
+                            const isOpen = b.status === "open";
+                            const live = isOpen && b.currentPrice != null && b.entryPrice != null ? b.stake * (b.currentPrice / b.entryPrice) - b.stake : null;
+                            const entryDisp = b.entryPrice != null ? `${b.entryPrice}¢` : (b.price != null ? `${b.price}¢` : "");
+                            return (
+                              <div key={i} style={S.betRow}>
+                                <div style={S.betMain}><span style={S.betMarket}>{b.market}</span><span style={S.betOdds}>@ {entryDisp}</span></div>
+                                <div style={S.betMeta}>
+                                  <span style={{ ...S.betEdge, color: edge >= 5 ? "#5fd08a" : edge >= 3 ? "#e8a838" : "#9aa4b2" }}>edge {edge >= 0 ? "+" : ""}{edge.toFixed(1)}%</span>
+                                  <span style={S.betStake}>{fmtMoney(stake)}</span>
+                                  {isOpen && live != null && <span style={{ ...S.betLive, color: live >= 0 ? "#5fd08a" : "#ff6b6b" }}>{live >= 0 ? "▲" : "▼"}{fmtMoney(live)}</span>}
+                                  {b.status === "proposed" && <span style={S.betProposed}>предлагается</span>}
+                                </div>
+                                {b.entered && <div style={S.betEntered}>вход: {b.entered}</div>}
+                              </div>
+                            );
+                          })}
+                          <div style={S.betTotal}>задействовано {fmtMoney(items.reduce((a: number, b: any) => a + (b.stake != null ? b.stake : Math.round(budget * (b.pct || 0))), 0))} из {fmtMoney0(budget)}</div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {tab === "reassess" && (
+              <div>
+                <div style={S.reassessTop}>
+                  <span style={S.reassessHint}>Развёрнутые переоценки ИИ по ходу матча (в отличие от сухого лога).</span>
+                  {match.state === "live" && <button style={S.reassessBtn}>↻ Сделать переоценку</button>}
+                </div>
+                <div style={S.logStratBar}>{compStrats.map((st: any) => <button key={st.id} onClick={() => setLogStrat(st.id)} style={{ ...S.logStratBtn, ...(logStrat === st.id ? { background: st.color + "22", color: st.color, borderColor: st.color + "66" } : {}) }}>{st.name}</button>)}</div>
+                <div style={S.reassessList}>
+                  {(match.reassessByStrat?.[logStrat] || []).length === 0 && <div style={S.noPos}>переоценок пока нет</div>}
+                  {(match.reassessByStrat?.[logStrat] || []).map((r: any, i: number) => (
+                    <div key={i} style={S.reassessItem}>
+                      <div style={S.reassessItemHead}><span style={S.reassessMin}>{r.min}</span>{r.conf && r.conf !== "—" && <span style={S.reassessConf}>уверенность: {r.conf}</span>}</div>
+                      <p style={S.reassessText}>{r.text}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {tab === "settle" && (
+              <div>
+                <div style={S.settleHead}>Финальный счёт <b style={{ color: "#e8a838" }}>{match.finalScore}</b> — ставки рассчитаны</div>
+                {compStrats.filter((st: any) => match.settledBets[st.id]).map((st: any) => (
+                  <div key={st.id} style={S.settleStrat}>
+                    <div style={S.settleStratHead}><span style={{ ...S.dot, background: st.color }} /><span style={S.stratName}>{st.name}</span></div>
+                    {match.settledBets[st.id].map((b: any, i: number) => (
+                      <div key={i} style={S.settleBet}>
+                        <span style={S.settleMarket}>{b.market}</span>
+                        <span style={S.settleStake}>{fmtMoney(b.stake)}</span>
+                        <span style={{ ...S.settleResult, color: b.result === "won" ? "#5fd08a" : "#ff6b6b" }}>{b.result === "won" ? "✓ выиграла" : "✕ проиграла"}</span>
+                        <span style={{ ...S.settlePayout, color: b.result === "won" ? "#5fd08a" : "#ff6b6b" }}>{b.result === "won" ? `→ ${fmtMoney(b.payout)}` : "→ $0"}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+            {tab === "log" && hasLog && (
+              <div>
+                <div style={S.logStratBar}>{compStrats.map((st: any) => <button key={st.id} onClick={() => setLogStrat(st.id)} style={{ ...S.logStratBtn, ...(logStrat === st.id ? { background: st.color + "22", color: st.color, borderColor: st.color + "66" } : {}) }}>{st.name}</button>)}</div>
+                <div style={S.logList}>
+                  {(match.logByStrat?.[logStrat] || []).length === 0 && <div style={S.noPos}>действий пока нет</div>}
+                  {(match.logByStrat?.[logStrat] || []).map((e: any, i: number) => <div key={i} style={S.logEntry}><span style={S.logMin}>{e.min}</span><span style={{ ...S.logType, ...logTypeStyle(e.type) }}>{e.type}</span><span style={S.logText}>{e.text}</span></div>)}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {match.state === "finished" ? (
+          <aside style={S.oddsCol} className="el-odds-col">
+            <div style={S.oddsColLabel}>Итог стратегий</div>
+            <div style={S.oddsColSub}>как отработала каждая</div>
+            <div style={S.oddsScroll}>
+              {compStrats.filter((st: any) => match.result?.[st.id] != null).map((st: any) => {
+                const budget = stratBudget(compBudget, comp.id, shares, st.id);
+                const roi = budget ? (match.result[st.id] / budget) * 100 : 0;
+                return (
+                  <div key={st.id} style={S.finishCell}>
+                    <div style={S.finishTop}><span style={{ ...S.dot, background: st.color }} /><span style={S.finishNm}>{st.name}</span></div>
+                    <div style={{ ...S.finishVal, color: match.result[st.id] >= 0 ? "#5fd08a" : "#ff6b6b" }}>{fmtMoney(match.result[st.id])}</div>
+                    <div style={{ ...S.finishRoi, color: roi >= 0 ? "#5fd08a" : "#ff6b6b" }}>ROI {roi >= 0 ? "+" : ""}{roi.toFixed(1)}%</div>
+                  </div>
+                );
+              })}
+            </div>
+          </aside>
+        ) : match.markets && match.markets.length > 0 && (
+          <aside style={S.oddsCol} className="el-odds-col">
+            <div style={S.oddsColHead}>
+              <div><div style={S.oddsColLabel}>Котировки</div><div style={S.oddsColSub}>Polymarket · цена в ¢</div></div>
+              <button style={S.oddsRefresh} title="Обновить котировки" onClick={doRefresh} disabled={refreshing}>{refreshing ? "…" : "↻"}</button>
+            </div>
+            {match.oddsUpdated && <div style={S.oddsUpdated}>обновлено {match.oddsUpdated}</div>}
+            <div style={S.oddsScroll}>
+              {match.markets.map((mk: any) => {
+                const impl = mk.price != null ? mk.price / 100 : impliedProb(mk.odds);
+                const edge = ((mk.aiProb ?? impl) - impl) * 100;
+                const priceDisp = `${mk.price}¢`;
+                return (
+                  <div key={mk.id} style={S.oddsRow}>
+                    <div style={S.oddsTop}><span style={S.oddsLabel}>{mk.label}</span><span style={S.oddsVal}>{priceDisp}</span></div>
+                    <div style={S.oddsBot}>
+                      {mk.aiProb != null && <span style={S.oddsAi}>ИИ {(mk.aiProb * 100).toFixed(0)}%</span>}
+                      {mk.liq && <span style={S.oddsLiq}>{mk.liq}</span>}
+                      <span style={{ ...S.oddsEdge, color: edge >= 5 ? "#5fd08a" : edge >= 3 ? "#e8a838" : edge > 0 ? "#9aa4b2" : "#ff6b6b" }}>{edge >= 0 ? "+" : ""}{edge.toFixed(1)}%</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </aside>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function Assessment({ a }: any) {
+  const [full, setFull] = useState(false);
+  if (!a) return <div style={S.noPos}>нет данных</div>;
+  return (
+    <div>
+      <div style={S.assessTop}><span style={S.confChip}>уверенность: {a.confidence}</span><button onClick={() => setFull(!full)} style={S.fullToggle}>{full ? "кратко" : "подробно"}</button></div>
+      <p style={S.assessText}>{full ? a.text : a.short}</p>
+      {a.verdict && <div style={S.verdict}><span style={{ color: "#e8a838" }}>&#9656;</span> {a.verdict}</div>}
+    </div>
+  );
+}
+
+function ModelSelect({ value, models, onChange, onGoModels }: any) {
+  if (!models || models.length === 0) {
+    return <button style={S.modelSelectEmpty} onClick={onGoModels}>нет ключей — добавить →</button>;
+  }
+  return (
+    <select style={S.modelSelect} value={value} onChange={(e) => e.target.value === "__add" ? onGoModels() : onChange(e.target.value)}>
+      {!models.includes(value) && <option value={value}>{value}</option>}
+      {models.map((m: string) => <option key={m} value={m}>{m}</option>)}
+      <option value="__add">+ управлять моделями…</option>
+    </select>
+  );
+}
+
+function StrategyScreen({ sportId, sportLabel, catalog, setCatalog, competitions, matchDb, compBudget, shares, providers, quality, analysis, setAnalysis, onGoModels }: any) {
+  const [modal, setModal] = useState<any>(null);
+  const sportStrats = catalog.filter((s: any) => s.sport === sportId);
+  const sportComps = competitions.filter((c: any) => c.sport === sportId);
+  const [anSel, setAnSel] = useState("base");
+  const [saved, setSaved] = useState(true);
+  const saveTimer = useRef<any>(null);
+
+  const availableModels = providers.filter((p: any) => p.hasKey).flatMap((p: any) => p.models);
+
+  const addStrategy = async (draft: any) => {
+    const res = await mutate({ type: "createStrategy", sport: sportId, name: draft.name, prompt: draft.prompt, model: draft.model, params: draft.params });
+    const id = res.id || "s" + Date.now();
+    setCatalog((c: any) => [...c, { ...draft, id, version: 1, sport: sportId, color: res.color || PALETTE[c.length % PALETTE.length], tag: "custom" }]);
+    setModal(null);
+  };
+  const updateStrategy = (id: string, patch: any) => { setCatalog((c: any) => c.map((s: any) => (s.id === id ? { ...s, ...patch } : s))); mutate({ type: "patchStrategy", id, patch }); };
+  const acceptImprovement = (id: string, p: string, params: any) => {
+    setCatalog((c: any) => c.map((s: any) => (s.id === id ? { ...s, prompt: p, params, version: s.version + 1 } : s)));
+    mutate({ type: "improveStrategy", id, prompt: p, params, reason: "improvement" });
+    setModal(null);
+  };
+
+  const anValue = anSel === "base" ? analysis.bySport[sportId] : (analysis.byComp[anSel] || "");
+  const setAnValue = (txt: string) => {
+    setAnalysis((p: any) => anSel === "base" ? { ...p, bySport: { ...p.bySport, [sportId]: txt } } : { ...p, byComp: { ...p.byComp, [anSel]: txt } });
+    setSaved(false);
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      await mutate({ type: "saveAnalytics", scope: anSel === "base" ? "sport" : "competition", scopeId: anSel === "base" ? sportId : anSel, body: txt });
+      setSaved(true);
+    }, 500);
+  };
+  const anModel = analysis.modelBySport?.[sportId] || "—";
+  const setAnModel = (m: string) => { setAnalysis((p: any) => ({ ...p, modelBySport: { ...p.modelBySport, [sportId]: m } })); mutate({ type: "setAnalyticsModel", sportId, model: m }); };
+
+  return (
+    <main style={S.main}>
+      <div style={S.analysisCard}>
+        <div style={S.analysisCardHead}>
+          <div style={S.analysisTitle}>Аналитический промт · {sportLabel}</div>
+          <div style={S.analysisModelPick}>
+            <span style={S.analysisModelLbl}>модель:</span>
+            <ModelSelect value={anModel} models={availableModels} onChange={setAnModel} onGoModels={onGoModels} />
+          </div>
+        </div>
+        <div style={S.masterDetail} className="el-master-detail">
+          <div style={S.mdList}>
+            <button style={{ ...S.mdItem, ...(anSel === "base" ? S.mdItemOn : {}) }} onClick={() => setAnSel("base")}>
+              <span style={S.mdItemName}>Базовый ({sportLabel})</span>
+              <span style={S.mdItemTag}>применяется везде</span>
+            </button>
+            {sportComps.map((c: any) => (
+              <button key={c.id} style={{ ...S.mdItem, ...(anSel === c.id ? S.mdItemOn : {}) }} onClick={() => setAnSel(c.id)}>
+                <span style={S.mdItemName}>{c.name}</span>
+                <span style={{ ...S.mdItemTag, color: analysis.byComp[c.id] ? "#70b56a" : MUTE }}>{analysis.byComp[c.id] ? "✓ переопределено" : "наследует базовый"}</span>
+              </button>
+            ))}
+          </div>
+          <div style={S.mdContent}>
+            {anSel !== "base" && <div style={S.mdHint}>Дополнение к базовому промту, только для «{sportComps.find((c: any) => c.id === anSel)?.name}». Пусто — используется базовый.</div>}
+            <textarea style={S.mdTextarea} value={anValue} onChange={(e) => setAnValue(e.target.value)} placeholder={anSel === "base" ? "Как ИИ оценивает матчи этого спорта…" : "Особенности для турнира…"} />
+            <div style={S.saveIndicator}>{saved ? <span style={{ color: "#70b56a" }}>✓ сохранено</span> : <span style={{ color: "#e8a838" }}>сохранение…</span>}</div>
+          </div>
+        </div>
+      </div>
+
+      <div style={S.stratIntro}>
+        <div style={S.stratIntroTop}><div><div style={S.stratIntroTitle}>Стратегии · {sportLabel}</div><div style={S.stratIntroSub}>Бюджет и доли — на экране «Матчи». Модель выбирается для каждой стратегии.</div></div><button style={S.addBtn} onClick={() => setModal({ type: "new" })}>+ Новая</button></div>
+        <div style={S.howto}>Опиши стратегию <b>словами</b>: вход, размер, переоценка, выход, ограничители. Движок вытащит числа.</div>
+      </div>
+
+      {sportStrats.length === 0 && <div style={S.empty}>В категории «{sportLabel}» пока нет стратегий.</div>}
+      {sportStrats.map((st: any) => <StrategyCard key={st.id} st={st} overall={stratOverall(competitions, matchDb, st.id, sportId, compBudget, shares)} availableModels={availableModels} onSetModel={(m: string) => updateStrategy(st.id, { model: m })} onGoModels={onGoModels} onEdit={() => setModal({ type: "edit", stratId: st.id })} onImprove={() => setModal({ type: "improve", stratId: st.id })} />)}
+
+      {modal?.type === "new" && <PromptModal title={`Новая стратегия · ${sportLabel}`} availableModels={availableModels} onGoModels={onGoModels} onClose={() => setModal(null)} onSave={addStrategy} />}
+      {modal?.type === "edit" && <PromptModal title="Редактировать" strat={catalog.find((s: any) => s.id === modal.stratId)} availableModels={availableModels} onGoModels={onGoModels} onClose={() => setModal(null)} onSave={(d: any) => { updateStrategy(modal.stratId, d); setModal(null); }} />}
+      {modal?.type === "improve" && <ImproveModal strat={catalog.find((s: any) => s.id === modal.stratId)} stats={improveStats(quality[modal.stratId], stratOverall(competitions, matchDb, modal.stratId, sportId, compBudget, shares))} onClose={() => setModal(null)} onAccept={(p: string, params: any) => acceptImprovement(modal.stratId, p, params)} />}
+    </main>
+  );
+}
+
+function improveStats(q: any, overall: any) {
+  const matches = q?.samples ?? 0;
+  return { matches, roi: overall?.avgRoi ?? 0, note: matches >= 20 ? "Данных достаточно для анализа." : "Мало данных — метрики шумны." };
+}
+
+function FeedScreen({ feed }: any) {
+  const [filter, setFilter] = useState("all");
+  const types = [["all", "Всё"], ["enter", "Входы"], ["reassess", "Переоценки"], ["settle", "Расчёты"], ["goal", "События матча"], ["skip", "Пропуски"]];
+  const shown = filter === "all" ? feed : feed.filter((e: any) => e.type === filter || (filter === "goal" && (e.type === "goal" || e.type === "lineup")));
+  return (
+    <main style={S.main}>
+      <div style={S.feedHead}>
+        <div><div style={S.feedTitle}>Лента событий</div><div style={S.feedSub}>Хронология по всем матчам, спортам и стратегиям.</div></div>
+      </div>
+      <div style={S.feedFilters}>
+        {types.map(([k, lbl]) => <button key={k} onClick={() => setFilter(k)} style={{ ...S.feedFilterBtn, ...(filter === k ? S.feedFilterOn : {}) }}>{lbl}</button>)}
+      </div>
+      <div style={S.feedList}>
+        {shown.length === 0 && <div style={S.noPos}>событий нет</div>}
+        {shown.map((e: any, i: number) => (
+          <div key={i} style={S.feedItem}>
+            <div style={S.feedTime}>{e.t}</div>
+            <div style={{ ...S.feedIcon, ...feedIconStyle(e.type) }}>{feedIconChar(e.type)}</div>
+            <div style={S.feedBody}>
+              <div style={S.feedItemTop}>
+                {e.strat && <span style={{ ...S.feedStrat, color: e.color || "#8b95a5" }}>{e.strat}</span>}
+                <span style={S.feedMatch}>{e.sport} · {e.match}</span>
+              </div>
+              <div style={S.feedText}>{e.text}</div>
+            </div>
+            {e.pnl != null && <div style={{ ...S.feedPnl, color: e.pnl >= 0 ? "#5fd08a" : "#ff6b6b" }}>{e.pnl >= 0 ? "+" : ""}{fmtMoney(e.pnl)}</div>}
+          </div>
+        ))}
+      </div>
+    </main>
+  );
+}
+function feedIconChar(t: string) { return ({ enter: "→", reassess: "↻", settle: "✓", goal: "⚽", lineup: "📋", skip: "—" } as any)[t] || "•"; }
+function feedIconStyle(t: string) {
+  const map: any = { enter: { color: "#70b56a", borderColor: "#70b56a55" }, reassess: { color: "#5b9bd5", borderColor: "#5b9bd555" }, settle: { color: "#c98bdb", borderColor: "#c98bdb55" }, goal: { color: "#e8a838", borderColor: "#e8a83855" }, lineup: { color: "#e8a838", borderColor: "#e8a83855" }, skip: { color: "#8b95a5", borderColor: "#2c3543" } };
+  return map[t] || {};
+}
+
+function MetricsScreen({ catalog, quality }: any) {
+  const rows = catalog.filter((s: any) => quality[s.id]).map((s: any) => ({ ...s, q: quality[s.id] }));
+  return (
+    <main style={S.main}>
+      <div style={S.feedHead}>
+        <div><div style={S.feedTitle}>Метрики качества</div><div style={S.feedSub}>ROI на малой выборке врёт. Эти метрики показывают, реален ли эдж.</div></div>
+      </div>
+      <div style={S.metricExplain}>
+        <div style={S.metricExplainItem}><b style={{ color: "#7fb4e8" }}>Brier</b> — точность вероятностей (ниже = лучше).</div>
+        <div style={S.metricExplainItem}><b style={{ color: "#70b56a" }}>CLV</b> — closing line value. Лучший ранний признак реального эджа.</div>
+        <div style={S.metricExplainItem}><b style={{ color: "#e8a838" }}>Калибровка</b> — совпадают ли предсказанные вероятности с фактом.</div>
+      </div>
+      {rows.map((s: any) => {
+        const q = s.q;
+        const enough = q.samples >= 20;
+        return (
+          <section key={s.id} style={{ ...S.card, borderColor: s.color + "55" }}>
+            <div style={S.metricHead}>
+              <span style={{ ...S.dot, background: s.color }} />
+              <span style={S.metricName}>{s.name}</span>
+              <span style={S.metricSamples}>{q.samples} матчей {!enough && <span style={{ color: "#e8a838" }}>· мало данных</span>}</span>
+            </div>
+            <div style={S.metricNums}>
+              <div style={S.metricNumCell}><div style={S.metricNumLbl}>Brier</div><div style={{ ...S.metricNumVal, color: q.brier <= 0.19 ? "#5fd08a" : q.brier <= 0.22 ? "#e8a838" : "#ff6b6b" }}>{q.brier?.toFixed(3)}</div></div>
+              <div style={S.metricNumCell}><div style={S.metricNumLbl}>CLV</div><div style={{ ...S.metricNumVal, color: q.clv > 0 ? "#5fd08a" : "#ff6b6b" }}>{q.clv >= 0 ? "+" : ""}{q.clv?.toFixed(1)}%</div></div>
+              <div style={S.metricNumCell}><div style={S.metricNumLbl}>вердикт</div><div style={{ ...S.metricVerdict, color: q.clv > 1 && q.brier < 0.2 ? "#5fd08a" : q.clv < 0 ? "#ff6b6b" : "#e8a838" }}>{q.clv > 1 && q.brier < 0.2 ? "эдж реален" : q.clv < 0 ? "эджа нет" : "неясно"}</div></div>
+            </div>
+            <div style={S.calibLabel}>Калибровка (предсказано → факт)</div>
+            <div style={S.calibRows}>
+              {q.calib.map((c: any, i: number) => {
+                const diff = c.actual - c.predicted;
+                return (
+                  <div key={i} style={S.calibRow}>
+                    <span style={S.calibBucket}>{c.bucket}</span>
+                    <div style={S.calibBar}>
+                      <div style={{ ...S.calibBarPred, width: `${c.predicted}%` }} />
+                      <div style={{ ...S.calibDot, left: `${c.actual}%` }} />
+                    </div>
+                    <span style={{ ...S.calibDiff, color: Math.abs(diff) <= 3 ? "#5fd08a" : Math.abs(diff) <= 6 ? "#e8a838" : "#ff6b6b" }}>{diff >= 0 ? "+" : ""}{diff}</span>
+                  </div>
+                );
+              })}
+            </div>
+            {!enough && <div style={S.metricWarn}>Выборка мала ({q.samples}) — не доверяй метрикам до 20+ матчей.</div>}
+          </section>
+        );
+      })}
+    </main>
+  );
+}
+
+function PortfolioScreen({ positions, onGoMatches }: any) {
+  const [groupBy, setGroupBy] = useState("strat");
+  const totalStake = positions.reduce((a: number, p: any) => a + p.stake, 0);
+  const totalLive = positions.reduce((a: number, p: any) => a + p.live, 0);
+  const winners = positions.filter((p: any) => p.live >= 0).length;
+  const groups: any = {};
+  for (const p of positions) {
+    const key = groupBy === "strat" ? p.strat : p.compName;
+    (groups[key] = groups[key] || { items: [], color: p.stratColor, stake: 0, live: 0 }).items.push(p);
+    groups[key].stake += p.stake; groups[key].live += p.live;
+  }
+  return (
+    <main style={S.main}>
+      <div style={S.pfHeader}>
+        <div><div style={S.pfTitle}>Портфель — открытые позиции</div><div style={S.pfSub}>Всё, что сейчас в игре. Mark-to-market.</div></div>
+      </div>
+      <div style={S.pfAgg}>
+        <div style={S.pfAggCell}><div style={S.pfAggLbl}>Открытых позиций</div><div style={S.pfAggVal}>{positions.length}</div></div>
+        <div style={S.pfAggDiv} />
+        <div style={S.pfAggCell}><div style={S.pfAggLbl}>В игре</div><div style={S.pfAggVal}>{fmtMoney(totalStake)}</div></div>
+        <div style={S.pfAggDiv} />
+        <div style={S.pfAggCell}><div style={S.pfAggLbl}>Unrealized P&L</div><div style={{ ...S.pfAggVal, color: totalLive >= 0 ? "#5fd08a" : "#ff6b6b" }}>{totalLive >= 0 ? "+" : ""}{fmtMoney(totalLive)}</div></div>
+        <div style={S.pfAggDiv} />
+        <div style={S.pfAggCell}><div style={S.pfAggLbl}>В плюсе / всего</div><div style={S.pfAggVal}>{winners}/{positions.length}</div></div>
+      </div>
+      {positions.length === 0 ? (
+        <div style={S.pfEmpty}>Сейчас нет открытых позиций. Появятся, когда стратегии войдут в live. <button style={S.pfEmptyBtn} onClick={onGoMatches}>К матчам →</button></div>
+      ) : (
+        <>
+          <div style={S.pfGroupToggle}>
+            <span style={S.pfGroupLbl}>группировать:</span>
+            <button style={{ ...S.pfGroupBtn, ...(groupBy === "strat" ? S.pfGroupOn : {}) }} onClick={() => setGroupBy("strat")}>по стратегии</button>
+            <button style={{ ...S.pfGroupBtn, ...(groupBy === "comp" ? S.pfGroupOn : {}) }} onClick={() => setGroupBy("comp")}>по турниру</button>
+          </div>
+          {Object.entries(groups).map(([key, g]: any) => (
+            <div key={key} style={S.pfGroup}>
+              <div style={S.pfGroupHead}>
+                {groupBy === "strat" && <span style={{ ...S.dot, background: g.color }} />}
+                <span style={S.pfGroupName}>{key}</span>
+                <span style={S.pfGroupStake}>{fmtMoney(g.stake)} в игре</span>
+                <span style={{ ...S.pfGroupLive, color: g.live >= 0 ? "#5fd08a" : "#ff6b6b" }}>{g.live >= 0 ? "▲" : "▼"}{fmtMoney(g.live)}</span>
+              </div>
+              <div style={S.pfPosList}>
+                {g.items.map((p: any, i: number) => (
+                  <div key={i} style={S.pfPos}>
+                    <div style={S.pfPosLeft}>
+                      <div style={S.pfPosMarket}>{p.market}</div>
+                      <div style={S.pfPosMeta}>
+                        {groupBy === "strat" ? p.compName : <span style={{ color: p.stratColor }}>{p.strat}</span>}
+                        {" · "}{p.match} · {p.minute}'
+                        {p.entered && <span style={S.pfPosEntered}> · вход {p.entered}</span>}
+                      </div>
+                    </div>
+                    <div style={S.pfPosRight}>
+                      <div style={S.pfPosStake}>{fmtMoney(p.stake)} @ {p.entryPrice}¢</div>
+                      <div style={S.pfPosLiveWrap}>
+                        <span style={S.pfPosNow}>{p.currentPrice}¢</span>
+                        <span style={{ ...S.pfPosLive, color: p.live >= 0 ? "#5fd08a" : "#ff6b6b" }}>{p.live >= 0 ? "▲" : "▼"}{fmtMoney(p.live)}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+    </main>
+  );
+}
+
+function ModelsScreen({ providers }: any) {
+  return (
+    <main style={S.main}>
+      <div style={S.modelsIntro}>
+        <div style={S.modelsTitle}>Модели и ключи</div>
+        <div style={S.modelsSub}>Ключи API хранятся на бэкенде в переменных окружения (ТЗ §4.6, §9.9), не в браузере и не в БД. Задай их в <code>.env</code> (ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY) — после этого модели провайдера станут доступны для выбора.</div>
+      </div>
+      {providers.map((p: any) => (
+        <section key={p.id} style={{ ...S.card, borderColor: p.hasKey ? "#70b56a55" : LINE }}>
+          <div style={S.providerHead}>
+            <div style={S.providerName}>{p.name}</div>
+            <span style={{ ...S.providerStatus, color: p.hasKey ? "#70b56a" : MUTE, borderColor: p.hasKey ? "#70b56a55" : LINE }}>{p.hasKey ? "✓ ключ задан" : "нет ключа (env)"}</span>
+          </div>
+          <div style={S.modelChips}>
+            <span style={S.modelChipsLabel}>Модели:</span>
+            {p.models.map((m: string) => <span key={m} style={{ ...S.modelChip, opacity: p.hasKey ? 1 : 0.4 }}>{m}</span>)}
+          </div>
+        </section>
+      ))}
+      <div style={S.modelsNote}>Статус читается сервером из окружения. Список моделей репрезентативный; в боевой версии подтягивается от провайдера.</div>
+    </main>
+  );
+}
+
+function StrategyCard({ st, overall, availableModels, onSetModel, onGoModels, onEdit, onImprove }: any) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section style={{ ...S.card, borderColor: st.color + "55" }}>
+      <button style={S.stratHeadBtn} onClick={() => setOpen(!open)}><span style={{ ...S.dot, background: st.color }} /><span style={S.stratBigName}>{st.name}</span><span style={S.verBadge}>v{st.version}</span><span style={S.stratTag}>{st.tag}</span><span style={S.modelBadge}>{st.model || "модель?"}</span><span style={S.chev}>{open ? "▾" : "▸"}</span></button>
+      <div style={S.overallRow}>
+        {overall.active === 0 ? <span style={S.overallNone}>нет активных бюджетов — доходность не считается</span> : <>
+          <div style={S.overallMetric}><span style={S.overallLbl}>доходность (ср. ROI)</span><span style={{ ...S.overallRoi, color: overall.avgRoi >= 0 ? "#5fd08a" : "#ff6b6b" }}>{overall.avgRoi >= 0 ? "+" : ""}{overall.avgRoi.toFixed(1)}%</span></div>
+          <div style={S.overallDiv} />
+          <div style={S.overallMetric}><span style={S.overallLbl}>P&L всего</span><span style={{ ...S.overallPnl, color: overall.pnl >= 0 ? "#5fd08a" : "#ff6b6b" }}>{overall.pnl >= 0 ? "+" : ""}{fmtMoney(overall.pnl)}</span></div>
+          <div style={S.overallDiv} />
+          <div style={S.overallMetric}><span style={S.overallLbl}>в игре</span><span style={S.overallBudget}>{fmtMoney0(overall.budget)} · {overall.active} турн.</span></div>
+        </>}
+      </div>
+      {open && (
+        <div style={S.stratDetail}>
+          <div style={S.modelPickRow}>
+            <span style={S.modelPickLbl}>Модель стратегии:</span>
+            <ModelSelect value={st.model || ""} models={availableModels} onChange={onSetModel} onGoModels={onGoModels} />
+          </div>
+          <div style={S.promptLabel}>Промт стратегии</div>
+          <pre style={S.promptBox}>{st.prompt}</pre>
+          <div style={S.paramLabel}>Пороги, распознанные движком</div>
+          <div style={S.paramList}>{Object.entries(st.params).map(([k, v]) => { const d = describeParam(k, v); return <div key={k} style={S.paramItem}><span style={S.paramItemLabel}>{d.label}</span><span style={S.paramItemValue}>{d.value}</span></div>; })}</div>
+          <div style={S.stratEditRow}><button style={S.editBtn} onClick={onEdit}>Редактировать промт</button><button style={S.improveBtn} onClick={onImprove}>↻ Улучшить по данным</button></div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function BudgetModal({ comp, current, free, onClose, onSave }: any) {
+  const [amount, setAmount] = useState(current);
+  const maxAvail = free + current;
+  const invalid = amount < 0 || amount > maxAvail;
+  const quick = [500, 1000, 1500, maxAvail];
+  return (
+    <Modal title={`Бюджет турнира · ${comp.name}`} onClose={onClose}>
+      <div style={S.allocInfo}>
+        <div style={S.allocInfoRow}><span>Сейчас на турнире</span><b>{fmtMoney0(current)}</b></div>
+        <div style={S.allocInfoRow}><span>Свободно в казне</span><b style={{ color: "#5fd08a" }}>{fmtMoney0(free)}</b></div>
+        <div style={S.allocInfoRow}><span>Можно назначить до</span><b style={{ color: "#e8a838" }}>{fmtMoney0(maxAvail)}</b></div>
+      </div>
+      <label style={S.fieldLabel}>Бюджет турнира ($)</label>
+      <div style={S.allocInputRow}><span style={S.allocDollar}>$</span><input style={S.allocInput} type="number" min="0" max={maxAvail} value={amount} onChange={(e) => setAmount(Math.round(+e.target.value))} /></div>
+      <div style={S.quickRow}>{quick.map((q, i) => <button key={i} style={S.quickBtn} onClick={() => setAmount(Math.round(q))}>{i === 3 ? "макс" : fmtMoney0(q)}</button>)}</div>
+      <div style={S.allocNote}>Общий бюджет турнира. Внутри стратегии делят его в процентах.</div>
+      {invalid && <div style={S.warnBox}>Сумма от $0 до {fmtMoney0(maxAvail)}.</div>}
+      <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Отмена</button><button style={{ ...S.saveBtn, opacity: invalid ? 0.4 : 1 }} disabled={invalid} onClick={() => onSave(amount)}>Сохранить</button></div>
+    </Modal>
+  );
+}
+
+function SharesModal({ comp, strats, budget, current, onClose, onSave }: any) {
+  const [sh, setSh] = useState(() => Object.fromEntries(strats.map((s: any) => [s.id, current[s.id] || 0])));
+  const total = (Object.values(sh) as number[]).reduce((a, b) => a + b, 0);
+  const over = total > 100;
+  const setPct = (id: string, v: number) => setSh((p: any) => ({ ...p, [id]: Math.max(0, Math.min(100, Math.round(v))) }));
+  return (
+    <Modal title={`Доли стратегий · ${comp.name}`} onClose={onClose}>
+      <div style={S.sharesHead}><span>Бюджет турнира: <b>{fmtMoney0(budget)}</b></span><span style={{ color: over ? "#ff6b6b" : total === 100 ? "#5fd08a" : "#e8a838" }}>распределено {total}% {over ? "(перебор!)" : `· свободно ${100 - total}%`}</span></div>
+      {strats.map((s: any) => (
+        <div key={s.id} style={S.shareRow}>
+          <span style={{ ...S.dot, background: s.color }} />
+          <span style={S.shareName}>{s.name}</span>
+          <input type="range" min="0" max="100" value={sh[s.id]} onChange={(e) => setPct(s.id, +e.target.value)} style={S.shareRange} />
+          <div style={S.sharePctBox}><input type="number" min="0" max="100" value={sh[s.id]} onChange={(e) => setPct(s.id, +e.target.value)} style={S.sharePctInput} /><span style={S.sharePctSign}>%</span></div>
+          <span style={S.shareDollar}>{fmtMoney0(Math.round(budget * sh[s.id] / 100))}</span>
+        </div>
+      ))}
+      <div style={S.allocNote}>Проверенной стратегии — больше %, тестовой — меньше. Сумма не обязана быть 100%.</div>
+      {over && <div style={S.warnBox}>Сумма долей превышает 100%. Уменьши.</div>}
+      <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Отмена</button><button style={{ ...S.saveBtn, opacity: over ? 0.4 : 1 }} disabled={over} onClick={() => onSave(Object.fromEntries(Object.entries(sh).filter(([, v]: any) => v > 0)))}>Сохранить</button></div>
+    </Modal>
+  );
+}
+
+function PromptModal({ title, strat, availableModels, onGoModels, onClose, onSave }: any) {
+  const [name, setName] = useState(strat?.name || "");
+  const [prompt, setPrompt] = useState(strat?.prompt || "");
+  const [model, setModel] = useState(strat?.model || (availableModels[0] || ""));
+  const [parsed, setParsed] = useState<any>(strat?.params || null);
+  const [parsing, setParsing] = useState(false);
+  const [gen, setGen] = useState(false);
+  const runParse = async () => {
+    setParsing(true);
+    const res = await mutate({ type: "parseThresholds", prompt });
+    setParsed(res.params || { note: "пороги не распознаны" });
+    setParsing(false);
+  };
+  const genName = async () => {
+    setGen(true);
+    const res = await mutate({ type: "suggestName", prompt });
+    if (res.name) setName(res.name);
+    setGen(false);
+  };
+  const canSave = name.trim() && prompt.trim() && parsed;
+  return (
+    <Modal title={title} onClose={onClose}>
+      <label style={S.fieldLabel}>Название</label>
+      <div style={S.nameRow}>
+        <input style={{ ...S.input, flex: 1 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="напр. Playoff Guard" />
+        <button style={S.genNameBtn} onClick={genName} disabled={!prompt.trim() || gen} title="Придумать название">{gen ? "…" : "✨ придумать"}</button>
+      </div>
+      {!prompt.trim() && <div style={S.genHint}>сначала опиши промт — из него сгенерируется название</div>}
+      <label style={S.fieldLabel}>Модель, на которой думает стратегия</label>
+      <ModelSelect value={model} models={availableModels} onChange={setModel} onGoModels={onGoModels} />
+      <label style={S.fieldLabel}>Промт (вход, размер, переоценка, выход, ограничители — словами)</label>
+      <textarea style={S.textarea} value={prompt} onChange={(e) => { setPrompt(e.target.value); setParsed(null); }} placeholder={"Входи при edge >= 4% и высокой уверенности.\nОграничители: не более 12% на ставку, стоп -20%."} />
+      <button style={S.parseBtn} onClick={runParse} disabled={!prompt.trim() || parsing}>{parsing ? "движок парсит…" : "→ Распознать пороги движком"}</button>
+      {parsed && <div style={S.parsedBox}><div style={S.parsedLabel}>Движок распознал пороги:</div><div style={S.paramList}>{Object.entries(parsed).map(([k, v]) => { const d = describeParam(k, v); return <div key={k} style={{ ...S.paramItem, ...(k === "note" ? { borderColor: "#e8a83866" } : {}) }}><span style={S.paramItemLabel}>{d.label}</span><span style={{ ...S.paramItemValue, ...(k === "note" ? { color: "#e8a838" } : {}) }}>{d.value}</span></div>; })}</div></div>}
+      <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Отмена</button><button style={{ ...S.saveBtn, opacity: canSave ? 1 : 0.4 }} disabled={!canSave} onClick={() => onSave({ name, prompt, model, params: parsed, tag: "custom" })}>Сохранить</button></div>
+    </Modal>
+  );
+}
+
+function ImproveModal({ strat, stats, onClose, onAccept }: any) {
+  const [stage, setStage] = useState("stats");
+  const enough = stats.matches >= 20;
+  const improvedPrompt = strat.prompt.replace(/Входи[^\n]*/, "Входи ТОЛЬКО при уверенности «высокая» (входы на «средней» отключены — убыточны).");
+  const improvedParams = { ...strat.params, minConfidence: "высокая" };
+  return (
+    <Modal title={`Улучшить: ${strat.name} v${strat.version}`} onClose={onClose}>
+      {stage === "stats" ? <>
+        <div style={S.statsGrid}><Stat label="Матчей" value={stats.matches} /><Stat label="ROI" value={`${stats.roi >= 0 ? "+" : ""}${stats.roi.toFixed(1)}%`} color={stats.roi >= 0 ? "#5fd08a" : "#ff6b6b"} /></div>
+        <div style={S.dataProgress}>
+          <div style={S.dataProgressTop}><span>данные для улучшения</span><span style={{ color: enough ? "#70b56a" : "#e8a838" }}>{stats.matches} / 20 матчей</span></div>
+          <div style={S.dataBar}><div style={{ ...S.dataBarFill, width: `${Math.min(100, (stats.matches / 20) * 100)}%`, background: enough ? "#70b56a" : "#e8a838" }} /></div>
+        </div>
+        <div style={S.statNote}>{stats.note}</div>
+        {enough ? <div style={S.okBox}>✓ Данных достаточно ({stats.matches} матчей). Улучшение опирается на статистику.</div> : <div style={S.warnBox}>✕ Рано улучшать: только {stats.matches} матчей, нужно 20+. Собери ещё {20 - stats.matches}.</div>}
+        <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Закрыть</button><button style={{ ...S.saveBtn, opacity: enough ? 1 : 0.4 }} disabled={!enough} onClick={() => setStage("proposal")}>→ Запросить у ИИ</button></div>
+      </> : <>
+        <div style={S.diffLabel}>ИИ предлагает (diff)</div>
+        <div style={S.diffBox}><div style={S.diffRemoved}>− Входи при любой уверенности…</div><div style={S.diffAdded}>+ Входи ТОЛЬКО при «высокой» (средняя убыточна)</div></div>
+        <div style={S.reasonBox}><b>Обоснование:</b> входы при средней уверенности дали отрицательный вклад.</div>
+        <div style={S.newVerNote}>Принятие создаст <b>v{strat.version + 1}</b>.</div>
+        <div style={S.modalActions}><button style={S.cancelBtn} onClick={() => setStage("stats")}>← Назад</button><button style={S.saveBtn} onClick={() => onAccept(improvedPrompt, improvedParams)}>Принять v{strat.version + 1}</button></div>
+      </>}
+    </Modal>
+  );
+}
+
+function Stat({ label, value, color }: any) { return <div style={S.statCell}><div style={S.statLbl}>{label}</div><div style={{ ...S.statVal, color: color || TEXT }}>{value}</div></div>; }
+function Modal({ title, children, onClose }: any) { return <div style={S.overlay} onClick={onClose}><div style={S.modal} onClick={(e) => e.stopPropagation()}><div style={S.modalHead}><span style={S.modalTitle}>{title}</span><button style={S.closeX} onClick={onClose}>✕</button></div><div style={S.modalBody}>{children}</div></div></div>; }
+function logTypeStyle(type: string) { const m: any = { enter: { color: "#70b56a" }, exit: { color: "#e8a838" }, reassess: { color: "#5b9bd5" }, settle: { color: "#c98bdb" } }; return m[type] || { color: "#8b95a5" }; }
+
+const CSS = `* { box-sizing: border-box; } button { font-family: inherit; } button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid #e8a838; outline-offset: 2px; } p { margin: 0; } pre { margin: 0; } textarea, input, select { font-family: inherit; } input[type=range]{ accent-color: #e8a838; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+.el-tab-select { display: none; }
+@media (min-width: 760px) {
+  .el-match-body { display: grid !important; grid-template-columns: 1fr 280px; gap: 16px; align-items: start; }
+  .el-strat-grid { display: grid !important; grid-template-columns: 1fr 1fr; gap: 10px; align-items: start; }
+  .el-odds-col { position: sticky; top: 12px; }
+  .el-master-detail { display: grid !important; grid-template-columns: 220px 1fr; gap: 12px; align-items: start; }
+}
+@media (max-width: 759px) {
+  .el-odds-col { margin-top: 14px; }
+  .el-tab-buttons { display: none !important; }
+  .el-tab-select { display: block !important; }
+}`;
+
+const S: Record<string, React.CSSProperties> = {
+  root: { fontFamily: "'Inter', system-ui, sans-serif", background: INK, color: TEXT, minHeight: "100vh", padding: 20, maxWidth: 1120, margin: "0 auto" },
+  treasury: { display: "flex", alignItems: "center", gap: 4, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "10px 12px", marginBottom: 12, flexWrap: "wrap" },
+  trBrand: { display: "flex", alignItems: "center", gap: 6, paddingRight: 10, flexShrink: 0 },
+  mark: { fontSize: 18, color: "#e8a838" },
+  trBrandTxt: { fontSize: 14, fontWeight: 800, letterSpacing: "0.1em" },
+  trCell: { flex: 1, textAlign: "center", minWidth: 90 },
+  trLbl: { fontSize: 9.5, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em" },
+  trVal: { fontSize: 17, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", marginTop: 2 },
+  trDiv: { width: 1, height: 30, background: LINE },
+  screenSwitch: { display: "flex", gap: 2, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 4, marginBottom: 12, overflowX: "auto" },
+  screenBtn: { background: "transparent", border: "none", color: MUTE, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", borderRadius: 7, whiteSpace: "nowrap", flexShrink: 0 },
+  screenOn: { background: PANEL2, color: TEXT },
+  sportTabs: { display: "flex", gap: 4, marginBottom: 12, borderBottom: `1px solid ${LINE}` },
+  sportTab: { background: "transparent", border: "none", borderBottom: "2px solid transparent", color: MUTE, padding: "8px 16px", fontSize: 14, fontWeight: 600, cursor: "pointer" },
+  sportTabOn: { color: TEXT, borderBottomColor: "#e8a838" },
+  compRow: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 },
+  compCard: { display: "flex", alignItems: "stretch", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, minWidth: 150, overflow: "hidden" },
+  compMain: { textAlign: "left", background: "transparent", border: "none", padding: "8px 10px 8px 12px", cursor: "pointer", flex: 1, color: TEXT },
+  compOn: { borderColor: "#e8a838", background: PANEL2 },
+  compName: { fontSize: 13, fontWeight: 700, color: TEXT },
+  compBudget: { fontSize: 12, color: TEXT, fontFamily: "'JetBrains Mono', monospace", marginTop: 3, fontWeight: 700 },
+  compDelta: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace", marginTop: 1 },
+  compRoi: { fontSize: 10, opacity: 0.85 },
+  compUnalloc: { fontSize: 10, color: "#e8a838", marginTop: 3, fontStyle: "italic" },
+  allocIcon: { background: "transparent", border: "none", borderLeft: `1px solid ${LINE}`, color: "#e8a838", fontSize: 17, fontWeight: 800, cursor: "pointer", padding: "0 12px" },
+  stratStripHead: { display: "flex", alignItems: "center", marginBottom: 8 },
+  stratStripTitle: { fontSize: 12, color: MUTE, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700 },
+  shareBtn: { marginLeft: "auto", background: "transparent", border: `1px solid #e8a83866`, color: "#e8a838", borderRadius: 8, padding: "5px 12px", fontSize: 12, cursor: "pointer", fontWeight: 600 },
+  bankStrip: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 },
+  noStrat: { fontSize: 12.5, color: "#e8a838", background: "#2e2a1a", borderRadius: 8, padding: "10px 14px" },
+  bankCell: { display: "flex", alignItems: "center", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px" },
+  dot: { width: 9, height: 9, borderRadius: "50%", flexShrink: 0 },
+  bankInfo: { display: "flex", flexDirection: "column" },
+  bankNm: { fontSize: 13, fontWeight: 600 },
+  bankBudget: { fontSize: 10.5, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
+  bankNums: { marginLeft: "auto", textAlign: "right" },
+  bankEq: { fontSize: 15, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", display: "block" },
+  bankD: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace" },
+  main: { display: "flex", flexDirection: "column", gap: 12 },
+  empty: { color: MUTE, padding: 30, textAlign: "center" },
+  card: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, padding: 14 },
+  cardHead: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 },
+  matchup: { fontSize: 17, fontWeight: 700 },
+  score: { fontFamily: "'JetBrains Mono', monospace", color: "#e8a838", fontWeight: 800 },
+  vs: { color: MUTE, fontWeight: 400 },
+  timing: { fontSize: 12, color: MUTE, marginTop: 2 },
+  stateBadge: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", padding: "5px 10px", borderRadius: 20, whiteSpace: "nowrap" },
+  pulse: { width: 6, height: 6, borderRadius: "50%", background: "#ff6b6b", animation: "pulse 1.3s infinite" },
+  tabBar: { display: "flex", gap: 2, background: INK, borderRadius: 8, padding: 3, marginBottom: 12, flexWrap: "wrap" },
+  tabBtn: { flex: 1, background: "transparent", border: "none", color: MUTE, padding: "7px 10px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", borderRadius: 6, minWidth: 90 },
+  tabBtnOn: { background: PANEL2, color: TEXT },
+  tabBody: { minHeight: 60 },
+  matchBody: { display: "block" },
+  matchLeft: { minWidth: 0 },
+  oddsCol: { background: INK, border: `1px solid ${LINE}`, borderRadius: 10, padding: 10, alignSelf: "start" },
+  oddsColHead: { display: "flex", justifyContent: "space-between", alignItems: "flex-start" },
+  oddsColLabel: { fontSize: 11, color: "#e8a838", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 },
+  oddsColSub: { fontSize: 10, color: MUTE, marginTop: 2, marginBottom: 8 },
+  oddsRefresh: { background: PANEL2, border: `1px solid ${LINE}`, color: "#e8a838", borderRadius: 6, width: 28, height: 28, fontSize: 15, cursor: "pointer", flexShrink: 0 },
+  oddsUpdated: { fontSize: 9.5, color: MUTE, marginBottom: 8, fontFamily: "'JetBrains Mono', monospace" },
+  oddsScroll: { maxHeight: 360, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, paddingRight: 2 },
+  oddsRow: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "7px 9px" },
+  oddsTop: { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6 },
+  oddsLabel: { fontSize: 12, fontWeight: 600, lineHeight: 1.3 },
+  oddsVal: { fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14, color: "#e8a838", flexShrink: 0 },
+  oddsBot: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 4, gap: 6 },
+  oddsAi: { fontSize: 10.5, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
+  oddsLiq: { fontSize: 10, color: "#6b7686", fontFamily: "'JetBrains Mono', monospace" },
+  oddsEdge: { fontSize: 11.5, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" },
+  finishCell: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px" },
+  finishTop: { display: "flex", alignItems: "center", gap: 6, marginBottom: 4 },
+  finishNm: { fontSize: 12.5, fontWeight: 600 },
+  finishVal: { fontSize: 18, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace" },
+  finishRoi: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace", marginTop: 1 },
+  betEntered: { fontSize: 10, color: MUTE, marginTop: 4, fontFamily: "'JetBrains Mono', monospace" },
+  reassessTop: { display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" },
+  reassessHint: { fontSize: 11.5, color: MUTE, lineHeight: 1.4, flex: 1, minWidth: 180 },
+  reassessBtn: { background: "transparent", border: `1px solid #5b9bd566`, color: "#7fb4e8", borderRadius: 8, padding: "6px 14px", fontSize: 12.5, cursor: "pointer", fontWeight: 600, whiteSpace: "nowrap" },
+  reassessList: { display: "flex", flexDirection: "column", gap: 8, marginTop: 10 },
+  reassessItem: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: "10px 12px" },
+  reassessItemHead: { display: "flex", alignItems: "center", gap: 10, marginBottom: 5 },
+  reassessMin: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace", color: "#e8a838", fontWeight: 700 },
+  reassessConf: { fontSize: 10.5, color: MUTE },
+  reassessText: { fontSize: 13, lineHeight: 1.55, color: "#d3d8e0" },
+  assessTop: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 },
+  analysisFlow: { display: "flex", flexDirection: "column", gap: 14, maxHeight: 520, overflowY: "auto", paddingRight: 4 },
+  analysisStage: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12 },
+  analysisStageLabel: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700, marginBottom: 10, color: TEXT },
+  stageNum: { width: 20, height: 20, borderRadius: "50%", background: LINE, color: TEXT, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, flexShrink: 0 },
+  stagePriority: { fontSize: 10, color: "#e8a838", background: "#2e2a1a", borderRadius: 20, padding: "2px 8px", marginLeft: "auto", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" },
+  analysisPending: { fontSize: 12, color: MUTE, fontStyle: "italic", padding: "10px 12px", background: PANEL2, borderRadius: 10, border: `1px dashed ${LINE}` },
+  decisionList: { display: "flex", flexDirection: "column", gap: 8 },
+  decisionItem: { background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px" },
+  decisionHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 5 },
+  decisionName: { fontSize: 13, fontWeight: 700 },
+  decisionVerdict: { marginLeft: "auto", fontSize: 10.5, color: "#7fb4e8", background: "#1e2836", borderRadius: 20, padding: "2px 10px", fontFamily: "'JetBrains Mono', monospace" },
+  decisionText: { fontSize: 12.5, color: "#d3d8e0", lineHeight: 1.55 },
+  finishTiming: { fontSize: 11, color: "#6b7686", marginTop: 3, fontFamily: "'JetBrains Mono', monospace" },
+  confChip: { fontSize: 11, color: MUTE },
+  fullToggle: { marginLeft: "auto", background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 20, padding: "3px 10px", fontSize: 11, cursor: "pointer" },
+  assessText: { fontSize: 13.5, lineHeight: 1.55, color: "#d3d8e0" },
+  verdict: { marginTop: 10, paddingTop: 10, borderTop: `1px solid ${LINE}`, fontSize: 13, fontWeight: 600, color: TEXT },
+  stratListGrid: { display: "flex", flexDirection: "column", gap: 10 },
+  stratBlock: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12 },
+  stratBlockHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 },
+  stratName: { fontSize: 13.5, fontWeight: 700 },
+  stratBudgetChip: { marginLeft: "auto", fontSize: 10.5, color: "#e8a838", fontFamily: "'JetBrains Mono', monospace", background: "#2e2a1a", borderRadius: 20, padding: "2px 10px" },
+  noBets: { fontSize: 12, color: MUTE, fontStyle: "italic" },
+  betList: { display: "flex", flexDirection: "column", gap: 6 },
+  betRow: { background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 10px" },
+  betMain: { display: "flex", alignItems: "baseline", gap: 8 },
+  betMarket: { fontSize: 13, fontWeight: 600 },
+  betOdds: { fontSize: 12, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
+  betMeta: { display: "flex", alignItems: "center", gap: 10, marginTop: 5, fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5 },
+  betEdge: { fontWeight: 700 },
+  betStake: { color: TEXT, fontWeight: 700 },
+  betLive: { fontWeight: 700 },
+  betProposed: { color: "#8b95a5", fontStyle: "italic", fontFamily: "'Inter', sans-serif" },
+  betTotal: { fontSize: 11, color: MUTE, fontFamily: "'JetBrains Mono', monospace", marginTop: 4, paddingTop: 6, borderTop: `1px solid ${LINE}` },
+  logStratBar: { display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" },
+  logStratBtn: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 20, padding: "4px 12px", fontSize: 12, cursor: "pointer" },
+  logList: { display: "flex", flexDirection: "column", gap: 7 },
+  noPos: { fontSize: 12, color: MUTE, fontStyle: "italic", padding: "8px 0" },
+  logEntry: { display: "grid", gridTemplateColumns: "48px 72px 1fr", gap: 8, fontSize: 12, alignItems: "baseline" },
+  logMin: { fontFamily: "'JetBrains Mono', monospace", color: MUTE, fontSize: 11 },
+  logType: { fontSize: 10, fontWeight: 700, textTransform: "uppercase" },
+  logText: { color: "#c3c9d3", lineHeight: 1.4 },
+  analysisCard: { background: PANEL, border: `1px solid #5b9bd555`, borderRadius: 14, padding: 14 },
+  analysisCardHead: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" },
+  analysisTitle: { fontSize: 15, fontWeight: 700, color: "#7fb4e8" },
+  analysisModelPick: { display: "flex", alignItems: "center", gap: 8 },
+  analysisModelLbl: { fontSize: 12, color: MUTE },
+  masterDetail: { display: "block" },
+  mdList: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 },
+  mdItem: { textAlign: "left", background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 12px", cursor: "pointer", display: "flex", flexDirection: "column", gap: 2 },
+  mdItemOn: { borderColor: "#5b9bd5", background: "#1a2430" },
+  mdItemName: { fontSize: 13, fontWeight: 600, color: TEXT },
+  mdItemTag: { fontSize: 10.5 },
+  mdContent: { minWidth: 0 },
+  mdHint: { fontSize: 11.5, color: "#c3c9d3", background: PANEL2, borderRadius: 8, padding: "8px 12px", lineHeight: 1.5, marginBottom: 8 },
+  mdTextarea: { width: "100%", minHeight: 200, background: INK, border: `1px solid ${LINE}`, borderRadius: 8, color: TEXT, padding: "10px 12px", fontSize: 13, lineHeight: 1.55, resize: "vertical", fontFamily: "'JetBrains Mono', monospace" },
+  stratIntro: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, padding: 14 },
+  stratIntroTop: { display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 10 },
+  stratIntroTitle: { fontSize: 15, fontWeight: 700 },
+  stratIntroSub: { fontSize: 11.5, color: MUTE, marginTop: 3 },
+  addBtn: { marginLeft: "auto", background: "#e8a838", border: "none", color: "#12161d", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
+  howto: { fontSize: 12, lineHeight: 1.55, color: "#c3c9d3", background: PANEL2, borderRadius: 8, padding: "9px 12px" },
+  stratHeadBtn: { width: "100%", background: "transparent", border: "none", display: "flex", alignItems: "center", gap: 10, cursor: "pointer", padding: 0 },
+  overallRow: { display: "flex", alignItems: "center", gap: 12, marginTop: 12, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px", flexWrap: "wrap" },
+  overallNone: { fontSize: 11.5, color: MUTE, fontStyle: "italic" },
+  overallMetric: { display: "flex", flexDirection: "column", gap: 2 },
+  overallLbl: { fontSize: 9.5, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em" },
+  overallRoi: { fontSize: 17, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace" },
+  overallPnl: { fontSize: 15, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" },
+  overallBudget: { fontSize: 13, fontFamily: "'JetBrains Mono', monospace", color: "#c3c9d3" },
+  overallDiv: { width: 1, height: 28, background: LINE },
+  stratBigName: { fontSize: 16, fontWeight: 700, color: TEXT },
+  verBadge: { fontSize: 10, background: LINE, color: TEXT, borderRadius: 20, padding: "1px 7px", fontFamily: "'JetBrains Mono', monospace" },
+  stratTag: { fontSize: 10, color: MUTE },
+  chev: { marginLeft: "auto", color: MUTE },
+  stratDetail: { marginTop: 12, paddingTop: 12, borderTop: `1px solid ${LINE}` },
+  promptLabel: { fontSize: 10, color: "#e8a838", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, marginBottom: 6 },
+  promptBox: { background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: 12, fontFamily: "'JetBrains Mono', ui-monospace, monospace", fontSize: 12, lineHeight: 1.6, color: "#d3d8e0", whiteSpace: "pre-wrap", marginBottom: 14 },
+  paramLabel: { fontSize: 10, color: MUTE, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, marginBottom: 8 },
+  paramList: { display: "flex", flexDirection: "column", gap: 4, marginBottom: 14 },
+  paramItem: { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px" },
+  paramItemLabel: { fontSize: 12.5, color: "#c3c9d3" },
+  paramItemValue: { fontSize: 12.5, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: TEXT, textAlign: "right" },
+  nameRow: { display: "flex", gap: 6, alignItems: "center" },
+  genNameBtn: { background: "transparent", border: `1px solid #c98bdb66`, color: "#c98bdb", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, cursor: "pointer", fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0 },
+  genHint: { fontSize: 11, color: MUTE, fontStyle: "italic", marginTop: 4 },
+  saveIndicator: { fontSize: 11, marginTop: 6, fontFamily: "'JetBrains Mono', monospace", textAlign: "right" },
+  stratEditRow: { display: "flex", gap: 8, flexWrap: "wrap" },
+  editBtn: { background: "transparent", border: `1px solid ${LINE}`, color: TEXT, borderRadius: 8, padding: "7px 14px", fontSize: 12.5, cursor: "pointer" },
+  improveBtn: { background: "transparent", border: `1px solid #e8a83866`, color: "#e8a838", borderRadius: 8, padding: "7px 14px", fontSize: 12.5, cursor: "pointer", fontWeight: 600 },
+  overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, overflowY: "auto", zIndex: 100 },
+  modal: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, width: "100%", maxWidth: 560, marginTop: 40 },
+  modalHead: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", borderBottom: `1px solid ${LINE}` },
+  modalTitle: { fontSize: 15, fontWeight: 700 },
+  closeX: { background: "transparent", border: "none", color: MUTE, fontSize: 16, cursor: "pointer" },
+  modalBody: { padding: 16 },
+  fieldLabel: { display: "block", fontSize: 11.5, color: MUTE, marginBottom: 6, marginTop: 12 },
+  input: { width: "100%", background: INK, border: `1px solid ${LINE}`, borderRadius: 8, color: TEXT, padding: "9px 12px", fontSize: 13 },
+  textarea: { width: "100%", minHeight: 120, background: INK, border: `1px solid ${LINE}`, borderRadius: 8, color: TEXT, padding: "10px 12px", fontSize: 13, lineHeight: 1.55, resize: "vertical" },
+  parseBtn: { marginTop: 10, width: "100%", background: PANEL2, border: `1px solid #e8a83866`, color: "#e8a838", borderRadius: 8, padding: "9px", fontSize: 13, fontWeight: 600, cursor: "pointer" },
+  parsedBox: { marginTop: 12, background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: 12 },
+  parsedLabel: { fontSize: 11, color: "#70b56a", marginBottom: 8, fontWeight: 600 },
+  modalActions: { display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 },
+  cancelBtn: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 8, padding: "9px 16px", fontSize: 13, cursor: "pointer" },
+  saveBtn: { background: "#e8a838", border: "none", color: "#12161d", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" },
+  allocInfo: { background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px", marginBottom: 6 },
+  allocInfoRow: { display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#c3c9d3", padding: "3px 0", fontFamily: "'JetBrains Mono', monospace" },
+  allocInputRow: { display: "flex", alignItems: "center", background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "4px 12px", marginTop: 6 },
+  allocDollar: { color: MUTE, fontSize: 18, fontFamily: "'JetBrains Mono', monospace" },
+  allocInput: { flex: 1, background: "transparent", border: "none", color: TEXT, padding: "8px 8px", fontSize: 20, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, outline: "none" },
+  quickRow: { display: "flex", gap: 6, marginTop: 8 },
+  quickBtn: { flex: 1, background: PANEL2, border: `1px solid ${LINE}`, color: TEXT, borderRadius: 6, padding: "6px", fontSize: 12, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace" },
+  allocNote: { fontSize: 11.5, color: MUTE, lineHeight: 1.5, marginTop: 10 },
+  sharesHead: { display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#c3c9d3", marginBottom: 12, fontFamily: "'JetBrains Mono', monospace" },
+  shareRow: { display: "flex", alignItems: "center", gap: 10, marginBottom: 10 },
+  shareName: { fontSize: 13, fontWeight: 600, width: 90, flexShrink: 0 },
+  shareRange: { flex: 1 },
+  sharePctBox: { display: "flex", alignItems: "center", background: INK, border: `1px solid ${LINE}`, borderRadius: 6, padding: "2px 6px", width: 62 },
+  sharePctInput: { width: 34, background: "transparent", border: "none", color: TEXT, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", textAlign: "right", outline: "none" },
+  sharePctSign: { fontSize: 12, color: MUTE },
+  shareDollar: { fontSize: 12, fontFamily: "'JetBrains Mono', monospace", color: "#e8a838", width: 56, textAlign: "right", flexShrink: 0 },
+  statsGrid: { display: "flex", gap: 8, marginTop: 6 },
+  statCell: { flex: 1, background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px", textAlign: "center" },
+  statLbl: { fontSize: 10, color: MUTE, textTransform: "uppercase", letterSpacing: "0.06em" },
+  statVal: { fontSize: 18, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", marginTop: 4 },
+  statNote: { fontSize: 12.5, color: "#c3c9d3", lineHeight: 1.55, marginTop: 12, background: PANEL2, borderRadius: 8, padding: "10px 12px" },
+  warnBox: { fontSize: 12, color: "#e8a838", background: "#2e2a1a", borderRadius: 8, padding: "10px 12px", marginTop: 10, lineHeight: 1.5 },
+  okBox: { fontSize: 12, color: "#70b56a", background: "#1c2620", borderRadius: 8, padding: "10px 12px", marginTop: 10, lineHeight: 1.5 },
+  diffLabel: { fontSize: 11, color: MUTE, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, marginBottom: 8 },
+  diffBox: { background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: 12, fontFamily: "'JetBrains Mono', monospace", fontSize: 12, lineHeight: 1.6 },
+  diffRemoved: { color: "#ff6b6b", background: "#2e1f22", borderRadius: 4, padding: "2px 6px", marginBottom: 4 },
+  diffAdded: { color: "#5fd08a", background: "#1c2620", borderRadius: 4, padding: "2px 6px" },
+  reasonBox: { fontSize: 12.5, color: "#c3c9d3", lineHeight: 1.55, marginTop: 12, background: PANEL2, borderRadius: 8, padding: "10px 12px" },
+  newVerNote: { fontSize: 12, color: MUTE, marginTop: 10 },
+  footer: { marginTop: 22, paddingTop: 14, borderTop: `1px solid ${LINE}`, fontSize: 12, color: MUTE, lineHeight: 1.5 },
+  feedHead: { marginBottom: 4 },
+  feedTitle: { fontSize: 17, fontWeight: 700 },
+  feedSub: { fontSize: 12, color: MUTE, marginTop: 3 },
+  feedFilters: { display: "flex", gap: 6, flexWrap: "wrap" },
+  feedFilterBtn: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 20, padding: "5px 12px", fontSize: 12.5, cursor: "pointer" },
+  feedFilterOn: { background: PANEL2, color: TEXT, borderColor: "#e8a83855" },
+  feedList: { display: "flex", flexDirection: "column", gap: 6 },
+  feedItem: { display: "flex", alignItems: "flex-start", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: "10px 12px" },
+  feedTime: { fontSize: 11, color: MUTE, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, width: 38, paddingTop: 3 },
+  feedIcon: { width: 26, height: 26, borderRadius: 7, border: "1px solid", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, flexShrink: 0 },
+  feedBody: { flex: 1, minWidth: 0 },
+  feedItemTop: { display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" },
+  feedStrat: { fontSize: 12, fontWeight: 700 },
+  feedMatch: { fontSize: 11, color: MUTE },
+  feedText: { fontSize: 13, color: "#d3d8e0", marginTop: 2, lineHeight: 1.4 },
+  feedPnl: { fontSize: 14, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, paddingTop: 2 },
+  metricExplain: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 14, display: "flex", flexDirection: "column", gap: 8 },
+  metricExplainItem: { fontSize: 12.5, color: "#c3c9d3", lineHeight: 1.5 },
+  metricHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12 },
+  metricName: { fontSize: 15, fontWeight: 700 },
+  metricSamples: { fontSize: 11.5, color: MUTE, marginLeft: "auto", fontFamily: "'JetBrains Mono', monospace" },
+  metricNums: { display: "flex", gap: 8, marginBottom: 14 },
+  metricNumCell: { flex: 1, background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px", textAlign: "center" },
+  metricNumLbl: { fontSize: 10, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em" },
+  metricNumVal: { fontSize: 20, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", marginTop: 3 },
+  metricVerdict: { fontSize: 13, fontWeight: 700, marginTop: 6 },
+  calibLabel: { fontSize: 10, color: MUTE, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, marginBottom: 8 },
+  calibRows: { display: "flex", flexDirection: "column", gap: 8 },
+  calibRow: { display: "flex", alignItems: "center", gap: 10 },
+  calibBucket: { fontSize: 11, color: MUTE, fontFamily: "'JetBrains Mono', monospace", width: 56, flexShrink: 0 },
+  calibBar: { flex: 1, height: 16, background: INK, borderRadius: 4, position: "relative", border: `1px solid ${LINE}` },
+  calibBarPred: { position: "absolute", left: 0, top: 0, bottom: 0, background: "#5b9bd533", borderRight: "2px solid #5b9bd5", borderRadius: "4px 0 0 4px" },
+  calibDot: { position: "absolute", top: "50%", width: 8, height: 8, borderRadius: "50%", background: "#e8a838", transform: "translate(-50%, -50%)", boxShadow: "0 0 0 2px #12161d" },
+  calibDiff: { fontSize: 12, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, width: 32, textAlign: "right", flexShrink: 0 },
+  metricWarn: { fontSize: 11.5, color: "#e8a838", background: "#2e2a1a", borderRadius: 8, padding: "8px 12px", marginTop: 12, lineHeight: 1.5 },
+  settleHead: { fontSize: 13, color: "#d3d8e0", marginBottom: 12, paddingBottom: 10, borderBottom: `1px solid ${LINE}` },
+  settleStrat: { marginBottom: 12 },
+  settleStratHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6 },
+  settleBet: { display: "flex", alignItems: "center", gap: 10, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px", marginBottom: 4, flexWrap: "wrap" },
+  settleMarket: { fontSize: 13, fontWeight: 600, flex: 1, minWidth: 100 },
+  settleStake: { fontSize: 12, fontFamily: "'JetBrains Mono', monospace", color: MUTE },
+  settleResult: { fontSize: 12, fontWeight: 700 },
+  settlePayout: { fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" },
+  pfHeader: { marginBottom: 4 },
+  pfTitle: { fontSize: 17, fontWeight: 700 },
+  pfSub: { fontSize: 12, color: MUTE, marginTop: 3 },
+  pfAgg: { display: "flex", alignItems: "center", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "12px 8px", flexWrap: "wrap", gap: 8 },
+  pfAggCell: { flex: 1, textAlign: "center", minWidth: 110 },
+  pfAggLbl: { fontSize: 10, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em" },
+  pfAggVal: { fontSize: 20, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", marginTop: 3 },
+  pfAggDiv: { width: 1, height: 34, background: LINE },
+  pfEmpty: { color: MUTE, padding: 40, textAlign: "center", fontSize: 13, lineHeight: 1.6 },
+  pfEmptyBtn: { background: "transparent", border: `1px solid #e8a83866`, color: "#e8a838", borderRadius: 8, padding: "6px 14px", fontSize: 12.5, cursor: "pointer", marginLeft: 8 },
+  pfGroupToggle: { display: "flex", alignItems: "center", gap: 6 },
+  pfGroupLbl: { fontSize: 12, color: MUTE, marginRight: 4 },
+  pfGroupBtn: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 20, padding: "5px 14px", fontSize: 12.5, cursor: "pointer" },
+  pfGroupOn: { background: PANEL2, color: TEXT, borderColor: "#e8a83855" },
+  pfGroup: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 14 },
+  pfGroupHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10, paddingBottom: 10, borderBottom: `1px solid ${LINE}` },
+  pfGroupName: { fontSize: 14, fontWeight: 700 },
+  pfGroupStake: { fontSize: 11.5, color: MUTE, fontFamily: "'JetBrains Mono', monospace", marginLeft: "auto" },
+  pfGroupLive: { fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" },
+  pfPosList: { display: "flex", flexDirection: "column", gap: 6 },
+  pfPos: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 12px" },
+  pfPosLeft: { minWidth: 0, flex: 1 },
+  pfPosMarket: { fontSize: 13.5, fontWeight: 600 },
+  pfPosMeta: { fontSize: 11, color: MUTE, marginTop: 2 },
+  pfPosEntered: { color: "#6b7686" },
+  pfPosRight: { textAlign: "right", flexShrink: 0 },
+  pfPosStake: { fontSize: 12, fontFamily: "'JetBrains Mono', monospace", color: "#c3c9d3" },
+  pfPosLiveWrap: { display: "flex", gap: 8, alignItems: "baseline", justifyContent: "flex-end", marginTop: 2 },
+  pfPosNow: { fontSize: 11, color: "#e8a838", fontFamily: "'JetBrains Mono', monospace" },
+  pfPosLive: { fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" },
+  tabSelect: { width: "100%", background: PANEL2, border: `1px solid ${LINE}`, color: TEXT, borderRadius: 8, padding: "9px 12px", fontSize: 13, fontWeight: 600, marginBottom: 12 },
+  modelBadge: { fontSize: 10, color: "#7fb4e8", background: "#1e2836", border: "1px solid #5b9bd544", borderRadius: 20, padding: "2px 9px", fontFamily: "'JetBrains Mono', monospace" },
+  modelSelect: { background: INK, border: `1px solid ${LINE}`, color: TEXT, borderRadius: 8, padding: "7px 10px", fontSize: 12.5, cursor: "pointer", maxWidth: "100%" },
+  modelSelectEmpty: { background: "transparent", border: `1px solid #e8a83866`, color: "#e8a838", borderRadius: 8, padding: "7px 12px", fontSize: 12, cursor: "pointer" },
+  modelPickRow: { display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" },
+  modelPickLbl: { fontSize: 12, color: MUTE, fontWeight: 600 },
+  modelsIntro: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, padding: 16 },
+  modelsTitle: { fontSize: 16, fontWeight: 700 },
+  modelsSub: { fontSize: 12.5, color: "#c3c9d3", lineHeight: 1.55, marginTop: 6 },
+  providerHead: { display: "flex", alignItems: "center", gap: 10, marginBottom: 10 },
+  providerName: { fontSize: 15, fontWeight: 700 },
+  providerStatus: { fontSize: 11, border: "1px solid", borderRadius: 20, padding: "2px 10px", fontWeight: 600 },
+  modelChips: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" },
+  modelChipsLabel: { fontSize: 11, color: MUTE },
+  modelChip: { fontSize: 11.5, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 20, padding: "3px 10px", color: "#c3c9d3", fontFamily: "'JetBrains Mono', monospace" },
+  modelsNote: { fontSize: 11.5, color: MUTE, lineHeight: 1.5, background: "#2e2a1a", borderRadius: 8, padding: "10px 12px", borderLeft: "2px solid #e8a838" },
+  dataProgress: { marginTop: 12, background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px" },
+  dataProgressTop: { display: "flex", justifyContent: "space-between", fontSize: 11.5, color: MUTE, marginBottom: 6, fontFamily: "'JetBrains Mono', monospace" },
+  dataBar: { height: 6, background: PANEL2, borderRadius: 3, overflow: "hidden" },
+  dataBarFill: { height: "100%", borderRadius: 3 },
+};
