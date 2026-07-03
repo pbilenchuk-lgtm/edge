@@ -237,6 +237,10 @@ export function latestMarkets(db: Database, matchId: string, closingOnly = false
   return out;
 }
 
+export function setMarketAiProb(db: Database, marketId: string, prob: number): void {
+  db.prepare(`UPDATE markets SET ai_prob=? WHERE id=?`).run(prob, marketId);
+}
+
 // ---------- bets ----------
 export function insertBet(db: Database, b: Bet): void {
   db.prepare(
@@ -263,6 +267,10 @@ export function betsForMatch(db: Database, matchId: string, strategyId?: string)
 }
 export function openBets(db: Database): Bet[] {
   return db.prepare(`SELECT * FROM bets WHERE status='open'`).all() as Bet[];
+}
+/** Remove not-yet-executed proposals (before re-deciding after a fresh assessment). */
+export function clearProposedBets(db: Database, matchId: string): void {
+  db.prepare(`DELETE FROM bets WHERE match_id=? AND status='proposed'`).run(matchId);
 }
 export function settledBetsForStrategy(db: Database, strategyId: string): Bet[] {
   return db.prepare(

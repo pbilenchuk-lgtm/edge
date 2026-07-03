@@ -27,6 +27,11 @@ export async function POST(req: Request) {
         const last = list[list.length - 1];
         return NextResponse.json({ ok: r.created, source: r.source, reassessment: last ? { min: last.minute, text: last.body, conf: last.confidence } : null });
       }
+      case "analyze": {
+        const { analyzeMatch } = await import("@/lib/analysis");
+        const res = await analyzeMatch(db, body.matchId, {});
+        return NextResponse.json(res, { status: res.ok ? 200 : 422 });
+      }
       case "refreshOdds": {
         const res = await engine.refreshMatchOdds(db, body.matchId, {});
         const markets = R.latestMarkets(db, body.matchId).map((m) => ({ id: m.id, label: m.label, price: m.price, tokenId: m.external_ref }));

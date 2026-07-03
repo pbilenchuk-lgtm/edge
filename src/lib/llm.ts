@@ -294,6 +294,58 @@ export function heuristicReassess(ctx: ReassessContext): string {
   }
 }
 
+export interface AssessInput {
+  home: string; away: string; sport: string; state: string;
+  analyticsPrompt: string;
+  markets: { label: string; price: number }[]; // price in cents
+}
+export interface MatchAssessment {
+  ok: boolean;
+  confidence: "низкая" | "средняя" | "высокая";
+  short: string; body: string; verdict: string;
+  markets: { label: string; prob: number }[]; // model probability 0..1 per market
+  error?: string;
+}
+
+/**
+ * Objective match assessment (ТЗ §2.9, аналитика). The analyst does NOT see
+ * money (§9.5) — it only estimates probabilities and a narrative. Returns
+ * ok:false on any failure so the caller can mark the assessment failed (§6).
+ */
+export async function assessMatchLLM(
+  input: AssessInput, model: string, deps: Deps = {},
+): Promise<MatchAssessment> {
+  const marketList = input.markets.map((m) => `- ${m.label} (рынок: ${m.price}¢)`).join("\n");
+  const res = await callLLM({
+    model,
+    system:
+      "Ты — объективный спортивный аналитик. Оцени матч по инструкции. НЕ думай про деньги и ставки — только вероятности и разбор. Верни ТОЛЬКО JSON: {confidence:'низкая'|'средняя'|'высокая', short:'2-3 предложения', body:'развёрнутый разбор', verdict:'итог', markets:[{label, prob}]}. Для КАЖДОГО рынка из списка укажи prob — свою вероятность (0..1), что рынок сыграет ДА. Не копируй рыночную цену слепо: где видишь расхождение — покажи его.",
+    prompt: `Спорт: ${input.sport}. Матч: ${input.home} — ${input.away} (состояние: ${input.state}).\n\nИнструкция аналитики:\n${input.analyticsPrompt}\n\nРынки для оценки:\n${marketList}`,
+    maxTokens: 1500,
+  }, deps);
+
+  if (!res.ok) return failed(res.error);
+  try {
+    const j = JSON.parse(stripFences(res.text));
+    const markets = Array.isArray(j.markets)
+      ? j.markets.filter((m: any) => m && typeof m.label === "string" && typeof m.prob === "number")
+          .map((m: any) => ({ label: String(m.label), prob: clamp01(m.prob) }))
+      : [];
+    return {
+      ok: true,
+      confidence: (["низкая", "средняя", "высокая"].includes(j.confidence) ? j.confidence : "средняя"),
+      short: String(j.short ?? ""), body: String(j.body ?? ""), verdict: String(j.verdict ?? ""),
+      markets,
+    };
+  } catch {
+    return failed("невалидный JSON от модели");
+  }
+}
+function failed(error?: string): MatchAssessment {
+  return { ok: false, confidence: "средняя", short: "", body: "", verdict: "", markets: [], error };
+}
+const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+
 export interface ImprovementProposal {
   removed: string; added: string; newPrompt: string; reason: string; source: "llm" | "heuristic";
 }

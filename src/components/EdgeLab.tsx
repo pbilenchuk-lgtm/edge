@@ -175,6 +175,16 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     }
   };
 
+  const doAnalyze = async (matchId: string) => {
+    const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "analyze", matchId }) });
+    const j = await r.json();
+    // reload the (assessment + ai_prob + proposed bets are all in matchDb)
+    const app = await (await fetch("/api/app")).json();
+    if (app.matchDb) setMatchDb(app.matchDb);
+    if (app.catalog) setCatalog(app.catalog);
+    return j;
+  };
+
   const sportStrats = catalog.filter((s) => s.sport === sportId);
   const compStrats = sportStrats.filter((s) => (shares[comp?.id]?.[s.id] || 0) > 0 && compBudget[comp?.id] > 0);
 
@@ -250,7 +260,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 
           <main style={S.main}>
             {comp?.matches.length === 0 && <div style={S.empty}>В этом турнире пока нет матчей.</div>}
-            {comp?.matches.map((mid) => <MatchCard key={mid} match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} />)}
+            {comp?.matches.map((mid) => <MatchCard key={mid} match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} />)}
           </main>
         </>
       ) : screen === "strategies" ? (
@@ -277,7 +287,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   );
 }
 
-function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess }: any) {
+function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess, onAnalyze }: any) {
   const meta = STATE_META[match.state];
   const hasLog = match.state === "live" || match.state === "finished";
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
@@ -293,6 +303,8 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   const [tab, setTab] = useState(defaultTab);
   const [logStrat, setLogStrat] = useState(compStrats[0]?.id);
   const [refreshing, setRefreshing] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
 
   const doRefresh = async () => { setRefreshing(true); await onRefreshOdds(match.id); setRefreshing(false); };
 
@@ -316,6 +328,15 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
           <div style={S.tabBody}>
             {tab === "analysis" && (
               <div style={S.analysisFlow}>
+                {match.markets?.length > 0 && match.state !== "finished" && (
+                  <div style={S.reassessTop}>
+                    <span style={S.reassessHint}>ИИ оценит матч по рынкам, проставит вероятности и предложит ставки стратегий.</span>
+                    <button style={S.reassessBtn} disabled={analyzing} onClick={async () => { setAnalyzing(true); setAnalyzeErr(null); const r = await onAnalyze(match.id); if (r && r.ok === false) setAnalyzeErr(r.error || "оценка не удалась"); setAnalyzing(false); }}>
+                      {analyzing ? "ИИ оценивает…" : "✨ Оценить матч (ИИ)"}
+                    </button>
+                  </div>
+                )}
+                {analyzeErr && <div style={S.analysisPending}>{analyzeErr}</div>}
                 {match.preLineup && (
                   <div style={S.analysisStage}>
                     <div style={S.analysisStageLabel}><span style={S.stageNum}>1</span> До состава</div>
