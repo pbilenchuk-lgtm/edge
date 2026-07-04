@@ -304,8 +304,11 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
             {sportComps.map((c) => {
               const budget = compBudget[c.id] || 0;
               const cStrats = sportStrats.filter((s) => (shares[c.id]?.[s.id] || 0) > 0);
-              const eq = cStrats.reduce((a, s) => a + stratEquityOnComp(matchDb, c, s.id, stratBudget(compBudget, c.id, shares, s.id)).equity, 0);
-              const delta = eq - budget;
+              // delta is PURE P&L (realized + open mark-to-market) across the comp's
+              // strategies — 0 until something is actually bet, so a freshly-funded
+              // tournament shows "бюджет свободен", not a phantom -100%.
+              const delta = cStrats.reduce((a, s) => { const e = stratEquityOnComp(matchDb, c, s.id, stratBudget(compBudget, c.id, shares, s.id)); return a + e.realized + e.unreal; }, 0);
+              const eq = budget + delta;
               return (
                 <div key={c.id} style={{ ...S.compCard, ...(c.id === comp?.id ? S.compOn : {}) }}>
                   <button style={S.compMain} onClick={() => setCompId(c.id)}>
