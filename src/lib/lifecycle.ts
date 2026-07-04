@@ -262,10 +262,14 @@ export async function strategistReassess(
       if (!dec.ok) continue;
 
       // (a) EXITS — full or partial fixation on this strategy's open positions.
+      const exited = new Set<string>();
       for (const ex of dec.exits) {
-        const b = myOpen.find((x) => norm(x.market_label) === norm(ex.market));
+        const key = norm(ex.market);
+        if (exited.has(key)) continue; // one close per market — a duplicate exit would size off a stale stake
+        const b = myOpen.find((x) => norm(x.market_label) === key);
         const mk = b && markets.find((x) => x.label === b.market_label);
         if (!b || !mk || mk.price == null || b.entry_price == null) continue;
+        exited.add(key);
         const { pnl, partial } = closeBetPortion(db, b, ex.fraction, mk.price, minuteLabel(m), now);
         const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag}) @ ${mk.price}¢ · стратег: ${ex.reason} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
@@ -344,11 +348,15 @@ export async function runAutoCycle(
   const triggers = new Set(enrich.newEvents.map((e) => e.matchId));
   advanceClocks(db, deps); // flip lineup_out ~1h before kickoff (time-scheduled fallback)
   captureLiveOpens(db, deps); // kickoff-price baseline for the odds column
-  // deterministic safety-net exits first, then strategist-driven reassessment
-  // (exits + fresh entries) on matches with risk or a fresh live trigger.
+  // Analyze BEFORE reassessment: analyzeMatch wipes a match's proposed bets to
+  // replace them with the fresh stage's, which would otherwise delete brand-new
+  // reassessment proposals created in the same cycle. Running it first means the
+  // reassessment's entries are added afterwards and survive to autoEnter.
+  const analyzed = await autoAnalyze(db, deps);
+  // deterministic safety-net exits, then strategist-driven reassessment (exits +
+  // fresh entries) on matches with risk or a fresh live trigger.
   const reassess = await strategistReassess(db, deps, { newEventMatchIds: triggers });
   const exited = [...evaluateExits(db, deps), ...reassess.exits];
-  const analyzed = await autoAnalyze(db, deps);
   const entered = autoEnter(db, deps); // fills both analyze- and reassess-proposed bets
   return {
     synced: synced.length, imported: synced.filter((r) => r.created).length, discovered,

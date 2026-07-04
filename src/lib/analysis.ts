@@ -128,7 +128,12 @@ export async function analyzeMatch(
     }, stratModel, { fetchImpl: deps.fetchImpl, env });
     const picks = dec.ok ? new Map(dec.picks.map((p) => [norm(p.label), p])) : null;
 
-    let exposure = 0, entries = 0, skipped = 0;
+    // Seed exposure from positions this strategy ALREADY holds on the match, and
+    // never re-propose on a market it's already in — otherwise the post-lineup
+    // re-analysis would double up and breach the per-match budget cap (§9.3).
+    const held = new Set(openPos.map((b) => norm(b.market_label)));
+    let exposure = openPos.reduce((n, b) => n + (b.stake ?? 0), 0);
+    let entries = 0, skipped = 0;
     // best edges first
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
       .map((m) => ({ m, edge: edgePct(m.ai_prob as number, m.price) }))
@@ -138,6 +143,7 @@ export async function analyzeMatch(
       // (from the prompt's methodology) drives the confidence gate.
       const pick = picks?.get(norm(m.label));
       if (picks && !pick) { skipped++; continue; }
+      if (held.has(norm(m.label))) { skipped++; continue; } // already open on this market
       const conf = (pick?.conviction ?? a.confidence) as Confidence;
       const d = sizeBet({ params: strat.params, aiProb: m.ai_prob as number, priceCents: m.price, budget, exposure, confidence: conf, drawdown });
       if (!d.enter) { skipped++; continue; }

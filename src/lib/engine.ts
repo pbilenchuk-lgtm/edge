@@ -456,13 +456,25 @@ export async function importPolymarketMatches(
 // and records new in-match events (goals/cards/subs) as reassessment triggers.
 // ------------------------------------------------------------
 
-function teamKey(name: string): string {
-  const t = name.toLowerCase().normalize("NFD").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 3);
-  return t.length ? t[t.length - 1] : name.toLowerCase().trim();
+// Generic club suffixes carry no identity — "Manchester United" and "Newcastle
+// United" must NOT match on "united". Matching needs a distinctive token.
+const TEAM_STOPWORDS = new Set(["fc", "afc", "sc", "cf", "ac", "as", "cd", "sv", "fk", "if", "bk", "club", "united", "city", "town", "county", "calcio", "sporting", "real", "athletic", "atletico"]);
+function teamTokens(name: string): Set<string> {
+  return new Set(name.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 3));
+}
+/** Do two team names refer to the same club/nation? Requires every token of the
+ *  shorter name to appear in the longer (so "West Ham" ⊂ "West Ham United" ok,
+ *  but "Manchester United" vs "Newcastle United" / "Manchester City" do NOT),
+ *  and at least one shared DISTINCTIVE (non-suffix) token. */
+function nameMatch(a: string, b: string): boolean {
+  const ta = teamTokens(a), tb = teamTokens(b);
+  if (!ta.size || !tb.size) return false;
+  const [small, big] = ta.size <= tb.size ? [ta, tb] : [tb, ta];
+  if (![...small].every((t) => big.has(t))) return false;      // shorter ⊆ longer
+  return [...small].some((t) => big.has(t) && !TEAM_STOPWORDS.has(t)); // a real, distinctive token
 }
 function sameTeams(h1: string, a1: string, h2: string, a2: string): boolean {
-  const s = new Set([teamKey(h1), teamKey(a1)]);
-  return s.has(teamKey(h2)) && s.has(teamKey(a2));
+  return (nameMatch(h1, h2) && nameMatch(a1, a2)) || (nameMatch(h1, a2) && nameMatch(a1, h2));
 }
 
 export interface EnrichResult { enriched: number; newEvents: { matchId: string; type: string; minute: number | null; text: string }[] }
@@ -482,7 +494,7 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       // sameTeams is order-insensitive: the DB match's home/away orientation
       // (from the Polymarket title) may be the reverse of ESPN's. Align scores
       // and lineups to the DB match's home/away so nothing gets mirrored.
-      const flip = teamKey(m.home) !== teamKey(s.home);
+      const flip = nameMatch(m.home, s.away); // DB home is ESPN's away side → scores/lineups mirrored
       const scoreHome = flip ? s.scoreAway : s.scoreHome;
       const scoreAway = flip ? s.scoreHome : s.scoreAway;
       R.updateMatch(db, m.id, { state: s.state, minute: s.minute, score_home: scoreHome, score_away: scoreAway, ...(s.final ? { final_score: `${scoreHome ?? 0}:${scoreAway ?? 0}` } : {}) });

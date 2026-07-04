@@ -6,6 +6,7 @@ import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision } from "../src/lib/thresholds.js";
 import { autoEnter, evaluateExits, autoAnalyze, strategistReassess, advanceClocks, runLiveCycle } from "../src/lib/lifecycle.js";
+import { analyzeMatch } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
 const mockLLM = (a: unknown) => (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify(a) }] }) })) as any;
@@ -192,6 +193,27 @@ test("runLiveCycle is a cheap no-op when nothing is in play", async () => {
   db.exec("UPDATE matches SET state='finished'");
   const r = await runLiveCycle(db, null, {});
   assert.deepEqual(r, { live: 0, oddsUpdated: 0, enriched: 0, triggers: 0, exits: 0, entries: 0 });
+});
+
+test("analyzeMatch re-run doesn't re-propose on an already-open market or breach budget (§9.3)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 100 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "lineup", lineup_out: true, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 3.5", price: 30, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  // already holds a near-full-budget open position on Over 3.5 (from the pre-lineup stage)
+  const held = Math.round(comp.budget * 0.9);
+  R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, market_label: "Over 3.5", status: "open", proposed_price: 30, entry_price: 30, current_price: 30, closing_price: null, ai_prob: 0.6, stake: held, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  // combined mock: valid assessment AND a strategist pick on the held market
+  const combined = { confidence: "высокая", short: "s", body: "b", verdict: "v", markets: [{ label: "Over 3.5", prob: 0.6 }], picks: [{ label: "Over 3.5", conviction: "высокая", reason: "добрать" }], exits: [] };
+  await analyzeMatch(db, mid, { fetchImpl: mockLLM(combined), env: { ANTHROPIC_API_KEY: "k" } });
+  const bets = R.betsForMatch(db, mid, strat.id);
+  assert.equal(bets.filter((b) => b.status === "proposed" && b.market_label === "Over 3.5").length, 0, "no re-propose on the held market");
+  const exposure = bets.filter((b) => b.status === "open" || b.status === "proposed").reduce((n, b) => n + (b.stake ?? 0), 0);
+  assert.ok(exposure <= comp.budget, `open+proposed exposure ${exposure} within budget ${comp.budget}`);
 });
 
 test("autoAnalyze analyzes an eligible match once per stage", async () => {

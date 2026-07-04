@@ -167,6 +167,24 @@ test("recomputeMetrics counts only resolution-settled bets, not early/partial ca
   assert.equal(R.getQuality(db, strat.id)!.samples, 2, "only the two resolution-settled bets feed metrics");
 });
 
+test("upsertImportedMatch does not merge fixtures that only share a club suffix", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const compId = R.uid();
+  R.upsertCompetition(db, { id: compId, sport_id: "football", name: "EPL", budget: 0, external_league: "eng.1", created_at: "t" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: compId, home: "Manchester United", away: "Arsenal", state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "pm:mu-ars" });
+  // "Newcastle United vs Arsenal" shares only the "United"/"Arsenal" tokens — a
+  // DIFFERENT fixture; must NOT merge (the old teamKey bug merged on "united").
+  const diff = upsertImportedMatch(db, compId, { externalRef: "espn-1", home: "Newcastle United", away: "Arsenal", state: "live", minute: 10, scoreHome: 0, scoreAway: 0, final: false });
+  assert.equal(diff.created, true, "different fixture → new row");
+  assert.equal(R.getMatch(db, mid)!.external_ref, "pm:mu-ars", "Man United match left untouched");
+  // the SAME fixture (exact names) DOES merge and adopts the ESPN ref
+  const same = upsertImportedMatch(db, compId, { externalRef: "espn-2", home: "Manchester United", away: "Arsenal", state: "live", minute: 10, scoreHome: 0, scoreAway: 0, final: false });
+  assert.equal(same.created, false, "same fixture → merged");
+  assert.equal(R.getMatch(db, mid)!.external_ref, "espn-2", "ESPN id adopted");
+});
+
 // ---------------- triggers + rate limit (§9.7) ----------------
 test("canReassess enforces the minute gap", () => {
   const db = openDb(":memory:");
