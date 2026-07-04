@@ -23,6 +23,9 @@ services:
         value: "30"      # odds/exits/analyze/enter cadence (pre-match)
       - key: DISCOVER_INTERVAL_HR
         value: "24"      # Polymarket parse cadence (matches surface ~7 days out)
-      # Live Claude analysis needs a key — add it in the dashboard or the Models screen:
-      # - key: ANTHROPIC_API_KEY
-      #   sync: false
+      # Live Claude analysis needs a key. sync:false means Render PROMPTS you for
+      # the value in the dashboard on first deploy and KEEPS it across redeploys
+      # (the DB reseeds on every deploy, but this env var persists — so once you
+      # paste the key here it stays the default). Never commit the key to the repo.
+      - key: ANTHROPIC_API_KEY
+        sync: false
