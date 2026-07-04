@@ -73,7 +73,11 @@ export async function analyzeMatch(
     return { ok: false, error: a.error ?? "оценка не удалась", stage };
   }
 
-  R.upsertAssessment(db, { id: R.uid(), match_id: matchId, stage, confidence: a.confidence, short: a.short, body: a.body, verdict: a.verdict, model, status: "ok", created_at: now() });
+  const asmtAt = now();
+  R.upsertAssessment(db, { id: R.uid(), match_id: matchId, stage, confidence: a.confidence, short: a.short, body: a.body, verdict: a.verdict, model, status: "ok", created_at: asmtAt });
+  // Archive every successful run so the «Анализ» tab can show the history of the
+  // model's reasoning, not just the latest (which the upsert above overwrites).
+  R.appendAssessmentHistory(db, { id: R.uid(), match_id: matchId, stage, confidence: a.confidence, short: a.short, body: a.body, verdict: a.verdict, model, created_at: asmtAt });
 
   // update market ai_prob from the model. Match exactly on the normalized
   // label first; if the model paraphrased ("Over 2.5" vs "Over 2.5 goals"),

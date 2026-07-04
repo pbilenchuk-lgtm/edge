@@ -286,6 +286,28 @@ export function assessmentsForMatch(db: Database, matchId: string): Assessment[]
   return db.prepare(`SELECT * FROM assessments WHERE match_id=?`).all(matchId) as Assessment[];
 }
 
+/** Append a successful assessment to the append-only history archive (kept
+ *  separate from `assessments`, which only holds the latest per stage). */
+export function appendAssessmentHistory(
+  db: Database,
+  a: { id: string; match_id: string; stage: string; confidence: string | null; short: string | null; body: string | null; verdict: string | null; model: string | null; created_at: string },
+): void {
+  db.prepare(
+    `INSERT INTO assessment_history(id,match_id,stage,confidence,short,body,verdict,model,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?)`,
+  ).run(a.id, a.match_id, a.stage, a.confidence, a.short, a.body, a.verdict, a.model, a.created_at);
+}
+export interface AssessmentHistoryRow {
+  id: string; match_id: string; stage: string; confidence: string | null;
+  short: string | null; body: string | null; verdict: string | null; model: string | null; created_at: string;
+}
+/** Past assessments for a match, newest first (capped). */
+export function assessmentHistoryForMatch(db: Database, matchId: string, limit = 24): AssessmentHistoryRow[] {
+  return db.prepare(
+    `SELECT * FROM assessment_history WHERE match_id=? ORDER BY created_at DESC LIMIT ?`,
+  ).all(matchId, limit) as AssessmentHistoryRow[];
+}
+
 // ---------- analysis jobs (durable per-match analyze state) ----------
 export function getAnalysisJob(db: Database, matchId: string): AnalysisJob | undefined {
   return db.prepare(`SELECT * FROM analysis_jobs WHERE match_id=?`).get(matchId) as AnalysisJob | undefined;
