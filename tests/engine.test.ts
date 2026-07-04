@@ -29,6 +29,12 @@ test("parseEspnEvent maps state/score/minute", () => {
   assert.equal(s.scoreAway, 1);
   assert.equal(s.minute, 63);
   assert.equal(s.final, false);
+  assert.equal(s.clock, "63'"); // raw display clock preserved
+
+  // stoppage time: minute drops the "+2", clock keeps it
+  const stoppage = parseEspnEvent({ ...ev, status: { displayClock: "45'+2'", type: { state: "in", completed: false, detail: "45'+2'" } } })!;
+  assert.equal(stoppage.minute, 45);
+  assert.equal(stoppage.clock, "45'+2'");
 
   const post = parseEspnEvent({ ...ev, status: { type: { state: "post", completed: true } } })!;
   assert.equal(post.state, "finished");
@@ -64,6 +70,31 @@ test("parseEspnSummary extracts lineups + typed key events", () => {
   assert.equal(d.events[0].minute, 23);
   assert.equal(d.events[0].team, "Colombia");
   assert.equal(d.events[1].type, "yellow_card");
+});
+
+test("parseEspnSummary extracts team statistics (possession, shots, chances)", () => {
+  const s = {
+    rosters: [],
+    keyEvents: [],
+    boxscore: { teams: [
+      { homeAway: "home", team: { displayName: "Colombia" }, statistics: [
+        { name: "possessionPct", displayValue: "58" }, { name: "totalShots", displayValue: "12" },
+        { name: "shotsOnTarget", displayValue: "5" }, { name: "wonCorners", displayValue: "6" },
+        { name: "unmapped", displayValue: "99" },
+      ] },
+      { homeAway: "away", team: { displayName: "Ghana" }, statistics: [
+        { name: "possessionPct", displayValue: "42" }, { name: "totalShots", displayValue: "7" },
+      ] },
+    ] },
+  };
+  const d = parseEspnSummary(s);
+  assert.ok(d.stats?.home);
+  assert.equal(d.stats!.home!.team, "Colombia");
+  const poss = d.stats!.home!.items.find((i) => i.label === "владение");
+  assert.equal(poss?.value, "58");
+  assert.ok(d.stats!.home!.items.some((i) => i.label === "удары" && i.value === "12"));
+  assert.ok(!d.stats!.home!.items.some((i) => i.value === "99")); // unmapped stat dropped
+  assert.equal(d.stats!.away!.items.find((i) => i.label === "владение")?.value, "42");
 });
 
 // Mock ESPN provider with lineups + a scripted goal.

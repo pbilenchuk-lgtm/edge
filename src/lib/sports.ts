@@ -26,11 +26,22 @@ export interface SportsMatchStatus {
   scoreAway: number | null;
   final: boolean;
   detail?: string;
+  /** raw ESPN display clock, e.g. "45'+2'" / "90'+4'" — preserves stoppage time
+   *  that the integer `minute` drops. Shown in the UI / fed to reassessment. */
+  clock?: string | null;
 }
 
 export interface TeamLineup { team: string; formation: string | null; starters: string[] }
 export interface MatchEvent { key: string; minute: number | null; type: "goal" | "red_card" | "yellow_card" | "sub" | "other"; team: string | null; text: string }
-export interface MatchDetail { lineupOut: boolean; lineups: { home: TeamLineup | null; away: TeamLineup | null }; events: MatchEvent[] }
+/** Compact team match statistics (possession, shots, etc.) — the "how the game
+ *  is actually going" signal beyond the score, fed to analysis/reassessment. */
+export interface TeamStats { team: string; items: { label: string; value: string }[] }
+export interface MatchDetail {
+  lineupOut: boolean;
+  lineups: { home: TeamLineup | null; away: TeamLineup | null };
+  events: MatchEvent[];
+  stats?: { home: TeamStats | null; away: TeamStats | null };
+}
 
 export interface SportsProvider {
   readonly name: string;
@@ -122,6 +133,32 @@ export class EspnSportsProvider implements SportsProvider {
   }
 }
 
+// The team-statistics ESPN publishes for soccer that actually inform a trade —
+// tempo, territory, threat. Mapped from ESPN stat `name` to a short RU label.
+const STAT_LABELS: Record<string, string> = {
+  possessionPct: "владение",
+  totalShots: "удары",
+  shotsOnTarget: "в створ",
+  wonCorners: "угловые",
+  foulsCommitted: "фолы",
+  saves: "сейвы",
+  offsides: "офсайды",
+  bigChanceCreated: "моменты",
+  totalShotsOnGoal: "в створ",
+  effectiveClearance: "выносы",
+};
+function teamStats(r: any): TeamStats | null {
+  if (!r) return null;
+  const src = Array.isArray(r.statistics) ? r.statistics : [];
+  const items: { label: string; value: string }[] = [];
+  for (const st of src) {
+    const label = STAT_LABELS[String(st?.name ?? "")];
+    const value = st?.displayValue;
+    if (label && value != null && value !== "") items.push({ label, value: String(value) });
+  }
+  return { team: r.team?.displayName ?? "?", items };
+}
+
 export function parseEspnSummary(s: any): MatchDetail {
   const teamLineup = (r: any): TeamLineup | null => {
     if (!r) return null;
@@ -137,9 +174,13 @@ export function parseEspnSummary(s: any): MatchDetail {
     const minute = (() => { const m = String(e.clock?.displayValue ?? e.time?.displayValue ?? "").match(/(\d+)/); return m ? parseInt(m[1], 10) : null; })();
     return { key: String(e.id ?? `${minute}-${text.slice(0, 30)}`), minute, type, team: e.team?.displayName ?? null, text };
   });
+  // team statistics live under boxscore.teams[] (possession, shots, …)
+  const boxTeams = s.boxscore?.teams ?? [];
+  const statHome = teamStats(boxTeams.find((t: any) => t.homeAway === "home") ?? boxTeams[0]);
+  const statAway = teamStats(boxTeams.find((t: any) => t.homeAway === "away") ?? boxTeams[1]);
   // lineups are "out" once starters are published for both sides
   const lineupOut = !!(home?.starters.length && away?.starters.length);
-  return { lineupOut, lineups: { home, away }, events };
+  return { lineupOut, lineups: { home, away }, events, stats: { home: statHome, away: statAway } };
 }
 
 export function parseEspnEvent(e: any): SportsMatchStatus | null {
@@ -160,6 +201,7 @@ export function parseEspnEvent(e: any): SportsMatchStatus | null {
       scoreAway: num(away?.score),
       final: !!st.completed,
       detail: st.detail,
+      clock: (String(e.status?.displayClock ?? "").trim() || null),
     };
   } catch {
     return null;

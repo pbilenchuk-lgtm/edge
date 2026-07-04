@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS matches (
   end_time       TEXT,
   duration       TEXT,
   end_note       TEXT,             -- «основное время»/«доп. время»/«серия пенальти»
-  external_ref   TEXT              -- ID матча во внешнем спортивном API
+  external_ref   TEXT,             -- ID матча во внешнем спортивном API
+  clock          TEXT              -- сырое табло ESPN «45'+2'» (доп. время, которого нет в minute)
 );
 
 -- §2.9 assessments (оценки матча — от аналитики; один pre + один post, post приоритетнее)
@@ -210,6 +211,7 @@ CREATE TABLE IF NOT EXISTS match_live (
   league         TEXT,
   home_lineup    TEXT,  -- json {team, formation, starters[]}
   away_lineup    TEXT,
+  stats          TEXT,  -- json {home:{team,items[]}, away:{...}} — владение/удары/моменты
   updated_at     TEXT NOT NULL
 );
 

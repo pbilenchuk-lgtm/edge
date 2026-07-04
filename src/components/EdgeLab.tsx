@@ -166,43 +166,38 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     mutate({ type: "setShares", compId: cid, shares: newShares });
   };
 
-  const refreshOdds = async (matchId: string) => {
-    const m = matchDb[matchId];
-    if (!m) return;
-    const markets = m.markets.map((mk) => ({ tokenId: mk.tokenId, snapshotCents: mk.price }));
-    let quotes: any[] = [];
+  // Refresh a match's odds via the SERVER action (engine.refreshMatchOdds): the
+  // same reliable CLOB path the cron uses, keyed off the market's stored token —
+  // so it works even when the client copy of a market lacks a tokenId (which was
+  // why the manual ↻ silently returned "нет котировок"). `silent` skips toasts
+  // for the background auto-refresh loop.
+  const refreshOddsCore = async (matchId: string, silent = false): Promise<void> => {
+    let res: any;
     try {
-      const r = await fetch("/api/quotes", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ markets }) });
-      ({ quotes } = await r.json());
-    } catch { toast("err", "Котировки не обновились — Polymarket не ответил"); return; }
-    const byTok: Record<string, any> = {};
-    for (const q of quotes || []) byTok[q.tokenId] = q;
-    let anyLive = false, hits = 0;
+      res = await engine("refreshOdds", matchId);
+    } catch { if (!silent) toast("err", "Котировки не обновились — сеть недоступна"); return; }
+    const byId: Record<string, any> = {};
+    for (const mk of res?.markets || []) byId[mk.id] = mk;
     setMatchDb((prev) => {
-      const nm = { ...prev[matchId] };
-      nm.markets = nm.markets.map((mk) => {
-        const q = mk.tokenId ? byTok[mk.tokenId] : null;
-        if (q && q.priceCents != null) { if (q.source === "live") anyLive = true; hits++; return { ...mk, price: q.priceCents }; }
-        return mk;
-      });
-      nm.oddsUpdated = anyLive ? "только что · live" : "только что · snapshot";
+      const cur = prev[matchId];
+      if (!cur) return prev;
+      const nm = { ...cur };
+      nm.markets = nm.markets.map((mk) => { const q = byId[mk.id]; return q && q.price != null ? { ...mk, price: q.price } : mk; });
+      nm.oddsUpdated = "только что";
       return { ...prev, [matchId]: nm };
     });
-    toast(hits ? "ok" : "info", hits ? `Котировки обновлены (${hits}) · ${anyLive ? "live" : "снимок"}` : "Свежих котировок нет — рынок закрыт или неликвиден");
+    if (!silent) toast(res?.updated ? "ok" : "info", res?.updated ? `Котировки обновлены (${res.updated})` : "Свежих котировок нет — рынок закрыт или неликвиден");
   };
+  const refreshOdds = (matchId: string) => refreshOddsCore(matchId, false);
 
   const doReassess = async (matchId: string, strategyId: string) => {
     const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "reassess", matchId, strategyId }) });
     const j = await r.json();
-    if (j.reassessment) {
-      setMatchDb((prev) => {
-        const nm = { ...prev[matchId] };
-        const list = { ...(nm.reassessByStrat || {}) };
-        list[strategyId] = [...(list[strategyId] || []), j.reassessment];
-        nm.reassessByStrat = list;
-        return { ...prev, [matchId]: nm };
-      });
-    }
+    // Pull fresh state so any exits/entries the reassessment made show at once
+    // (the note, positions, log and P&L all change together).
+    await reloadApp().catch(() => {});
+    const acted = (j.exits || 0) + (j.entries || 0);
+    toast("ok", acted ? `Переоценка: выходов ${j.exits}, входов ${j.entries}` : "Переоценка готова — изменений по позициям нет");
   };
 
   const engine = (action: string, matchId: string) => fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, matchId }) }).then((x) => x.json());
@@ -212,18 +207,26 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     if (app.catalog) setCatalog(app.catalog);
   };
 
-  // Live auto-refresh: while ANY match is in play, re-pull the full app state
-  // every 3s so money, quotes, the trade log, reassessments and settlement all
-  // stay live without a manual page reload. Idle (no live match) → no polling.
-  const liveMatchCount = Object.values(matchDb).filter(
-    (m: any) => m.state === "live" || m.state === "lineup" || m.lineupOut,
-  ).length;
+  // Live auto-refresh: while ANY match is in play, every 3s (a) pull fresh CLOB
+  // prices for each live match server-side, then (b) re-pull the full app state
+  // so money, quotes, trade log, reassessments and settlement all stay live with
+  // no manual reload. Idle (no live match) → no polling. 3s is comfortably inside
+  // Polymarket's rate limits; drop it if you want a faster tick.
+  const liveMatchIds = Object.values(matchDb)
+    .filter((m: any) => m.state === "live" || m.state === "lineup" || m.lineupOut)
+    .map((m: any) => m.id);
+  const liveKey = liveMatchIds.join(",");
   useEffect(() => {
-    if (!liveMatchCount) return;
-    const id = setInterval(() => { reloadApp().catch(() => {}); }, 3000);
-    return () => clearInterval(id);
+    if (!liveMatchIds.length) return;
+    let stop = false;
+    const tick = async () => {
+      await Promise.all(liveMatchIds.map((id) => refreshOddsCore(id, true).catch(() => {})));
+      if (!stop) await reloadApp().catch(() => {});
+    };
+    const iv = setInterval(tick, 3000);
+    return () => { stop = true; clearInterval(iv); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveMatchCount]);
+  }, [liveKey]);
 
   // Toasts — side notifications for actions, so the user sees what worked/failed.
   const [toasts, setToasts] = useState<{ id: number; kind: "ok" | "err" | "info"; text: string }[]>([]);
@@ -417,7 +420,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   if (hasReassess) tabs.push({ id: "reassess", label: "Переоценки" });
   if (hasSettled) tabs.push({ id: "settle", label: hasResolution ? "Расчёт" : "Закрытия" });
   const hasLive = !!((match.lineups && (match.lineups.home || match.lineups.away)) || (match.events && match.events.length));
-  if (hasLive) tabs.push({ id: "live", label: "Составы · события" });
+  if (hasLive) tabs.push({ id: "live", label: "События матча" });
   if (hasLog) tabs.push({ id: "log", label: "Лог" });
   // Only jump straight to the settle tab when the match actually resolved — a
   // mid-match partial fixation must not hijack a live card into "рассчитано".
@@ -427,6 +430,8 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   const [refreshing, setRefreshing] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
+  const [reassessing, setReassessing] = useState<Record<string, boolean>>({});
+  const [showLineups, setShowLineups] = useState(false); // составы скрыты по умолчанию — по кнопке
 
   const doRefresh = async () => { setRefreshing(true); await onRefreshOdds(match.id); setRefreshing(false); };
 
@@ -447,7 +452,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
       <div style={S.cardHead}>
         <div>
           <div style={S.matchup}>{match.home}{match.state === "live" || match.state === "finished" ? <span style={S.score}> {match.scoreHome}:{match.scoreAway} </span> : <span style={S.vs}> — </span>}{match.away}</div>
-          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && match.kickoff}{match.state === "live" && `LIVE · ${match.minute}'`}{match.state === "finished" && (match.endTime ? `завершён ${match.endTime}` : "финал")}{hasLineups && <>{"  ·  "}<span style={{ color: match.lineupOut ? "#70b56a" : "#8b95a5" }}>{match.lineupOut ? "✓ состав" : "○ без состава"}</span></>}</div>
+          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && match.kickoff}{match.state === "live" && `LIVE · ${match.clock || (match.minute != null ? `${match.minute}'` : "")}`}{match.state === "finished" && (match.endTime ? `завершён ${match.endTime}` : "финал")}{hasLineups && <>{"  ·  "}<span style={{ color: match.lineupOut ? "#70b56a" : "#8b95a5" }}>{match.lineupOut ? "✓ состав" : "○ без состава"}</span></>}</div>
           {match.state === "finished" && match.duration && <div style={S.finishTiming}>{match.kickoffTime}–{match.endTime} · длительность {match.duration}{match.endNote && ` · ${match.endNote}`}</div>}
         </div>
         <div style={{ ...S.stateBadge, background: meta.bg, color: meta.color }}>{match.state === "live" && <span style={S.pulse} />}{meta.label}</div>
@@ -537,7 +542,18 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                   const items = betItems(raw);
                   return (
                     <div key={st.id} style={S.stratBlock}>
-                      <div style={S.stratBlockHead}><span style={{ ...S.dot, background: st.color }} /><span style={S.stratName}>{st.name}</span><span style={S.stratBudgetChip}>{shares[comp.id][st.id]}% · {fmtMoney0(budget)}</span></div>
+                      <div style={S.stratBlockHead}>
+                        <span style={{ ...S.dot, background: st.color }} /><span style={S.stratName}>{st.name}</span>
+                        <span style={S.stratBudgetChip}>{shares[comp.id][st.id]}% · {fmtMoney0(budget)}</span>
+                        {match.state === "live" && (
+                          <button
+                            style={{ ...S.stratReassessBtn, opacity: reassessing[st.id] ? 0.5 : 1 }}
+                            disabled={reassessing[st.id]}
+                            title={`Переоценить «${st.name}» по этому матчу (ИИ пересмотрит позиции: вход/частичный или полный выход)`}
+                            onClick={async () => { setReassessing((p) => ({ ...p, [st.id]: true })); try { await onReassess(match.id, st.id); } finally { setReassessing((p) => ({ ...p, [st.id]: false })); } }}
+                          >{reassessing[st.id] ? "…" : "↻"}</button>
+                        )}
+                      </div>
                       {items.length === 0 ? <div style={S.noBets}>ставок нет — край недостаточен, стратегия пропускает матч</div> : (
                         <div style={S.betList}>
                           {items.map((b: any, i: number) => {
@@ -571,8 +587,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
             {tab === "reassess" && (
               <div>
                 <div style={S.reassessTop}>
-                  <span style={S.reassessHint}>Развёрнутые переоценки ИИ по ходу матча (в отличие от сухого лога).</span>
-                  {match.state === "live" && logStrat && <button style={S.reassessBtn} onClick={() => onReassess(match.id, logStrat)}>↻ Сделать переоценку</button>}
+                  <span style={S.reassessHint}>Развёрнутые переоценки ИИ по ходу матча (в отличие от сухого лога). Запустить вручную — кнопкой ↻ у стратегии во вкладке «Ставки стратегий».</span>
                 </div>
                 <div style={S.logStratBar}>{compStrats.map((st: any) => <button key={st.id} onClick={() => setLogStrat(st.id)} style={{ ...S.logStratBtn, ...(logStrat === st.id ? { background: st.color + "22", color: st.color, borderColor: st.color + "66" } : {}) }}>{st.name}</button>)}</div>
                 <div style={S.reassessList}>
@@ -618,12 +633,14 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                         {match.settledBets[st.id].filter((b: any) => b.settledBy).map((b: any, i: number) => {
                           const pnl = (b.payout ?? 0) - (b.stake ?? 0);
                           const up = pnl >= 0;
+                          const pnlPct = b.stake ? (pnl / b.stake) * 100 : 0;
+                          const closedPct = b.closedPct ?? 100;
                           return (
                             <div key={i} style={S.settleBet}>
-                              <span style={S.settleMarket}>{b.market}{b.settledBy === "partial" ? " · частично" : ""}</span>
-                              <span style={S.settleStake}>{fmtMoney(b.stake)}</span>
-                              <span style={{ ...S.settleResult, color: up ? "#5fd08a" : "#ff6b6b" }}>закрыта</span>
-                              <span style={{ ...S.settlePayout, color: up ? "#5fd08a" : "#ff6b6b" }}>{up ? "+" : "−"}{fmtMoney(Math.abs(pnl))}</span>
+                              <span style={S.settleMarket}>{b.market}</span>
+                              <span style={S.settleStake} title="Сколько $ и какая доля позиции закрыта">{fmtMoney(b.stake)} · {closedPct}% позиции</span>
+                              <span style={{ ...S.settleResult, color: up ? "#5fd08a" : "#ff6b6b" }}>{closedPct >= 100 ? "закрыта" : "фиксация"}</span>
+                              <span style={{ ...S.settlePayout, color: up ? "#5fd08a" : "#ff6b6b" }} title="Реализованный P&L по закрытой доле">{up ? "+" : "−"}{fmtMoney(Math.abs(pnl))} ({up ? "+" : ""}{pnlPct.toFixed(0)}%)</span>
                             </div>
                           );
                         })}
@@ -644,14 +661,19 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
             )}
             {tab === "live" && hasLive && (
               <div style={S.liveWrap}>
-                {match.lineups && (
-                  <div style={S.lineupGrid}>
-                    {[match.lineups.home, match.lineups.away].filter(Boolean).map((l: any, i: number) => (
-                      <div key={i} style={S.lineupCol}>
-                        <div style={S.lineupTeam}>{l.team}{l.formation && <span style={S.lineupForm}> · {l.formation}</span>}</div>
-                        <ol style={S.lineupList}>{l.starters.map((p: string, j: number) => <li key={j} style={S.lineupPlayer}>{p}</li>)}</ol>
+                {match.lineups && (match.lineups.home || match.lineups.away) && (
+                  <div>
+                    <button style={S.lineupToggle} onClick={() => setShowLineups((v) => !v)}>{showLineups ? "▾ Скрыть составы" : "▸ Показать составы"}</button>
+                    {showLineups && (
+                      <div style={S.lineupGrid}>
+                        {[match.lineups.home, match.lineups.away].filter(Boolean).map((l: any, i: number) => (
+                          <div key={i} style={S.lineupCol}>
+                            <div style={S.lineupTeam}>{l.team}{l.formation && <span style={S.lineupForm}> · {l.formation}</span>}</div>
+                            <ol style={S.lineupList}>{l.starters.map((p: string, j: number) => <li key={j} style={S.lineupPlayer}>{p}</li>)}</ol>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    )}
                   </div>
                 )}
                 {match.events?.length > 0 && (
@@ -703,7 +725,6 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                   <div key={mk.id} style={S.oddsRow}>
                     <div style={S.oddsTop}><span style={S.oddsLabel}>{mk.label}</span><span style={S.oddsVal}>{mk.price}¢</span></div>
                     <div style={S.oddsBot}>
-                      {mk.aiProb != null && <span style={S.oddsAi} title="Объективная оценка вероятности аналитическим ИИ (не привязана к стратегии)">ИИ {(mk.aiProb * 100).toFixed(0)}%</span>}
                       {move !== 0 && (
                         <span style={{ ...S.oddsMove, color: move > 0 ? "#5fd08a" : "#ff6b6b" }} title={`Цена на старте матча ${mk.openCents}¢ → сейчас ${mk.price}¢`}>{move > 0 ? "▲+" : "▼"}{move}¢ от старта</span>
                       )}
@@ -1319,6 +1340,7 @@ const S: Record<string, React.CSSProperties> = {
   toastIcon: { fontWeight: 800, flexShrink: 0 },
   toastText: { color: "#e6ebf2" },
   liveWrap: { display: "flex", flexDirection: "column", gap: 14 },
+  lineupToggle: { background: "transparent", border: "none", color: "#7fb4e8", fontSize: 12, cursor: "pointer", padding: "2px 0", marginBottom: 8, fontWeight: 600 },
   lineupGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
   lineupCol: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px" },
   lineupTeam: { fontSize: 13, fontWeight: 700, color: "#e6ebf2", marginBottom: 6 },
@@ -1432,6 +1454,7 @@ const S: Record<string, React.CSSProperties> = {
   stratBlockHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 },
   stratName: { fontSize: 13.5, fontWeight: 700 },
   stratBudgetChip: { marginLeft: "auto", fontSize: 10.5, color: "#e8a838", fontFamily: "'JetBrains Mono', monospace", background: "#2e2a1a", borderRadius: 20, padding: "2px 10px" },
+  stratReassessBtn: { flex: "0 0 auto", width: 26, height: 26, display: "inline-flex", alignItems: "center", justifyContent: "center", background: "transparent", border: `1px solid #5b9bd566`, color: "#7fb4e8", borderRadius: 7, fontSize: 13, cursor: "pointer", lineHeight: 1, padding: 0 },
   noBets: { fontSize: 12, color: MUTE, fontStyle: "italic" },
   betList: { display: "flex", flexDirection: "column", gap: 6 },
   betRow: { background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 10px" },

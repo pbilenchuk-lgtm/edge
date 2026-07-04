@@ -35,7 +35,9 @@ import type { SportsProvider } from "./sports.js";
 import type { Match } from "./types.js";
 
 const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
-const minuteLabel = (m: Match) => (m.state === "live" && m.minute != null ? `${m.minute}'` : "предматч");
+// Prefer the raw ESPN clock ("45'+2'") so logs/reassessments carry stoppage
+// time; fall back to the whole-minute figure, then "предматч".
+const minuteLabel = (m: Match) => (m.state === "live" ? (m.clock || (m.minute != null ? `${m.minute}'` : "предматч")) : "предматч");
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 function activeMatches(db: Database): { comp: string; sport: string; match: Match }[] {
@@ -211,7 +213,7 @@ export interface ReassessResult { exits: ExitItem[]; entries: ReassessEntry[] }
  * trigger actually fired. This is what makes reassessment *react* to live data.
  */
 export async function strategistReassess(
-  db: Database, deps: EngineDeps = {}, opts: { max?: number; newEventMatchIds?: Set<string>; triggeredOnly?: boolean; labelFor?: Map<string, ReassessTrigger> } = {},
+  db: Database, deps: EngineDeps = {}, opts: { max?: number; newEventMatchIds?: Set<string>; triggeredOnly?: boolean; labelFor?: Map<string, ReassessTrigger>; onlyStrategyId?: string } = {},
 ): Promise<ReassessResult> {
   const max = opts.max ?? 4;
   const triggered = opts.newEventMatchIds ?? new Set<string>();
@@ -253,6 +255,7 @@ export async function strategistReassess(
 
     for (const sid of sids) {
       if (calls >= max) break;
+      if (opts.onlyStrategyId && sid !== opts.onlyStrategyId) continue; // manual: one strategy only
       const strat = R.getStrategy(db, sid);
       if (!strat) continue;
       const myOpen = open.filter((b) => b.strategy_id === sid);
@@ -400,15 +403,19 @@ const LIVE_TRIGGER_TYPES = new Set(["goal", "red_card"]);
 // exit) and fresh analytics land on a steady heartbeat, not only on goals.
 export const REASSESS_INTERVAL_MIN = 5;
 
-/** Live matches whose open positions haven't been reassessed in the last
- *  REASSESS_INTERVAL_MIN minutes (or never) — the periodic cadence set. */
+/** Live matches due for a periodic reassessment — those not reassessed in the
+ *  last REASSESS_INTERVAL_MIN minutes (or never). Fires on ANY funded live match
+ *  with tradeable markets, regardless of whether a position is open: reassessment
+ *  is both fresh analytics AND a chance to open/exit, so it must not wait for an
+ *  on-pitch event (user: «переоценку надо делать каждые 5 минут независимо»). */
 function periodicReassessMatches(db: Database, deps: EngineDeps): Set<string> {
   const nowMs = Date.parse(nowFn(deps)()) || Date.now();
+  const budgetByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.budget]));
   const due = new Set<string>();
-  for (const { match: m } of activeMatches(db)) {
+  for (const { comp, match: m } of activeMatches(db)) {
     if (m.state !== "live" && m.state !== "lineup" && !m.lineup_out) continue;
-    const hasOpen = R.betsForMatch(db, m.id).some((b) => b.status === "open");
-    if (!hasOpen) continue;
+    if ((budgetByComp.get(comp) ?? 0) <= 0) continue;        // unfunded → skip (economical)
+    if (!R.latestMarkets(db, m.id).length) continue;         // nothing to price/trade
     const notes = R.reassessmentsForMatch(db, m.id);
     const last = notes.length ? Date.parse(notes[notes.length - 1].created_at) : NaN;
     if (isNaN(last) || nowMs - last >= REASSESS_INTERVAL_MIN * 60_000) due.add(m.id);

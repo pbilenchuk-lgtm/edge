@@ -23,10 +23,22 @@ export async function POST(req: Request) {
       case "reassess": {
         const match = R.getMatch(db, body.matchId);
         if (!match) return NextResponse.json({ ok: false, error: "матч не найден" }, { status: 404 });
-        const r = await engine.triggerReassessment(db, { match, strategyId: body.strategyId, trigger: "manual", minute: match.minute }, {});
+        // FULL strategist reassessment for this one strategy: writes the narrative
+        // note AND re-evaluates its open positions (full/partial exit) plus fresh
+        // entries — then fills any newly-proposed bets. This is the same engine the
+        // 5-min heartbeat runs, invoked on demand for a single strategy.
+        const { strategistReassess, autoEnter } = await import("@/lib/lifecycle");
+        const res = await strategistReassess(db, {}, {
+          newEventMatchIds: new Set([match.id]), triggeredOnly: true,
+          onlyStrategyId: body.strategyId, labelFor: new Map([[match.id, "manual"]]), max: 1,
+        });
+        autoEnter(db, {});
         const list = R.reassessmentsForMatch(db, match.id).filter((x) => x.strategy_id === body.strategyId);
         const last = list[list.length - 1];
-        return NextResponse.json({ ok: r.created, source: r.source, reassessment: last ? { min: last.minute, text: last.body, conf: last.confidence } : null });
+        return NextResponse.json({
+          ok: true, exits: res.exits.length, entries: res.entries.length,
+          reassessment: last ? { min: last.minute, text: last.body, conf: last.confidence } : null,
+        });
       }
       case "analyze": {
         // Kick the expensive LLM path into the background and return at once

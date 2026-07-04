@@ -257,7 +257,7 @@ export async function syncMatchStatus(
   const from = match.state;
 
   const patch: Partial<Match> = {
-    state: status.state, minute: status.minute,
+    state: status.state, minute: status.minute, clock: status.clock ?? null,
     score_home: status.scoreHome, score_away: status.scoreAway,
   };
   if (status.state === "finished") {
@@ -497,12 +497,16 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       const flip = nameMatch(m.home, s.away); // DB home is ESPN's away side → scores/lineups mirrored
       const scoreHome = flip ? s.scoreAway : s.scoreHome;
       const scoreAway = flip ? s.scoreHome : s.scoreAway;
-      R.updateMatch(db, m.id, { state: s.state, minute: s.minute, score_home: scoreHome, score_away: scoreAway, ...(s.final ? { final_score: `${scoreHome ?? 0}:${scoreAway ?? 0}` } : {}) });
+      R.updateMatch(db, m.id, { state: s.state, minute: s.minute, score_home: scoreHome, score_away: scoreAway, clock: s.clock ?? null, ...(s.final ? { final_score: `${scoreHome ?? 0}:${scoreAway ?? 0}` } : {}) });
       const detail = await provider.matchDetail!("football", league, s.externalRef);
       if (detail) {
         const homeLineup = flip ? detail.lineups.away : detail.lineups.home;
         const awayLineup = flip ? detail.lineups.home : detail.lineups.away;
-        R.upsertMatchLive(db, { match_id: m.id, espn_event_id: s.externalRef, league, home_lineup: homeLineup ? JSON.stringify(homeLineup) : null, away_lineup: awayLineup ? JSON.stringify(awayLineup) : null, updated_at: now });
+        // orient stats to the DB match's home/away, same as lineups
+        const statHome = detail.stats ? (flip ? detail.stats.away : detail.stats.home) : null;
+        const statAway = detail.stats ? (flip ? detail.stats.home : detail.stats.away) : null;
+        const statsJson = (statHome || statAway) ? JSON.stringify({ home: statHome, away: statAway }) : null;
+        R.upsertMatchLive(db, { match_id: m.id, espn_event_id: s.externalRef, league, home_lineup: homeLineup ? JSON.stringify(homeLineup) : null, away_lineup: awayLineup ? JSON.stringify(awayLineup) : null, stats: statsJson, updated_at: now });
         if (detail.lineupOut && !m.lineup_out) R.updateMatch(db, m.id, { lineup_out: true, state: s.state === "upcoming" ? "lineup" : s.state });
         for (const e of detail.events) {
           if (e.type === "other") continue;

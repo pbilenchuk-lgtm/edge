@@ -165,17 +165,17 @@ function mapStrategy(r: any): Strategy {
 }
 
 // ---------- match live (ESPN link + lineups) & events ----------
-export interface MatchLive { match_id: string; espn_event_id: string | null; league: string | null; home_lineup: string | null; away_lineup: string | null; updated_at: string }
+export interface MatchLive { match_id: string; espn_event_id: string | null; league: string | null; home_lineup: string | null; away_lineup: string | null; stats: string | null; updated_at: string }
 export function getMatchLive(db: Database, matchId: string): MatchLive | undefined {
   return db.prepare(`SELECT * FROM match_live WHERE match_id=?`).get(matchId) as MatchLive | undefined;
 }
 export function upsertMatchLive(db: Database, m: MatchLive): void {
   db.prepare(
-    `INSERT INTO match_live(match_id,espn_event_id,league,home_lineup,away_lineup,updated_at)
-     VALUES(?,?,?,?,?,?)
+    `INSERT INTO match_live(match_id,espn_event_id,league,home_lineup,away_lineup,stats,updated_at)
+     VALUES(?,?,?,?,?,?,?)
      ON CONFLICT(match_id) DO UPDATE SET espn_event_id=excluded.espn_event_id, league=excluded.league,
-       home_lineup=excluded.home_lineup, away_lineup=excluded.away_lineup, updated_at=excluded.updated_at`,
-  ).run(m.match_id, m.espn_event_id, m.league, m.home_lineup, m.away_lineup, m.updated_at);
+       home_lineup=excluded.home_lineup, away_lineup=excluded.away_lineup, stats=excluded.stats, updated_at=excluded.updated_at`,
+  ).run(m.match_id, m.espn_event_id, m.league, m.home_lineup, m.away_lineup, m.stats ?? null, m.updated_at);
 }
 export interface MatchEventRow { id: string; match_id: string; event_key: string; minute: number | null; type: string; team: string | null; text: string; created_at: string }
 /** Insert a match event; returns true if it was new (deduped by match+key). */
@@ -237,12 +237,12 @@ export function clearShares(db: Database, competitionId: string): void {
 export function insertMatch(db: Database, m: Match): void {
   db.prepare(
     `INSERT INTO matches(id,competition_id,home,away,state,lineup_out,kickoff_at,minute,
-       score_home,score_away,final_score,kickoff_time,end_time,duration,end_note,external_ref)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       score_home,score_away,final_score,kickoff_time,end_time,duration,end_note,external_ref,clock)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     m.id, m.competition_id, m.home, m.away, m.state, m.lineup_out ? 1 : 0,
     m.kickoff_at, m.minute, m.score_home, m.score_away, m.final_score,
-    m.kickoff_time, m.end_time, m.duration, m.end_note, m.external_ref,
+    m.kickoff_time, m.end_time, m.duration, m.end_note, m.external_ref, m.clock ?? null,
   );
 }
 export function getMatch(db: Database, id: string): Match | null {

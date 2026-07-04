@@ -27,7 +27,7 @@ export interface BetItemView {
 }
 export interface MatchView {
   id: string; competitionId: string; home: string; away: string; state: string;
-  minute: number | null; scoreHome: number | null; scoreAway: number | null;
+  minute: number | null; clock: string | null; scoreHome: number | null; scoreAway: number | null;
   lineupOut: boolean; kickoff: string | null; oddsUpdated: string | null;
   finalScore: string | null; kickoffTime: string | null; endTime: string | null;
   duration: string | null; endNote: string | null;
@@ -38,7 +38,7 @@ export interface MatchView {
   bets: Record<string, { rationale: string | null; items: BetItemView[] }>;
   reassessByStrat: Record<string, { min: string | null; text: string; conf: string | null }[]>;
   logByStrat: Record<string, { min: string | null; text: string; type: string }[]>;
-  settledBets: Record<string, { market: string; stake: number; result: string; payout: number; settledBy: string | null }[]>;
+  settledBets: Record<string, { market: string; stake: number; result: string; payout: number; settledBy: string | null; closedPct: number }[]>;
   result: Record<string, number>;
   /** real lineups (ESPN), if enriched — shown under the СОСТАВ toggle */
   lineups: { home: LineupView | null; away: LineupView | null } | null;
@@ -152,9 +152,14 @@ export function buildAppData(db: Database, env = process.env): AppData {
       const result: Record<string, number> = {};
       for (const b of allBets) {
         if (b.status === "settled_won" || b.status === "settled_lost") {
+          // How much of the position this close represents: a partial fixation
+          // stamps «частичная фиксация NN%» into the rationale; a full early
+          // close / resolution is 100%.
+          const pctM = b.settled_by === "partial" ? /(\d+)\s*%/.exec(b.rationale ?? "") : null;
+          const closedPct = pctM ? Number(pctM[1]) : 100;
           (settledBets[b.strategy_id] ||= []).push({
             market: b.market_label, stake: b.stake ?? 0, result: b.result ?? "lost", payout: b.payout ?? 0,
-            settledBy: b.settled_by ?? null,
+            settledBy: b.settled_by ?? null, closedPct,
           });
           result[b.strategy_id] = (result[b.strategy_id] ?? 0) + ((b.payout ?? 0) - (b.stake ?? 0));
         } else {
@@ -184,7 +189,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
 
       matchDb[m.id] = {
         id: m.id, competitionId: m.competition_id, home: m.home, away: m.away, state: m.state,
-        minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
+        minute: m.minute, clock: m.clock ?? null, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
         kickoff: warsawLabel(m.kickoff_at), oddsUpdated: null, finalScore: m.final_score, kickoffTime: m.kickoff_time,
         endTime: m.end_time, duration: m.duration, endNote: m.end_note,
         analyzing: jobActive(R.getAnalysisJob(db, m.id), nowMs),

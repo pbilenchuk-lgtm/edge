@@ -115,6 +115,8 @@ export interface Match {
   duration: string | null;
   end_note: string | null;
   external_ref: string | null;
+  /** raw ESPN display clock incl. stoppage ("45'+2'"); null pre-match / non-ESPN */
+  clock?: string | null;
 }
 
 export interface Assessment {

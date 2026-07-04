@@ -172,9 +172,24 @@ export function matchContext(db: Database, matchId: string): string | undefined 
   const live = R.getMatchLive(db, matchId);
   const fmt = (j: string | null) => { if (!j) return null; try { const l = JSON.parse(j); return `${l.team} (${l.formation ?? "?"}): ${(l.starters ?? []).slice(0, 11).join(", ")}`; } catch { return null; } };
   const parts: string[] = [];
+  const m = R.getMatch(db, matchId);
+  // Real match time incl. stoppage ("45'+2'") — so the model knows how much game
+  // is actually left, not just the whole-minute figure.
+  if (m?.state === "live" && m.clock) parts.push(`Время матча: ${m.clock}`);
   const h = fmt(live?.home_lineup ?? null), a = fmt(live?.away_lineup ?? null);
   if (h) parts.push(`Состав (дом) — ${h}`);
   if (a) parts.push(`Состав (гости) — ${a}`);
+  // Live team statistics (possession, shots, chances) — the flow of play beyond
+  // the scoreline; a core reassessment signal, not just the goal/card events.
+  if (live?.stats) {
+    try {
+      const s = JSON.parse(live.stats) as { home: any; away: any };
+      const line = (t: any) => (t && Array.isArray(t.items) ? t.items.map((it: any) => `${it.label} ${it.value}`).join(", ") : "");
+      const hl = line(s.home), al = line(s.away);
+      if (hl) parts.push(`Статистика (дом, ${s.home?.team ?? "?"}): ${hl}`);
+      if (al) parts.push(`Статистика (гости, ${s.away?.team ?? "?"}): ${al}`);
+    } catch { /* ignore malformed stats */ }
+  }
   const events = R.eventsForMatch(db, matchId).filter((e) => e.type !== "other");
   if (events.length) parts.push("События: " + events.map((e) => `${e.minute ?? "?"}' ${e.type}${e.team ? " " + e.team : ""}`).join("; "));
   return parts.length ? parts.join("\n") : undefined;
