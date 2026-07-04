@@ -365,7 +365,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       ) : screen === "feed" ? (
         <FeedScreen feed={EVENT_FEED} />
       ) : screen === "metrics" ? (
-        <MetricsScreen catalog={catalog} quality={QUALITY} />
+        <MetricsScreen catalog={catalog} quality={QUALITY} stats={initial.strategyStats} />
       ) : (
         <ModelsScreen providers={providers} setProviders={setProviders} total={TOTAL_BALANCE} allocated={allocatedSum} cron={initial.cron}
           onSetTotal={async (amount: number) => {
@@ -393,14 +393,14 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
   const hasReassess = Object.keys(match.reassessByStrat || {}).length > 0;
   const hasSettled = Object.keys(match.settledBets || {}).length > 0;
-  const tabs: any[] = [{ id: "analysis", label: "Анализ" }]; // always available — analyze on demand
-  tabs.push({ id: "strat", label: "Ставки стратегий" });
+  // Strategies matter more than analysis → their bets tab leads and is default.
+  const tabs: any[] = [{ id: "strat", label: "Ставки стратегий" }, { id: "analysis", label: "Анализ" }];
   if (hasReassess) tabs.push({ id: "reassess", label: "Переоценки" });
   if (hasSettled) tabs.push({ id: "settle", label: "Расчёт" });
   const hasLive = !!((match.lineups && (match.lineups.home || match.lineups.away)) || (match.events && match.events.length));
   if (hasLive) tabs.push({ id: "live", label: "Составы · события" });
   if (hasLog) tabs.push({ id: "log", label: "Лог" });
-  const defaultTab = hasSettled ? "settle" : "analysis"; // analysis is the default view
+  const defaultTab = hasSettled ? "settle" : "strat"; // strategy bets are the default view
   const [tab, setTab] = useState(defaultTab);
   const [logStrat, setLogStrat] = useState(compStrats[0]?.id);
   const [refreshing, setRefreshing] = useState(false);
@@ -819,28 +819,37 @@ function feedIconStyle(t: string) {
   return map[t] || {};
 }
 
-function MetricsScreen({ catalog, quality }: any) {
-  const rows = catalog.filter((s: any) => quality[s.id]).map((s: any) => ({ ...s, q: quality[s.id] }));
+function MetricsScreen({ catalog, quality, stats }: any) {
+  const S0 = { matches: 0, predictions: 0, won: 0, lost: 0, openPlus: 0, openMinus: 0, openPnl: 0, earned: 0, lostMoney: 0, inMatch: 0, inMatchPlus: 0, inMatchMinus: 0 };
   return (
     <main style={S.main}>
       <div style={S.feedHead}>
-        <div><div style={S.feedTitle}>Метрики качества</div><div style={S.feedSub}>ROI на малой выборке врёт. Эти метрики показывают, реален ли эдж.</div></div>
+        <div><div style={S.feedTitle}>Статистика стратегий</div><div style={S.feedSub}>Подробная статистика по каждой стратегии. Открытые позиции — по актуальной котировке. Ниже — метрики качества эджа.</div></div>
       </div>
-      <div style={S.metricExplain}>
-        <div style={S.metricExplainItem}><b style={{ color: "#7fb4e8" }}>Brier</b> — точность вероятностей (ниже = лучше).</div>
-        <div style={S.metricExplainItem}><b style={{ color: "#70b56a" }}>CLV</b> — closing line value. Лучший ранний признак реального эджа.</div>
-        <div style={S.metricExplainItem}><b style={{ color: "#e8a838" }}>Калибровка</b> — совпадают ли предсказанные вероятности с фактом.</div>
-      </div>
-      {rows.map((s: any) => {
-        const q = s.q;
-        const enough = q.samples >= 20;
+      {catalog.map((s: any) => {
+        const st = { ...S0, ...(stats?.[s.id] || {}) };
+        const q = quality[s.id];
+        const netRealized = st.earned - st.lostMoney;
         return (
           <section key={s.id} style={{ ...S.card, borderColor: s.color + "55" }}>
             <div style={S.metricHead}>
               <span style={{ ...S.dot, background: s.color }} />
               <span style={S.metricName}>{s.name}</span>
-              <span style={S.metricSamples}>{q.samples} матчей {!enough && <span style={{ color: "#e8a838" }}>· мало данных</span>}</span>
+              <span style={S.metricSamples}>{st.matches} матч(ей) · {st.predictions} ставок</span>
             </div>
+            <div style={S.statGrid}>
+              <div style={S.statCell}><div style={S.statLbl}>Верных прогнозов</div><div style={{ ...S.statVal, color: "#5fd08a" }}>{st.won}</div></div>
+              <div style={S.statCell}><div style={S.statLbl}>Неверных</div><div style={{ ...S.statVal, color: "#ff6b6b" }}>{st.lost}</div></div>
+              <div style={S.statCell}><div style={S.statLbl}>Заработано</div><div style={{ ...S.statVal, color: "#5fd08a" }}>{fmtMoney(st.earned)}</div></div>
+              <div style={S.statCell}><div style={S.statLbl}>Потеряно</div><div style={{ ...S.statVal, color: "#ff6b6b" }}>−{fmtMoney(st.lostMoney)}</div></div>
+              <div style={S.statCell}><div style={S.statLbl}>Итог (реализ.)</div><div style={{ ...S.statVal, color: netRealized >= 0 ? "#5fd08a" : "#ff6b6b" }}>{netRealized >= 0 ? "+" : ""}{fmtMoney(netRealized)}</div></div>
+              <div style={S.statCell}><div style={S.statLbl}>Открыто +/−</div><div style={S.statVal}><span style={{ color: "#5fd08a" }}>{st.openPlus}</span> / <span style={{ color: "#ff6b6b" }}>{st.openMinus}</span></div></div>
+              <div style={S.statCell}><div style={S.statLbl}>Открытый P&L</div><div style={{ ...S.statVal, color: st.openPnl >= 0 ? "#5fd08a" : "#ff6b6b" }}>{st.openPnl >= 0 ? "+" : ""}{fmtMoney(st.openPnl)}</div></div>
+              <div style={S.statCell}><div style={S.statLbl}>В матче +/−</div><div style={S.statVal}><span style={{ color: "#5fd08a" }}>{st.inMatchPlus}</span> / <span style={{ color: "#ff6b6b" }}>{st.inMatchMinus}</span> <span style={{ color: MUTE, fontSize: 10 }}>из {st.inMatch}</span></div></div>
+            </div>
+            {st.predictions === 0 && <div style={S.metricWarn}>Ставок ещё нет — статистика появится, когда стратегия начнёт играть.</div>}
+            {q ? <>
+            <div style={{ ...S.calibLabel, marginTop: 12 }}>Метрики качества эджа {q.samples < 20 && <span style={{ color: "#e8a838" }}>· мало данных ({q.samples})</span>}</div>
             <div style={S.metricNums}>
               <div style={S.metricNumCell}><div style={S.metricNumLbl}>Brier</div><div style={{ ...S.metricNumVal, color: q.brier <= 0.19 ? "#5fd08a" : q.brier <= 0.22 ? "#e8a838" : "#ff6b6b" }}>{q.brier?.toFixed(3)}</div></div>
               <div style={S.metricNumCell}><div style={S.metricNumLbl}>CLV</div><div style={{ ...S.metricNumVal, color: q.clv > 0 ? "#5fd08a" : "#ff6b6b" }}>{q.clv >= 0 ? "+" : ""}{q.clv?.toFixed(1)}%</div></div>
@@ -862,7 +871,8 @@ function MetricsScreen({ catalog, quality }: any) {
                 );
               })}
             </div>
-            {!enough && <div style={S.metricWarn}>Выборка мала ({q.samples}) — не доверяй метрикам до 20+ матчей.</div>}
+            {q.samples < 20 && <div style={S.metricWarn}>Выборка мала ({q.samples}) — не доверяй метрикам качества до 20+ рассчитанных ставок.</div>}
+            </> : null}
           </section>
         );
       })}
@@ -1497,6 +1507,7 @@ const S: Record<string, React.CSSProperties> = {
   metricHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12 },
   metricName: { fontSize: 15, fontWeight: 700 },
   metricSamples: { fontSize: 11.5, color: MUTE, marginLeft: "auto", fontFamily: "'JetBrains Mono', monospace" },
+  statGrid: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginTop: 10 },
   metricNums: { display: "flex", gap: 8, marginBottom: 14 },
   metricNumCell: { flex: 1, background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px", textAlign: "center" },
   metricNumLbl: { fontSize: 10, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em" },

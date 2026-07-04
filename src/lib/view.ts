@@ -60,6 +60,24 @@ export interface FeedItem {
 }
 export interface ProviderView { id: string; name: string; keyHint: string; models: string[]; hasKey: boolean; }
 
+/** Per-strategy operational stats (distinct from the quality metrics). Open
+ *  positions are marked to market against the FRESHEST quote, not the price
+ *  stored on the bet, so "в плюсе/в минусе" reflects the current line. */
+export interface StrategyStats {
+  matches: number;        // distinct matches the strategy bet on
+  predictions: number;    // filled bets (open + settled) — actual predictions
+  won: number;            // settled by the real match outcome → correct
+  lost: number;           // settled by the real match outcome → wrong
+  openPlus: number;       // open positions currently in profit (current quote)
+  openMinus: number;      // open positions currently at a loss
+  openPnl: number;        // current unrealized P&L on open positions ($)
+  earned: number;         // realized profit ($) — sum of positive settled P&L
+  lostMoney: number;      // realized loss ($, positive number)
+  inMatch: number;        // predictions entered in-match (live)
+  inMatchPlus: number;    // in-match predictions currently/finally positive
+  inMatchMinus: number;   // in-match predictions currently/finally negative
+}
+
 export interface AppData {
   treasuryTotal: number;
   sports: { id: string; label: string }[];
@@ -73,6 +91,7 @@ export interface AppData {
   eventFeed: FeedItem[];
   providers: ProviderView[];
   cron: CronView;
+  strategyStats: Record<string, StrategyStats>;
 }
 export interface CronView {
   enabled: boolean; tickMin: number; discoverHr: number; liveSec: number; nextRunAt: string | null;
@@ -204,7 +223,9 @@ export function buildAppData(db: Database, env = process.env): AppData {
     recent: recentRuns.map((r) => ({ at: r.at, kind: r.kind, ok: r.ok === 1, summary: r.summary })),
   };
 
-  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers, cron };
+  const strategyStats = computeStrategyStats(db, strategies);
+
+  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats };
   // node:sqlite rows have a null prototype; React Server Components can't pass
   // those to a client component. A JSON round-trip yields plain objects.
   return JSON.parse(JSON.stringify(payload));
@@ -217,6 +238,48 @@ function view(a: { confidence: string | null; short: string | null; body: string
 const EVENT_LABEL: Record<string, string> = { goal: "⚽ гол", red_card: "🟥 красная", yellow_card: "🟨 жёлтая", sub: "🔁 замена" };
 // The feed filters group all match events under "События матча" (type "goal").
 const FEED_EVENT_TYPE: Record<string, string> = { goal: "goal", red_card: "card", yellow_card: "card", sub: "sub" };
+
+/** Detailed per-strategy stats — open positions marked to the FRESHEST market
+ *  price (not the price stored on the bet), so +/- reflects the current line. */
+function computeStrategyStats(db: Database, strategies: { id: string }[]): Record<string, StrategyStats> {
+  const out: Record<string, StrategyStats> = {};
+  const seenMatch: Record<string, Set<string>> = {};
+  for (const s of strategies) {
+    out[s.id] = { matches: 0, predictions: 0, won: 0, lost: 0, openPlus: 0, openMinus: 0, openPnl: 0, earned: 0, lostMoney: 0, inMatch: 0, inMatchPlus: 0, inMatchMinus: 0 };
+    seenMatch[s.id] = new Set();
+  }
+  for (const c of R.listCompetitions(db)) {
+    for (const m of R.listMatches(db, c.id)) {
+      const cur: Record<string, number> = {}; // freshest quote per market label
+      for (const mk of R.latestMarkets(db, m.id)) if (!(mk.label in cur)) cur[mk.label] = mk.price;
+      for (const b of R.betsForMatch(db, m.id)) {
+        const st = out[b.strategy_id];
+        if (!st) continue;
+        const open = b.status === "open";
+        const settled = b.status === "settled_won" || b.status === "settled_lost";
+        if (!open && !settled) continue; // proposed / not_filled — not a prediction yet
+        st.predictions++;
+        seenMatch[b.strategy_id].add(m.id);
+        const inMatch = !!b.entered_minute && /\d/.test(b.entered_minute); // a live minute, not "предматч"
+        let pnl = 0;
+        if (settled) {
+          pnl = (b.payout ?? 0) - (b.stake ?? 0);
+          if (pnl >= 0) st.earned += pnl; else st.lostMoney += -pnl;
+          if (b.settled_by == null) { if (b.result === "won") st.won++; else st.lost++; } // real outcome only
+        } else {
+          const price = cur[b.market_label] ?? b.current_price ?? b.entry_price ?? 0; // current quote
+          const entry = b.entry_price ?? 0;
+          pnl = entry > 0 ? (b.stake ?? 0) * (price / entry - 1) : 0;
+          st.openPnl += pnl;
+          if (pnl >= 0) st.openPlus++; else st.openMinus++;
+        }
+        if (inMatch) { st.inMatch++; if (pnl >= 0) st.inMatchPlus++; else st.inMatchMinus++; }
+      }
+    }
+  }
+  for (const s of strategies) out[s.id].matches = seenMatch[s.id].size;
+  return out;
+}
 
 function buildFeed(
   db: Database,
