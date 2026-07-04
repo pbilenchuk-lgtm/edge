@@ -71,6 +71,10 @@ export interface StrategyParams {
   takeProfit?: number;
   /** per-position stop: close once down this fraction (positive number, e.g. 0.4) */
   exitStop?: number;
+  /** deterministic "edge gone" auto-exit (model prob ≤ current price). Default ON
+   *  for back-compat; set false to let the STRATEGIST manage exits instead of the
+   *  fast loop cashing out every tick the edge dips (avoids in-match churn). */
+  edgeExit?: boolean;
   /** diagnostic note when nothing could be extracted */
   note?: string;
 }

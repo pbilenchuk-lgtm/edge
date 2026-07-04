@@ -18,6 +18,12 @@ test("exitDecision: take-profit, stop, edge-gone, hold", () => {
   assert.match(exitDecision({ params: P, aiProb: 0.9, entryPriceCents: 50, currentPriceCents: 20 }).reason, /стоп/); // -60%
   assert.match(exitDecision({ params: P, aiProb: 0.4, entryPriceCents: 50, currentPriceCents: 60 }).reason, /край/); // edge gone
   assert.equal(exitDecision({ params: P, aiProb: 0.8, entryPriceCents: 50, currentPriceCents: 55 }).exit, false); // hold
+  // edgeExit:false disables the "edge gone" auto-exit (strategist manages exits),
+  // but take-profit and hard stop still fire — no in-match churn on a dip.
+  const NE = { takeProfit: 0.5, exitStop: 0.5, edgeExit: false };
+  assert.equal(exitDecision({ params: NE, aiProb: 0.4, entryPriceCents: 50, currentPriceCents: 60 }).exit, false); // edge gone → held
+  assert.equal(exitDecision({ params: NE, aiProb: 0.9, entryPriceCents: 50, currentPriceCents: 80 }).exit, true);  // TP still fires
+  assert.equal(exitDecision({ params: NE, aiProb: 0.9, entryPriceCents: 50, currentPriceCents: 20 }).exit, true);  // stop still fires
 });
 
 test("autoEnter fills proposed bets at the current price", () => {
@@ -171,6 +177,37 @@ test("runLiveCycle reacts to a live goal, and quiet re-runs don't re-fire the st
   // second pass: same goal (deduped) → no new trigger → strategist not re-called
   const r2 = await runLiveCycle(db, provider, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
   assert.equal(r2.triggers, 0, "known event doesn't re-trigger");
+});
+
+test("runLiveCycle reassesses on the 5-min heartbeat with no on-pitch event", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0 && c.external_league === "fifa.world")!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  // Retire the seeded demo's other live matches so `mid` is the sole periodic
+  // candidate — otherwise they'd compete for the per-run reassessment budget.
+  for (const c of R.listCompetitions(db)) for (const mm of R.listMatches(db, c.id)) R.updateMatch(db, mm.id, { state: "finished" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Japan", away: "Peru", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 40, ai_prob: 0.5, liquidity: null, external_ref: null, snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, market_label: "Under 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 40, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+
+  // provider surfaces the match but reports NO new events — nothing on the pitch
+  const provider: SportsProvider = {
+    name: "mock",
+    async scoreboard(_s, league) { return league === "fifa.world" ? [{ externalRef: "E1", home: "Japan", away: "Peru", state: "live", minute: 55, scoreHome: 0, scoreAway: 0, final: false }] : []; },
+    async matchDetail() { return { lineupOut: true, lineups: { home: null, away: null }, events: [] }; },
+  };
+  const mock = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [], note: "Держу Under, темп низкий." }) }] }) }) as any);
+
+  const before = R.reassessmentsForMatch(db, mid).length;
+  const r = await runLiveCycle(db, provider, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
+  assert.equal(r.triggers, 0, "no on-pitch event trigger");
+  const notes = R.reassessmentsForMatch(db, mid);
+  assert.ok(notes.length > before, "periodic heartbeat still wrote a reassessment note");
+  assert.equal(notes[notes.length - 1].trigger, "time", "labelled as a periodic (time) reassessment");
+  assert.match(notes[notes.length - 1].body, /Держу/, "narrative note carries the strategist's read");
 });
 
 test("captureOpenOdds locks the kickoff price (first write wins)", () => {

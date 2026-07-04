@@ -132,6 +132,7 @@ export function validateParams(raw: StrategyParams): StrategyParams {
   // plainly-stated stop-loss is never silently dropped on the LLM path.
   if (typeof raw.stop === "number" && raw.stop !== 0 && Math.abs(raw.stop) <= 1)
     p.stop = -Math.abs(raw.stop);
+  if (typeof raw.edgeExit === "boolean") p.edgeExit = raw.edgeExit;
   if (typeof raw.minEdge === "number" && raw.minEdge >= 0 && raw.minEdge <= 100)
     p.minEdge = raw.minEdge;
   if (isPos(raw.flatSize)) p.flatSize = clamp(raw.flatSize!, 0, 1);
@@ -281,7 +282,10 @@ export function exitDecision(inp: ExitInput): ExitDecision {
   const sl = params.exitStop ?? DEFAULT_EXIT_STOP;
   if (pnlFrac >= tp) return { exit: true, reason: `тейк-профит +${(pnlFrac * 100).toFixed(0)}%`, pnlFrac };
   if (pnlFrac <= -Math.abs(sl)) return { exit: true, reason: `стоп ${(pnlFrac * 100).toFixed(0)}%`, pnlFrac };
-  if (aiProb * 100 - currentPriceCents <= 0) return { exit: true, reason: `край исчез (ИИ ${(aiProb * 100).toFixed(0)}% ≤ ${currentPriceCents}¢)`, pnlFrac };
+  // "Edge gone" auto-exit is opt-OUT: strategies that manage exits via the
+  // strategist (edgeExit:false) skip this so the fast loop doesn't cash out —
+  // and re-enter — every tick the model prob dips under the price (in-match churn).
+  if (params.edgeExit !== false && aiProb * 100 - currentPriceCents <= 0) return { exit: true, reason: `край исчез (ИИ ${(aiProb * 100).toFixed(0)}% ≤ ${currentPriceCents}¢)`, pnlFrac };
   return { exit: false, reason: "держим", pnlFrac };
 }
 

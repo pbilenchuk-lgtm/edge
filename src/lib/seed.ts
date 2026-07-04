@@ -284,7 +284,10 @@ export function seedMinimal(db: Database): void {
   R.insertStrategy(db, {
     id: "wc", sport_id: "football", name: "Мундиаль", tag: "ЧМ-2026", color: "#e8a838", version: 1,
     model: "Claude Opus 4.8", created_at: T, prompt: PROMPT_STRATEGY,
-    params: { minEdge: 1, tiers: [[6, 0.15], [4, 0.12], [2.5, 0.09], [1.5, 0.06], [1, 0.04]], maxPerBet: 0.15, stop: -0.20, takeProfit: 0.6, exitStop: 0.5 },
+    // edgeExit:false — the STRATEGIST manages exits (full/partial fixation) at
+    // each reassessment; the fast loop only guards take-profit / hard stop, so a
+    // momentary dip in model edge no longer churns the position in and out.
+    params: { minEdge: 1, tiers: [[6, 0.15], [4, 0.12], [2.5, 0.09], [1.5, 0.06], [1, 0.04]], maxPerBet: 0.15, stop: -0.20, takeProfit: 0.6, exitStop: 0.5, edgeExit: false },
   });
 }
 

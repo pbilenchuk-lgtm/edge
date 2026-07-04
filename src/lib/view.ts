@@ -38,7 +38,7 @@ export interface MatchView {
   bets: Record<string, { rationale: string | null; items: BetItemView[] }>;
   reassessByStrat: Record<string, { min: string | null; text: string; conf: string | null }[]>;
   logByStrat: Record<string, { min: string | null; text: string; type: string }[]>;
-  settledBets: Record<string, { market: string; stake: number; result: string; payout: number }[]>;
+  settledBets: Record<string, { market: string; stake: number; result: string; payout: number; settledBy: string | null }[]>;
   result: Record<string, number>;
   /** real lineups (ESPN), if enriched — shown under the СОСТАВ toggle */
   lineups: { home: LineupView | null; away: LineupView | null } | null;
@@ -154,6 +154,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
         if (b.status === "settled_won" || b.status === "settled_lost") {
           (settledBets[b.strategy_id] ||= []).push({
             market: b.market_label, stake: b.stake ?? 0, result: b.result ?? "lost", payout: b.payout ?? 0,
+            settledBy: b.settled_by ?? null,
           });
           result[b.strategy_id] = (result[b.strategy_id] ?? 0) + ((b.payout ?? 0) - (b.stake ?? 0));
         } else {

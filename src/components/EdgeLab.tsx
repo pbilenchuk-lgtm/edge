@@ -212,6 +212,19 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     if (app.catalog) setCatalog(app.catalog);
   };
 
+  // Live auto-refresh: while ANY match is in play, re-pull the full app state
+  // every 3s so money, quotes, the trade log, reassessments and settlement all
+  // stay live without a manual page reload. Idle (no live match) → no polling.
+  const liveMatchCount = Object.values(matchDb).filter(
+    (m: any) => m.state === "live" || m.state === "lineup" || m.lineupOut,
+  ).length;
+  useEffect(() => {
+    if (!liveMatchCount) return;
+    const id = setInterval(() => { reloadApp().catch(() => {}); }, 3000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveMatchCount]);
+
   // Toasts — side notifications for actions, so the user sees what worked/failed.
   const [toasts, setToasts] = useState<{ id: number; kind: "ok" | "err" | "info"; text: string }[]>([]);
   const toast = (kind: "ok" | "err" | "info", text: string) => {
@@ -391,15 +404,24 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   const hasLog = match.state === "live" || match.state === "finished";
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
   const hasReassess = Object.keys(match.reassessByStrat || {}).length > 0;
-  const hasSettled = Object.keys(match.settledBets || {}).length > 0;
+  // Split settled bets: resolution = the market actually resolved (settledBy null);
+  // cashout = closed early or partially fixed mid-match (settledBy early/partial).
+  // Only a real RESOLUTION on a FINISHED match is "Финальный счёт — рассчитано";
+  // mid-match cash-outs are just closed trades, never framed as final results.
+  const settledEntries: [string, any[]][] = Object.entries(match.settledBets || {});
+  const hasResolution = !!match.finalScore && settledEntries.some(([, arr]) => arr.some((b: any) => !b.settledBy));
+  const hasCashout = settledEntries.some(([, arr]) => arr.some((b: any) => b.settledBy));
+  const hasSettled = hasResolution || hasCashout;
   // Strategies matter more than analysis → their bets tab leads and is default.
   const tabs: any[] = [{ id: "strat", label: "Ставки стратегий" }, { id: "analysis", label: "Анализ" }];
   if (hasReassess) tabs.push({ id: "reassess", label: "Переоценки" });
-  if (hasSettled) tabs.push({ id: "settle", label: "Расчёт" });
+  if (hasSettled) tabs.push({ id: "settle", label: hasResolution ? "Расчёт" : "Закрытия" });
   const hasLive = !!((match.lineups && (match.lineups.home || match.lineups.away)) || (match.events && match.events.length));
   if (hasLive) tabs.push({ id: "live", label: "Составы · события" });
   if (hasLog) tabs.push({ id: "log", label: "Лог" });
-  const defaultTab = hasSettled ? "settle" : "strat"; // strategy bets are the default view
+  // Only jump straight to the settle tab when the match actually resolved — a
+  // mid-match partial fixation must not hijack a live card into "рассчитано".
+  const defaultTab = hasResolution ? "settle" : "strat";
   const [tab, setTab] = useState(defaultTab);
   const [logStrat, setLogStrat] = useState(compStrats[0]?.id);
   const [refreshing, setRefreshing] = useState(false);
@@ -566,20 +588,49 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
             )}
             {tab === "settle" && (
               <div>
-                <div style={S.settleHead}>Финальный счёт <b style={{ color: "#e8a838" }}>{match.finalScore}</b> — ставки рассчитаны</div>
-                {compStrats.filter((st: any) => match.settledBets[st.id]).map((st: any) => (
-                  <div key={st.id} style={S.settleStrat}>
-                    <div style={S.settleStratHead}><span style={{ ...S.dot, background: st.color }} /><span style={S.stratName}>{st.name}</span></div>
-                    {match.settledBets[st.id].map((b: any, i: number) => (
-                      <div key={i} style={S.settleBet}>
-                        <span style={S.settleMarket}>{b.market}</span>
-                        <span style={S.settleStake}>{fmtMoney(b.stake)}</span>
-                        <span style={{ ...S.settleResult, color: b.result === "won" ? "#5fd08a" : "#ff6b6b" }}>{b.result === "won" ? "✓ выиграла" : "✕ проиграла"}</span>
-                        <span style={{ ...S.settlePayout, color: b.result === "won" ? "#5fd08a" : "#ff6b6b" }}>{b.result === "won" ? `→ ${fmtMoney(b.payout)}` : "→ $0"}</span>
+                {/* RESOLUTION — only when the match actually finished. */}
+                {hasResolution && (
+                  <div style={{ marginBottom: hasCashout ? 18 : 0 }}>
+                    <div style={S.settleHead}>Финальный счёт <b style={{ color: "#e8a838" }}>{match.finalScore}</b> — ставки рассчитаны</div>
+                    {compStrats.filter((st: any) => (match.settledBets[st.id] || []).some((b: any) => !b.settledBy)).map((st: any) => (
+                      <div key={st.id} style={S.settleStrat}>
+                        <div style={S.settleStratHead}><span style={{ ...S.dot, background: st.color }} /><span style={S.stratName}>{st.name}</span></div>
+                        {match.settledBets[st.id].filter((b: any) => !b.settledBy).map((b: any, i: number) => (
+                          <div key={i} style={S.settleBet}>
+                            <span style={S.settleMarket}>{b.market}</span>
+                            <span style={S.settleStake}>{fmtMoney(b.stake)}</span>
+                            <span style={{ ...S.settleResult, color: b.result === "won" ? "#5fd08a" : "#ff6b6b" }}>{b.result === "won" ? "✓ выиграла" : "✕ проиграла"}</span>
+                            <span style={{ ...S.settlePayout, color: b.result === "won" ? "#5fd08a" : "#ff6b6b" }}>{b.result === "won" ? `→ ${fmtMoney(b.payout)}` : "→ $0"}</span>
+                          </div>
+                        ))}
                       </div>
                     ))}
                   </div>
-                ))}
+                )}
+                {/* CASH-OUTS — positions closed / partially fixed in-match. These
+                    are trades, not the match result: show realised P&L, no счёт. */}
+                {hasCashout && (
+                  <div>
+                    <div style={S.settleHead}>Закрытия по ходу матча — реализованный P&L (не итог матча)</div>
+                    {compStrats.filter((st: any) => (match.settledBets[st.id] || []).some((b: any) => b.settledBy)).map((st: any) => (
+                      <div key={st.id} style={S.settleStrat}>
+                        <div style={S.settleStratHead}><span style={{ ...S.dot, background: st.color }} /><span style={S.stratName}>{st.name}</span></div>
+                        {match.settledBets[st.id].filter((b: any) => b.settledBy).map((b: any, i: number) => {
+                          const pnl = (b.payout ?? 0) - (b.stake ?? 0);
+                          const up = pnl >= 0;
+                          return (
+                            <div key={i} style={S.settleBet}>
+                              <span style={S.settleMarket}>{b.market}{b.settledBy === "partial" ? " · частично" : ""}</span>
+                              <span style={S.settleStake}>{fmtMoney(b.stake)}</span>
+                              <span style={{ ...S.settleResult, color: up ? "#5fd08a" : "#ff6b6b" }}>закрыта</span>
+                              <span style={{ ...S.settlePayout, color: up ? "#5fd08a" : "#ff6b6b" }}>{up ? "+" : "−"}{fmtMoney(Math.abs(pnl))}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
             {tab === "log" && hasLog && (

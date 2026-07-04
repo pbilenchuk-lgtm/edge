@@ -24,7 +24,7 @@ import { exitDecision, sizeBet } from "./thresholds.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
 import { hoursUntil } from "./time.js";
-import type { Confidence } from "./types.js";
+import type { Confidence, ReassessTrigger } from "./types.js";
 
 // Timing gates (hours before kickoff). Pre-match assessment opens ~12h out;
 // lineups are treated as out ~1h before (WC teamsheets), triggering the final
@@ -211,10 +211,11 @@ export interface ReassessResult { exits: ExitItem[]; entries: ReassessEntry[] }
  * trigger actually fired. This is what makes reassessment *react* to live data.
  */
 export async function strategistReassess(
-  db: Database, deps: EngineDeps = {}, opts: { max?: number; newEventMatchIds?: Set<string>; triggeredOnly?: boolean } = {},
+  db: Database, deps: EngineDeps = {}, opts: { max?: number; newEventMatchIds?: Set<string>; triggeredOnly?: boolean; labelFor?: Map<string, ReassessTrigger> } = {},
 ): Promise<ReassessResult> {
   const max = opts.max ?? 4;
   const triggered = opts.newEventMatchIds ?? new Set<string>();
+  const labelFor = opts.labelFor ?? new Map<string, ReassessTrigger>();
   // Event-driven mode (fast live loop): only reassess matches with a fresh
   // trigger — don't burn an LLM call every tick on quiet open positions.
   const triggeredOnly = opts.triggeredOnly ?? false;
@@ -224,7 +225,12 @@ export async function strategistReassess(
   const out: ReassessResult = { exits: [], entries: [] };
   const touched = new Set<string>();
   let calls = 0;
-  for (const { comp, sport, match: m } of activeMatches(db)) {
+  // Process on-pitch event triggers (goal / red card — anything NOT labelled
+  // "time") BEFORE the periodic heartbeat matches, so an urgent reaction to a
+  // goal is never crowded out of the per-run `max` budget by routine 5-min ticks.
+  const isPeriodic = (id: string) => (labelFor.get(id) ?? "time") === "time";
+  const ordered = activeMatches(db).slice().sort((a, b) => Number(isPeriodic(a.match.id)) - Number(isPeriodic(b.match.id)));
+  for (const { comp, sport, match: m } of ordered) {
     if (calls >= max) break;
     const c = comps.get(comp);
     if (!c || c.budget <= 0) continue;
@@ -260,6 +266,22 @@ export async function strategistReassess(
         context: ctx,
       }, strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
       if (!dec.ok) continue;
+
+      // Record the reassessment as a narrative note (Переоценки tab) — this is
+      // BOTH the analytics readout ("что вижу сейчас") AND the timestamp the
+      // periodic 5-min cadence keys off. Written every time the strategist runs,
+      // even when it decides to hold (no exits/entries), so the tab shows the
+      // ongoing in-match thinking and the cadence advances.
+      const actioned: string[] = [];
+      if (dec.exits.length) actioned.push(`закрыть ${dec.exits.length}`);
+      if (dec.picks.length) actioned.push(`войти ${dec.picks.length}`);
+      const noteBody = dec.note?.trim() || (actioned.length ? `Действия: ${actioned.join(", ")}.` : "Держу текущие позиции без изменений.");
+      R.insertReassessment(db, {
+        id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m),
+        body: noteBody, confidence: assess?.confidence ?? null,
+        trigger: labelFor.get(m.id) ?? "time", created_at: now,
+      });
+      touched.add(sid);
 
       // (a) EXITS — full or partial fixation on this strategy's open positions.
       const exited = new Set<string>();
@@ -345,6 +367,8 @@ export async function runAutoCycle(
   // Pull real lineups + live events (ESPN) — this feeds matchContext and, via
   // its fresh events, arms the strategist's in-match reassessment triggers.
   const enrich = provider ? await enrichFromEspn(db, provider, deps) : { enriched: 0, newEvents: [] };
+  const labelFor = new Map<string, ReassessTrigger>();
+  for (const e of enrich.newEvents) if (!labelFor.has(e.matchId)) labelFor.set(e.matchId, LIVE_TRIGGER_TYPES.has(e.type) ? (e.type as ReassessTrigger) : "price_move");
   const triggers = new Set(enrich.newEvents.map((e) => e.matchId));
   advanceClocks(db, deps); // flip lineup_out ~1h before kickoff (time-scheduled fallback)
   captureLiveOpens(db, deps); // kickoff-price baseline for the odds column
@@ -355,7 +379,7 @@ export async function runAutoCycle(
   const analyzed = await autoAnalyze(db, deps);
   // deterministic safety-net exits, then strategist-driven reassessment (exits +
   // fresh entries) on matches with risk or a fresh live trigger.
-  const reassess = await strategistReassess(db, deps, { newEventMatchIds: triggers });
+  const reassess = await strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor });
   const exited = [...evaluateExits(db, deps), ...reassess.exits];
   const entered = autoEnter(db, deps); // fills both analyze- and reassess-proposed bets
   return {
@@ -370,6 +394,27 @@ export async function runAutoCycle(
 // call). Goals and red cards change the game state; yellows/subs are recorded
 // and shown, but don't burn a model call on the fast loop.
 const LIVE_TRIGGER_TYPES = new Set(["goal", "red_card"]);
+
+// The strategist reassesses at LEAST this often on any live match with open risk,
+// regardless of on-pitch events — so positions are re-evaluated (full/partial
+// exit) and fresh analytics land on a steady heartbeat, not only on goals.
+export const REASSESS_INTERVAL_MIN = 5;
+
+/** Live matches whose open positions haven't been reassessed in the last
+ *  REASSESS_INTERVAL_MIN minutes (or never) — the periodic cadence set. */
+function periodicReassessMatches(db: Database, deps: EngineDeps): Set<string> {
+  const nowMs = Date.parse(nowFn(deps)()) || Date.now();
+  const due = new Set<string>();
+  for (const { match: m } of activeMatches(db)) {
+    if (m.state !== "live" && m.state !== "lineup" && !m.lineup_out) continue;
+    const hasOpen = R.betsForMatch(db, m.id).some((b) => b.status === "open");
+    if (!hasOpen) continue;
+    const notes = R.reassessmentsForMatch(db, m.id);
+    const last = notes.length ? Date.parse(notes[notes.length - 1].created_at) : NaN;
+    if (isNaN(last) || nowMs - last >= REASSESS_INTERVAL_MIN * 60_000) due.add(m.id);
+  }
+  return due;
+}
 
 export interface LiveCycleResult { live: number; oddsUpdated: number; enriched: number; triggers: number; exits: number; entries: number }
 
@@ -395,16 +440,23 @@ export async function runLiveCycle(
   advanceClocks(db, deps);
   const enrich = provider ? await enrichFromEspn(db, provider, deps) : { enriched: 0, newEvents: [] };
   captureLiveOpens(db, deps); // snapshot kickoff prices the first time a match is live
-  // only goals / red cards trigger the (LLM) strategist reassessment
-  const triggers = new Set(enrich.newEvents.filter((e) => LIVE_TRIGGER_TYPES.has(e.type)).map((e) => e.matchId));
+  // Reassessment fires on TWO conditions, unioned: (1) a high-impact on-pitch
+  // event (goal / red card) — labelled by its type; (2) the periodic 5-min
+  // heartbeat on any match with open risk — labelled "time". Both hand the
+  // strategist the live context to re-evaluate positions AND open fresh ones.
+  const labelFor = new Map<string, ReassessTrigger>();
+  const eventTriggers = new Set<string>();
+  for (const e of enrich.newEvents) if (LIVE_TRIGGER_TYPES.has(e.type)) { labelFor.set(e.matchId, e.type as ReassessTrigger); eventTriggers.add(e.matchId); }
+  for (const id of periodicReassessMatches(db, deps)) if (!labelFor.has(id)) labelFor.set(id, "time");
+  const reassessIds = new Set(labelFor.keys());
 
   const detExits = evaluateExits(db, deps); // cheap TP/stop, reacts to price every tick
-  const reassess = await strategistReassess(db, deps, { newEventMatchIds: triggers, triggeredOnly: true });
+  const reassess = await strategistReassess(db, deps, { newEventMatchIds: reassessIds, triggeredOnly: true, labelFor });
   autoEnter(db, deps); // fill any positions the strategist just opened
 
   return {
     live: inPlay.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),
-    enriched: enrich.enriched, triggers: triggers.size,
+    enriched: enrich.enriched, triggers: eventTriggers.size, // on-pitch events only (periodic reassess is separate)
     exits: detExits.length + reassess.exits.length, entries: reassess.entries.length,
   };
 }
