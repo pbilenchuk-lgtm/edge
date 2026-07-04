@@ -234,7 +234,18 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     toast("ok", acted ? `Переоценка: выходов ${j.exits}, входов ${j.entries}` : "Переоценка готова — изменений по позициям нет");
   };
 
-  const engine = (action: string, matchId: string) => fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, matchId }) }).then((x) => x.json());
+  // Never let a failed request reject: a network error (server mid-redeploy, or
+  // the free instance cold-starting/asleep) would otherwise throw out of the
+  // caller before it can reset its "работает…" state, leaving the button stuck
+  // with a raw "fetch failed". Return a structured error instead.
+  const engine = async (action: string, matchId: string): Promise<any> => {
+    try {
+      const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, matchId }) });
+      return await r.json();
+    } catch {
+      return { ok: false, status: "error", error: "сервер не ответил — возможно идёт передеплой или холодный старт (free-план засыпает после простоя). Повтори через минуту." };
+    }
+  };
   const reloadApp = async () => {
     const app = await (await fetch("/api/app")).json();
     if (app.matchDb) setMatchDb(app.matchDb);
@@ -291,6 +302,9 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const pollAnalyze = async (matchId: string): Promise<{ outcome: "done" | "failed" | "timeout"; error?: string }> => {
     for (let i = 0; i < 100; i++) { // ~150s ceiling (LLM timeout is 120s)
       const s = await engine("analyzeStatus", matchId);
+      // A transient status-call failure (cold start / redeploy) must not be read
+      // as "done" — keep polling; the durable job on the server is unaffected.
+      if (s.status === "error") { await new Promise((res) => setTimeout(res, 1500)); continue; }
       if (s.status !== "analyzing") { await reloadApp(); return { outcome: s.failed ? "failed" : "done", error: s.error }; }
       await new Promise((res) => setTimeout(res, 1500));
     }
@@ -525,7 +539,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                         ? <>ИИ оценит матч по рынкам (промт аналитики{hasLineups ? ", учёт составов" : ""}), проставит вероятности и предложит ставки стратегий.</>
                         : <>Нет котировок — сначала нажми «Подтянуть матчи» или ↻ в колонке котировок.</>}
                     </span>
-                    <button style={{ ...S.reassessBtn, opacity: (analyzing || !match.markets?.length) ? 0.5 : 1 }} disabled={analyzing || !match.markets?.length} onClick={async () => { setAnalyzing(true); setAnalyzeErr(null); const r = await onAnalyze(match.id); if (r && r.ok === false) setAnalyzeErr(r.error || "оценка не удалась"); setAnalyzing(false); }}>
+                    <button style={{ ...S.reassessBtn, opacity: (analyzing || !match.markets?.length) ? 0.5 : 1 }} disabled={analyzing || !match.markets?.length} onClick={async () => { setAnalyzing(true); setAnalyzeErr(null); try { const r = await onAnalyze(match.id); if (r && r.ok === false) setAnalyzeErr(r.error || "оценка не удалась"); } catch (e: any) { setAnalyzeErr(e?.message || "оценка не удалась"); } finally { setAnalyzing(false); } }}>
                       {analyzing ? "ИИ оценивает…" : match.preLineup || match.postLineup ? "↻ Переоценить (ИИ)" : "✨ Оценить матч (ИИ)"}
                     </button>
                   </div>
@@ -581,7 +595,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                 {match.state !== "finished" && (
                   <div style={S.reassessTop}>
                     <span style={S.reassessHint}>{match.markets?.length ? "Прогнать стратегию по матчу: ИИ оценит рынки и предложит ставки по методологии стратегии." : "Нет котировок — сначала «Подтянуть матчи»."}</span>
-                    <button style={{ ...S.reassessBtn, opacity: (analyzing || !match.markets?.length) ? 0.5 : 1 }} disabled={analyzing || !match.markets?.length} onClick={async () => { setAnalyzing(true); setAnalyzeErr(null); const r = await onAnalyze(match.id); if (r && r.ok === false) setAnalyzeErr(r.error || "не удалось"); setAnalyzing(false); }}>
+                    <button style={{ ...S.reassessBtn, opacity: (analyzing || !match.markets?.length) ? 0.5 : 1 }} disabled={analyzing || !match.markets?.length} onClick={async () => { setAnalyzing(true); setAnalyzeErr(null); try { const r = await onAnalyze(match.id); if (r && r.ok === false) setAnalyzeErr(r.error || "не удалось"); } catch (e: any) { setAnalyzeErr(e?.message || "не удалось"); } finally { setAnalyzing(false); } }}>
                       {analyzing ? "ИИ работает…" : "✨ Прогнать стратегию (ИИ)"}
                     </button>
                   </div>

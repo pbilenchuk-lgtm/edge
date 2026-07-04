@@ -132,10 +132,18 @@ export async function callLLM(
     if (text == null) return { ok: false, provider, error: "пустой ответ модели" };
     return { ok: true, text, provider, model: apiId };
   } catch (e) {
+    // undici's fetch throws a bare "fetch failed" and hides the real reason on
+    // `.cause` (ENOTFOUND / ECONNREFUSED / UND_ERR_CONNECT_TIMEOUT / TLS / an
+    // abort on timeout). Surface it so a network failure in production is
+    // actually diagnosable instead of an opaque "fetch failed".
+    const msg = e instanceof Error ? e.message : String(e);
+    const cause = (e as any)?.cause;
+    const detail = cause ? ` (${cause.code || cause.message || String(cause)})` : "";
+    const aborted = (e as any)?.name === "AbortError" || /abort/i.test(msg);
     return {
       ok: false,
       provider,
-      error: e instanceof Error ? e.message : String(e),
+      error: aborted ? `модель не ответила за отведённое время (таймаут)` : `${msg}${detail}`,
     };
   } finally {
     clearTimeout(timer);
