@@ -238,15 +238,14 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   // Returns "done" | "failed" | "timeout". "timeout" ≠ success: the run may
   // still be going server-side (the job persists and the card re-derives
   // `analyzing` on the next reload and resumes), so we must not report ok.
-  const pollAnalyze = async (matchId: string): Promise<"done" | "failed" | "timeout"> => {
-    let outcome: "done" | "failed" | "timeout" = "timeout";
-    for (let i = 0; i < 60; i++) { // ~90s ceiling
+  const pollAnalyze = async (matchId: string): Promise<{ outcome: "done" | "failed" | "timeout"; error?: string }> => {
+    for (let i = 0; i < 100; i++) { // ~150s ceiling (LLM timeout is 120s)
       const s = await engine("analyzeStatus", matchId);
-      if (s.status !== "analyzing") { outcome = s.failed ? "failed" : "done"; break; }
+      if (s.status !== "analyzing") { await reloadApp(); return { outcome: s.failed ? "failed" : "done", error: s.error }; }
       await new Promise((res) => setTimeout(res, 1500));
     }
     await reloadApp();
-    return outcome;
+    return { outcome: "timeout" };
   };
   const doAnalyze = async (matchId: string) => {
     // Kick off (returns immediately with 202 / "analyzing"), then poll until the
@@ -254,8 +253,8 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     // model round-trip, so nothing "hangs" on slow/timeout-y analyses.
     const kick = await engine("analyze", matchId);
     if (kick.ok === false) return kick; // validation error (no markets / not found) — show at once
-    const outcome = await pollAnalyze(matchId);
-    if (outcome === "failed") return { ok: false, error: "оценка не удалась" };
+    const { outcome, error } = await pollAnalyze(matchId);
+    if (outcome === "failed") return { ok: false, error: error || "оценка не удалась" }; // surface the real reason
     if (outcome === "timeout") return { ok: false, error: "анализ идёт дольше обычного — результат появится сам" };
     return { ok: true };
   };
@@ -417,7 +416,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
     if (match.analyzing && !resumed.current && onResumeAnalyze) {
       resumed.current = true;
       setAnalyzing(true); setAnalyzeErr(null);
-      onResumeAnalyze(match.id).then((outcome: "done" | "failed" | "timeout") => { if (outcome === "failed") setAnalyzeErr("оценка не удалась"); setAnalyzing(false); });
+      onResumeAnalyze(match.id).then(({ outcome, error }: { outcome: string; error?: string }) => { if (outcome === "failed") setAnalyzeErr(error || "оценка не удалась"); setAnalyzing(false); });
     }
   }, [match.analyzing, match.id, onResumeAnalyze]);
 

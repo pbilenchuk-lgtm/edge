@@ -116,12 +116,16 @@ export async function callLLM(
     return { ok: false, provider, error: `нет ключа для ${provider} (ТЗ §4.6)` };
 
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), req.timeoutMs ?? 30000);
+  // 120s: the analytics/strategist calls send a long prompt + many markets and
+  // Opus can take 40–70s; 30s aborted them mid-flight ("operation was aborted").
+  const timer = setTimeout(() => ctrl.abort(), req.timeoutMs ?? 120_000);
   try {
     const { url, init } = buildRequest(provider, apiId, key, req);
     const res = await doFetch(url, { ...init, signal: ctrl.signal });
     if (!res.ok) {
-      return { ok: false, provider, error: `${provider} HTTP ${res.status}` };
+      const body = await res.text().catch(() => "");
+      const hint = body.slice(0, 200).replace(/\s+/g, " ");
+      return { ok: false, provider, error: `${provider} HTTP ${res.status}${hint ? ` — ${hint}` : ""}` };
     }
     const json = await res.json();
     const text = extractText(provider, json);
@@ -338,9 +342,12 @@ export async function assessMatchLLM(
   const res = await callLLM({
     model,
     system:
-      "Ты — объективный спортивный аналитик. Оцени матч по инструкции. НЕ думай про деньги и ставки — только вероятности и разбор. Верни ТОЛЬКО JSON: {confidence:'низкая'|'средняя'|'высокая', short:'2-3 предложения', body:'развёрнутый разбор', verdict:'итог', markets:[{label, prob}]}. Для КАЖДОГО рынка из списка укажи prob — свою вероятность (0..1), что рынок сыграет ДА. Не копируй рыночную цену слепо: где видишь расхождение — покажи его.",
-    prompt: `Спорт: ${input.sport}. Матч: ${input.home} — ${input.away} (состояние: ${input.state}).\n\nИнструкция аналитики:\n${input.analyticsPrompt}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы/события):\n${input.context}\n` : ""}\nРынки для оценки:\n${marketList}`,
-    maxTokens: 1500,
+      "Ты — объективный спортивный аналитик. Оцени матч по методологии из инструкции. НЕ думай про деньги/ставки — только вероятности и разбор. " +
+      "ВАЖНО ПРО ФОРМАТ: инструкция аналитики описывает КАК думать, а не формат ответа. Что бы она ни говорила про формат — ты обязан вернуть ТОЛЬКО валидный JSON (без markdown-ограждений, без текста до/после): " +
+      "{confidence:'низкая'|'средняя'|'высокая', short:'2-3 предложения', body:'сжатый разбор, ключевое', verdict:'итог одним абзацем', markets:[{label, prob}]}. " +
+      "body держи компактным (до ~600 слов). Для КАЖДОГО рынка из списка укажи prob — свою вероятность (0..1), что рынок сыграет ДА (используй ТОЧНЫЙ label из списка). Где видишь расхождение с ценой — покажи его.",
+    prompt: `Спорт: ${input.sport}. Матч: ${input.home} — ${input.away} (состояние: ${input.state}).\n\nМЕТОДОЛОГИЯ АНАЛИЗА (как думать):\n${input.analyticsPrompt}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы/события):\n${input.context}\n` : ""}\nРынки для оценки (дай prob для каждого):\n${marketList}\n\nОтветь СТРОГО одним JSON-объектом в описанном формате — без пояснений вне JSON.`,
+    maxTokens: 6000,
   }, deps);
 
   if (!res.ok) return failed(res.error);
