@@ -49,18 +49,17 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true, matches: items.length, updated: items.reduce((n, r) => n + r.updated, 0), items });
       }
       case "tick": {
-        // LLM-free scheduler tick (same as `npm run tick:once`): sync + odds.
-        const cfg = loadSportsConfig();
-        const provider = loadSportsProvider(cfg);
+        // Full automated lifecycle pass (same as `npm run tick:once`):
+        // sync + odds + exits + auto-analyze + paper-enter.
+        const { runAutoCycle } = await import("@/lib/lifecycle");
         const { loadPolymarketConfig } = await import("@/lib/polymarket");
-        const synced = provider
-          ? await engine.syncCompetitions(db, provider, {}, { linkOdds: loadPolymarketConfig().enabled })
-          : [];
-        const odds = await engine.refreshActiveOdds(db, {});
+        const provider = loadSportsProvider(loadSportsConfig());
+        const res = await runAutoCycle(db, provider, {}, { linkOdds: loadPolymarketConfig().enabled });
         return NextResponse.json({
           ok: true,
-          synced: synced.length, imported: synced.filter((r) => r.created).length,
-          oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),
+          synced: res.synced, imported: res.imported,
+          oddsMatches: res.oddsMatches, oddsUpdated: res.oddsUpdated,
+          analyzed: res.analyzed.length, entered: res.entered.length, exited: res.exited.length,
         });
       }
       case "sync": {

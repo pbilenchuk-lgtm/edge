@@ -238,7 +238,7 @@ export async function llmExtractThresholds(
     {
       model,
       system:
-        "Ты извлекаешь числовые пороги стратегии ставок из текста. Верни ТОЛЬКО JSON с любыми из полей: maxPerBet, stop, minEdge, flatSize, kellyFraction, cap, tiers ([[edge%,fraction]...]), minConfidence. Доли (maxPerBet, flatSize, cap, stop) — как доли 0..1; stop — доля просадки портфеля 0..1. minEdge — в процентах. minConfidence — строго одно из: 'низкая'|'средняя'|'высокая'. Без пояснений.",
+        "Ты извлекаешь числовые пороги стратегии ставок из текста. Верни ТОЛЬКО JSON с любыми из полей: maxPerBet, stop, minEdge, flatSize, kellyFraction, cap, tiers ([[edge%,fraction]...]), minConfidence, takeProfit, exitStop. Доли (maxPerBet, flatSize, cap, stop) — как доли 0..1; stop — доля просадки портфеля 0..1. minEdge — в процентах. takeProfit — доля прибыли позиции для фиксации (0.5 = +50%); exitStop — доля убытка позиции для выхода (0..1). minConfidence — строго одно из: 'низкая'|'средняя'|'высокая'. Без пояснений.",
       prompt,
       maxTokens: 400,
     },

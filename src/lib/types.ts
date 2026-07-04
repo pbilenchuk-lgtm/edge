@@ -67,6 +67,10 @@ export interface StrategyParams {
   tiers?: Array<[number, number]>;
   /** min confidence to enter */
   minConfidence?: Confidence | "high";
+  /** take-profit: close a position once its value is up this fraction (e.g. 0.5 = +50%) */
+  takeProfit?: number;
+  /** per-position stop: close once down this fraction (positive number, e.g. 0.4) */
+  exitStop?: number;
   /** diagnostic note when nothing could be extracted */
   note?: string;
 }

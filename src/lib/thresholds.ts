@@ -154,6 +154,8 @@ export function validateParams(raw: StrategyParams): StrategyParams {
     const mc = normalizeConfidence(raw.minConfidence);
     if (mc) p.minConfidence = mc;
   }
+  if (isPos(raw.takeProfit)) p.takeProfit = clamp(raw.takeProfit!, 0, 10);
+  if (isPos(raw.exitStop)) p.exitStop = clamp(raw.exitStop!, 0, 1);
   if (Object.keys(p).length === 0) p.note = raw.note ?? "пороги не распознаны";
   return p;
 }
@@ -248,6 +250,39 @@ export function sizeBet(input: SizeInput): SizeDecision {
     edge,
     reason: `вход: край ${edge.toFixed(1)}%, размер ${(fraction * 100).toFixed(1)}% бюджета`,
   };
+}
+
+// ------------------------------------------------------------
+// Exit — when to close an OPEN paper position (position simulation)
+// ------------------------------------------------------------
+
+export interface ExitInput {
+  params: StrategyParams;
+  aiProb: number;          // model probability the market resolves YES (from the last assessment)
+  entryPriceCents: number; // price we bought at
+  currentPriceCents: number;
+}
+export interface ExitDecision { exit: boolean; reason: string; pnlFrac: number }
+
+/** Defaults when the strategy prompt doesn't specify exit rules. */
+export const DEFAULT_TAKE_PROFIT = 0.5; // +50% of position value
+export const DEFAULT_EXIT_STOP = 0.5;   // −50%
+
+/**
+ * Deterministic exit rule (code, not LLM — §9.6). A prediction-market position
+ * bought at `entry` is worth stake·(current/entry) if sold now, so P&L% is
+ * current/entry − 1. We close on: take-profit, per-position stop, or when the
+ * edge that justified the entry is gone (model prob ≤ current price).
+ */
+export function exitDecision(inp: ExitInput): ExitDecision {
+  const { params, aiProb, entryPriceCents, currentPriceCents } = inp;
+  const pnlFrac = entryPriceCents > 0 ? currentPriceCents / entryPriceCents - 1 : 0;
+  const tp = params.takeProfit ?? DEFAULT_TAKE_PROFIT;
+  const sl = params.exitStop ?? DEFAULT_EXIT_STOP;
+  if (pnlFrac >= tp) return { exit: true, reason: `тейк-профит +${(pnlFrac * 100).toFixed(0)}%`, pnlFrac };
+  if (pnlFrac <= -Math.abs(sl)) return { exit: true, reason: `стоп ${(pnlFrac * 100).toFixed(0)}%`, pnlFrac };
+  if (aiProb * 100 - currentPriceCents <= 0) return { exit: true, reason: `край исчез (ИИ ${(aiProb * 100).toFixed(0)}% ≤ ${currentPriceCents}¢)`, pnlFrac };
+  return { exit: false, reason: "держим", pnlFrac };
 }
 
 /** Base fraction before caps, from whichever rule the strategy uses. */
