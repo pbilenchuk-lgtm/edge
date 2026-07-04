@@ -15,7 +15,27 @@ import {
 } from "../src/lib/metrics.js";
 import { checkInvariants } from "../src/lib/invariants.js";
 import { warsawLabel, hoursUntil, isIso } from "../src/lib/time.js";
+import { extractJson } from "../src/lib/llm.js";
+import { sameMarketLabel } from "../src/lib/analysis.js";
 import type { StrategyParams } from "../src/lib/types.js";
+
+// ---------------- LLM parse + label matching ----------------
+test("extractJson: pulls the first balanced object out of prose/fences", () => {
+  assert.equal(extractJson('{"a":1}'), '{"a":1}');
+  assert.equal(extractJson('```json\n{"a":1}\n```'), '{"a":1}');
+  assert.equal(extractJson('Here you go: {"a":1,"b":"x"} — hope that helps'), '{"a":1,"b":"x"}');
+  assert.equal(JSON.parse(extractJson('prefix {"n":{"m":2}} suffix')).n.m, 2);
+  // braces inside strings don't miscount
+  assert.equal(JSON.parse(extractJson('{"s":"a{b}c"}')).s, "a{b}c");
+});
+
+test("sameMarketLabel: filler-tolerant but never conflates distinct markets", () => {
+  assert.ok(sameMarketLabel("Over 2.5", "Over 2.5 goals"));   // filler-only diff
+  assert.ok(sameMarketLabel("Draw", "Draw"));                 // exact
+  assert.ok(!sameMarketLabel("Draw", "Draw no bet"));         // meaningful {no,bet}
+  assert.ok(!sameMarketLabel("Over 2.5", "Over 3.5"));        // numbers differ
+  assert.ok(!sameMarketLabel("Over 2.5 goals", "Under 2.5 goals")); // over vs under
+});
 
 // ---------------- money (§3.1, §9.1–3) ----------------
 test("money: free balance and allocation guard", () => {

@@ -19,7 +19,7 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn } from "./engine.js";
 import { SPORT_TAG_IDS } from "./polymarket.js";
-import { analyzeMatch, jobActive, matchContext, strategyDrawdown } from "./analysis.js";
+import { analyzeMatch, jobActive, matchContext, strategyDrawdown, sameMarketLabel } from "./analysis.js";
 import { exitDecision, sizeBet } from "./thresholds.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -308,7 +308,10 @@ export async function strategistReassess(
       for (const ex of dec.exits) {
         const key = norm(ex.market);
         if (exited.has(key)) continue; // one close per market — a duplicate exit would size off a stale stake
-        const b = myOpen.find((x) => norm(x.market_label) === key);
+        // Resolve the strategist's (possibly paraphrased) exit label to a real
+        // open position — exact first, then the safe fuzzy match, so an exit the
+        // model asked for isn't silently dropped and the position left open.
+        const b = myOpen.find((x) => norm(x.market_label) === key) ?? myOpen.find((x) => sameMarketLabel(x.market_label, ex.market));
         const mk = b && markets.find((x) => x.label === b.market_label);
         if (!b || !mk || mk.price == null || b.entry_price == null) continue;
         exited.add(key);
@@ -334,7 +337,7 @@ export async function strategistReassess(
         .filter((b) => b.status === "settled_won" || b.status === "settled_lost")
         .reduce((n, b) => n + ((b.payout ?? 0) - (b.stake ?? 0)), 0);
       for (const pick of dec.picks) {
-        const mk = markets.find((x) => norm(x.label) === norm(pick.label));
+        const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
         if (!mk || mk.ai_prob == null || mk.price == null) continue; // need a probability to size
         if (held.has(norm(mk.label))) continue;                       // already in this market
         const d = sizeBet({ params: strat.params, aiProb: mk.ai_prob, priceCents: mk.price, budget, exposure, realizedPnl, confidence: pick.conviction as Confidence, drawdown });
