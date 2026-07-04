@@ -77,7 +77,10 @@ export function initSchema(db: Database): void {
   db.exec(sql);
   // Additive migrations for pre-existing databases (CREATE TABLE IF NOT EXISTS
   // won't add new columns). Each guarded so re-runs are harmless.
-  for (const alter of ["ALTER TABLE competitions ADD COLUMN external_league TEXT"]) {
+  for (const alter of [
+    "ALTER TABLE competitions ADD COLUMN external_league TEXT",
+    "ALTER TABLE bets ADD COLUMN settled_by TEXT",
+  ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }
 }

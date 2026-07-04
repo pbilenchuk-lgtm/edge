@@ -66,16 +66,20 @@ export function resolveFootballMarket(
   const total = scoreHome + scoreAway;
   const l = label.toLowerCase();
 
-  const ou = l.match(/(over|under)\s*(\d+(?:\.\d+)?)/);
+  // Totals — "Over/Under X", or Polymarket's "O/U X" (backs Over). A team total
+  // ("Colombia Over 2.5") names a side → settle against THAT team's goals, not
+  // the aggregate. A prefixed total whose side we can't identify (no team info)
+  // is left unsettleable (null) rather than wrongly resolved off the total.
+  const ou = l.match(/(?:^|\s)(over|under|o\/u)\s*(\d+(?:\.\d+)?)/);
   if (ou) {
     const line = parseFloat(ou[2]);
-    return ou[1] === "over" ? total > line : total < line;
+    const over = ou[1] !== "under"; // "over" and "o/u" back the Over side
+    const side = labelSide(l, teams);
+    const prefixed = /\S+\s+(?:over|under|o\/u)\b/.test(l); // a word before the total
+    if (prefixed && side == null) return null;              // team total, side unknown
+    const scored = side === "home" ? scoreHome : side === "away" ? scoreAway : total;
+    return over ? scored > line : scored < line;
   }
-  // Polymarket's total is labeled "O/U 2.5" and backs outcome[0] = Over. A team
-  // total ("Colombia O/U 2.5") has a name before "O/U" — that we can't settle
-  // from the aggregate score, so let it fall through to null.
-  const ou2 = l.match(/\bo\/u\s*(\d+(?:\.\d+)?)/);
-  if (ou2 && !/\S+\s+o\/u/.test(l)) return total > parseFloat(ou2[1]);
 
   if (/both teams to score|btts/.test(l)) {
     const yes = scoreHome > 0 && scoreAway > 0;

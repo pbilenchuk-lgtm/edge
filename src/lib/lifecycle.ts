@@ -133,7 +133,10 @@ function closeBetEarly(db: Database, bet: { id: string; stake: number | null; en
   const entry = bet.entry_price ?? 0;
   const payout = entry > 0 ? round2(stake * (currentPriceCents / entry)) : 0;
   const pnl = round2(payout - stake);
-  R.updateBet(db, bet.id, { status: pnl >= 0 ? "settled_won" : "settled_lost", result: pnl >= 0 ? "won" : "lost", payout, closing_price: currentPriceCents });
+  // "early" cash-out: booked by P&L sign, NOT by real outcome — excluded from
+  // the predictive metrics (Brier/CLV) so trading P&L doesn't masquerade as
+  // prediction accuracy.
+  R.updateBet(db, bet.id, { status: pnl >= 0 ? "settled_won" : "settled_lost", result: pnl >= 0 ? "won" : "lost", payout, closing_price: currentPriceCents, settled_by: "early" });
   return pnl;
 }
 
@@ -154,7 +157,7 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
     status: pnl >= 0 ? "settled_won" : "settled_lost", proposed_price: bet.proposed_price, entry_price: entry,
     current_price: currentPriceCents, closing_price: currentPriceCents, ai_prob: bet.ai_prob, stake: closed,
     rationale: `частичная фиксация ${Math.round(fraction * 100)}%`, entered_minute: bet.entered_minute,
-    result: pnl >= 0 ? "won" : "lost", payout, created_at: now,
+    result: pnl >= 0 ? "won" : "lost", payout, settled_by: "partial", created_at: now,
   });
   R.updateBet(db, bet.id, { stake: round2(stake - closed) }); // keep the remainder open
   return { pnl, partial: true };
@@ -278,7 +281,9 @@ export async function strategistReassess(
       const budget = stratBudget(c.budget, share.pct);
       const drawdown = strategyDrawdown(db, comp, sid, budget);
       const held = new Set(R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").map((b) => norm(b.market_label)));
-      let exposure = R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open").reduce((n, b) => n + (b.stake ?? 0), 0);
+      // Seed exposure from BOTH open and still-proposed stakes — autoEnter will
+      // fill the proposals, so a new entry must be sized against them too (§9.3).
+      let exposure = R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").reduce((n, b) => n + (b.stake ?? 0), 0);
       for (const pick of dec.picks) {
         const mk = markets.find((x) => norm(x.label) === norm(pick.label));
         if (!mk || mk.ai_prob == null || mk.price == null) continue; // need a probability to size

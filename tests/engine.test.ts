@@ -6,7 +6,7 @@ import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { parseEspnEvent, parseEspnSummary, MockSportsProvider } from "../src/lib/sports.js";
 import {
-  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn,
+  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch,
 } from "../src/lib/engine.js";
 import { matchContext } from "../src/lib/analysis.js";
 import type { SportsMatchStatus, SportsProvider, MatchDetail } from "../src/lib/sports.js";
@@ -115,6 +115,56 @@ test("enrichFromEspn stores lineups, records new events, reports triggers, and f
   // second pass: the same event is deduped (INSERT OR IGNORE) — no new trigger
   const res2 = await enrichFromEspn(db, provider, {});
   assert.equal(res2.newEvents.length, 0, "known events don't re-trigger");
+});
+
+test("enrichFromEspn aligns scores/lineups when the DB match orientation is reversed", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const compId = R.uid();
+  R.upsertCompetition(db, { id: compId, sport_id: "football", name: "WC", budget: 1000, external_league: "fifa.world", created_at: "t" });
+  const mid = R.uid();
+  // DB match orientation (from the Polymarket title) is REVERSED vs ESPN:
+  // DB home=Ghana, away=Colombia — ESPN reports Colombia (home) 1 - Ghana (away) 0.
+  R.insertMatch(db, { id: mid, competition_id: compId, home: "Ghana", away: "Colombia", state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  const detail: MatchDetail = { lineupOut: true, lineups: { home: { team: "Colombia", formation: "4-3-3", starters: ["James"] }, away: { team: "Ghana", formation: "4-1-4-1", starters: ["Kudus"] } }, events: [] };
+  await enrichFromEspn(db, mockDetailProvider(detail), {});
+  const m = R.getMatch(db, mid)!;
+  assert.equal(m.score_home, 0, "Ghana (DB home) gets ESPN away score 0");
+  assert.equal(m.score_away, 1, "Colombia (DB away) gets ESPN home score 1");
+  const live = R.getMatchLive(db, mid)!;
+  assert.match(live.home_lineup!, /Ghana/, "home_lineup is the DB-home team (Ghana)");
+  assert.match(live.away_lineup!, /Colombia/, "away_lineup is the DB-away team (Colombia)");
+});
+
+test("upsertImportedMatch merges into a same-fixture twin instead of duplicating", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const compId = R.uid();
+  R.upsertCompetition(db, { id: compId, sport_id: "football", name: "WC", budget: 0, external_league: "fifa.world", created_at: "t" });
+  // a Polymarket-discovered match already exists (pm: ref)
+  const pmMatch = { id: R.uid(), competition_id: compId, home: "Colombia", away: "Ghana", state: "upcoming" as const, lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "pm:football:colombia-ghana" };
+  R.insertMatch(db, pmMatch);
+  // ESPN import for the SAME fixture (different, numeric ref) must not duplicate
+  const r = upsertImportedMatch(db, compId, { externalRef: "760501", home: "Colombia", away: "Ghana", state: "live", minute: 30, scoreHome: 1, scoreAway: 0, final: false });
+  assert.equal(r.created, false, "no new row created");
+  assert.equal(R.listMatches(db, compId).length, 1, "still one match for the fixture");
+  assert.equal(r.match.external_ref, "760501", "ESPN id adopted so status sync can settle it");
+  assert.equal(R.getMatch(db, pmMatch.id)!.external_ref, "760501");
+});
+
+test("recomputeMetrics counts only resolution-settled bets, not early/partial cash-outs", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets; DELETE FROM quality_metrics");
+  const strat = R.listStrategies(db, "football")[0];
+  const mk = (settledBy: string | null, prob: number, result: "won" | "lost") =>
+    R.insertBet(db, { id: R.uid(), match_id: "m-finished", strategy_id: strat.id, market_label: "Over 2.5", status: result === "won" ? "settled_won" : "settled_lost", proposed_price: 50, entry_price: 50, current_price: 60, closing_price: 55, ai_prob: prob, stake: 100, rationale: null, entered_minute: "3'", result, payout: result === "won" ? 120 : 0, settled_by: settledBy, created_at: "t" });
+  mk(null, 0.6, "won");      // resolution → counts
+  mk(null, 0.4, "lost");     // resolution → counts
+  mk("early", 0.9, "won");   // cash-out → excluded
+  mk("partial", 0.9, "won"); // partial fixation → excluded
+  recomputeMetrics(db, strat.id);
+  assert.equal(R.getQuality(db, strat.id)!.samples, 2, "only the two resolution-settled bets feed metrics");
 });
 
 // ---------------- triggers + rate limit (§9.7) ----------------

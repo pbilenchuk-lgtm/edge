@@ -183,7 +183,9 @@ export async function refreshActiveOdds(db: Database, deps: EngineDeps = {}, opt
 // ------------------------------------------------------------
 
 export function recomputeMetrics(db: Database, strategyId: string, deps: EngineDeps = {}): void {
-  const bets = R.settledBetsForStrategy(db, strategyId);
+  // Only bets settled by the REAL match outcome measure prediction quality.
+  // Early/partial cash-outs are booked by P&L sign and would bias Brier/CLV.
+  const bets = R.settledBetsForStrategy(db, strategyId).filter((b) => b.settled_by == null);
   const samples: MetricSample[] = bets.map((b) => ({
     aiProb: b.ai_prob ?? 0, outcome: (b.result === "won" ? 1 : 0) as 0 | 1,
     entryPrice: b.entry_price ?? 0, closingPrice: b.closing_price,
@@ -200,6 +202,10 @@ export function settleMatch(
   overrides: Record<string, boolean> = {},
 ): { settled: number; skipped: number; affectedStrategies: string[] } {
   const now = nowFn(deps)();
+  // CLV closing line: the KICKOFF price (when pre-match betting closed) is the
+  // real benchmark — the finish-time market price is post-resolution (~0/100)
+  // and would make CLV just P&L again. Fall back to the last price if no kickoff.
+  const kickoff = R.openOddsFor(db, match.id);
   const closingByLabel: Record<string, number> = {};
   for (const m of R.latestMarkets(db, match.id)) if (!(m.label in closingByLabel)) closingByLabel[m.label] = m.price;
 
@@ -209,7 +215,7 @@ export function settleMatch(
     if (b.status !== "open") continue;
     const won = resolveOutcome(b, match, overrides);
     if (won == null) { skipped++; continue; } // needs external result (e.g. Advance)
-    const closing = closingByLabel[b.market_label] ?? b.current_price ?? b.entry_price ?? null;
+    const closing = kickoff[b.market_label] ?? closingByLabel[b.market_label] ?? b.current_price ?? b.entry_price ?? null;
     const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, closing);
     R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price });
     R.insertTradeLog(db, {
@@ -287,12 +293,27 @@ export async function syncMatchStatus(
 // sports provider and file them under that competition (ТЗ иерархия §1).
 // ------------------------------------------------------------
 
-/** Create the match under a competition if it's new (keyed by external_ref). */
+/** Find an existing match for the same fixture in a competition (order-insensitive
+ *  team match), so different sources (Polymarket "pm:" ref vs ESPN numeric id)
+ *  don't create duplicate rows for one game. */
+function findTwinMatch(db: Database, competitionId: string, home: string, away: string): Match | undefined {
+  return R.listMatches(db, competitionId).find((dm) => sameTeams(dm.home, dm.away, home, away));
+}
+
+/** Create the match under a competition if it's new (keyed by external_ref, then
+ *  by team names). If a twin exists from another source, merge the ESPN identity
+ *  into it (so status sync + settlement work) rather than duplicating the fixture. */
 export function upsertImportedMatch(
   db: Database, competitionId: string, status: SportsMatchStatus,
 ): { match: Match; created: boolean } {
   const existing = R.matchByExternalRef(db, status.externalRef);
   if (existing) return { match: existing, created: false };
+  const twin = findTwinMatch(db, competitionId, status.home, status.away);
+  if (twin) {
+    // adopt the ESPN ref so syncMatchStatus can drive/settle this fixture
+    if (twin.external_ref !== status.externalRef) R.updateMatch(db, twin.id, { external_ref: status.externalRef });
+    return { match: { ...twin, external_ref: status.externalRef }, created: false };
+  }
   const match: Match = {
     id: R.uid(), competition_id: competitionId, home: status.home, away: status.away,
     state: status.state, lineup_out: status.state !== "upcoming", kickoff_at: status.detail ?? null,
@@ -402,7 +423,9 @@ export async function importPolymarketMatches(
     // Route into the tournament category this match belongs to (Polymarket series).
     const compId = ensureCategoryComp(db, sport, d.series, d.seriesSlug, now);
     const ref = `pm:${sport}:${d.home}-${d.away}`.toLowerCase().replace(/\s+/g, "");
-    let match = R.matchByExternalRef(db, ref);
+    // Dedup by pm: ref first, then by teams (the fixture may already exist under
+    // an ESPN id if syncCompetitions imported it) — never duplicate the game.
+    let match = R.matchByExternalRef(db, ref) ?? findTwinMatch(db, compId, d.home, d.away);
     let created = false;
     if (!match) {
       const startMs = d.kickoff ? Date.parse(d.kickoff) : NaN;
@@ -456,10 +479,18 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
     for (const s of board) {
       const m = dbMatches.find((dm) => sameTeams(dm.home, dm.away, s.home, s.away));
       if (!m) continue;
-      R.updateMatch(db, m.id, { state: s.state, minute: s.minute, score_home: s.scoreHome, score_away: s.scoreAway, ...(s.final ? { final_score: `${s.scoreHome ?? 0}:${s.scoreAway ?? 0}` } : {}) });
+      // sameTeams is order-insensitive: the DB match's home/away orientation
+      // (from the Polymarket title) may be the reverse of ESPN's. Align scores
+      // and lineups to the DB match's home/away so nothing gets mirrored.
+      const flip = teamKey(m.home) !== teamKey(s.home);
+      const scoreHome = flip ? s.scoreAway : s.scoreHome;
+      const scoreAway = flip ? s.scoreHome : s.scoreAway;
+      R.updateMatch(db, m.id, { state: s.state, minute: s.minute, score_home: scoreHome, score_away: scoreAway, ...(s.final ? { final_score: `${scoreHome ?? 0}:${scoreAway ?? 0}` } : {}) });
       const detail = await provider.matchDetail!("football", league, s.externalRef);
       if (detail) {
-        R.upsertMatchLive(db, { match_id: m.id, espn_event_id: s.externalRef, league, home_lineup: detail.lineups.home ? JSON.stringify(detail.lineups.home) : null, away_lineup: detail.lineups.away ? JSON.stringify(detail.lineups.away) : null, updated_at: now });
+        const homeLineup = flip ? detail.lineups.away : detail.lineups.home;
+        const awayLineup = flip ? detail.lineups.home : detail.lineups.away;
+        R.upsertMatchLive(db, { match_id: m.id, espn_event_id: s.externalRef, league, home_lineup: homeLineup ? JSON.stringify(homeLineup) : null, away_lineup: awayLineup ? JSON.stringify(awayLineup) : null, updated_at: now });
         if (detail.lineupOut && !m.lineup_out) R.updateMatch(db, m.id, { lineup_out: true, state: s.state === "upcoming" ? "lineup" : s.state });
         for (const e of detail.events) {
           if (e.type === "other") continue;

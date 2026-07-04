@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS bets (
   entered_minute TEXT,             -- «3'», «20' (добавлено)»
   result         TEXT CHECK (result IN ('won','lost') OR result IS NULL),
   payout         REAL,
+  settled_by     TEXT,             -- null=resolution, 'early'|'partial'=cash-out (excluded from metrics)
   created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bets_match_strat ON bets(match_id, strategy_id);

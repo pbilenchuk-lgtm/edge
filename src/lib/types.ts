@@ -164,6 +164,10 @@ export interface Bet {
   result: "won" | "lost" | null;
   payout: number | null;
   created_at: string;
+  /** how the bet closed: null/undefined = settled by real match resolution;
+   *  "early" = cashed out at market; "partial" = a partial-fixation child slice.
+   *  Only resolution-settled bets feed the predictive metrics (Brier/CLV). */
+  settled_by?: string | null;
 }
 
 export interface Reassessment {
