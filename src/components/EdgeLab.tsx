@@ -499,7 +499,16 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
             )}
             {tab === "strat" && (
               <div style={S.stratListGrid} className="el-strat-grid">
-                {compStrats.length === 0 && <div style={S.noPos}>Нет стратегий с долей на этом турнире.</div>}
+                {match.state !== "finished" && (
+                  <div style={S.reassessTop}>
+                    <span style={S.reassessHint}>{match.markets?.length ? "Прогнать стратегию по матчу: ИИ оценит рынки и предложит ставки по методологии стратегии." : "Нет котировок — сначала «Подтянуть матчи»."}</span>
+                    <button style={{ ...S.reassessBtn, opacity: (analyzing || !match.markets?.length) ? 0.5 : 1 }} disabled={analyzing || !match.markets?.length} onClick={async () => { setAnalyzing(true); setAnalyzeErr(null); const r = await onAnalyze(match.id); if (r && r.ok === false) setAnalyzeErr(r.error || "не удалось"); setAnalyzing(false); }}>
+                      {analyzing ? "ИИ работает…" : "✨ Прогнать стратегию (ИИ)"}
+                    </button>
+                  </div>
+                )}
+                {analyzeErr && <div style={S.analysisPending}>{analyzeErr}</div>}
+                {compStrats.length === 0 && <div style={S.noStrat}>Стратегия не активирована на «{comp.name}». Задай бюджет турниру (кнопка <b>$</b> на плашке) и распредели долю стратегии («⚙ Распределить доли %» над матчами) — тогда она начнёт играть и появится здесь.</div>}
                 {compStrats.map((st: any) => {
                   const budget = stratBudget(compBudget, comp.id, shares, st.id);
                   const raw = match.bets?.[st.id];
