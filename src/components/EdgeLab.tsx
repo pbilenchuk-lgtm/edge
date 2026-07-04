@@ -112,6 +112,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const TOTAL_BALANCE = initial.treasuryTotal;
 
   const [screen, setScreen] = useState("matches");
+  const toastId = useRef(0);
   const [catalog, setCatalog] = useState(initial.catalog);
   const [compBudget, setCompBudget] = useState(initial.compBudget);
   const [shares, setShares] = useState(initial.shares);
@@ -145,21 +146,25 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     const m = matchDb[matchId];
     if (!m) return;
     const markets = m.markets.map((mk) => ({ tokenId: mk.tokenId, snapshotCents: mk.price }));
-    const r = await fetch("/api/quotes", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ markets }) });
-    const { quotes } = await r.json();
+    let quotes: any[] = [];
+    try {
+      const r = await fetch("/api/quotes", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ markets }) });
+      ({ quotes } = await r.json());
+    } catch { toast("err", "Котировки не обновились — Polymarket не ответил"); return; }
     const byTok: Record<string, any> = {};
     for (const q of quotes || []) byTok[q.tokenId] = q;
-    let anyLive = false;
+    let anyLive = false, hits = 0;
     setMatchDb((prev) => {
       const nm = { ...prev[matchId] };
       nm.markets = nm.markets.map((mk) => {
         const q = mk.tokenId ? byTok[mk.tokenId] : null;
-        if (q && q.priceCents != null) { if (q.source === "live") anyLive = true; return { ...mk, price: q.priceCents }; }
+        if (q && q.priceCents != null) { if (q.source === "live") anyLive = true; hits++; return { ...mk, price: q.priceCents }; }
         return mk;
       });
       nm.oddsUpdated = anyLive ? "только что · live" : "только что · snapshot";
       return { ...prev, [matchId]: nm };
     });
+    toast(hits ? "ok" : "info", hits ? `Котировки обновлены (${hits}) · ${anyLive ? "live" : "снимок"}` : "Свежих котировок нет — рынок закрыт или неликвиден");
   };
 
   const doReassess = async (matchId: string, strategyId: string) => {
@@ -183,18 +188,25 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     if (app.catalog) setCatalog(app.catalog);
   };
 
+  // Toasts — side notifications for actions, so the user sees what worked/failed.
+  const [toasts, setToasts] = useState<{ id: number; kind: "ok" | "err" | "info"; text: string }[]>([]);
+  const toast = (kind: "ok" | "err" | "info", text: string) => {
+    const id = toastId.current++;
+    setToasts((t) => [...t, { id, kind, text }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === "err" ? 8000 : 5000);
+  };
+
   // "Pull matches" — parse Polymarket + ESPN lineups + odds (no LLM). Fast.
   const [discovering, setDiscovering] = useState(false);
-  const [discoverMsg, setDiscoverMsg] = useState<string | null>(null);
   const doDiscover = async () => {
-    setDiscovering(true); setDiscoverMsg(null);
+    setDiscovering(true);
+    toast("info", "Подтягиваю матчи с Polymarket…");
     try {
       const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "discover" }) }).then((x) => x.json());
-      if (r.ok) { await reloadApp(); setDiscoverMsg(`+${r.discovered} матчей · котировки: ${r.oddsUpdated}`); }
-      else setDiscoverMsg(r.error || "не удалось подтянуть");
-    } catch { setDiscoverMsg("сеть недоступна"); }
+      if (r.ok) { await reloadApp(); toast("ok", `Подтянуто: +${r.discovered} матчей · составы: ${r.enriched} · котировки обновлены: ${r.oddsUpdated}`); }
+      else toast("err", r.error || "Не удалось подтянуть матчи");
+    } catch { toast("err", "Сеть недоступна — Polymarket/ESPN не ответили"); }
     setDiscovering(false);
-    setTimeout(() => setDiscoverMsg(null), 6000);
   };
   // Poll the durable job until it settles, then reload. Used both after a fresh
   // kick and to RESUME a run already in flight (e.g. after navigating back — the
@@ -231,6 +243,15 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     <div style={S.root}>
       <style>{CSS}</style>
 
+      <div style={S.toastWrap}>
+        {toasts.map((t) => (
+          <div key={t.id} style={{ ...S.toast, ...(t.kind === "ok" ? S.toastOk : t.kind === "err" ? S.toastErr : S.toastInfo) }}>
+            <span style={S.toastIcon}>{t.kind === "ok" ? "✓" : t.kind === "err" ? "✕" : "…"}</span>
+            <span style={S.toastText}>{t.text}</span>
+          </div>
+        ))}
+      </div>
+
       <div style={S.treasury}>
         <div style={S.trBrand}><span style={S.mark}>&#9670;</span><span style={S.trBrandTxt}>EDGE LAB</span></div>
         <div style={S.trCell}><div style={S.trLbl}>Общий баланс</div><div style={S.trVal}>{fmtMoney0(TOTAL_BALANCE)}</div></div>
@@ -241,7 +262,6 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
         <div style={S.trDiv} />
         <div style={S.trCell}>
           <button style={{ ...S.discoverBtn, opacity: discovering ? 0.6 : 1 }} disabled={discovering} onClick={doDiscover} title="Подтянуть матчи с Polymarket + составы ESPN + котировки (без ИИ)">{discovering ? "подтягиваю…" : "↧ Подтянуть матчи"}</button>
-          {discoverMsg && <div style={S.discoverMsg}>{discoverMsg}</div>}
         </div>
       </div>
 
@@ -270,8 +290,10 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
                   <button style={S.compMain} onClick={() => setCompId(c.id)}>
                     <div style={S.compName}>{c.name}</div>
                     {budget > 0 ? <>
-                      <div style={S.compBudget}>{fmtMoney0(eq)} <span style={{ color: MUTE }}>из {fmtMoney0(budget)}</span></div>
-                      <div style={{ ...S.compDelta, color: delta >= 0 ? "#5fd08a" : "#ff6b6b" }}>{delta >= 0 ? "+" : ""}{fmtMoney(delta)} <span style={S.compRoi}>({delta >= 0 ? "+" : ""}{((delta / budget) * 100).toFixed(1)}%)</span></div>
+                      <div style={S.compBudget}>{fmtMoney0(budget)} <span style={S.compBudgetLbl}>бюджет</span></div>
+                      {Math.round(delta * 100) !== 0
+                        ? <div style={{ ...S.compDelta, color: delta >= 0 ? "#5fd08a" : "#ff6b6b" }}>{delta >= 0 ? "▲ +" : "▼ "}{fmtMoney(delta)} ({delta >= 0 ? "+" : ""}{((delta / budget) * 100).toFixed(1)}%) <span style={S.compRoi}>· сейчас {fmtMoney0(eq)}</span></div>
+                        : <div style={S.compFlat}>ставок нет · бюджет свободен</div>}
                     </> : <div style={S.compUnalloc}>{c.matches.length ? "нет бюджета" : "нет матчей"}</div>}
                   </button>
                   <button style={S.allocIcon} title="Бюджет турнира" onClick={() => setCompModal(c.id)}>$</button>
@@ -1111,7 +1133,13 @@ const S: Record<string, React.CSSProperties> = {
   trVal: { fontSize: 17, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", marginTop: 2 },
   trDiv: { width: 1, height: 30, background: LINE },
   discoverBtn: { background: PANEL2, border: `1px solid #e8a83866`, color: "#e8a838", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
-  discoverMsg: { fontSize: 10.5, color: MUTE, marginTop: 4, whiteSpace: "nowrap" },
+  toastWrap: { position: "fixed", top: 16, right: 16, zIndex: 1000, display: "flex", flexDirection: "column", gap: 8, maxWidth: 380, pointerEvents: "none" },
+  toast: { display: "flex", alignItems: "flex-start", gap: 8, padding: "10px 14px", borderRadius: 10, fontSize: 12.5, lineHeight: 1.35, boxShadow: "0 8px 24px rgba(0,0,0,0.35)", border: `1px solid ${LINE}`, background: "#1b212b" },
+  toastOk: { borderColor: "#5fd08a66", background: "#16241c" },
+  toastErr: { borderColor: "#ff6b6b66", background: "#2a1a1c" },
+  toastInfo: { borderColor: "#5b9bd566", background: "#182230" },
+  toastIcon: { fontWeight: 800, flexShrink: 0 },
+  toastText: { color: "#e6ebf2" },
   liveWrap: { display: "flex", flexDirection: "column", gap: 14 },
   lineupGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
   lineupCol: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px" },
@@ -1136,9 +1164,11 @@ const S: Record<string, React.CSSProperties> = {
   compMain: { textAlign: "left", background: "transparent", border: "none", padding: "8px 10px 8px 12px", cursor: "pointer", flex: 1, color: TEXT },
   compOn: { borderColor: "#e8a838", background: PANEL2 },
   compName: { fontSize: 13, fontWeight: 700, color: TEXT },
-  compBudget: { fontSize: 12, color: TEXT, fontFamily: "'JetBrains Mono', monospace", marginTop: 3, fontWeight: 700 },
-  compDelta: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace", marginTop: 1 },
-  compRoi: { fontSize: 10, opacity: 0.85 },
+  compBudget: { fontSize: 14, color: TEXT, fontFamily: "'JetBrains Mono', monospace", marginTop: 3, fontWeight: 800 },
+  compBudgetLbl: { fontSize: 10, color: MUTE, fontWeight: 500, letterSpacing: "0.03em" },
+  compDelta: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace", marginTop: 2 },
+  compRoi: { fontSize: 10, opacity: 0.85, color: MUTE },
+  compFlat: { fontSize: 10, color: MUTE, marginTop: 2 },
   compUnalloc: { fontSize: 10, color: "#e8a838", marginTop: 3, fontStyle: "italic" },
   allocIcon: { background: "transparent", border: "none", borderLeft: `1px solid ${LINE}`, color: "#e8a838", fontSize: 17, fontWeight: 800, cursor: "pointer", padding: "0 12px" },
   stratStripHead: { display: "flex", alignItems: "center", marginBottom: 8 },

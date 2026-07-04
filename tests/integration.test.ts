@@ -124,7 +124,7 @@ test("polymarket: eventToMarketSnapshots drops priceless markets", () => {
   const snaps = eventToMarketSnapshots(normalizeEvent(EVENT_FIXTURE[0]), "2026-07-03T00:00:00Z");
   assert.equal(snaps.length, 2); // the priceless one is dropped
   assert.deepEqual(snaps[0], { label: "Connor Doig vs Eudald Gonzalez", price: 62, external_ref: "tok-a", liquidity: "1234" });
-  assert.equal(snaps[1].label, "Total Sets: O/U 2.5");
+  assert.equal(snaps[1].label, "Total Sets: Over 2.5"); // O/U clarified to the priced side (outcomes[0])
 });
 
 test("polymarket: parseMatchTitle extracts competitors across formats", () => {

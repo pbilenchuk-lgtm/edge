@@ -164,6 +164,11 @@ export interface PolyEvent {
   /** actual kickoff (Gamma `startTime`/`gameStartTime`) — NOT startDate, which
    *  is the market creation date. Null when Polymarket hasn't set it. */
   startTime: string | null;
+  /** tournament this match belongs to, e.g. "FIFA World Cup" — used to
+   *  categorize discovered matches (Gamma `series`). Null if unlabelled. */
+  series: string | null;
+  /** stable series key, e.g. "soccer-fifwc" — the category id we group by. */
+  seriesSlug: string | null;
   markets: PolyMarketRow[];
 }
 
@@ -199,12 +204,19 @@ export function normalizeEvent(raw: any): PolyEvent {
   // kickoff: event startTime, else a market's gameStartTime ("YYYY-MM-DD HH:MM:SS+00").
   const gst = raw.markets?.find?.((m: any) => m.gameStartTime)?.gameStartTime;
   const startTime = raw.startTime ?? (gst ? String(gst).replace(" ", "T").replace("+00", "Z") : null);
+  // Gamma `series`: array of { title, slug } (or bare strings). First entry is
+  // the tournament (e.g. "FIFA World Cup" / "soccer-fifwc").
+  const s0 = Array.isArray(raw.series) ? raw.series[0] : null;
+  const series = (s0 && typeof s0 === "object" ? s0.title : s0) ? String((s0 && typeof s0 === "object" ? s0.title : s0)) : (raw.seriesName ?? null);
+  const seriesSlug = raw.seriesSlug ?? (s0 && typeof s0 === "object" && s0.slug ? String(s0.slug) : null);
   return {
     id: String(raw.id ?? ""),
     slug: String(raw.slug ?? ""),
     title: String(raw.title ?? ""),
     startDate: raw.startDate ?? null,
     startTime: startTime ? String(startTime) : null,
+    series: series || null,
+    seriesSlug: seriesSlug || null,
     markets,
   };
 }
@@ -365,7 +377,7 @@ export function parseMatchTitle(title: string, sport: string): { home: string; a
   return { home, away };
 }
 
-export interface DiscoveredMatch { home: string; away: string; kickoff: string | null; markets: MarketSnapshot[]; liquidity: number }
+export interface DiscoveredMatch { home: string; away: string; kickoff: string | null; markets: MarketSnapshot[]; liquidity: number; series: string | null; seriesSlug: string | null }
 
 /**
  * Discover matches a sport lists on Polymarket: group events by competitors,
@@ -382,13 +394,14 @@ export async function discoverSportMatches(
   const nowMs = opts.nowMs ?? (Date.parse(snapshotAt) || 0);
   const windowMs = (opts.windowDays ?? 7) * 86_400_000;
   const events = await fetchSportEvents(cfg, tag, cfg.discoverLimit ?? 1000, deps);
-  const groups = new Map<string, { home: string; away: string; kickoff: string | null; events: PolyEvent[] }>();
+  const groups = new Map<string, { home: string; away: string; kickoff: string | null; series: string | null; seriesSlug: string | null; events: PolyEvent[] }>();
   for (const ev of events) {
     const p = parseMatchTitle(ev.title, sport);
     if (!p) continue;
     const key = `${norm(p.home)}|${norm(p.away)}`;
-    const g = groups.get(key) ?? { home: p.home, away: p.away, kickoff: ev.startTime, events: [] };
+    const g = groups.get(key) ?? { home: p.home, away: p.away, kickoff: ev.startTime, series: ev.series, seriesSlug: ev.seriesSlug, events: [] };
     if (!g.kickoff && ev.startTime) g.kickoff = ev.startTime; // real kickoff, not creation date
+    if (!g.series && ev.series) { g.series = ev.series; g.seriesSlug = ev.seriesSlug; } // tournament label
     g.events.push(ev);
     groups.set(key, g);
   }
@@ -403,7 +416,7 @@ export async function discoverSportMatches(
     const markets = matchMarketSnapshots(g.events, snapshotAt, cfg.maxMarketsPerMatch);
     if (!markets.length) continue;
     const liquidity = markets.reduce((n, m) => n + (Number(m.liquidity ?? 0) || 0), 0);
-    out.push({ home: g.home, away: g.away, kickoff: g.kickoff, markets, liquidity });
+    out.push({ home: g.home, away: g.away, kickoff: g.kickoff, markets, liquidity, series: g.series, seriesSlug: g.seriesSlug });
   }
   // soonest kickoff first; cap to keep it usable
   return out.sort((a, b) => (a.kickoff ?? "9") < (b.kickoff ?? "9") ? -1 : 1).slice(0, limit);
@@ -447,14 +460,32 @@ export function matchMarketSnapshots(
       if (m.priceCents == null || !m.label) continue;
       if (dropNoise && (m.priceCents <= 1 || m.priceCents >= 99)) continue; // effectively-resolved / dead line
       if (dropNoise && isNoiseMarket(m.label)) continue;
-      const key = m.label.toLowerCase().trim();
+      const label = clarifyLabel(m.label, m.outcomes);
+      const key = label.toLowerCase().trim();
       if (seen.has(key)) continue;
       seen.add(key);
-      rows.push({ label: m.label, price: m.priceCents, external_ref: m.tokenIds[0] ?? null, liquidity: m.liquidity, liq: Number(m.liquidity ?? 0) || 0 });
+      rows.push({ label, price: m.priceCents, external_ref: m.tokenIds[0] ?? null, liquidity: m.liquidity, liq: Number(m.liquidity ?? 0) || 0 });
     }
   }
   rows.sort((a, b) => b.liq - a.liq);
   return rows.slice(0, cap).map(({ liq, ...s }) => s);
+}
+
+/**
+ * Make a totals market state WHICH side the shown price (outcomes[0]) is for.
+ * Polymarket's priceCents is always the price of the first outcome. A title like
+ * "O/U 3.5" doesn't say over or under, so we resolve it to the priced side
+ * ("Over 3.5"), preserving any context ("Total Sets: O/U 2.5" → "…: Over 2.5").
+ * Spread/winner/Yes-No titles already name their side and are left untouched.
+ */
+export function clarifyLabel(label: string, outcomes: string[]): string {
+  const s = (outcomes[0] ?? "").toLowerCase();
+  if (!s.startsWith("over") && !s.startsWith("under")) return label; // only totals
+  if (/\bover\b|\bunder\b/i.test(label)) return label;               // already explicit
+  const word = s.startsWith("over") ? "Over" : "Under";
+  if (/o\/u/i.test(label)) return label.replace(/o\/u/i, word);      // keep context
+  const line = (label.match(/\d+(?:\.\d+)?/) || [])[0];
+  return line ? `${word} ${line}` : `${word} — ${label}`;
 }
 
 // ------------------------------------------------------------

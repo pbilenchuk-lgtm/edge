@@ -66,6 +66,10 @@ export function listCompetitions(db: Database, sportId?: string): Competition[] 
 export function setCompetitionBudget(db: Database, id: string, budget: number): void {
   db.prepare(`UPDATE competitions SET budget=? WHERE id=?`).run(budget, id);
 }
+/** Backfill an ESPN league on a category comp (for lineup/event enrichment) without touching its budget. */
+export function setCompetitionLeague(db: Database, id: string, league: string): void {
+  db.prepare(`UPDATE competitions SET external_league=? WHERE id=?`).run(league, id);
+}
 
 // ---------- analytics prompts (§2.4) ----------
 export function upsertAnalyticsPrompt(

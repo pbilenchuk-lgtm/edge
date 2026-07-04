@@ -192,6 +192,44 @@ export function seedDatabase(db: Database): void {
     });
 }
 
+/**
+ * Clean-start seed for a real deployment: treasury + sports + analytics prompts
+ * + a few strategy TEMPLATES only. No demo competitions / matches / bets /
+ * shares / metrics — real categories and matches arrive from "Подтянуть матчи"
+ * (Polymarket series → ЧМ-2026, Wimbledon, …) and the cron. This is what the
+ * production container seeds on first boot.
+ */
+export function seedMinimal(db: Database): void {
+  for (const t of [
+    "trade_log", "reassessments", "bets", "markets", "assessments", "analysis_jobs", "match_events", "match_live",
+    "quality_metrics", "strategy_versions", "strategy_shares", "matches",
+    "strategies", "analytics_prompts", "competitions", "sports", "treasury",
+  ]) db.exec(`DELETE FROM ${t};`);
+
+  R.setTreasury(db, 5000); // starting bankroll — editable on the Настройки screen
+  R.upsertSport(db, "football", "Футбол");
+  R.upsertSport(db, "tennis", "Теннис");
+
+  R.upsertAnalyticsPrompt(db, "sport", "football",
+    "Оцени матч объективно. Учитывай силу составов (после объявления — приоритет), территориальное преимущество, xG, форму, мотивацию, тактику, H2H. Дай вероятности П1/Х/П2 и ключевых рынков. Две версии: развёрнутая и краткое саммари.",
+    "Claude Opus 4.8");
+  R.upsertAnalyticsPrompt(db, "sport", "tennis",
+    "Оцени матч объективно. Покрытие и его соответствие стилю, форма, физика, H2H, усталость. Вероятность победы каждого игрока и ключевых рынков. Краткое саммари + развёрнутая версия.",
+    "Claude Sonnet 5");
+
+  // strategy templates — starting points the user can edit/delete/clone
+  const strats: Array<Omit<Parameters<typeof R.insertStrategy>[1], "params">> = [
+    { id: "edge", sport_id: "football", name: "Edge Tiered", tag: "лесенка", color: "#e8a838", version: 1, model: "Claude Opus 4.8", created_at: T,
+      prompt: "Входи ТОЛЬКО при уверенности «высокая» и когда рынок не впитал информацию.\nРазмер по лесенке: edge>=10% -> 20%; 7-10% -> 15%; 5-7% -> 10%; 3-5% -> 5%.\nМожно несколько ставок на матч. Переоценка на голах.\nОграничители: не более 20% на ставку, стоп -25%." },
+    { id: "flat", sport_id: "football", name: "Flat", tag: "фикс 5%", color: "#5b9bd5", version: 1, model: "Claude Haiku 4.5", created_at: T,
+      prompt: "Входи на любой edge >= 3%. Размер всегда 5%. Выход по финалу.\nОграничители: не более 5% на ставку." },
+    { id: "tn1", sport_id: "tennis", name: "Serve Edge", tag: "теннис", color: "#c98bdb", version: 1, model: "Claude Sonnet 5", created_at: T,
+      prompt: "Входи при edge >= 4% и преимуществе на покрытии. Размер 8%. Переоценка после сета.\nОграничители: не более 10% на ставку." },
+  ];
+  for (const s of strats)
+    R.insertStrategy(db, { ...s, params: extractThresholdsHeuristic(s.prompt) });
+}
+
 // ---------- small builders ----------
 function base(id: string, comp: string, home: string, away: string, state: any, extra: Partial<any> = {}) {
   return {

@@ -17,6 +17,7 @@ window.fetch = async (input, init) => {
   if (url.includes("/api/engine")) {
     if (b.action === "analyze") return j({ ok: false, error: "Демо-превью: снимок реальных данных. Живой (пере)анализ и авто-цикл — в развёрнутой версии (нужен бэкенд + ключ Claude)." }, 422);
     if (b.action === "analyzeStatus") return j({ status: "idle" });
+    if (b.action === "discover") return j({ ok: false, error: "Демо-превью: «Подтянуть матчи» ходит на Polymarket/ESPN — работает в развёрнутой версии." });
     return j({ ok: true });
   }
   if (url.includes("/api/mutations")) return j({ ok: true });

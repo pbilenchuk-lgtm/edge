@@ -329,13 +329,52 @@ export async function linkMatchOdds(
 // imports the many matches it lists into a per-sport catch-all competition.
 // ------------------------------------------------------------
 
-const PM_COMP_LABEL: Record<string, string> = { football: "Polymarket · Футбол", tennis: "Polymarket · Теннис" };
+const PM_COMP_LABEL: Record<string, string> = { football: "Polymarket · Футбол · прочее", tennis: "Polymarket · Теннис · прочее" };
 
-/** Ensure the catch-all competition for a sport's Polymarket-discovered matches. */
-function ensurePolymarketComp(db: Database, sport: string, now: string): string {
-  const id = `pm-${sport}`;
-  if (!R.listCompetitions(db).some((c) => c.id === id)) {
-    R.upsertCompetition(db, { id, sport_id: sport, name: PM_COMP_LABEL[sport] ?? `Polymarket · ${sport}`, budget: 0, external_league: null, created_at: now });
+// Localized names + ESPN league (for lineup/event enrichment) for known series.
+const SERIES_RU: Record<string, string> = {
+  "soccer-fifwc": "ЧМ-2026",
+  "soccer-ucl": "Лига чемпионов",
+  "soccer-uel": "Лига Европы",
+  "soccer-epl": "АПЛ",
+  "soccer-laliga": "Ла Лига",
+  "soccer-seriea": "Серия A",
+  "soccer-bundesliga": "Бундеслига",
+  "soccer-ligue1": "Лига 1",
+};
+const SERIES_ESPN_LEAGUE: Record<string, string> = {
+  "soccer-fifwc": "fifa.world",
+  "soccer-ucl": "uefa.champions",
+  "soccer-uel": "uefa.europa",
+  "soccer-epl": "eng.1",
+  "soccer-laliga": "esp.1",
+  "soccer-seriea": "ita.1",
+  "soccer-bundesliga": "ger.1",
+  "soccer-ligue1": "fra.1",
+};
+const slugify = (s: string) => s.toLowerCase().normalize("NFD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+/**
+ * Ensure the CATEGORY competition a discovered match belongs to (its Polymarket
+ * `series`, e.g. "FIFA World Cup" → "ЧМ-2026"). Matches with no series fall back
+ * to the per-sport "…· прочее" bucket. Never clobbers an existing comp's budget;
+ * backfills the ESPN league so its matches get lineups/events.
+ */
+function ensureCategoryComp(db: Database, sport: string, series: string | null, seriesSlug: string | null, now: string): string {
+  if (!series && !seriesSlug) {
+    const id = `pm-${sport}`;
+    if (!R.listCompetitions(db).some((c) => c.id === id))
+      R.upsertCompetition(db, { id, sport_id: sport, name: PM_COMP_LABEL[sport] ?? `Polymarket · ${sport}`, budget: 0, external_league: null, created_at: now });
+    return id;
+  }
+  const slug = seriesSlug ?? slugify(series!);
+  const id = `pm-${slug}`;
+  const league = SERIES_ESPN_LEAGUE[slug] ?? null;
+  const existing = R.listCompetitions(db).find((c) => c.id === id);
+  if (!existing) {
+    R.upsertCompetition(db, { id, sport_id: sport, name: SERIES_RU[slug] ?? series ?? slug, budget: 0, external_league: league, created_at: now });
+  } else if (league && !existing.external_league) {
+    R.setCompetitionLeague(db, id, league); // backfill without touching budget/shares
   }
   return id;
 }
@@ -355,10 +394,11 @@ export async function importPolymarketMatches(
   if (!poly.enabled) return [];
   const now = nowFn(deps)();
   const nowMs = Date.parse(now) || Date.now();
-  const compId = ensurePolymarketComp(db, sport, now);
   const discovered = await discoverSportMatches(poly, sport, now, { fetchImpl: deps.fetchImpl }, { limit: opts.limit ?? 200, windowDays: 7, nowMs });
   const out: DiscoverItem[] = [];
   for (const d of discovered) {
+    // Route into the tournament category this match belongs to (Polymarket series).
+    const compId = ensureCategoryComp(db, sport, d.series, d.seriesSlug, now);
     const ref = `pm:${sport}:${d.home}-${d.away}`.toLowerCase().replace(/\s+/g, "");
     let match = R.matchByExternalRef(db, ref);
     let created = false;

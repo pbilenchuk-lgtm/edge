@@ -1,11 +1,13 @@
-// Seed the local SQLite DB from the reference mockup data.
-// Run: npm run db:seed
+// Seed the local SQLite DB. Default: clean production start (treasury + sports
+// + strategy templates). SEED_DEMO=true seeds the full demo dataset instead.
+// Run: npm run db:seed   (or SEED_DEMO=true npm run db:seed)
 import { getDb, dbPath } from "../src/lib/db.js";
-import { seedDatabase } from "../src/lib/seed.js";
+import { seedDatabase, seedMinimal } from "../src/lib/seed.js";
 import { listCompetitions, listStrategies, getTreasury } from "../src/lib/repo.js";
 
 const db = getDb();
-seedDatabase(db);
+if ((process.env.SEED_DEMO ?? "").toLowerCase() === "true") seedDatabase(db);
+else seedMinimal(db);
 
 const comps = listCompetitions(db);
 const strats = listStrategies(db);
