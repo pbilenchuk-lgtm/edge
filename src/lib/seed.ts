@@ -262,11 +262,15 @@ const PROMPT_STRATEGY = `Ты — стратег по ставкам на про
  * матчи" and the cron. This is what the production container seeds on first boot.
  */
 export function seedMinimal(db: Database): void {
-  for (const t of [
-    "trade_log", "reassessments", "bets", "markets", "assessments", "analysis_jobs", "match_events", "match_live", "market_open", "cron_log",
-    "quality_metrics", "strategy_versions", "strategy_shares", "matches",
-    "strategies", "analytics_prompts", "competitions", "sports", "treasury",
-  ]) db.exec(`DELETE FROM ${t};`);
+  // NON-DESTRUCTIVE + idempotent. If the DB already holds data (treasury row
+  // present), do nothing — NEVER wipe a user's live state by reseeding. This
+  // used to `DELETE FROM` every table first, so any run against a populated DB
+  // (a boot where the file survived, an accidental re-invocation, a future
+  // migration) erased bets / budgets / API keys / analysis history. First-boot
+  // detection also lives in start.sh (seed only when the file is absent); this
+  // guard is the belt-and-suspenders so seeding can never destroy data.
+  const seeded = db.prepare(`SELECT 1 FROM treasury LIMIT 1`).get();
+  if (seeded) return;
 
   R.setTreasury(db, 5000); // starting bankroll — editable on the Настройки screen
   R.upsertSport(db, "football", "Футбол");
