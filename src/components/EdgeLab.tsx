@@ -20,6 +20,14 @@ const STATE_META: Record<string, { label: string; color: string; bg: string }> =
 const impliedProb = (o: number) => (o > 1 ? 1 / o : 0);
 const fmtMoney = (n: number) => (n < 0 ? "-$" : "$") + Math.abs(n).toFixed(2);
 const fmtMoney0 = (n: number) => (n < 0 ? "-$" : "$") + Math.abs(n).toFixed(0);
+// Warsaw-time label for cron timestamps, e.g. "сб 04.07, 20:45".
+const fmtWarsaw = (iso: string) => {
+  try {
+    const p = new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Warsaw", weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).formatToParts(new Date(iso));
+    const g = (t: string) => p.find((x) => x.type === t)?.value ?? "";
+    return `${g("weekday")} ${g("day")}.${g("month")}, ${g("hour")}:${g("minute")}`;
+  } catch { return iso; }
+};
 
 async function mutate(action: any): Promise<any> {
   const r = await fetch("/api/mutations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(action) });
@@ -109,7 +117,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const QUALITY = initial.quality;
   const EVENT_FEED = initial.eventFeed;
   const COMPETITIONS = initial.competitions;
-  const TOTAL_BALANCE = initial.treasuryTotal;
+  const [TOTAL_BALANCE, setTotalBalance] = useState(initial.treasuryTotal);
 
   const [screen, setScreen] = useState("matches");
   const toastId = useRef(0);
@@ -266,7 +274,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       </div>
 
       <div style={S.screenSwitch} className="el-screen-switch">
-        {[["matches", "Матчи"], ["feed", "Лента"], ["portfolio", "Портфель"], ["metrics", "Метрики"], ["strategies", "Стратегии"], ["models", "Модели"]].map(([k, lbl]) => (
+        {[["matches", "Матчи"], ["feed", "Лента"], ["portfolio", "Портфель"], ["metrics", "Метрики"], ["strategies", "Стратегии"], ["models", "Настройки"]].map(([k, lbl]) => (
           <button key={k} onClick={() => setScreen(k)} style={{ ...S.screenBtn, ...(screen === k ? S.screenOn : {}) }}>{lbl}</button>
         ))}
       </div>
@@ -340,7 +348,13 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       ) : screen === "metrics" ? (
         <MetricsScreen catalog={catalog} quality={QUALITY} />
       ) : (
-        <ModelsScreen providers={providers} setProviders={setProviders} />
+        <ModelsScreen providers={providers} setProviders={setProviders} total={TOTAL_BALANCE} allocated={allocatedSum} cron={initial.cron}
+          onSetTotal={async (amount: number) => {
+            const r = await mutate({ type: "setTreasury", amount });
+            if (r.ok) { setTotalBalance(amount); toast("ok", `Общий баланс: $${amount}`); }
+            else toast("err", r.error || "Не удалось изменить баланс");
+            return r;
+          }} />
       )}
 
       {compModal && <BudgetModal comp={COMPETITIONS.find((c) => c.id === compModal)!} current={compBudget[compModal] || 0} free={freeBalance} onClose={() => setCompModal(null)} onSave={(amt: number) => setBudget(compModal, amt)} />}
@@ -603,8 +617,11 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                     <div style={S.oddsTop}><span style={S.oddsLabel}>{mk.label}</span><span style={S.oddsVal}>{priceDisp}</span></div>
                     <div style={S.oddsBot}>
                       {mk.aiProb != null && <span style={S.oddsAi}>ИИ {(mk.aiProb * 100).toFixed(0)}%</span>}
+                      {mk.aiProb != null && <span style={{ ...S.oddsEdge, color: edge >= 5 ? "#5fd08a" : edge >= 3 ? "#e8a838" : edge > 0 ? "#9aa4b2" : "#ff6b6b" }} title="Край: оценка ИИ минус рыночная вероятность">край {edge >= 0 ? "+" : ""}{edge.toFixed(1)}%</span>}
+                      {mk.openCents != null && Math.round(mk.price - mk.openCents) !== 0 && (
+                        <span style={{ ...S.oddsMove, color: mk.price >= mk.openCents ? "#5fd08a" : "#ff6b6b" }} title={`Движение цены с открытия: ${mk.openCents}¢ → ${mk.price}¢`}>{mk.price >= mk.openCents ? "▲" : "▼"}{mk.price >= mk.openCents ? "+" : ""}{Math.round(mk.price - mk.openCents)}¢ от старта</span>
+                      )}
                       {mk.liq && <span style={S.oddsLiq}>{mk.liq}</span>}
-                      <span style={{ ...S.oddsEdge, color: edge >= 5 ? "#5fd08a" : edge >= 3 ? "#e8a838" : edge > 0 ? "#9aa4b2" : "#ff6b6b" }}>{edge >= 0 ? "+" : ""}{edge.toFixed(1)}%</span>
                     </div>
                   </div>
                 );
@@ -897,18 +914,78 @@ function PortfolioScreen({ positions, onGoMatches }: any) {
   );
 }
 
-function ModelsScreen({ providers, setProviders }: any) {
+function ModelsScreen({ providers, setProviders, total, allocated, cron, onSetTotal }: any) {
   return (
     <main style={S.main}>
       <div style={S.modelsIntro}>
-        <div style={S.modelsTitle}>Модели и ключи</div>
-        <div style={S.modelsSub}>Ключ можно задать здесь — он сохраняется <b>на сервере</b> и наружу (в браузер) не отдаётся. Переменная окружения (<code>ANTHROPIC_API_KEY</code> и т.п.) имеет приоритет над ключом из UI. Как только ключ задан — модели провайдера доступны для выбора.</div>
+        <div style={S.modelsTitle}>Настройки</div>
+        <div style={S.modelsSub}>Общий баланс казны, ключи провайдеров и журнал автоматического цикла (крон).</div>
       </div>
+
+      <BalanceCard total={total} allocated={allocated} onSetTotal={onSetTotal} />
+
+      <div style={S.settingsSectionLbl}>Модели и ключи</div>
+      <div style={S.modelsSub}>Ключ сохраняется <b>на сервере</b> и наружу не отдаётся. Переменная окружения (<code>ANTHROPIC_API_KEY</code>) имеет приоритет над ключом из UI.</div>
       {providers.map((p: any) => (
         <ProviderCard key={p.id} p={p} onSaved={(hasKey: boolean) => setProviders((prev: any[]) => prev.map((x) => x.id === p.id ? { ...x, hasKey } : x))} />
       ))}
-      <div style={S.modelsNote}>Ключи лежат в БД сервера (файл gitignore-нут, в образ не попадает). Список моделей репрезентативный; в боевой версии подтягивается от провайдера.</div>
+
+      <CronPanel cron={cron} />
     </main>
+  );
+}
+
+function BalanceCard({ total, allocated, onSetTotal }: any) {
+  const [val, setVal] = useState(String(total));
+  const [busy, setBusy] = useState(false);
+  const n = Math.round(Number(val));
+  const invalid = !isFinite(n) || n < 0 || n < allocated || n === total;
+  const save = async () => { setBusy(true); await onSetTotal(n); setBusy(false); };
+  return (
+    <section style={S.card}>
+      <div style={S.balHead}>
+        <div>
+          <div style={S.balTitle}>Общий баланс казны</div>
+          <div style={S.balSub}>Распределено по турнирам: <b>{fmtMoney0(allocated)}</b>. Баланс не может быть меньше распределённого.</div>
+        </div>
+        <div style={S.balNow}>{fmtMoney0(total)}</div>
+      </div>
+      <div style={S.balRow}>
+        <span style={S.balDollar}>$</span>
+        <input style={S.balInput} type="number" value={val} onChange={(e) => setVal(e.target.value)} min={allocated} />
+        <button style={{ ...S.saveBtn, opacity: invalid || busy ? 0.4 : 1 }} disabled={invalid || busy} onClick={save}>{busy ? "…" : "Сохранить"}</button>
+      </div>
+      {n < allocated && <div style={S.balErr}>Меньше распределённого (${allocated}) — сначала уменьши бюджеты турниров.</div>}
+    </section>
+  );
+}
+
+function CronPanel({ cron }: any) {
+  if (!cron) return null;
+  const kindLabel: any = { tick: "тик", discover: "парсинг", manual: "вручную" };
+  return (
+    <section style={S.card}>
+      <div style={S.cronHead}>
+        <div style={S.cronTitle}>Журнал крона (авто-цикл)</div>
+        <div style={{ ...S.cronBadge, ...(cron.enabled ? S.cronOn : S.cronOff) }}>{cron.enabled ? "включён" : "выключен"}</div>
+      </div>
+      <div style={S.cronPlan}>
+        {cron.enabled
+          ? <>Тик каждые <b>{cron.tickMin} мин</b> (котировки · составы · переоценка · входы/выходы) · парсинг Polymarket каждые <b>{cron.discoverHr} ч</b>{cron.nextRunAt && <> · следующий ≈ <b>{fmtWarsaw(cron.nextRunAt)}</b></>}</>
+          : <>Авто-цикл выключен (<code>AUTO_TICK=false</code>). Матчи и переоценка — только по кнопке «Подтянуть матчи» и «Оценить матч».</>}
+      </div>
+      <div style={S.cronList}>
+        {(!cron.recent || cron.recent.length === 0) && <div style={S.noPos}>запусков ещё не было</div>}
+        {cron.recent?.map((r: any, i: number) => (
+          <div key={i} style={S.cronRow}>
+            <span style={{ ...S.cronDot, background: r.ok ? "#5fd08a" : "#ff6b6b" }} />
+            <span style={S.cronAt}>{fmtWarsaw(r.at)}</span>
+            <span style={S.cronKind}>{kindLabel[r.kind] ?? r.kind}</span>
+            <span style={S.cronSummary}>{r.summary}</span>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -1215,6 +1292,7 @@ const S: Record<string, React.CSSProperties> = {
   oddsAi: { fontSize: 10.5, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
   oddsLiq: { fontSize: 10, color: "#6b7686", fontFamily: "'JetBrains Mono', monospace" },
   oddsEdge: { fontSize: 11.5, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" },
+  oddsMove: { fontSize: 10, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" },
   finishCell: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px" },
   finishTop: { display: "flex", alignItems: "center", gap: 6, marginBottom: 4 },
   finishNm: { fontSize: 12.5, fontWeight: 600 },
@@ -1453,6 +1531,27 @@ const S: Record<string, React.CSSProperties> = {
   modelsIntro: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, padding: 16 },
   modelsTitle: { fontSize: 16, fontWeight: 700 },
   modelsSub: { fontSize: 12.5, color: "#c3c9d3", lineHeight: 1.55, marginTop: 6 },
+  settingsSectionLbl: { fontSize: 11, color: MUTE, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, marginTop: 8 },
+  balHead: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 },
+  balTitle: { fontSize: 15, fontWeight: 700 },
+  balSub: { fontSize: 12, color: MUTE, lineHeight: 1.5, marginTop: 4, maxWidth: 460 },
+  balNow: { fontSize: 22, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", color: "#5fd08a" },
+  balRow: { display: "flex", alignItems: "center", gap: 8, marginTop: 12 },
+  balDollar: { fontSize: 15, color: MUTE, fontWeight: 700 },
+  balInput: { flex: 1, maxWidth: 200, background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 12px", color: TEXT, fontSize: 14, fontFamily: "'JetBrains Mono', monospace" },
+  balErr: { fontSize: 11.5, color: "#ff6b6b", marginTop: 8 },
+  cronHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 },
+  cronTitle: { fontSize: 15, fontWeight: 700 },
+  cronBadge: { fontSize: 10.5, borderRadius: 20, padding: "2px 10px", fontWeight: 700, border: "1px solid" },
+  cronOn: { color: "#5fd08a", borderColor: "#5fd08a55", background: "#16241c" },
+  cronOff: { color: MUTE, borderColor: LINE, background: PANEL2 },
+  cronPlan: { fontSize: 12, color: "#c3c9d3", lineHeight: 1.55, background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px" },
+  cronList: { display: "flex", flexDirection: "column", gap: 2, marginTop: 10, maxHeight: 320, overflowY: "auto" },
+  cronRow: { display: "flex", alignItems: "baseline", gap: 8, fontSize: 11.5, padding: "4px 0", borderBottom: `1px solid ${LINE}` },
+  cronDot: { width: 7, height: 7, borderRadius: "50%", flexShrink: 0, alignSelf: "center" },
+  cronAt: { color: MUTE, fontFamily: "'JetBrains Mono', monospace", minWidth: 118, flexShrink: 0 },
+  cronKind: { color: "#e8a838", minWidth: 56, flexShrink: 0, fontWeight: 600 },
+  cronSummary: { color: "#c4cdd9", fontFamily: "'JetBrains Mono', monospace", fontSize: 11 },
   providerHead: { display: "flex", alignItems: "center", gap: 10, marginBottom: 10 },
   providerName: { fontSize: 15, fontWeight: 700 },
   providerStatus: { fontSize: 11, border: "1px solid", borderRadius: 20, padding: "2px 10px", fontWeight: 600 },

@@ -19,7 +19,7 @@ const oddsToCents = (odds: number) => Math.round((1 / odds) * 100);
 export function seedDatabase(db: Database): void {
   // idempotent: wipe in FK-safe order
   for (const t of [
-    "trade_log", "reassessments", "bets", "markets", "assessments", "analysis_jobs", "match_events", "match_live",
+    "trade_log", "reassessments", "bets", "markets", "assessments", "analysis_jobs", "match_events", "match_live", "cron_log",
     "quality_metrics", "strategy_versions", "strategy_shares", "matches",
     "strategies", "analytics_prompts", "competitions", "sports", "treasury",
   ]) db.exec(`DELETE FROM ${t};`);
@@ -201,7 +201,7 @@ export function seedDatabase(db: Database): void {
  */
 export function seedMinimal(db: Database): void {
   for (const t of [
-    "trade_log", "reassessments", "bets", "markets", "assessments", "analysis_jobs", "match_events", "match_live",
+    "trade_log", "reassessments", "bets", "markets", "assessments", "analysis_jobs", "match_events", "match_live", "cron_log",
     "quality_metrics", "strategy_versions", "strategy_shares", "matches",
     "strategies", "analytics_prompts", "competitions", "sports", "treasury",
   ]) db.exec(`DELETE FROM ${t};`);

@@ -189,6 +189,18 @@ export function eventsForMatch(db: Database, matchId: string): MatchEventRow[] {
   return db.prepare(`SELECT * FROM match_events WHERE match_id=? ORDER BY created_at`).all(matchId) as MatchEventRow[];
 }
 
+// ---------- cron log (scheduler audit trail) ----------
+export interface CronLogRow { id: string; at: string; kind: string; ok: number; summary: string; created_at: string }
+export function insertCronLog(db: Database, e: CronLogRow): void {
+  db.prepare(`INSERT INTO cron_log(id,at,kind,ok,summary,created_at) VALUES(?,?,?,?,?,?)`)
+    .run(e.id, e.at, e.kind, e.ok, e.summary, e.created_at);
+  // keep the table small — retain the most recent 100 runs
+  db.exec(`DELETE FROM cron_log WHERE id NOT IN (SELECT id FROM cron_log ORDER BY created_at DESC LIMIT 100)`);
+}
+export function recentCronLog(db: Database, limit = 20): CronLogRow[] {
+  return db.prepare(`SELECT * FROM cron_log ORDER BY created_at DESC LIMIT ?`).all(limit) as CronLogRow[];
+}
+
 // ---------- provider keys (optional, entered via UI; server-side only) ----------
 export function getProviderKeys(db: Database): Partial<Record<string, string>> {
   const rows = db.prepare(`SELECT provider, api_key FROM provider_keys`).all() as { provider: string; api_key: string }[];
@@ -321,6 +333,17 @@ export function latestMarkets(db: Database, matchId: string, closingOnly = false
     seen.add(r.label);
     out.push({ ...r, is_closing: !!r.is_closing });
   }
+  return out;
+}
+
+/** Opening (first-seen) price per market label — the pre-match snapshot, used to
+ *  show how the line has moved since. Earliest snapshot_at wins. */
+export function openingMarketPrices(db: Database, matchId: string): Record<string, number> {
+  const rows = db.prepare(
+    `SELECT label, price FROM markets WHERE match_id=? ORDER BY snapshot_at ASC, rowid ASC`,
+  ).all(matchId) as { label: string; price: number }[];
+  const out: Record<string, number> = {};
+  for (const r of rows) if (!(r.label in out)) out[r.label] = r.price;
   return out;
 }
 

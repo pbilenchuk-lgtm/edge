@@ -226,5 +226,17 @@ CREATE TABLE IF NOT EXISTS match_events (
   UNIQUE (match_id, event_key)
 );
 
+-- cron_log — audit trail of the in-process scheduler (and manual engine runs):
+-- what ran, when, whether it succeeded, and a human summary. Powers the
+-- "Настройки → журнал крона" panel.
+CREATE TABLE IF NOT EXISTS cron_log (
+  id         TEXT PRIMARY KEY,
+  at         TEXT NOT NULL,   -- when the run happened (ISO)
+  kind       TEXT NOT NULL,   -- "tick" | "discover" | "manual"
+  ok         INTEGER NOT NULL,
+  summary    TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 -- §2.15 event_feed — агрегируется из bets/reassessments/trade_log/matches (view),
 -- поэтому отдельной таблицы нет: строится в репозитории по времени.

@@ -83,7 +83,10 @@ export async function POST(req: Request) {
           enriched = e.enriched;
         }
         const odds = await engine.refreshActiveOdds(db, {});
-        return NextResponse.json({ ok: true, discovered, enriched, oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0) });
+        const oddsUpdated = odds.reduce((n, r) => n + r.updated, 0);
+        const at = new Date().toISOString();
+        try { R.insertCronLog(db, { id: R.uid(), at, kind: "manual", ok: 1, summary: `подтянуть матчи: +${discovered} матчей · составы ${enriched} · котировки ${oddsUpdated}`, created_at: at }); } catch {}
+        return NextResponse.json({ ok: true, discovered, enriched, oddsMatches: odds.length, oddsUpdated });
       }
       case "sync": {
         const cfg = loadSportsConfig();

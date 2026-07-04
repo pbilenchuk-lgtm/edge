@@ -10,6 +10,7 @@
 // ============================================================
 
 import { getDb } from "./db.js";
+import * as R from "./repo.js";
 import { loadSportsProvider, loadSportsConfig } from "./sports.js";
 import { loadPolymarketConfig } from "./polymarket.js";
 import { runAutoCycle } from "./lifecycle.js";
@@ -26,16 +27,21 @@ export function startScheduler(env: Record<string, string | undefined> = process
   let lastDiscover = 0;
 
   const run = async () => {
+    const db = getDb();
+    const nowMs = Date.now();
+    const discover = nowMs - lastDiscover >= discoverHr * 3_600_000;
+    const at = new Date(nowMs).toISOString();
     try {
-      const db = getDb();
       const provider = loadSportsProvider(loadSportsConfig(env));
-      const now = Date.now();
-      const discover = now - lastDiscover >= discoverHr * 3_600_000;
-      if (discover) lastDiscover = now;
+      if (discover) lastDiscover = nowMs;
       const r = await runAutoCycle(db, provider, {}, { linkOdds, discover });
-      console.log(`[scheduler] sync ${r.synced} · discover ${r.discovered} · odds ${r.oddsUpdated} · analyze ${r.analyzed.length} · enter ${r.entered.length} · exit ${r.exited.length}`);
+      const summary = `sync ${r.synced} · discover ${r.discovered} · составы ${r.enriched} · котировки ${r.oddsUpdated} · анализ ${r.analyzed.length} · входы ${r.entered.length} · выходы ${r.exited.length}`;
+      console.log(`[scheduler] ${summary}`);
+      try { R.insertCronLog(db, { id: R.uid(), at, kind: discover ? "discover" : "tick", ok: 1, summary, created_at: at }); } catch {}
     } catch (e) {
-      console.error("[scheduler] error:", e instanceof Error ? e.message : e);
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[scheduler] error:", msg);
+      try { R.insertCronLog(db, { id: R.uid(), at, kind: discover ? "discover" : "tick", ok: 0, summary: `ошибка: ${msg}`, created_at: at }); } catch {}
     }
   };
 

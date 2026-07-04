@@ -14,6 +14,8 @@ import type { StrategyParams } from "./types.js";
 export interface MarketView {
   id: string; label: string; price: number; aiProb: number | null;
   liq: string | null; tokenId: string | null;
+  /** opening (pre-match, first-seen) price in cents — for the "line moved" delta */
+  openCents: number | null;
 }
 export interface AssessmentView {
   confidence: string | null; short: string | null; text: string | null; verdict: string | null; status: string;
@@ -70,6 +72,11 @@ export interface AppData {
   quality: Record<string, QualityView>;
   eventFeed: FeedItem[];
   providers: ProviderView[];
+  cron: CronView;
+}
+export interface CronView {
+  enabled: boolean; tickMin: number; discoverHr: number; nextRunAt: string | null;
+  recent: { at: string; kind: string; ok: boolean; summary: string }[];
 }
 
 const PROVIDER_DEFS: Omit<ProviderView, "hasKey">[] = [
@@ -115,8 +122,10 @@ export function buildAppData(db: Database, env = process.env): AppData {
       const assessments = R.assessmentsForMatch(db, m.id).filter((a) => a.status !== "failed");
       const pre = assessments.find((a) => a.stage === "pre_lineup");
       const post = assessments.find((a) => a.stage === "post_lineup");
+      const opening = R.openingMarketPrices(db, m.id);
       const markets = R.latestMarkets(db, m.id).map((mk) => ({
         id: mk.id, label: mk.label, price: mk.price, aiProb: mk.ai_prob, liq: mk.liquidity, tokenId: mk.external_ref,
+        openCents: mk.label in opening ? opening[mk.label] : null,
       }));
       const allBets = R.betsForMatch(db, m.id);
       const bets: MatchView["bets"] = {};
@@ -181,7 +190,19 @@ export function buildAppData(db: Database, env = process.env): AppData {
     ...p, hasKey: providerEnabled(p.id as any, keyEnv),
   }));
 
-  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers };
+  // cron audit: schedule (from env) + recent runs (from the log)
+  const cronEnabled = (env.AUTO_TICK ?? "false").toLowerCase() === "true";
+  const tickMin = Math.max(1, Number(env.TICK_INTERVAL_MIN ?? 30));
+  const discoverHr = Math.max(1, Number(env.DISCOVER_INTERVAL_HR ?? 24));
+  const recentRuns = R.recentCronLog(db, 15);
+  const lastAt = recentRuns[0] ? Date.parse(recentRuns[0].at) : NaN;
+  const nextRunAt = cronEnabled && !isNaN(lastAt) ? new Date(lastAt + tickMin * 60_000).toISOString() : null;
+  const cron: CronView = {
+    enabled: cronEnabled, tickMin, discoverHr, nextRunAt,
+    recent: recentRuns.map((r) => ({ at: r.at, kind: r.kind, ok: r.ok === 1, summary: r.summary })),
+  };
+
+  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers, cron };
   // node:sqlite rows have a null prototype; React Server Components can't pass
   // those to a client component. A JSON round-trip yields plain objects.
   return JSON.parse(JSON.stringify(payload));

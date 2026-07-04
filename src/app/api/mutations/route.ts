@@ -32,6 +32,14 @@ export async function POST(req: Request) {
         R.setCompetitionBudget(db, compId, Math.round(amount));
         return ok({ free: freeBalance(total, R.listCompetitions(db)) });
       }
+      case "setTreasury": {
+        const amount = Math.round(Number(body.amount));
+        if (!isFinite(amount) || amount < 0) return bad("Некорректная сумма");
+        const allocated = R.listCompetitions(db).reduce((n, c) => n + c.budget, 0);
+        if (amount < allocated) return bad(`Общий баланс не может быть меньше уже распределённого ($${allocated})`);
+        R.setTreasury(db, amount);
+        return ok({ total: amount, free: freeBalance(amount, R.listCompetitions(db)) });
+      }
       case "setShares": {
         const { compId, shares } = body as { compId: string; shares: Record<string, number> };
         if (!compId || !shares || typeof shares !== "object") return bad("нужны compId и shares");
