@@ -34,6 +34,8 @@ export interface MatchView {
   /** a per-match LLM analyze run is in flight (durable; survives reload) */
   analyzing: boolean;
   preLineup: AssessmentView | null; postLineup: AssessmentView | null;
+  /** past analyses (older runs), newest first — the current pre/post are excluded */
+  assessmentHistory: { stage: string; label: string; at: string | null; confidence: string | null; short: string | null; text: string | null; verdict: string | null }[];
   markets: MarketView[];
   bets: Record<string, { rationale: string | null; items: BetItemView[] }>;
   reassessByStrat: Record<string, { min: string | null; text: string; conf: string | null }[]>;
@@ -141,6 +143,17 @@ export function buildAppData(db: Database, env = process.env): AppData {
       const assessments = R.assessmentsForMatch(db, m.id).filter((a) => a.status !== "failed");
       const pre = assessments.find((a) => a.stage === "pre_lineup");
       const post = assessments.find((a) => a.stage === "post_lineup");
+      // History of past analyses: newest first, dropping the single most-recent
+      // row per stage (that one is already surfaced as the current pre/post).
+      const stageLabel: Record<string, string> = { pre_lineup: "до состава", post_lineup: "после состава" };
+      const seenStage = new Set<string>();
+      const assessmentHistory = R.assessmentHistoryForMatch(db, m.id).filter((h) => {
+        if (!seenStage.has(h.stage)) { seenStage.add(h.stage); return false; } // skip current
+        return true;
+      }).map((h) => ({
+        stage: h.stage, label: stageLabel[h.stage] ?? h.stage, at: warsawLabel(h.created_at),
+        confidence: h.confidence, short: h.short, text: h.body, verdict: h.verdict,
+      }));
       const kickoff = R.openOddsFor(db, m.id); // price at kickoff (empty pre-match)
       const markets = R.latestMarkets(db, m.id).map((mk) => ({
         id: mk.id, label: mk.label, price: mk.price, aiProb: mk.ai_prob, liq: mk.liquidity, tokenId: mk.external_ref,
@@ -194,6 +207,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
         endTime: m.end_time, duration: m.duration, endNote: m.end_note,
         analyzing: jobActive(R.getAnalysisJob(db, m.id), nowMs),
         preLineup: pre ? view(pre) : null, postLineup: post ? view(post) : null,
+        assessmentHistory,
         markets, bets, reassessByStrat, logByStrat, settledBets, result, lineups, events,
       };
     }

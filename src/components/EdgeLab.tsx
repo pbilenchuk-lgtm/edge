@@ -78,7 +78,11 @@ function stratEquityOnComp(matchDb: any, comp: any, stratId: string, budget: num
   for (const mid of comp.matches) {
     const m = matchDb[mid];
     if (!m) continue;
-    if (m.state === "finished" && m.result?.[stratId] != null) realized += m.result[stratId];
+    // Realized P&L from every CLOSED position — including cash-outs / partial
+    // fixations taken while the match is still live. Was gated on
+    // state==="finished", so money booked mid-match never showed up in the
+    // tournament budget/equity until the match ended.
+    if (m.result?.[stratId] != null) realized += m.result[stratId];
     for (const b of betItems(m.bets?.[stratId])) {
       if (b.status === "open") {
         if (b.currentPrice != null && b.entryPrice != null) unreal += b.stake * (b.currentPrice / b.entryPrice) - b.stake;
@@ -126,6 +130,35 @@ function collectPortfolio(competitions: any[], matchDb: any, catalog: any[], com
     }
   }
   return positions;
+}
+
+// Contain render crashes so one bad screen / match card can't blank the whole
+// app with Next's generic "Application error: a client-side exception has
+// occurred". The real error + component stack are logged to the console (tagged
+// [EDGE LAB]) so a production crash is actually debuggable, and the user gets a
+// retry / reload instead of a dead page.
+class ErrorBoundary extends React.Component<{ label?: string; children: React.ReactNode }, { error: Error | null }> {
+  constructor(props: any) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(error: Error, info: any) {
+    // eslint-disable-next-line no-console
+    console.error(`[EDGE LAB] UI error${this.props.label ? ` · ${this.props.label}` : ""}:`, error, info?.componentStack);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={S.errBox}>
+          <div style={S.errTitle}>⚠ Не удалось отобразить{this.props.label ? ` «${this.props.label}»` : " этот блок"}</div>
+          <div style={S.errMsg}>{String(this.state.error?.message || this.state.error)}</div>
+          <div style={S.errActions}>
+            <button style={S.errBtn} onClick={() => this.setState({ error: null })}>↻ Повторить</button>
+            <button style={S.errBtn} onClick={() => { if (typeof window !== "undefined") window.location.reload(); }}>Перезагрузить</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 export default function EdgeLab({ initial }: { initial: AppData }) {
@@ -183,7 +216,8 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       if (!cur) return prev;
       const nm = { ...cur };
       nm.markets = nm.markets.map((mk) => { const q = byId[mk.id]; return q && q.price != null ? { ...mk, price: q.price } : mk; });
-      nm.oddsUpdated = "только что";
+      // The "updated" cue is now a fading green dot in MatchCard (driven by an
+      // actual price change), not a text line that reflowed the odds list.
       return { ...prev, [matchId]: nm };
     });
     if (!silent) toast(res?.updated ? "ok" : "info", res?.updated ? `Котировки обновлены (${res.updated})` : "Свежих котировок нет — рынок закрыт или неликвиден");
@@ -316,6 +350,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
         </nav>
       )}
 
+      <ErrorBoundary key={screen} label={screen}>
       {screen === "matches" ? (
         <>
           <div style={S.compRow}>
@@ -368,7 +403,11 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 
           <main style={S.main}>
             {comp?.matches.length === 0 && <div style={S.empty}>В этом турнире пока нет матчей.</div>}
-            {comp?.matches.map((mid) => <MatchCard key={mid} match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} onResumeAnalyze={pollAnalyze} />)}
+            {comp?.matches.map((mid) => matchDb[mid] && (
+              <ErrorBoundary key={mid} label={`${matchDb[mid].home}–${matchDb[mid].away}`}>
+                <MatchCard match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} onResumeAnalyze={pollAnalyze} />
+              </ErrorBoundary>
+            ))}
           </main>
         </>
       ) : screen === "strategies" ? (
@@ -390,6 +429,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
             return r;
           }} />
       )}
+      </ErrorBoundary>
 
       {compModal && <BudgetModal comp={COMPETITIONS.find((c) => c.id === compModal)!} current={compBudget[compModal] || 0} free={freeBalance} onClose={() => setCompModal(null)} onSave={(amt: number) => setBudget(compModal, amt)} />}
       {shareModal && <SharesModal comp={COMPETITIONS.find((c) => c.id === shareModal)!} strats={catalog.filter((s) => s.sport === COMPETITIONS.find((c) => c.id === shareModal)!.sport)} budget={compBudget[shareModal]} current={shares[shareModal] || {}} onClose={() => setShareModal(null)} onSave={(sh: any) => saveShares(shareModal, sh)} />}
@@ -432,6 +472,17 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
   const [reassessing, setReassessing] = useState<Record<string, boolean>>({});
   const [showLineups, setShowLineups] = useState(false); // составы скрыты по умолчанию — по кнопке
+
+  // Quote-refresh indicator: instead of an "обновлено только что" line that
+  // pushed the odds list down on every tick, flash a small green dot next to ↻
+  // ONLY when a price actually changed. The dot slot is always reserved, so the
+  // layout never shifts.
+  const priceSig = (match.markets || []).map((mk: any) => `${mk.id}:${mk.price}`).join("|");
+  const [flashKey, setFlashKey] = useState(0);
+  const prevSig = useRef(priceSig);
+  useEffect(() => {
+    if (prevSig.current !== priceSig) { prevSig.current = priceSig; setFlashKey((n) => n + 1); }
+  }, [priceSig]);
 
   const doRefresh = async () => { setRefreshing(true); await onRefreshOdds(match.id); setRefreshing(false); };
 
@@ -522,6 +573,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                     </div>
                   </div>
                 )}
+                <PastAssessments history={match.assessmentHistory} />
               </div>
             )}
             {tab === "strat" && (
@@ -715,9 +767,11 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
           <aside style={S.oddsCol} className="el-odds-col">
             <div style={S.oddsColHead}>
               <div><div style={S.oddsColLabel}>Котировки</div><div style={S.oddsColSub}>Polymarket · цена в ¢</div></div>
-              <button style={S.oddsRefresh} title="Обновить котировки" onClick={doRefresh} disabled={refreshing}>{refreshing ? "…" : "↻"}</button>
+              <div style={S.oddsRefreshWrap}>
+                <span style={S.oddsFlashSlot}>{flashKey > 0 && <span key={flashKey} className="el-odds-flash" style={S.oddsFlash} title="котировки обновились">&#9679;</span>}</span>
+                <button style={S.oddsRefresh} title="Обновить котировки" onClick={doRefresh} disabled={refreshing}>{refreshing ? "…" : "↻"}</button>
+              </div>
             </div>
-            {match.oddsUpdated && <div style={S.oddsUpdated}>обновлено {match.oddsUpdated}</div>}
             <div style={S.oddsScroll}>
               {[...match.markets].sort((a: any, b: any) => (b.price ?? 0) - (a.price ?? 0)).map((mk: any) => {
                 const move = mk.openCents != null ? Math.round(mk.price - mk.openCents) : 0;
@@ -738,6 +792,42 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
         )}
       </div>
     </section>
+  );
+}
+
+// Previous analyses of a match, kept as history so re-оценки don't erase the
+// model's earlier reasoning. Collapsed by default — the current pre/post is
+// shown above; this is the archive.
+function PastAssessments({ history }: { history?: any[] }) {
+  const [open, setOpen] = useState(false);
+  const [expanded, setExpanded] = useState<number | null>(null);
+  if (!history || history.length === 0) return null;
+  return (
+    <div style={S.pastWrap}>
+      <button style={S.pastToggle} onClick={() => setOpen((v) => !v)}>
+        {open ? "▾" : "▸"} Прошлые оценки ({history.length})
+      </button>
+      {open && (
+        <div style={S.pastList}>
+          {history.map((h: any, i: number) => (
+            <div key={i} style={S.pastItem}>
+              <button style={S.pastItemHead} onClick={() => setExpanded(expanded === i ? null : i)}>
+                <span style={S.pastStage}>{h.label}</span>
+                <span style={S.pastAt}>{h.at}</span>
+                {h.confidence && <span style={S.pastConf}>увер.: {h.confidence}</span>}
+                <span style={S.pastChev}>{expanded === i ? "свернуть" : "показать"}</span>
+              </button>
+              {expanded === i && (
+                <div style={S.pastBody}>
+                  <p style={S.pastText}>{h.text || h.short || "—"}</p>
+                  {h.verdict && <div style={S.verdict}><span style={{ color: "#e8a838" }}>&#9656;</span> {h.verdict}</div>}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1308,6 +1398,8 @@ function logTypeStyle(type: string) { const m: any = { enter: { color: "#70b56a"
 
 const CSS = `* { box-sizing: border-box; } button { font-family: inherit; } button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid #e8a838; outline-offset: 2px; } p { margin: 0; } pre { margin: 0; } textarea, input, select { font-family: inherit; } input[type=range]{ accent-color: #e8a838; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+@keyframes elOddFlash { 0%{opacity:0;transform:scale(.4)} 15%{opacity:1;transform:scale(1)} 60%{opacity:1} 100%{opacity:0;transform:scale(1)} }
+.el-odds-flash { animation: elOddFlash 1.6s ease-out forwards; }
 .el-tab-select { display: none; }
 @media (min-width: 760px) {
   .el-match-body { display: grid !important; grid-template-columns: 1fr 280px; gap: 16px; align-items: start; }
@@ -1386,6 +1478,11 @@ const S: Record<string, React.CSSProperties> = {
   bankD: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace" },
   main: { display: "flex", flexDirection: "column", gap: 12 },
   empty: { color: MUTE, padding: 30, textAlign: "center" },
+  errBox: { background: "#2e1f22", border: "1px solid #ff6b6b55", borderRadius: 12, padding: "16px 18px", margin: "10px 0", color: "#ffd7d7" },
+  errTitle: { fontSize: 14, fontWeight: 700, color: "#ff8f8f", marginBottom: 6 },
+  errMsg: { fontSize: 12, fontFamily: "'JetBrains Mono', monospace", color: "#e8b3b3", wordBreak: "break-word", marginBottom: 12, lineHeight: 1.5 },
+  errActions: { display: "flex", gap: 8, flexWrap: "wrap" },
+  errBtn: { background: "#3a2a2c", border: "1px solid #ff6b6b55", color: "#ffd7d7", borderRadius: 8, padding: "6px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" },
   card: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, padding: 14 },
   cardHead: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 },
   matchup: { fontSize: 17, fontWeight: 700 },
@@ -1405,6 +1502,9 @@ const S: Record<string, React.CSSProperties> = {
   oddsColLabel: { fontSize: 11, color: "#e8a838", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 },
   oddsColSub: { fontSize: 10, color: MUTE, marginTop: 2, marginBottom: 8 },
   oddsRefresh: { background: PANEL2, border: `1px solid ${LINE}`, color: "#e8a838", borderRadius: 6, width: 28, height: 28, fontSize: 15, cursor: "pointer", flexShrink: 0 },
+  oddsRefreshWrap: { display: "flex", alignItems: "center", gap: 4, flexShrink: 0 },
+  oddsFlashSlot: { width: 10, display: "inline-flex", justifyContent: "center", alignItems: "center" },
+  oddsFlash: { color: "#5fd08a", fontSize: 10, lineHeight: 1 },
   oddsUpdated: { fontSize: 9.5, color: MUTE, marginBottom: 8, fontFamily: "'JetBrains Mono', monospace" },
   oddsScroll: { maxHeight: 360, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, paddingRight: 2 },
   oddsRow: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "7px 9px" },
@@ -1444,6 +1544,17 @@ const S: Record<string, React.CSSProperties> = {
   decisionName: { fontSize: 13, fontWeight: 700 },
   decisionVerdict: { marginLeft: "auto", fontSize: 10.5, color: "#7fb4e8", background: "#1e2836", borderRadius: 20, padding: "2px 10px", fontFamily: "'JetBrains Mono', monospace" },
   decisionText: { fontSize: 12.5, color: "#d3d8e0", lineHeight: 1.55 },
+  pastWrap: { marginTop: 2 },
+  pastToggle: { background: "transparent", border: "none", color: MUTE, fontSize: 11.5, cursor: "pointer", padding: "2px 0", fontWeight: 600 },
+  pastList: { display: "flex", flexDirection: "column", gap: 6, marginTop: 6 },
+  pastItem: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, overflow: "hidden" },
+  pastItemHead: { display: "flex", alignItems: "center", gap: 8, width: "100%", background: "transparent", border: "none", cursor: "pointer", padding: "7px 10px", textAlign: "left", flexWrap: "wrap" },
+  pastStage: { fontSize: 11, fontWeight: 700, color: "#7fb4e8", textTransform: "uppercase", letterSpacing: "0.04em" },
+  pastAt: { fontSize: 10.5, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
+  pastConf: { fontSize: 10.5, color: MUTE },
+  pastChev: { marginLeft: "auto", fontSize: 10.5, color: "#6b7686" },
+  pastBody: { padding: "0 10px 10px" },
+  pastText: { fontSize: 12.5, lineHeight: 1.55, color: "#c7cdd6" },
   finishTiming: { fontSize: 11, color: "#6b7686", marginTop: 3, fontFamily: "'JetBrains Mono', monospace" },
   confChip: { fontSize: 11, color: MUTE },
   fullToggle: { marginLeft: "auto", background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 20, padding: "3px 10px", fontSize: 11, cursor: "pointer" },

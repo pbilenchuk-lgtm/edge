@@ -111,6 +111,23 @@ CREATE TABLE IF NOT EXISTS assessments (
   UNIQUE (match_id, stage)         -- одна оценка каждой стадии на матч
 );
 
+-- §2.9b assessment_history — append-only архив оценок. Таблица `assessments`
+-- хранит ТОЛЬКО актуальную оценку каждой стадии (upsert затирает прошлую); сюда
+-- же дописывается каждый успешный прогон, чтобы в «Анализе» была видна история
+-- переоценок матча, а не только последняя.
+CREATE TABLE IF NOT EXISTS assessment_history (
+  id         TEXT PRIMARY KEY,
+  match_id   TEXT NOT NULL REFERENCES matches(id),
+  stage      TEXT NOT NULL,
+  confidence TEXT,
+  short      TEXT,
+  body       TEXT,
+  verdict    TEXT,
+  model      TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_asmt_hist ON assessment_history(match_id, created_at);
+
 -- §2.10 markets (котировки рынков, Polymarket-стиль; версионируются по snapshot_at)
 CREATE TABLE IF NOT EXISTS markets (
   id           TEXT PRIMARY KEY,
