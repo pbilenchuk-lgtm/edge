@@ -10,6 +10,9 @@ import type { AppData } from "@/lib/view";
 
 const INK = "#12161d", PANEL = "#1a2029", PANEL2 = "#212936", LINE = "#2c3543", TEXT = "#e6e9ef", MUTE = "#8b95a5";
 const PALETTE = ["#e8a838", "#5b9bd5", "#70b56a", "#c98bdb", "#e07a5f", "#4fc3c7"];
+// Sports that have team sheets — analysis is staged as до/после состава for these;
+// others (tennis) get a single "Анализ" with no lineup framing.
+const LINEUP_SPORTS = new Set(["football"]);
 const STATE_META: Record<string, { label: string; color: string; bg: string }> = {
   upcoming: { label: "СКОРО", color: "#8b95a5", bg: "#232a35" },
   lineup: { label: "СОСТАВ", color: "#e8a838", bg: "#2e2a1a" },
@@ -385,19 +388,19 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 
 function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess, onAnalyze, onResumeAnalyze }: any) {
   const meta = STATE_META[match.state];
+  const hasLineups = LINEUP_SPORTS.has(comp.sport); // does this sport have team sheets?
   const hasLog = match.state === "live" || match.state === "finished";
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
   const hasReassess = Object.keys(match.reassessByStrat || {}).length > 0;
   const hasSettled = Object.keys(match.settledBets || {}).length > 0;
-  const tabs: any[] = [];
-  if (match.preLineup || match.postLineup) tabs.push({ id: "analysis", label: "Анализ" });
+  const tabs: any[] = [{ id: "analysis", label: "Анализ" }]; // always available — analyze on demand
   tabs.push({ id: "strat", label: "Ставки стратегий" });
   if (hasReassess) tabs.push({ id: "reassess", label: "Переоценки" });
   if (hasSettled) tabs.push({ id: "settle", label: "Расчёт" });
   const hasLive = !!((match.lineups && (match.lineups.home || match.lineups.away)) || (match.events && match.events.length));
   if (hasLive) tabs.push({ id: "live", label: "Составы · события" });
   if (hasLog) tabs.push({ id: "log", label: "Лог" });
-  const defaultTab = hasSettled ? "settle" : (match.preLineup || match.postLineup) ? "analysis" : "strat";
+  const defaultTab = hasSettled ? "settle" : "analysis"; // analysis is the default view
   const [tab, setTab] = useState(defaultTab);
   const [logStrat, setLogStrat] = useState(compStrats[0]?.id);
   const [refreshing, setRefreshing] = useState(false);
@@ -423,7 +426,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
       <div style={S.cardHead}>
         <div>
           <div style={S.matchup}>{match.home}{match.state === "live" || match.state === "finished" ? <span style={S.score}> {match.scoreHome}:{match.scoreAway} </span> : <span style={S.vs}> — </span>}{match.away}</div>
-          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && match.kickoff}{match.state === "live" && `LIVE · ${match.minute}'`}{match.state === "finished" && (match.endTime ? `завершён ${match.endTime}` : "финал")}{"  ·  "}<span style={{ color: match.lineupOut ? "#70b56a" : "#8b95a5" }}>{match.lineupOut ? "✓ состав" : "○ без состава"}</span></div>
+          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && match.kickoff}{match.state === "live" && `LIVE · ${match.minute}'`}{match.state === "finished" && (match.endTime ? `завершён ${match.endTime}` : "финал")}{hasLineups && <>{"  ·  "}<span style={{ color: match.lineupOut ? "#70b56a" : "#8b95a5" }}>{match.lineupOut ? "✓ состав" : "○ без состава"}</span></>}</div>
           {match.state === "finished" && match.duration && <div style={S.finishTiming}>{match.kickoffTime}–{match.endTime} · длительность {match.duration}{match.endNote && ` · ${match.endNote}`}</div>}
         </div>
         <div style={{ ...S.stateBadge, background: meta.bg, color: meta.color }}>{match.state === "live" && <span style={S.pulse} />}{meta.label}</div>
@@ -438,28 +441,39 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
           <div style={S.tabBody}>
             {tab === "analysis" && (
               <div style={S.analysisFlow}>
-                {match.markets?.length > 0 && match.state !== "finished" && (
+                {match.state !== "finished" && (
                   <div style={S.reassessTop}>
-                    <span style={S.reassessHint}>ИИ оценит матч по рынкам, проставит вероятности и предложит ставки стратегий.</span>
-                    <button style={S.reassessBtn} disabled={analyzing} onClick={async () => { setAnalyzing(true); setAnalyzeErr(null); const r = await onAnalyze(match.id); if (r && r.ok === false) setAnalyzeErr(r.error || "оценка не удалась"); setAnalyzing(false); }}>
-                      {analyzing ? "ИИ оценивает…" : "✨ Оценить матч (ИИ)"}
+                    <span style={S.reassessHint}>
+                      {match.markets?.length > 0
+                        ? <>ИИ оценит матч по рынкам (промт аналитики{hasLineups ? ", учёт составов" : ""}), проставит вероятности и предложит ставки стратегий.</>
+                        : <>Нет котировок — сначала нажми «Подтянуть матчи» или ↻ в колонке котировок.</>}
+                    </span>
+                    <button style={{ ...S.reassessBtn, opacity: (analyzing || !match.markets?.length) ? 0.5 : 1 }} disabled={analyzing || !match.markets?.length} onClick={async () => { setAnalyzing(true); setAnalyzeErr(null); const r = await onAnalyze(match.id); if (r && r.ok === false) setAnalyzeErr(r.error || "оценка не удалась"); setAnalyzing(false); }}>
+                      {analyzing ? "ИИ оценивает…" : match.preLineup || match.postLineup ? "↻ Переоценить (ИИ)" : "✨ Оценить матч (ИИ)"}
                     </button>
                   </div>
                 )}
                 {analyzeErr && <div style={S.analysisPending}>{analyzeErr}</div>}
-                {match.preLineup && (
-                  <div style={S.analysisStage}>
-                    <div style={S.analysisStageLabel}><span style={S.stageNum}>1</span> До состава</div>
-                    <Assessment a={match.preLineup} />
-                  </div>
-                )}
-                {match.postLineup && (
-                  <div style={S.analysisStage}>
-                    <div style={S.analysisStageLabel}><span style={{ ...S.stageNum, background: "#e8a838", color: "#12161d" }}>2</span> После состава <span style={S.stagePriority}>приоритетная</span></div>
-                    <Assessment a={match.postLineup} />
-                  </div>
-                )}
-                {!match.postLineup && <div style={S.analysisPending}>Оценка после состава появится, когда объявят составы.</div>}
+                {hasLineups ? <>
+                  {match.preLineup && (
+                    <div style={S.analysisStage}>
+                      <div style={S.analysisStageLabel}><span style={S.stageNum}>1</span> До состава</div>
+                      <Assessment a={match.preLineup} />
+                    </div>
+                  )}
+                  {match.postLineup && (
+                    <div style={S.analysisStage}>
+                      <div style={S.analysisStageLabel}><span style={{ ...S.stageNum, background: "#e8a838", color: "#12161d" }}>2</span> После состава <span style={S.stagePriority}>приоритетная</span></div>
+                      <Assessment a={match.postLineup} />
+                    </div>
+                  )}
+                  {!match.preLineup && !match.postLineup && <div style={S.analysisPending}>Анализа пока нет — нажми «Оценить матч (ИИ)». После выхода составов появится приоритетная оценка.</div>}
+                  {match.preLineup && !match.postLineup && match.state !== "finished" && <div style={S.analysisPending}>Приоритетная оценка после состава появится, когда объявят составы.</div>}
+                </> : <>
+                  {(match.postLineup || match.preLineup)
+                    ? <div style={S.analysisStage}><div style={S.analysisStageLabel}><span style={S.stageNum}>✓</span> Анализ</div><Assessment a={match.postLineup || match.preLineup} /></div>
+                    : <div style={S.analysisPending}>Анализа пока нет — нажми «Оценить матч (ИИ)».</div>}
+                </>}
                 {compStrats.length > 0 && compStrats.some((st: any) => { const r = match.bets?.[st.id]; return r && r.rationale; }) && (
                   <div style={S.analysisStage}>
                     <div style={S.analysisStageLabel}><span style={{ ...S.stageNum, background: "#5b9bd5", color: "#12161d" }}>3</span> Решения стратегий</div>
