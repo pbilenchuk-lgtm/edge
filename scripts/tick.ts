@@ -19,6 +19,7 @@ if (!provider) console.log("· sync пропущен (SPORTS_ENABLED=false) — 
 const r = await runAutoCycle(db, provider, {}, { linkOdds: loadPolymarketConfig().enabled });
 
 console.log(`✓ sync: ${r.synced} матч(ей), новых ${r.imported}`);
+console.log(`✓ Polymarket-дискавери: ${r.discovered} матч(ей) с рынками`);
 console.log(`✓ odds: ${r.oddsMatches} с изменениями, ${r.oddsUpdated} снапшот(ов)`);
 console.log(`✓ анализ: ${r.analyzed.filter((a) => a.ok).length}/${r.analyzed.length} матч(ей)`);
 for (const a of r.analyzed) console.log(`    ${a.match.padEnd(34)} ${a.stage} ${a.ok ? `ok (${a.bets} ставок)` : "не удалось"}`);

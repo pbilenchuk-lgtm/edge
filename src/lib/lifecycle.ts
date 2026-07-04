@@ -17,7 +17,8 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
-import { syncCompetitions, refreshActiveOdds, recomputeMetrics } from "./engine.js";
+import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches } from "./engine.js";
+import { SPORT_TAG_IDS } from "./polymarket.js";
 import { analyzeMatch, jobActive } from "./analysis.js";
 import { exitDecision } from "./thresholds.js";
 import type { SportsProvider } from "./sports.js";
@@ -41,9 +42,19 @@ function activeMatches(db: Database): { comp: string; sport: string; match: Matc
 
 export interface AutoAnalyzeItem { matchId: string; match: string; stage: string; ok: boolean; bets: number }
 
-export async function autoAnalyze(db: Database, deps: EngineDeps = {}): Promise<AutoAnalyzeItem[]> {
+/**
+ * Analyze matches that have tradeable odds, belong to a FUNDED competition
+ * (budget > 0 — no point spending LLM on matches no strategy can bet), and
+ * haven't been analyzed for their current stage. Capped per run so a tick over
+ * hundreds of discovered matches doesn't fire hundreds of model calls.
+ */
+export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { max?: number } = {}): Promise<AutoAnalyzeItem[]> {
+  const max = opts.max ?? 6;
+  const budgetByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.budget]));
   const out: AutoAnalyzeItem[] = [];
-  for (const { match: m } of activeMatches(db)) {
+  for (const { comp, match: m } of activeMatches(db)) {
+    if (out.length >= max) break;
+    if ((budgetByComp.get(comp) ?? 0) <= 0) continue;              // unfunded → skip (economical)
     if (!R.latestMarkets(db, m.id).length) continue;               // needs tradeable odds
     const stage = m.lineup_out ? "post_lineup" : "pre_lineup";
     if (R.assessmentsForMatch(db, m.id).some((a) => a.stage === stage && a.status === "ok")) continue; // already done this stage
@@ -122,7 +133,7 @@ export function evaluateExits(db: Database, deps: EngineDeps = {}): ExitItem[] {
 // ------------------------------------------------------------
 
 export interface AutoCycleResult {
-  synced: number; imported: number; oddsMatches: number; oddsUpdated: number;
+  synced: number; imported: number; discovered: number; oddsMatches: number; oddsUpdated: number;
   analyzed: AutoAnalyzeItem[]; entered: AutoEnterItem[]; exited: ExitItem[];
 }
 
@@ -133,15 +144,21 @@ export interface AutoCycleResult {
  * newly-eligible matches, then fill their proposals.
  */
 export async function runAutoCycle(
-  db: Database, provider: SportsProvider | null, deps: EngineDeps = {}, opts: { linkOdds?: boolean } = {},
+  db: Database, provider: SportsProvider | null, deps: EngineDeps = {}, opts: { linkOdds?: boolean; discoverLimit?: number } = {},
 ): Promise<AutoCycleResult> {
   const synced = provider ? await syncCompetitions(db, provider, deps, opts) : [];
+  // Discover the many matches Polymarket lists directly (into catch-all comps).
+  let discovered = 0;
+  for (const sport of Object.keys(SPORT_TAG_IDS)) {
+    const items = await importPolymarketMatches(db, sport, deps, { limit: opts.discoverLimit ?? 60 });
+    discovered += items.length;
+  }
   const odds = await refreshActiveOdds(db, deps);
   const exited = evaluateExits(db, deps);
   const analyzed = await autoAnalyze(db, deps);
   const entered = autoEnter(db, deps);
   return {
-    synced: synced.length, imported: synced.filter((r) => r.created).length,
+    synced: synced.length, imported: synced.filter((r) => r.created).length, discovered,
     oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),
     analyzed, entered, exited,
   };

@@ -18,7 +18,7 @@ import type { SportsMatchStatus } from "./sports.js";
 import { reassessNarrative, effectiveEnv } from "./llm.js";
 import { settleBet, resolveFootballMarket } from "./settlement.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
-import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, type PolymarketConfig } from "./polymarket.js";
+import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, type PolymarketConfig } from "./polymarket.js";
 import type { SportsProvider } from "./sports.js";
 
 export interface EngineConfig {
@@ -322,6 +322,66 @@ export async function linkMatchOdds(
     });
   }
   return snaps.length;
+}
+
+// ------------------------------------------------------------
+// Discover matches directly FROM Polymarket (not only ESPN-linked leagues) —
+// imports the many matches it lists into a per-sport catch-all competition.
+// ------------------------------------------------------------
+
+const PM_COMP_LABEL: Record<string, string> = { football: "Polymarket · Футбол", tennis: "Polymarket · Теннис" };
+
+/** Ensure the catch-all competition for a sport's Polymarket-discovered matches. */
+function ensurePolymarketComp(db: Database, sport: string, now: string): string {
+  const id = `pm-${sport}`;
+  if (!R.listCompetitions(db).some((c) => c.id === id)) {
+    R.upsertCompetition(db, { id, sport_id: sport, name: PM_COMP_LABEL[sport] ?? `Polymarket · ${sport}`, budget: 0, external_league: null, created_at: now });
+  }
+  return id;
+}
+
+export interface DiscoverItem { sport: string; match: string; created: boolean; markets: number }
+
+/**
+ * Import the most-liquid matches Polymarket lists for a sport into its catch-all
+ * competition, with their settleable odds. Idempotent: existing matches are left
+ * alone (markets attached only if they have none). State/lineup come from the
+ * event start date — live scores still need the ESPN sync.
+ */
+export async function importPolymarketMatches(
+  db: Database, sport: string, deps: EngineDeps = {}, opts: { limit?: number } = {},
+): Promise<DiscoverItem[]> {
+  const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
+  if (!poly.enabled) return [];
+  const now = nowFn(deps)();
+  const nowMs = Date.parse(now) || Date.now();
+  const compId = ensurePolymarketComp(db, sport, now);
+  const discovered = await discoverSportMatches(poly, sport, now, { fetchImpl: deps.fetchImpl }, opts.limit ?? 60);
+  const out: DiscoverItem[] = [];
+  for (const d of discovered) {
+    const ref = `pm:${sport}:${d.home}-${d.away}`.toLowerCase().replace(/\s+/g, "");
+    let match = R.matchByExternalRef(db, ref);
+    let created = false;
+    if (!match) {
+      const startMs = d.startDate ? Date.parse(d.startDate) : NaN;
+      const lineupOut = !isNaN(startMs) && startMs <= nowMs + 24 * 3600_000;
+      match = {
+        id: R.uid(), competition_id: compId, home: d.home, away: d.away,
+        state: "upcoming", lineup_out: lineupOut, kickoff_at: d.startDate ? d.startDate.slice(0, 16).replace("T", " ") : null,
+        minute: null, score_home: null, score_away: null, final_score: null,
+        kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: ref,
+      };
+      R.insertMatch(db, match);
+      created = true;
+    }
+    if (!R.latestMarkets(db, match.id).length) {
+      for (const s of d.markets) {
+        R.insertMarket(db, { id: R.uid(), match_id: match.id, label: s.label, price: s.price, ai_prob: null, liquidity: s.liquidity, external_ref: s.external_ref, snapshot_at: now, is_closing: false });
+      }
+    }
+    out.push({ sport, match: `${d.home}–${d.away}`, created, markets: d.markets.length });
+  }
+  return out;
 }
 
 export interface CompetitionSyncItem {

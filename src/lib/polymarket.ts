@@ -334,6 +334,63 @@ function matchesTitle(name: string, titleWords: Set<string>): boolean {
  * the `markets` table): label, price in cents, the backing CLOB token as
  * external_ref, and liquidity. Markets without a usable price are skipped.
  */
+// ------------------------------------------------------------
+// Match discovery FROM Polymarket (import the many matches it lists directly,
+// not only ESPN-linked competitions). A match is spread across several events
+// by market family; we parse the competitors from each event's title, group by
+// (home, away), and aggregate the settleable markets.
+// ------------------------------------------------------------
+
+// Tennis titles carry a "Tournament: " prefix ("ITF Skopje:", "Wimbledon ATP:").
+const TOURNEY_PREFIX_RE = /^[^:]*:\s*/;
+// Trailing market-family text appended to a title after the "A vs B" core.
+const FAMILY_SUFFIX_RE = /\s*(?:[-–]\s*)?(?:more markets|player props|total corners|exact score|halftime result|1st half result|first half result|second half result|first (?:team )?to score|to score first|moneyline|corners?|cards?|bookings?|set\s*\d.*|match o\/u.*|total sets.*|set handicap.*|completed match|winner|o\/u\s*[\d.]+.*)\s*$/i;
+
+/** Extract {home, away} from an event title, or null if it isn't an A-vs-B match. */
+export function parseMatchTitle(title: string, sport: string): { home: string; away: string } | null {
+  let s = title.trim();
+  if (sport === "tennis") s = s.replace(TOURNEY_PREFIX_RE, "");
+  s = s.replace(FAMILY_SUFFIX_RE, "").replace(FAMILY_SUFFIX_RE, "").trim(); // twice: "… Set 1 Winner"
+  const parts = s.split(/\s+vs\.?\s+/i);
+  if (parts.length !== 2) return null;
+  const home = parts[0].trim(), away = parts[1].trim();
+  if (home.length < 2 || away.length < 2) return null;
+  return { home, away };
+}
+
+export interface DiscoveredMatch { home: string; away: string; startDate: string | null; markets: MarketSnapshot[]; liquidity: number }
+
+/**
+ * Discover matches a sport lists on Polymarket: group events by competitors,
+ * aggregate each match's settleable markets, drop matches with none, and return
+ * the most-liquid up to `limit`.
+ */
+export async function discoverSportMatches(
+  cfg: PolymarketConfig, sport: string, snapshotAt: string, deps: FetchDeps = {}, limit = 60,
+): Promise<DiscoveredMatch[]> {
+  const tag = SPORT_TAG_IDS[sport];
+  if (tag == null) return [];
+  const events = await fetchSportEvents(cfg, tag, cfg.discoverLimit ?? 1000, deps);
+  const groups = new Map<string, { home: string; away: string; startDate: string | null; events: PolyEvent[] }>();
+  for (const ev of events) {
+    const p = parseMatchTitle(ev.title, sport);
+    if (!p) continue;
+    const key = `${norm(p.home)}|${norm(p.away)}`;
+    const g = groups.get(key) ?? { home: p.home, away: p.away, startDate: ev.startDate, events: [] };
+    g.events.push(ev);
+    if (ev.startDate && (!g.startDate || ev.startDate < g.startDate)) g.startDate = ev.startDate;
+    groups.set(key, g);
+  }
+  const out: DiscoveredMatch[] = [];
+  for (const g of groups.values()) {
+    const markets = matchMarketSnapshots(g.events, snapshotAt, cfg.maxMarketsPerMatch);
+    if (!markets.length) continue;
+    const liquidity = markets.reduce((n, m) => n + (Number(m.liquidity ?? 0) || 0), 0);
+    out.push({ home: g.home, away: g.away, startDate: g.startDate, markets, liquidity });
+  }
+  return out.sort((a, b) => b.liquidity - a.liquidity).slice(0, limit);
+}
+
 export interface MarketSnapshot { label: string; price: number; external_ref: string | null; liquidity: string | null }
 
 export function eventToMarketSnapshots(event: PolyEvent, snapshotAt: string): MarketSnapshot[] {

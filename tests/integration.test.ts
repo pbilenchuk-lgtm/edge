@@ -8,7 +8,7 @@ import {
   loadPolymarketConfig, getQuotes, fetchMidpointCents,
   normalizeEvent, eventToMarketSnapshots, titleMatchScore,
   findMatchEvent, fetchEventBySlug, listSportEvents,
-  isNoiseMarket, matchMarketSnapshots,
+  isNoiseMarket, matchMarketSnapshots, parseMatchTitle,
 } from "../src/lib/polymarket.js";
 import {
   resolveModel, apiKeyFor, callLLM, generateStrategyName, heuristicName,
@@ -125,6 +125,15 @@ test("polymarket: eventToMarketSnapshots drops priceless markets", () => {
   assert.equal(snaps.length, 2); // the priceless one is dropped
   assert.deepEqual(snaps[0], { label: "Connor Doig vs Eudald Gonzalez", price: 62, external_ref: "tok-a", liquidity: "1234" });
   assert.equal(snaps[1].label, "Total Sets: O/U 2.5");
+});
+
+test("polymarket: parseMatchTitle extracts competitors across formats", () => {
+  assert.deepEqual(parseMatchTitle("Colombia vs. Ghana - More Markets", "football"), { home: "Colombia", away: "Ghana" });
+  assert.deepEqual(parseMatchTitle("Henan FC vs. Qingdao Hainiu FC", "football"), { home: "Henan FC", away: "Qingdao Hainiu FC" });
+  assert.deepEqual(parseMatchTitle("Colombia vs. Ghana - Player Props", "football"), { home: "Colombia", away: "Ghana" });
+  assert.deepEqual(parseMatchTitle("ITF Skopje: Vladyslav Orlov vs Stefan Popovic Set 1 Winner", "tennis"), { home: "Vladyslav Orlov", away: "Stefan Popovic" });
+  assert.deepEqual(parseMatchTitle("Wimbledon ATP: Taylor Fritz vs Lorenzo Sonego", "tennis"), { home: "Taylor Fritz", away: "Lorenzo Sonego" });
+  assert.equal(parseMatchTitle("Bitcoin Up or Down July 5", "football"), null);
 });
 
 test("polymarket: isNoiseMarket keeps settleable markets, drops props/niche", () => {

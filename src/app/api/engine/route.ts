@@ -57,7 +57,7 @@ export async function POST(req: Request) {
         const res = await runAutoCycle(db, provider, {}, { linkOdds: loadPolymarketConfig().enabled });
         return NextResponse.json({
           ok: true,
-          synced: res.synced, imported: res.imported,
+          synced: res.synced, imported: res.imported, discovered: res.discovered,
           oddsMatches: res.oddsMatches, oddsUpdated: res.oddsUpdated,
           analyzed: res.analyzed.length, entered: res.entered.length, exited: res.exited.length,
         });
