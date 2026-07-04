@@ -226,6 +226,17 @@ CREATE TABLE IF NOT EXISTS match_events (
   UNIQUE (match_id, event_key)
 );
 
+-- market_open — the price of each market captured at KICKOFF (first time the
+-- match is seen live), so the odds column can show how the line moved during
+-- the match — not the noisy drift over the 7 days before it. First write wins.
+CREATE TABLE IF NOT EXISTS market_open (
+  match_id    TEXT NOT NULL REFERENCES matches(id),
+  label       TEXT NOT NULL,
+  price       INTEGER NOT NULL,
+  captured_at TEXT NOT NULL,
+  PRIMARY KEY (match_id, label)
+);
+
 -- cron_log — audit trail of the in-process scheduler (and manual engine runs):
 -- what ran, when, whether it succeeded, and a human summary. Powers the
 -- "Настройки → журнал крона" panel.

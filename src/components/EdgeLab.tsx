@@ -20,6 +20,19 @@ const STATE_META: Record<string, { label: string; color: string; bg: string }> =
 const impliedProb = (o: number) => (o > 1 ? 1 / o : 0);
 const fmtMoney = (n: number) => (n < 0 ? "-$" : "$") + Math.abs(n).toFixed(2);
 const fmtMoney0 = (n: number) => (n < 0 ? "-$" : "$") + Math.abs(n).toFixed(0);
+// Compact liquidity: 10093.73 → "$10K", 1300 → "$1.3K", 300 → "$0.3K", 2.5e6 → "$2.5M".
+// Pre-formatted values (seed "$1.1M") pass through unchanged.
+const fmtLiq = (raw: string | null): string => {
+  if (!raw) return "";
+  const s = String(raw).trim();
+  if (/[a-zа-я]/i.test(s)) return s.startsWith("$") ? s : `$${s}`; // already has a K/M suffix
+  const n = Number(s.replace(/[$,\s]/g, ""));
+  if (!isFinite(n) || n <= 0) return "";
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e4) return `$${Math.round(n / 1e3)}K`;   // 10K, 45K
+  if (n >= 100) return `$${(n / 1e3).toFixed(1)}K`;  // 1.3K, 0.3K, 0.1K
+  return `$${Math.round(n)}`;                         // <100 → $61 (no "$0.0K")
+};
 // Warsaw-time label for cron timestamps, e.g. "сб 04.07, 20:45".
 const fmtWarsaw = (iso: string) => {
   try {
@@ -616,9 +629,9 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                     <div style={S.oddsBot}>
                       {mk.aiProb != null && <span style={S.oddsAi} title="Объективная оценка вероятности аналитическим ИИ (не привязана к стратегии)">ИИ {(mk.aiProb * 100).toFixed(0)}%</span>}
                       {move !== 0 && (
-                        <span style={{ ...S.oddsMove, color: move > 0 ? "#5fd08a" : "#ff6b6b" }} title={`Цена до матча ${mk.openCents}¢ → сейчас ${mk.price}¢`}>{move > 0 ? "▲+" : "▼"}{move}¢ с предматча</span>
+                        <span style={{ ...S.oddsMove, color: move > 0 ? "#5fd08a" : "#ff6b6b" }} title={`Цена на старте матча ${mk.openCents}¢ → сейчас ${mk.price}¢`}>{move > 0 ? "▲+" : "▼"}{move}¢ от старта</span>
                       )}
-                      {mk.liq && <span style={S.oddsLiq}>{mk.liq}</span>}
+                      <span style={S.oddsLiq}>{fmtLiq(mk.liq)}</span>
                     </div>
                   </div>
                 );
@@ -1285,9 +1298,9 @@ const S: Record<string, React.CSSProperties> = {
   oddsTop: { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6 },
   oddsLabel: { fontSize: 12, fontWeight: 600, lineHeight: 1.3 },
   oddsVal: { fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14, color: "#e8a838", flexShrink: 0 },
-  oddsBot: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 4, gap: 6 },
+  oddsBot: { display: "flex", justifyContent: "flex-start", alignItems: "baseline", marginTop: 4, gap: 6 },
   oddsAi: { fontSize: 10.5, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
-  oddsLiq: { fontSize: 10, color: "#6b7686", fontFamily: "'JetBrains Mono', monospace" },
+  oddsLiq: { fontSize: 10, color: "#6b7686", fontFamily: "'JetBrains Mono', monospace", marginLeft: "auto", flexShrink: 0 },
   oddsEdge: { fontSize: 11.5, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" },
   oddsMove: { fontSize: 10, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" },
   finishCell: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px" },

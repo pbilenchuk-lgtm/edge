@@ -186,6 +186,13 @@ export function evaluateExits(db: Database, deps: EngineDeps = {}): ExitItem[] {
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 
+/** Snapshot each live match's current prices as its kickoff baseline (first
+ *  write wins), so the odds column shows in-match movement, not pre-match drift. */
+function captureLiveOpens(db: Database, deps: EngineDeps): void {
+  const now = nowFn(deps)();
+  for (const { match: m } of activeMatches(db)) if (m.state === "live") R.captureOpenOdds(db, m.id, now);
+}
+
 export interface ReassessEntry { matchId: string; strategyId: string; market: string; stake: number }
 export interface ReassessResult { exits: ExitItem[]; entries: ReassessEntry[] }
 
@@ -331,6 +338,7 @@ export async function runAutoCycle(
   const enrich = provider ? await enrichFromEspn(db, provider, deps) : { enriched: 0, newEvents: [] };
   const triggers = new Set(enrich.newEvents.map((e) => e.matchId));
   advanceClocks(db, deps); // flip lineup_out ~1h before kickoff (time-scheduled fallback)
+  captureLiveOpens(db, deps); // kickoff-price baseline for the odds column
   // deterministic safety-net exits first, then strategist-driven reassessment
   // (exits + fresh entries) on matches with risk or a fresh live trigger.
   const reassess = await strategistReassess(db, deps, { newEventMatchIds: triggers });
@@ -373,6 +381,7 @@ export async function runLiveCycle(
   const odds = await refreshActiveOdds(db, deps, { onlyLive: true });
   advanceClocks(db, deps);
   const enrich = provider ? await enrichFromEspn(db, provider, deps) : { enriched: 0, newEvents: [] };
+  captureLiveOpens(db, deps); // snapshot kickoff prices the first time a match is live
   // only goals / red cards trigger the (LLM) strategist reassessment
   const triggers = new Set(enrich.newEvents.filter((e) => LIVE_TRIGGER_TYPES.has(e.type)).map((e) => e.matchId));
 

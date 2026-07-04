@@ -165,10 +165,25 @@ test("runLiveCycle reacts to a live goal, and quiet re-runs don't re-fire the st
   assert.equal(r1.triggers, 1, "the goal is a trigger");
   assert.ok(r1.exits >= 1, "strategist cut the position on the goal");
   assert.ok(R.betsForMatch(db, mid).find((b) => b.id === bid)!.status.startsWith("settled"), "position closed");
+  assert.equal(R.openOddsFor(db, mid)["Under 2.5"], 40, "kickoff price captured for the live match");
 
   // second pass: same goal (deduped) → no new trigger → strategist not re-called
   const r2 = await runLiveCycle(db, provider, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
   assert.equal(r2.triggers, 0, "known event doesn't re-trigger");
+});
+
+test("captureOpenOdds locks the kickoff price (first write wins)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db)[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 5, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 40, ai_prob: null, liquidity: null, external_ref: "t", snapshot_at: "t1", is_closing: false });
+  assert.equal(R.captureOpenOdds(db, mid, "t1"), 1);
+  // price moves; a second capture must NOT overwrite the kickoff price
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 62, ai_prob: null, liquidity: null, external_ref: "t", snapshot_at: "t2", is_closing: false });
+  assert.equal(R.captureOpenOdds(db, mid, "t2"), 0, "already captured — no-op");
+  assert.equal(R.openOddsFor(db, mid)["Under 2.5"], 40, "kickoff price preserved, not the moved 62");
 });
 
 test("runLiveCycle is a cheap no-op when nothing is in play", async () => {

@@ -122,10 +122,10 @@ export function buildAppData(db: Database, env = process.env): AppData {
       const assessments = R.assessmentsForMatch(db, m.id).filter((a) => a.status !== "failed");
       const pre = assessments.find((a) => a.stage === "pre_lineup");
       const post = assessments.find((a) => a.stage === "post_lineup");
-      const opening = R.openingMarketPrices(db, m.id);
+      const kickoff = R.openOddsFor(db, m.id); // price at kickoff (empty pre-match)
       const markets = R.latestMarkets(db, m.id).map((mk) => ({
         id: mk.id, label: mk.label, price: mk.price, aiProb: mk.ai_prob, liq: mk.liquidity, tokenId: mk.external_ref,
-        openCents: mk.label in opening ? opening[mk.label] : null,
+        openCents: mk.label in kickoff ? kickoff[mk.label] : null,
       }));
       const allBets = R.betsForMatch(db, m.id);
       const bets: MatchView["bets"] = {};

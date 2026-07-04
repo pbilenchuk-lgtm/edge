@@ -336,14 +336,20 @@ export function latestMarkets(db: Database, matchId: string, closingOnly = false
   return out;
 }
 
-/** Opening (first-seen) price per market label — the pre-match snapshot, used to
- *  show how the line has moved since. Earliest snapshot_at wins. */
-export function openingMarketPrices(db: Database, matchId: string): Record<string, number> {
-  const rows = db.prepare(
-    `SELECT label, price FROM markets WHERE match_id=? ORDER BY snapshot_at ASC, rowid ASC`,
-  ).all(matchId) as { label: string; price: number }[];
+/** Capture the KICKOFF price of each current market (first-write-wins), so the
+ *  odds column shows in-match line movement rather than pre-match drift. Called
+ *  the first time a match is seen live. Returns how many labels were captured. */
+export function captureOpenOdds(db: Database, matchId: string, capturedAt: string): number {
+  const stmt = db.prepare(`INSERT OR IGNORE INTO market_open(match_id,label,price,captured_at) VALUES(?,?,?,?)`);
+  let n = 0;
+  for (const mk of latestMarkets(db, matchId)) n += stmt.run(matchId, mk.label, mk.price, capturedAt).changes;
+  return n;
+}
+/** Kickoff price per market label (empty until the match goes live). */
+export function openOddsFor(db: Database, matchId: string): Record<string, number> {
+  const rows = db.prepare(`SELECT label, price FROM market_open WHERE match_id=?`).all(matchId) as { label: string; price: number }[];
   const out: Record<string, number> = {};
-  for (const r of rows) if (!(r.label in out)) out[r.label] = r.price;
+  for (const r of rows) out[r.label] = r.price;
   return out;
 }
 
