@@ -179,6 +179,16 @@ CREATE TABLE IF NOT EXISTS quality_metrics (
   updated_at  TEXT NOT NULL
 );
 
+-- provider_keys — optional LLM API keys entered via the UI (Models screen),
+-- stored server-side only. The environment (ANTHROPIC_API_KEY/…) still takes
+-- precedence; a raw key is NEVER sent back to the browser (only "set/not set").
+-- Lives in the SQLite file, which is gitignored and not baked into the image.
+CREATE TABLE IF NOT EXISTS provider_keys (
+  provider   TEXT PRIMARY KEY CHECK (provider IN ('anthropic','openai','google')),
+  api_key    TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 -- analysis_jobs — durable state of the per-match LLM analyze run (discover⟂
 -- analyze split). Survives navigation/reload and process restart, and is
 -- visible to any instance sharing the DB. One row per match (latest run).

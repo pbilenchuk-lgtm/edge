@@ -6,7 +6,7 @@
 
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
-import { providerEnabled } from "./llm.js";
+import { providerEnabled, effectiveEnv } from "./llm.js";
 import { jobActive } from "./analysis.js";
 import type { StrategyParams } from "./types.js";
 
@@ -161,8 +161,10 @@ export function buildAppData(db: Database, env = process.env): AppData {
   // event feed (built from trade log + reassessments + settlements)
   const eventFeed = buildFeed(db, comps, strategies, matchDb);
 
+  // env keys OR keys entered via the UI (server-side); never expose the key itself.
+  const keyEnv = effectiveEnv(R.getProviderKeys(db), env);
   const providers: ProviderView[] = PROVIDER_DEFS.map((p) => ({
-    ...p, hasKey: providerEnabled(p.id as any, env),
+    ...p, hasKey: providerEnabled(p.id as any, keyEnv),
   }));
 
   const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers };

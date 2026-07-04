@@ -106,7 +106,6 @@ function collectPortfolio(competitions: any[], matchDb: any, catalog: any[], com
 
 export default function EdgeLab({ initial }: { initial: AppData }) {
   const SPORTS = initial.sports;
-  const PROVIDERS = initial.providers;
   const QUALITY = initial.quality;
   const EVENT_FEED = initial.eventFeed;
   const COMPETITIONS = initial.competitions;
@@ -118,6 +117,8 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [shares, setShares] = useState(initial.shares);
   const [analysis, setAnalysis] = useState(initial.analysis);
   const [matchDb, setMatchDb] = useState(initial.matchDb);
+  const [providers, setProviders] = useState(initial.providers);
+  const PROVIDERS = providers;
 
   const [sportId, setSportId] = useState("football");
   const sportComps = COMPETITIONS.filter((c) => c.sport === sportId);
@@ -298,7 +299,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       ) : screen === "metrics" ? (
         <MetricsScreen catalog={catalog} quality={QUALITY} />
       ) : (
-        <ModelsScreen providers={PROVIDERS} />
+        <ModelsScreen providers={providers} setProviders={setProviders} />
       )}
 
       {compModal && <BudgetModal comp={COMPETITIONS.find((c) => c.id === compModal)!} current={compBudget[compModal] || 0} free={freeBalance} onClose={() => setCompModal(null)} onSave={(amt: number) => setBudget(compModal, amt)} />}
@@ -589,6 +590,11 @@ function StrategyScreen({ sportId, sportLabel, catalog, setCatalog, competitions
     setModal(null);
   };
   const updateStrategy = (id: string, patch: any) => { setCatalog((c: any) => c.map((s: any) => (s.id === id ? { ...s, ...patch } : s))); mutate({ type: "patchStrategy", id, patch }); };
+  const deleteStrategy = (id: string, name: string) => {
+    if (typeof window !== "undefined" && !window.confirm(`Удалить стратегию «${name}» и все её данные (ставки, переоценки, метрики, доли)? Действие необратимо.`)) return;
+    setCatalog((c: any) => c.filter((s: any) => s.id !== id));
+    mutate({ type: "deleteStrategy", id });
+  };
   const acceptImprovement = (id: string, p: string, params: any) => {
     setCatalog((c: any) => c.map((s: any) => (s.id === id ? { ...s, prompt: p, params, version: s.version + 1 } : s)));
     mutate({ type: "improveStrategy", id, prompt: p, params, reason: "improvement" });
@@ -645,7 +651,7 @@ function StrategyScreen({ sportId, sportLabel, catalog, setCatalog, competitions
       </div>
 
       {sportStrats.length === 0 && <div style={S.empty}>В категории «{sportLabel}» пока нет стратегий.</div>}
-      {sportStrats.map((st: any) => <StrategyCard key={st.id} st={st} overall={stratOverall(competitions, matchDb, st.id, sportId, compBudget, shares)} availableModels={availableModels} onSetModel={(m: string) => updateStrategy(st.id, { model: m })} onGoModels={onGoModels} onEdit={() => setModal({ type: "edit", stratId: st.id })} onImprove={() => setModal({ type: "improve", stratId: st.id })} />)}
+      {sportStrats.map((st: any) => <StrategyCard key={st.id} st={st} overall={stratOverall(competitions, matchDb, st.id, sportId, compBudget, shares)} availableModels={availableModels} onSetModel={(m: string) => updateStrategy(st.id, { model: m })} onGoModels={onGoModels} onEdit={() => setModal({ type: "edit", stratId: st.id })} onImprove={() => setModal({ type: "improve", stratId: st.id })} onDelete={() => deleteStrategy(st.id, st.name)} />)}
 
       {modal?.type === "new" && <PromptModal title={`Новая стратегия · ${sportLabel}`} availableModels={availableModels} onGoModels={onGoModels} onClose={() => setModal(null)} onSave={addStrategy} />}
       {modal?.type === "edit" && <PromptModal title="Редактировать" strat={catalog.find((s: any) => s.id === modal.stratId)} availableModels={availableModels} onGoModels={onGoModels} onClose={() => setModal(null)} onSave={(d: any) => { updateStrategy(modal.stratId, d); setModal(null); }} />}
@@ -819,31 +825,57 @@ function PortfolioScreen({ positions, onGoMatches }: any) {
   );
 }
 
-function ModelsScreen({ providers }: any) {
+function ModelsScreen({ providers, setProviders }: any) {
   return (
     <main style={S.main}>
       <div style={S.modelsIntro}>
         <div style={S.modelsTitle}>Модели и ключи</div>
-        <div style={S.modelsSub}>Ключи API хранятся на бэкенде в переменных окружения (ТЗ §4.6, §9.9), не в браузере и не в БД. Задай их в <code>.env</code> (ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY) — после этого модели провайдера станут доступны для выбора.</div>
+        <div style={S.modelsSub}>Ключ можно задать здесь — он сохраняется <b>на сервере</b> и наружу (в браузер) не отдаётся. Переменная окружения (<code>ANTHROPIC_API_KEY</code> и т.п.) имеет приоритет над ключом из UI. Как только ключ задан — модели провайдера доступны для выбора.</div>
       </div>
       {providers.map((p: any) => (
-        <section key={p.id} style={{ ...S.card, borderColor: p.hasKey ? "#70b56a55" : LINE }}>
-          <div style={S.providerHead}>
-            <div style={S.providerName}>{p.name}</div>
-            <span style={{ ...S.providerStatus, color: p.hasKey ? "#70b56a" : MUTE, borderColor: p.hasKey ? "#70b56a55" : LINE }}>{p.hasKey ? "✓ ключ задан" : "нет ключа (env)"}</span>
-          </div>
-          <div style={S.modelChips}>
-            <span style={S.modelChipsLabel}>Модели:</span>
-            {p.models.map((m: string) => <span key={m} style={{ ...S.modelChip, opacity: p.hasKey ? 1 : 0.4 }}>{m}</span>)}
-          </div>
-        </section>
+        <ProviderCard key={p.id} p={p} onSaved={(hasKey: boolean) => setProviders((prev: any[]) => prev.map((x) => x.id === p.id ? { ...x, hasKey } : x))} />
       ))}
-      <div style={S.modelsNote}>Статус читается сервером из окружения. Список моделей репрезентативный; в боевой версии подтягивается от провайдера.</div>
+      <div style={S.modelsNote}>Ключи лежат в БД сервера (файл gitignore-нут, в образ не попадает). Список моделей репрезентативный; в боевой версии подтягивается от провайдера.</div>
     </main>
   );
 }
 
-function StrategyCard({ st, overall, availableModels, onSetModel, onGoModels, onEdit, onImprove }: any) {
+function ProviderCard({ p, onSaved }: any) {
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (!key.trim()) return;
+    setBusy(true);
+    const r = await mutate({ type: "setProviderKey", provider: p.id, key: key.trim() });
+    setBusy(false);
+    if (r.ok) { setKey(""); onSaved(true); }
+  };
+  const remove = async () => {
+    setBusy(true);
+    await mutate({ type: "deleteProviderKey", provider: p.id });
+    setBusy(false);
+    onSaved(false);
+  };
+  return (
+    <section style={{ ...S.card, borderColor: p.hasKey ? "#70b56a55" : LINE }}>
+      <div style={S.providerHead}>
+        <div style={S.providerName}>{p.name}</div>
+        <span style={{ ...S.providerStatus, color: p.hasKey ? "#70b56a" : MUTE, borderColor: p.hasKey ? "#70b56a55" : LINE }}>{p.hasKey ? "✓ ключ задан" : "нет ключа"}</span>
+      </div>
+      <div style={S.keyRow}>
+        <input style={S.keyInput} type="password" autoComplete="off" placeholder={p.hasKey ? "заменить ключ…" : p.keyHint} value={key} onChange={(e) => setKey(e.target.value)} onKeyDown={(e) => e.key === "Enter" && save()} />
+        <button style={{ ...S.keySaveBtn, opacity: key.trim() && !busy ? 1 : 0.5 }} disabled={!key.trim() || busy} onClick={save}>{busy ? "…" : "Сохранить"}</button>
+        {p.hasKey && <button style={S.keyRemoveBtn} disabled={busy} onClick={remove} title="Удалить ключ">Удалить</button>}
+      </div>
+      <div style={S.modelChips}>
+        <span style={S.modelChipsLabel}>Модели:</span>
+        {p.models.map((m: string) => <span key={m} style={{ ...S.modelChip, opacity: p.hasKey ? 1 : 0.4 }}>{m}</span>)}
+      </div>
+    </section>
+  );
+}
+
+function StrategyCard({ st, overall, availableModels, onSetModel, onGoModels, onEdit, onImprove, onDelete }: any) {
   const [open, setOpen] = useState(false);
   return (
     <section style={{ ...S.card, borderColor: st.color + "55" }}>
@@ -867,7 +899,7 @@ function StrategyCard({ st, overall, availableModels, onSetModel, onGoModels, on
           <pre style={S.promptBox}>{st.prompt}</pre>
           <div style={S.paramLabel}>Пороги, распознанные движком</div>
           <div style={S.paramList}>{Object.entries(st.params).map(([k, v]) => { const d = describeParam(k, v); return <div key={k} style={S.paramItem}><span style={S.paramItemLabel}>{d.label}</span><span style={S.paramItemValue}>{d.value}</span></div>; })}</div>
-          <div style={S.stratEditRow}><button style={S.editBtn} onClick={onEdit}>Редактировать промт</button><button style={S.improveBtn} onClick={onImprove}>↻ Улучшить по данным</button></div>
+          <div style={S.stratEditRow}><button style={S.editBtn} onClick={onEdit}>Редактировать промт</button><button style={S.improveBtn} onClick={onImprove}>↻ Улучшить по данным</button><button style={S.deleteBtn} onClick={onDelete}>Удалить</button></div>
         </div>
       )}
     </section>
@@ -1194,6 +1226,11 @@ const S: Record<string, React.CSSProperties> = {
   stratEditRow: { display: "flex", gap: 8, flexWrap: "wrap" },
   editBtn: { background: "transparent", border: `1px solid ${LINE}`, color: TEXT, borderRadius: 8, padding: "7px 14px", fontSize: 12.5, cursor: "pointer" },
   improveBtn: { background: "transparent", border: `1px solid #e8a83866`, color: "#e8a838", borderRadius: 8, padding: "7px 14px", fontSize: 12.5, cursor: "pointer", fontWeight: 600 },
+  deleteBtn: { background: "transparent", border: `1px solid #ff6b6b55`, color: "#ff6b6b", borderRadius: 8, padding: "7px 14px", fontSize: 12.5, cursor: "pointer", fontWeight: 600, marginLeft: "auto" },
+  keyRow: { display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" },
+  keyInput: { flex: 1, minWidth: 200, background: INK, border: `1px solid ${LINE}`, color: TEXT, borderRadius: 8, padding: "9px 12px", fontSize: 13, fontFamily: "'JetBrains Mono', monospace" },
+  keySaveBtn: { background: "#e8a838", border: "none", color: "#12161d", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
+  keyRemoveBtn: { background: "transparent", border: `1px solid #ff6b6b55`, color: "#ff6b6b", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, cursor: "pointer", fontWeight: 600 },
   overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, overflowY: "auto", zIndex: 100 },
   modal: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, width: "100%", maxWidth: 560, marginTop: 40 },
   modalHead: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", borderBottom: `1px solid ${LINE}` },

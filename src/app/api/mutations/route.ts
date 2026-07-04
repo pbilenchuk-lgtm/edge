@@ -15,7 +15,7 @@ export async function POST(req: Request) {
     const R = await import("@/lib/repo");
     const { canSetBudget, sharesValid, freeBalance } = await import("@/lib/money");
     const { extractThresholds, extractThresholdsHeuristic } = await import("@/lib/thresholds");
-    const { heuristicName, proposeImprovement } = await import("@/lib/llm");
+    const { heuristicName, proposeImprovement, effectiveEnv } = await import("@/lib/llm");
 
     const db = getDb();
     let body: any;
@@ -58,6 +58,24 @@ export async function POST(req: Request) {
         R.updateStrategy(db, id, patch);
         return ok();
       }
+      case "deleteStrategy": {
+        const { id } = body;
+        if (!id || !R.getStrategy(db, id)) return bad("стратегия не найдена");
+        R.deleteStrategy(db, id);
+        return ok();
+      }
+      case "setProviderKey": {
+        const { provider, key } = body as { provider: string; key: string };
+        if (!["anthropic", "openai", "google"].includes(provider)) return bad("неизвестный провайдер");
+        if (!key || !String(key).trim()) return bad("пустой ключ");
+        R.setProviderKey(db, provider, String(key), new Date().toISOString());
+        return ok(); // never echo the key back
+      }
+      case "deleteProviderKey": {
+        const { provider } = body as { provider: string };
+        R.deleteProviderKey(db, provider);
+        return ok();
+      }
       case "proposeImprovement": {
         const { strategyId } = body;
         const strat = R.getStrategy(db, strategyId);
@@ -68,7 +86,7 @@ export async function POST(req: Request) {
           // §3.5 gate: too few matches — improving now overfits noise.
           return NextResponse.json({ ok: false, gated: true, samples, error: `Рано улучшать: ${samples}/20 матчей (§3.5)` }, { status: 400 });
         }
-        const proposal = await proposeImprovement(strat, { matches: samples, clv: q?.clv ?? null, brier: q?.brier ?? null }, strat.model);
+        const proposal = await proposeImprovement(strat, { matches: samples, clv: q?.clv ?? null, brier: q?.brier ?? null }, strat.model, { env: effectiveEnv(R.getProviderKeys(db)) });
         const params = await extractThresholds(proposal.newPrompt); // params computed in CODE (§9.6)
         return ok({ proposal: { ...proposal, params, version: strat.version + 1 } });
       }

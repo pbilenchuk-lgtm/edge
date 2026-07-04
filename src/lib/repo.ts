@@ -143,8 +143,38 @@ export function updateStrategy(
   if (!cols.length) return;
   db.prepare(`UPDATE strategies SET ${cols.join(", ")} WHERE id=?`).run(...vals, id);
 }
+/** Remove a strategy and all of its dependent rows (paper data — no FK cascade
+ * in the schema, so we delete children first, in FK-safe order). */
+export function deleteStrategy(db: Database, id: string): void {
+  for (const sql of [
+    `DELETE FROM trade_log WHERE strategy_id=?`,
+    `DELETE FROM reassessments WHERE strategy_id=?`,
+    `DELETE FROM bets WHERE strategy_id=?`,
+    `DELETE FROM strategy_shares WHERE strategy_id=?`,
+    `DELETE FROM strategy_versions WHERE strategy_id=?`,
+    `DELETE FROM quality_metrics WHERE strategy_id=?`,
+    `DELETE FROM strategies WHERE id=?`,
+  ]) db.prepare(sql).run(id);
+}
 function mapStrategy(r: any): Strategy {
   return { ...r, params: safeJson<StrategyParams>(r.params, {}) };
+}
+
+// ---------- provider keys (optional, entered via UI; server-side only) ----------
+export function getProviderKeys(db: Database): Partial<Record<string, string>> {
+  const rows = db.prepare(`SELECT provider, api_key FROM provider_keys`).all() as { provider: string; api_key: string }[];
+  const out: Partial<Record<string, string>> = {};
+  for (const r of rows) if (r.api_key && r.api_key.trim()) out[r.provider] = r.api_key.trim();
+  return out;
+}
+export function setProviderKey(db: Database, provider: string, key: string, at: string): void {
+  db.prepare(
+    `INSERT INTO provider_keys(provider,api_key,updated_at) VALUES(?,?,?)
+     ON CONFLICT(provider) DO UPDATE SET api_key=excluded.api_key, updated_at=excluded.updated_at`,
+  ).run(provider, key.trim(), at);
+}
+export function deleteProviderKey(db: Database, provider: string): void {
+  db.prepare(`DELETE FROM provider_keys WHERE provider=?`).run(provider);
 }
 
 // ---------- shares ----------

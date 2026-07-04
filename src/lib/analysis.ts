@@ -12,7 +12,7 @@
 
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
-import { assessMatchLLM } from "./llm.js";
+import { assessMatchLLM, effectiveEnv } from "./llm.js";
 import { sizeBet } from "./thresholds.js";
 import { edgePct } from "./edge.js";
 import { stratBudget } from "./money.js";
@@ -50,10 +50,13 @@ export async function analyzeMatch(
   const model = prompt.model ?? deps.defaultModel ?? "Claude Opus 4.8";
   const stage: "pre_lineup" | "post_lineup" = match.lineup_out ? "post_lineup" : "pre_lineup";
 
+  // Key resolution: explicit deps.env wins (tests/callers); otherwise env vars
+  // OR a key entered via the UI (Models screen), resolved from the DB.
+  const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
   const a = await assessMatchLLM(
     { home: match.home, away: match.away, sport, state: match.state, analyticsPrompt: prompt.body, markets: markets.map((m) => ({ label: m.label, price: m.price })) },
     model,
-    { fetchImpl: deps.fetchImpl, env: deps.env },
+    { fetchImpl: deps.fetchImpl, env },
   );
 
   if (!a.ok) {

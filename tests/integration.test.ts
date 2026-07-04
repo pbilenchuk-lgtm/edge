@@ -11,6 +11,7 @@ import {
 } from "../src/lib/polymarket.js";
 import {
   resolveModel, apiKeyFor, callLLM, generateStrategyName, heuristicName,
+  effectiveEnv, providerEnabled,
 } from "../src/lib/llm.js";
 import { extractThresholds } from "../src/lib/thresholds.js";
 import { analyzeMatch } from "../src/lib/analysis.js";
@@ -193,6 +194,36 @@ test("llm: name generation and threshold extraction fall back without a key", as
   );
   assert.equal(params.flatSize, 0.05);
   assert.equal(params.minEdge, 3);
+});
+
+test("deleteStrategy removes the strategy and all its dependent rows", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const st = R.listStrategies(db)[0];
+  R.insertBet(db, { id: R.uid(), match_id: "m-lineup", strategy_id: st.id, market_label: "x", status: "proposed", proposed_price: 50, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.5, stake: 10, rationale: "r", entered_minute: null, result: null, payout: null, created_at: "t" });
+  R.deleteStrategy(db, st.id);
+  assert.equal(R.getStrategy(db, st.id), null);
+  assert.equal(R.betsForMatch(db, "m-lineup", st.id).length, 0);
+  assert.ok(R.listStrategies(db).every((s) => s.id !== st.id));
+});
+
+test("provider keys: DB key enables a provider; env still wins", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  assert.deepEqual(R.getProviderKeys(db), {});
+  R.setProviderKey(db, "anthropic", "sk-ant-from-ui", "t");
+  assert.equal(R.getProviderKeys(db).anthropic, "sk-ant-from-ui");
+
+  // no env key -> the UI/DB key fills it
+  const env1 = effectiveEnv(R.getProviderKeys(db), {});
+  assert.equal(providerEnabled("anthropic", env1), true);
+  assert.equal(apiKeyFor("anthropic", env1), "sk-ant-from-ui");
+  // env key present -> it wins, DB key does not override
+  const env2 = effectiveEnv(R.getProviderKeys(db), { ANTHROPIC_API_KEY: "sk-ant-from-env" });
+  assert.equal(apiKeyFor("anthropic", env2), "sk-ant-from-env");
+
+  R.deleteProviderKey(db, "anthropic");
+  assert.equal(providerEnabled("anthropic", effectiveEnv(R.getProviderKeys(db), {})), false);
 });
 
 test("analyzeMatch: fuzzy label mapping survives model paraphrase", async () => {

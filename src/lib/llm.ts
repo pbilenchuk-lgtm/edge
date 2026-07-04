@@ -62,6 +62,24 @@ export function providerEnabled(
   return !!apiKeyFor(provider, env);
 }
 
+/**
+ * Overlay UI-provided keys (from the DB) onto the environment. The environment
+ * wins — a deployment secret is never overridden by a UI key — so this only
+ * fills providers the env doesn't already set. Returns a plain env object to
+ * pass as `deps.env` to any LLM call site; llm.ts itself stays db-agnostic.
+ */
+export function effectiveEnv(
+  dbKeys: Partial<Record<string, string | undefined>>,
+  base: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+  const env = { ...base };
+  for (const p of Object.keys(ENV_KEY) as ProviderId[]) {
+    const cur = env[ENV_KEY[p]];
+    if ((!cur || !cur.trim()) && dbKeys[p]) env[ENV_KEY[p]] = dbKeys[p];
+  }
+  return env;
+}
+
 export interface LLMRequest {
   model: string;
   system?: string;

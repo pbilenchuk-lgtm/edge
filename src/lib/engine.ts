@@ -15,7 +15,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { Bet, Match } from "./types.js";
 import type { SportsMatchStatus } from "./sports.js";
-import { reassessNarrative } from "./llm.js";
+import { reassessNarrative, effectiveEnv } from "./llm.js";
 import { settleBet, resolveFootballMarket } from "./settlement.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvent, eventToMarketSnapshots, type PolymarketConfig } from "./polymarket.js";
@@ -76,6 +76,7 @@ export async function triggerReassessment(
   const strat = R.getStrategy(db, strategyId);
   if (!strat) return { strategyId, created: false, reason: "strategy not found" };
 
+  const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
   const narr = await reassessNarrative(
     {
       match: `${match.home}–${match.away}`, minute, trigger,
@@ -83,7 +84,7 @@ export async function triggerReassessment(
       strategyName: strat.name, strategyPrompt: strat.prompt,
     },
     strat.model,
-    { fetchImpl: deps.fetchImpl, env: deps.env },
+    { fetchImpl: deps.fetchImpl, env },
   );
 
   R.insertReassessment(db, {
