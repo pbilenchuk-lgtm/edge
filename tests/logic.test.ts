@@ -135,6 +135,10 @@ test("settlement: football market resolution from score 2:1", () => {
   assert.equal(resolveFootballMarket("Over 1.5", 2, 1), true);
   assert.equal(resolveFootballMarket("Both Teams to Score — Yes", 2, 1), true);
   assert.equal(resolveFootballMarket("Team to Advance — Португалия", 2, 1), null); // external
+  // Polymarket "O/U 2.5" total (backs Over); team totals stay unsettleable
+  assert.equal(resolveFootballMarket("O/U 2.5", 2, 1), true);  // total 3 > 2.5
+  assert.equal(resolveFootballMarket("O/U 3.5", 2, 1), false); // total 3 < 3.5
+  assert.equal(resolveFootballMarket("Colombia O/U 2.5", 2, 1), null); // team total — can't settle
 });
 
 test("settlement: moneyline resolves from score (no longer stuck open)", () => {

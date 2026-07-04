@@ -71,6 +71,11 @@ export function resolveFootballMarket(
     const line = parseFloat(ou[2]);
     return ou[1] === "over" ? total > line : total < line;
   }
+  // Polymarket's total is labeled "O/U 2.5" and backs outcome[0] = Over. A team
+  // total ("Colombia O/U 2.5") has a name before "O/U" — that we can't settle
+  // from the aggregate score, so let it fall through to null.
+  const ou2 = l.match(/\bo\/u\s*(\d+(?:\.\d+)?)/);
+  if (ou2 && !/\S+\s+o\/u/.test(l)) return total > parseFloat(ou2[1]);
 
   if (/both teams to score|btts/.test(l)) {
     const yes = scoreHome > 0 && scoreAway > 0;

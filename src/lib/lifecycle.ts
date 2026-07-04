@@ -21,6 +21,7 @@ import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarket
 import { SPORT_TAG_IDS } from "./polymarket.js";
 import { analyzeMatch, jobActive } from "./analysis.js";
 import { exitDecision } from "./thresholds.js";
+import { strategistDecide, effectiveEnv } from "./llm.js";
 import type { SportsProvider } from "./sports.js";
 import type { Match } from "./types.js";
 
@@ -128,6 +129,60 @@ export function evaluateExits(db: Database, deps: EngineDeps = {}): ExitItem[] {
   return out;
 }
 
+const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+
+/**
+ * Strategist-driven exits: for matches with open positions (funded comps), let
+ * the strategy PROMPT decide what to cut per its in-match methodology (scenario
+ * change, "this event broke the position"). Complements the deterministic
+ * evaluateExits. Capped per run — one model call per (match, strategy) with
+ * open positions — so it only runs where the user actually holds risk.
+ */
+export async function strategistExits(db: Database, deps: EngineDeps = {}, opts: { max?: number } = {}): Promise<ExitItem[]> {
+  const max = opts.max ?? 4;
+  const now = nowFn(deps)();
+  const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
+  const budgetByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.budget]));
+  const out: ExitItem[] = [];
+  const touched = new Set<string>();
+  let calls = 0;
+  for (const { comp, sport, match: m } of activeMatches(db)) {
+    if (calls >= max) break;
+    if ((budgetByComp.get(comp) ?? 0) <= 0) continue;
+    const open = R.betsForMatch(db, m.id).filter((b) => b.status === "open");
+    if (!open.length) continue;
+    const markets = R.latestMarkets(db, m.id);
+    const assess = R.assessmentsForMatch(db, m.id).filter((a) => a.status === "ok").sort((a, b) => (a.created_at >= b.created_at ? -1 : 1))[0];
+    const byStrat = new Map<string, typeof open>();
+    for (const b of open) (byStrat.get(b.strategy_id) ?? byStrat.set(b.strategy_id, []).get(b.strategy_id)!).push(b);
+    for (const [sid, bets] of byStrat) {
+      if (calls >= max) break;
+      const strat = R.getStrategy(db, sid);
+      if (!strat) continue;
+      calls++;
+      const dec = await strategistDecide({
+        strategyName: strat.name, strategyPrompt: strat.prompt,
+        match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away },
+        assessment: { confidence: assess?.confidence ?? "средняя", short: assess?.short ?? "", verdict: assess?.verdict ?? "" },
+        markets: markets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob })),
+        openPositions: bets.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
+      }, strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
+      if (!dec.ok) continue;
+      for (const ex of dec.exits) {
+        const b = bets.find((x) => norm(x.market_label) === norm(ex.market));
+        const mk = b && markets.find((x) => x.label === b.market_label);
+        if (!b || !mk || mk.price == null || b.entry_price == null) continue;
+        const pnl = closeBetEarly(db, b, mk.price, ex.reason, minuteLabel(m), now);
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${mk.price}¢ · стратег: ${ex.reason} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+        out.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег: ${ex.reason}`, pnl });
+        touched.add(sid);
+      }
+    }
+  }
+  for (const sid of touched) recomputeMetrics(db, sid, deps);
+  return out;
+}
+
 // ------------------------------------------------------------
 // 4) Orchestration
 // ------------------------------------------------------------
@@ -154,7 +209,8 @@ export async function runAutoCycle(
     discovered += items.length;
   }
   const odds = await refreshActiveOdds(db, deps);
-  const exited = evaluateExits(db, deps);
+  // deterministic safety-net exits first, then strategist-driven cuts on what's left
+  const exited = [...evaluateExits(db, deps), ...(await strategistExits(db, deps))];
   const analyzed = await autoAnalyze(db, deps);
   const entered = autoEnter(db, deps);
   return {
