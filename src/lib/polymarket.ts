@@ -274,13 +274,20 @@ export async function findMatchEvent(
   return best?.ev ?? null;
 }
 
-/** 0..2: how many of the two competitor names appear in the event title. */
+/** 0..2: how many of the two competitor names appear in the event title.
+ * Matches on each name's most distinctive (trailing) token as a WHOLE WORD,
+ * not a substring — so "Real Madrid" no longer scores against "Real Sociedad"
+ * while "Carlos Alcaraz" still matches a title carrying only "Alcaraz". */
 export function titleMatchScore(title: string, home: string, away: string): number {
-  const t = norm(title);
+  const words = new Set(norm(title).split(/\s+/).filter(Boolean));
   return [home, away].reduce(
-    (n, name) => n + (nameTokens(name).some((tok) => t.includes(tok)) ? 1 : 0),
+    (n, name) => n + (matchesTitle(name, words) ? 1 : 0),
     0,
   );
+}
+function matchesTitle(name: string, titleWords: Set<string>): boolean {
+  const key = nameKey(name);
+  return key.length >= 3 && titleWords.has(key);
 }
 
 /**
@@ -312,9 +319,11 @@ function norm(s: string): string {
     .replace(/[̀-ͯ]/g, "") // strip combining diacritics
     .replace(/[^a-z0-9Ѐ-ӿ ]+/g, " "); // keep latin, digits, cyrillic
 }
-function nameTokens(name: string): string[] {
-  // Use tokens >= 3 chars (surnames), so "Carlos Alcaraz" matches on "alcaraz".
-  return norm(name).split(/\s+/).filter((w) => w.length >= 3);
+/** Most distinctive token of a name: the trailing ≥3-char token (surname /
+ * club-defining word). "Carlos Alcaraz"→"alcaraz", "Real Madrid"→"madrid". */
+function nameKey(name: string): string {
+  const toks = norm(name).split(/\s+/).filter((w) => w.length >= 3);
+  return toks.length ? toks[toks.length - 1] : "";
 }
 async function withTimeout(
   ms: number,

@@ -12,9 +12,8 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
   try {
     const { loadPolymarketConfig, getQuotes } = await import("@/lib/polymarket");
-    const body = (await req.json()) as {
-      markets?: { tokenId?: string | null; snapshotCents?: number | null }[];
-    };
+    let body: { markets?: { tokenId?: string | null; snapshotCents?: number | null }[] };
+    try { body = await req.json(); } catch { body = {}; } // empty/malformed => no tokens
     const tokens = (body.markets ?? [])
       .filter((m) => m.tokenId)
       .map((m) => ({ tokenId: String(m.tokenId), snapshotCents: m.snapshotCents ?? null }));

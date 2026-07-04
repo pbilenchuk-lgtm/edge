@@ -16,7 +16,8 @@ export async function POST(req: Request) {
     const { loadSportsProvider, loadSportsConfig } = await import("@/lib/sports");
 
     const db = getDb();
-    const body = (await req.json()) as any;
+    let body: any;
+    try { body = await req.json(); } catch { return NextResponse.json({ ok: false, error: "невалидный JSON в теле запроса" }, { status: 400 }); }
 
     switch (body.action) {
       case "reassess": {

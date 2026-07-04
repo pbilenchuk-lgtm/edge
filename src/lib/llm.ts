@@ -220,7 +220,7 @@ export async function llmExtractThresholds(
     {
       model,
       system:
-        "Ты извлекаешь числовые пороги стратегии ставок из текста. Верни ТОЛЬКО JSON с любыми из полей: maxPerBet, stop, minEdge, flatSize, kellyFraction, cap, tiers ([[edge%,fraction]...]), minConfidence. Доли — как доли 0..1, minEdge — в процентах. Без пояснений.",
+        "Ты извлекаешь числовые пороги стратегии ставок из текста. Верни ТОЛЬКО JSON с любыми из полей: maxPerBet, stop, minEdge, flatSize, kellyFraction, cap, tiers ([[edge%,fraction]...]), minConfidence. Доли (maxPerBet, flatSize, cap, stop) — как доли 0..1; stop — доля просадки портфеля 0..1. minEdge — в процентах. minConfidence — строго одно из: 'низкая'|'средняя'|'высокая'. Без пояснений.",
       prompt,
       maxTokens: 400,
     },
@@ -328,7 +328,7 @@ export async function assessMatchLLM(
   try {
     const j = JSON.parse(stripFences(res.text));
     const markets = Array.isArray(j.markets)
-      ? j.markets.filter((m: any) => m && typeof m.label === "string" && typeof m.prob === "number")
+      ? j.markets.filter((m: any) => m && typeof m.label === "string" && Number.isFinite(m.prob))
           .map((m: any) => ({ label: String(m.label), prob: clamp01(m.prob) }))
       : [];
     return {
@@ -355,15 +355,20 @@ export interface ImprovementProposal {
  * key is present, else a deterministic heuristic. Callers gate on samples ≥ 20
  * and re-extract params from newPrompt in CODE (§9.6).
  */
+export interface ImprovementStats { matches: number; clv?: number | null; brier?: number | null }
+
 export async function proposeImprovement(
-  strat: { name: string; prompt: string }, stats: { matches: number; roi: number },
+  strat: { name: string; prompt: string }, stats: ImprovementStats,
   model: string | null, deps: Deps = {},
 ): Promise<ImprovementProposal> {
   if (model) {
+    const parts = [`сыграно ${stats.matches} матчей`];
+    if (stats.clv != null) parts.push(`средний CLV ${stats.clv.toFixed(1)}¢ (положительный = входим лучше цены закрытия)`);
+    if (stats.brier != null) parts.push(`Brier ${stats.brier.toFixed(3)} (ниже = точнее)`);
     const res = await callLLM({
       model,
       system: "Ты улучшаешь промт стратегии ставок по её статистике. Верни ТОЛЬКО JSON {newPrompt, reason}: минимальная осмысленная правка промта и краткое обоснование.",
-      prompt: `Стратегия «${strat.name}». Текущий промт:\n${strat.prompt}\n\nСтатистика: сыграно ${stats.matches} матчей, средний ROI ${stats.roi.toFixed(1)}%. Предложи одно улучшение.`,
+      prompt: `Стратегия «${strat.name}». Текущий промт:\n${strat.prompt}\n\nСтатистика: ${parts.join(", ")}. Предложи одно улучшение.`,
       maxTokens: 500,
     }, deps);
     if (res.ok) {
@@ -377,7 +382,7 @@ export async function proposeImprovement(
 }
 
 export function heuristicImprovement(
-  strat: { name: string; prompt: string }, stats: { matches: number; roi: number },
+  strat: { name: string; prompt: string }, stats: ImprovementStats,
 ): ImprovementProposal {
   const newPrompt = /Входи/.test(strat.prompt)
     ? strat.prompt.replace(/Входи[^\n]*/, "Входи ТОЛЬКО при уверенности «высокая» — входы на средней отключены (по данным убыточны).")

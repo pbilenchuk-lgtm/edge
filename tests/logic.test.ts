@@ -130,6 +130,40 @@ test("settlement: football market resolution from score 2:1", () => {
   assert.equal(resolveFootballMarket("Team to Advance — Португалия", 2, 1), null); // external
 });
 
+test("settlement: moneyline resolves from score (no longer stuck open)", () => {
+  const teams = { home: "Portugal", away: "Croatia" };
+  assert.equal(resolveFootballMarket("Portugal", 2, 1, teams), true);   // home win
+  assert.equal(resolveFootballMarket("Croatia", 2, 1, teams), false);   // away lost
+  assert.equal(resolveFootballMarket("Home to win", 2, 1, teams), true);
+  assert.equal(resolveFootballMarket("Away", 0, 3, teams), true);       // away won
+  assert.equal(resolveFootballMarket("Draw", 1, 1, teams), true);       // tie
+  assert.equal(resolveFootballMarket("Draw", 2, 1, teams), false);
+});
+
+test("settlement: signed handicap respects side and sign", () => {
+  const teams = { home: "Portugal", away: "Croatia" };
+  assert.equal(resolveFootballMarket("Portugal -1.5", 2, 0, teams), true);   // home by 2 > 1.5
+  assert.equal(resolveFootballMarket("Portugal -1.5", 1, 0, teams), false);  // home by 1
+  assert.equal(resolveFootballMarket("Croatia -1.5", 0, 3, teams), true);    // away by 3 (was inverted before)
+  assert.equal(resolveFootballMarket("Croatia -1.5", 0, 3, teams) !== false, true);
+});
+
+test("thresholds: numeric minConfidence still gates (не отключается)", () => {
+  // The extractor may emit minConfidence as a number; validateParams (the real
+  // pipeline) must normalize it to a band so the gate isn't silently disabled.
+  const p = validateParams({ minConfidence: 0.8, flatSize: 0.05 } as unknown as StrategyParams);
+  assert.equal(p.minConfidence, "высокая");
+  const skip = sizeBet({ params: p, aiProb: 0.9, priceCents: 50, budget: 1000, confidence: "низкая" });
+  assert.equal(skip.enter, false);
+  assert.match(skip.reason, /уверенность/);
+});
+
+test("thresholds: stop-loss captured in both sign conventions", () => {
+  assert.equal(validateParams({ stop: 0.2 } as StrategyParams).stop, -0.2);   // LLM (0..1) — was dropped before
+  assert.equal(validateParams({ stop: -0.25 } as StrategyParams).stop, -0.25); // heuristic
+  assert.equal(validateParams({ stop: 0 } as StrategyParams).stop, undefined);
+});
+
 // ---------------- metrics (§2.14) ----------------
 test("metrics: Brier, CLV, calibration, verdict", () => {
   const samples = [

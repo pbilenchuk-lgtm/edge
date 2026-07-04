@@ -48,10 +48,15 @@ export function getDb(path = dbPath()): Database {
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
   initSchema(db);
   // Reconcile analyze jobs orphaned by a crash/restart: the background promise
-  // that would finish them does not survive a process restart, so any leftover
-  // 'running' row is stale and must not read as "analyzing" forever.
+  // that would finish them does not survive a process restart. Only fail rows
+  // older than the stale window (ISO timestamps, matching the rest of the
+  // schema) so that under a shared DB we never kill another instance's genuinely
+  // in-flight run; anything younger self-heals via analysisStatus/jobActive.
   try {
-    db.exec("UPDATE analysis_jobs SET status='failed', error='прервано рестартом сервера', finished_at=CURRENT_TIMESTAMP WHERE status='running'");
+    const cutoff = new Date(Date.now() - 5 * 60_000).toISOString();
+    db.prepare(
+      "UPDATE analysis_jobs SET status='failed', error='прервано рестартом сервера', finished_at=? WHERE status='running' AND started_at < ?",
+    ).run(new Date().toISOString(), cutoff);
   } catch { /* table may not exist on a very old DB; schema just created it */ }
   _db = db;
   return db;

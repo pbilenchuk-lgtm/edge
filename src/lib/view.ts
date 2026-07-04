@@ -7,6 +7,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { providerEnabled } from "./llm.js";
+import { jobActive } from "./analysis.js";
 import type { StrategyParams } from "./types.js";
 
 export interface MarketView {
@@ -72,6 +73,7 @@ const PROVIDER_DEFS: Omit<ProviderView, "hasKey">[] = [
 ];
 
 export function buildAppData(db: Database, env = process.env): AppData {
+  const nowMs = Date.now();
   const treasury = R.getTreasury(db);
   const sports = db.prepare(`SELECT id,label FROM sports ORDER BY rowid`).all() as { id: string; label: string }[];
   const comps = R.listCompetitions(db);
@@ -142,7 +144,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
         minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
         kickoff: m.kickoff_at, oddsUpdated: null, finalScore: m.final_score, kickoffTime: m.kickoff_time,
         endTime: m.end_time, duration: m.duration, endNote: m.end_note,
-        analyzing: R.getAnalysisJob(db, m.id)?.status === "running",
+        analyzing: jobActive(R.getAnalysisJob(db, m.id), nowMs),
         preLineup: pre ? view(pre) : null, postLineup: post ? view(post) : null,
         markets, bets, reassessByStrat, logByStrat, settledBets, result,
       };

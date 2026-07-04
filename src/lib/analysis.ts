@@ -79,7 +79,14 @@ export async function analyzeMatch(
   }
   const freshMarkets = R.latestMarkets(db, matchId);
 
-  // strategy decisions (§9.5: strategy reads analytics; §9.6: code sizes)
+  // strategy decisions (§9.5: strategy reads analytics; §9.6: code sizes).
+  // Only replace existing proposals if this run actually produced usable
+  // probabilities — a degenerate run (no market label matched, all probs
+  // invalid) must not wipe the previous good proposals with nothing to replace.
+  const anyAiProb = freshMarkets.some((m) => m.ai_prob != null);
+  if (!anyAiProb) {
+    return { ok: true, stage, confidence: a.confidence, betsCreated: 0, decisions: [] };
+  }
   R.clearProposedBets(db, matchId);
   const strategies = R.listStrategies(db, sport).filter((s) => {
     const share = R.sharesForComp(db, match.competition_id).find((x) => x.strategy_id === s.id);
@@ -136,6 +143,18 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 
 const now = (deps: AnalyzeDeps) => deps.now ?? (() => new Date().toISOString());
 
+/**
+ * A 'running' job older than this is treated as stale — its background promise
+ * died (crash/restart/another instance) and will never call finishAnalysisJob.
+ * Comfortably longer than any real analyze round-trip (~30s LLM timeout).
+ */
+export const ANALYSIS_STALE_MS = 5 * 60_000;
+export function jobActive(job: { status: string; started_at: string } | undefined, nowMs: number): boolean {
+  if (!job || job.status !== "running") return false;
+  const started = Date.parse(job.started_at);
+  return !isNaN(started) && nowMs - started < ANALYSIS_STALE_MS;
+}
+
 export interface StartResult { ok: boolean; status?: "analyzing"; error?: string }
 
 /**
@@ -150,7 +169,9 @@ export function startAnalysis(db: Database, matchId: string, deps: AnalyzeDeps =
   if (!R.latestMarkets(db, matchId).length) {
     return { ok: false, error: "у матча нет рынков — сначала подтяни котировки (Polymarket)" };
   }
-  if (R.getAnalysisJob(db, matchId)?.status === "running") return { ok: true, status: "analyzing" };
+  // An active (non-stale) running job means a real run is in flight — dedupe.
+  // A stale 'running' row (dead promise) is not honored: we re-kick over it.
+  if (jobActive(R.getAnalysisJob(db, matchId), Date.now())) return { ok: true, status: "analyzing" };
 
   R.startAnalysisJob(db, matchId, now(deps)());
   // Fire-and-forget: analyzeMatch records its own success/failure assessment
@@ -172,6 +193,10 @@ export interface AnalysisStatus {
 export function analysisStatus(db: Database, matchId: string): AnalysisStatus {
   const job = R.getAnalysisJob(db, matchId);
   if (!job) return { status: "idle" };
-  if (job.status === "running") return { status: "analyzing" };
+  if (job.status === "running") {
+    return jobActive(job, Date.now())
+      ? { status: "analyzing" }
+      : { status: "done", failed: true, error: "анализ прервался (таймаут)" };
+  }
   return { status: "done", failed: job.status === "failed", error: job.error ?? undefined };
 }

@@ -27,6 +27,27 @@ export function confidenceRank(c?: string | null): number {
   return c ? CONFIDENCE_RANK[c] ?? 0 : 0;
 }
 
+/**
+ * Normalize a minConfidence value to a canonical band the ranker understands.
+ * The LLM extractor may return a WORD ('высокая') or a NUMBER (0..1); a raw
+ * number would score 0 in confidenceRank and silently disable the gate, so map
+ * numbers to bands and drop anything unrecognized.
+ */
+export function normalizeConfidence(v: unknown): Confidence | undefined {
+  if (typeof v === "string") {
+    const s = v.toLowerCase().trim();
+    if (CONFIDENCE_RANK[s]) return (s === "low" ? "низкая" : s === "medium" ? "средняя" : s === "high" ? "высокая" : s) as Confidence;
+    return undefined;
+  }
+  if (typeof v === "number" && isFinite(v)) {
+    const x = v > 1 ? v / 100 : v; // tolerate 0..1 or 0..100
+    if (x >= 0.66) return "высокая";
+    if (x >= 0.34) return "средняя";
+    if (x > 0) return "низкая";
+  }
+  return undefined;
+}
+
 // ------------------------------------------------------------
 // Extraction
 // ------------------------------------------------------------
@@ -105,8 +126,12 @@ export function validateParams(raw: StrategyParams): StrategyParams {
   const p: StrategyParams = {};
   // Fraction fields: keep any positive number, clamped to [0,1].
   if (isPos(raw.maxPerBet)) p.maxPerBet = clamp(raw.maxPerBet!, 0, 1);
-  if (typeof raw.stop === "number" && raw.stop < 0 && raw.stop >= -1)
-    p.stop = raw.stop;
+  // Portfolio stop-loss as a drawdown fraction. Accept BOTH sign conventions:
+  // the heuristic emits it negative (-0.25), the LLM extractor is told 0..1 and
+  // emits it positive (0.2). Store canonically as a negative fraction so a
+  // plainly-stated stop-loss is never silently dropped on the LLM path.
+  if (typeof raw.stop === "number" && raw.stop !== 0 && Math.abs(raw.stop) <= 1)
+    p.stop = -Math.abs(raw.stop);
   if (typeof raw.minEdge === "number" && raw.minEdge >= 0 && raw.minEdge <= 100)
     p.minEdge = raw.minEdge;
   if (isPos(raw.flatSize)) p.flatSize = clamp(raw.flatSize!, 0, 1);
@@ -125,7 +150,10 @@ export function validateParams(raw: StrategyParams): StrategyParams {
       .sort((a, b) => b[0] - a[0]);
     if (tiers.length) p.tiers = tiers;
   }
-  if (raw.minConfidence) p.minConfidence = raw.minConfidence;
+  if (raw.minConfidence != null) {
+    const mc = normalizeConfidence(raw.minConfidence);
+    if (mc) p.minConfidence = mc;
+  }
   if (Object.keys(p).length === 0) p.note = raw.note ?? "пороги не распознаны";
   return p;
 }

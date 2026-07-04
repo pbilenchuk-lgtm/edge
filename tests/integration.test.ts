@@ -124,6 +124,10 @@ test("polymarket: titleMatchScore matches on surnames", () => {
   assert.equal(titleMatchScore(t, "Connor Doig", "Eudald Gonzalez"), 2);
   assert.equal(titleMatchScore(t, "Doig", "Gonzalez"), 2);
   assert.equal(titleMatchScore(t, "Alcaraz", "Sinner"), 0);
+  // full first+surname still matches when the title carries only the surname
+  assert.equal(titleMatchScore("ATP Final: Alcaraz vs Sinner", "Carlos Alcaraz", "Jannik Sinner"), 2);
+  // and a shared-word near-miss no longer false-positives (was a substring bug)
+  assert.ok(titleMatchScore("Real Sociedad vs Barcelona B", "Real Madrid", "Barcelona") < 2);
 });
 
 test("polymarket: findMatchEvent / bySlug / listSportEvents via mocked Gamma", async () => {

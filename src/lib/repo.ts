@@ -253,7 +253,7 @@ export function insertMarket(db: Database, m: Market): void {
 export function latestMarkets(db: Database, matchId: string, closingOnly = false): Market[] {
   const rows = db.prepare(
     `SELECT * FROM markets WHERE match_id=? ${closingOnly ? "AND is_closing=1" : ""}
-     ORDER BY snapshot_at DESC`,
+     ORDER BY snapshot_at DESC, rowid DESC`,
   ).all(matchId) as any[];
   const seen = new Set<string>();
   const out: Market[] = [];

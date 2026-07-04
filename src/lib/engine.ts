@@ -51,11 +51,14 @@ export function canReassess(
   db: Database, matchId: string, strategyId: string, minute: number | null, gapMinutes: number,
 ): boolean {
   const prior = R.reassessmentsForMatch(db, matchId).filter((r) => r.strategy_id === strategyId);
-  if (!prior.length) return true;
-  const last = prior[prior.length - 1];
-  const lastMin = parseInt(String(last.minute ?? ""), 10);
-  if (minute == null || isNaN(lastMin)) return true;
-  return Math.abs(minute - lastMin) >= gapMinutes;
+  if (!prior.length || minute == null) return true;
+  // Compare against the last reassessment that HAS a parseable match-minute;
+  // skip null-minute ones (e.g. manual triggers) so they don't reset the gap.
+  for (let i = prior.length - 1; i >= 0; i--) {
+    const m = parseInt(String(prior[i].minute ?? ""), 10);
+    if (!isNaN(m)) return Math.abs(minute - m) >= gapMinutes;
+  }
+  return true;
 }
 
 export interface ReassessResult { strategyId: string; created: boolean; reason?: string; source?: string; }
@@ -220,7 +223,7 @@ export function settleMatch(
 function resolveOutcome(bet: Bet, match: Match, overrides: Record<string, boolean>): boolean | null {
   if (bet.market_label in overrides) return overrides[bet.market_label];
   if (match.score_home == null || match.score_away == null) return null;
-  return resolveFootballMarket(bet.market_label, match.score_home, match.score_away);
+  return resolveFootballMarket(bet.market_label, match.score_home, match.score_away, { home: match.home, away: match.away });
 }
 
 // ------------------------------------------------------------

@@ -54,6 +54,27 @@ test("canReassess enforces the minute gap", () => {
   assert.equal(canReassess(db, "m-live", "flat", 40, 5), true); // gap 10 >= 5
 });
 
+test("canReassess ignores a later null-minute (manual) reassessment for the gap", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.insertReassessment(db, { id: R.uid(), match_id: "m-live", strategy_id: "flat", minute: "30'", body: "x", confidence: "средняя", trigger: "goal", created_at: "t1" });
+  R.insertReassessment(db, { id: R.uid(), match_id: "m-live", strategy_id: "flat", minute: null, body: "manual", confidence: "средняя", trigger: "manual", created_at: "t2" });
+  // Must still measure the gap against minute 30 (the null-minute manual one
+  // used to reset the limit and let a too-soon auto trigger through).
+  assert.equal(canReassess(db, "m-live", "flat", 33, 5), false); // gap 3 < 5
+  assert.equal(canReassess(db, "m-live", "flat", 40, 5), true);
+});
+
+test("latestMarkets picks the last-inserted snapshot on equal timestamps", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const ts = "2026-07-04T00:00:00.000Z";
+  R.insertMarket(db, { id: R.uid(), match_id: "m-live", label: "TieBreak", price: 40, ai_prob: null, liquidity: null, external_ref: "t", snapshot_at: ts, is_closing: false });
+  R.insertMarket(db, { id: R.uid(), match_id: "m-live", label: "TieBreak", price: 55, ai_prob: null, liquidity: null, external_ref: "t", snapshot_at: ts, is_closing: false });
+  const m = R.latestMarkets(db, "m-live").find((x) => x.label === "TieBreak")!;
+  assert.equal(m.price, 55); // rowid DESC tiebreaker => last write wins
+});
+
 test("syncMatchStatus: goal triggers reassessment then rate-limits", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

@@ -18,7 +18,8 @@ export async function POST(req: Request) {
     const { heuristicName, proposeImprovement } = await import("@/lib/llm");
 
     const db = getDb();
-    const body = (await req.json()) as any;
+    let body: any;
+    try { body = await req.json(); } catch { return bad("невалидный JSON в теле запроса"); }
     const type = body?.type as string;
 
     switch (type) {
@@ -33,6 +34,7 @@ export async function POST(req: Request) {
       }
       case "setShares": {
         const { compId, shares } = body as { compId: string; shares: Record<string, number> };
+        if (!compId || !shares || typeof shares !== "object") return bad("нужны compId и shares");
         const list = Object.entries(shares).map(([, pct]) => ({ pct: Number(pct) }));
         if (!sharesValid(list)) return bad("Сумма долей превышает 100% (§9.2)");
         R.clearShares(db, compId);
@@ -66,7 +68,7 @@ export async function POST(req: Request) {
           // §3.5 gate: too few matches — improving now overfits noise.
           return NextResponse.json({ ok: false, gated: true, samples, error: `Рано улучшать: ${samples}/20 матчей (§3.5)` }, { status: 400 });
         }
-        const proposal = await proposeImprovement(strat, { matches: samples, roi: q?.clv ?? 0 }, strat.model);
+        const proposal = await proposeImprovement(strat, { matches: samples, clv: q?.clv ?? null, brier: q?.brier ?? null }, strat.model);
         const params = await extractThresholds(proposal.newPrompt); // params computed in CODE (§9.6)
         return ok({ proposal: { ...proposal, params, version: strat.version + 1 } });
       }
