@@ -55,7 +55,7 @@ export function loadPolymarketConfig(
     gammaBase: env.POLYMARKET_GAMMA_BASE ?? "https://gamma-api.polymarket.com",
     clobBase: env.POLYMARKET_CLOB_BASE ?? "https://clob.polymarket.com",
     timeoutMs: Number(env.POLYMARKET_TIMEOUT_MS ?? 6000),
-    discoverLimit: Number(env.POLYMARKET_DISCOVER_LIMIT ?? 300),
+    discoverLimit: Number(env.POLYMARKET_DISCOVER_LIMIT ?? 1000),
     maxMarketsPerMatch: Number(env.POLYMARKET_MAX_MARKETS ?? 16),
   };
 }
@@ -270,10 +270,11 @@ export async function findMatchEvent(
 
 /**
  * All Gamma events for a match (score >= 2 => both names present). Polymarket
- * splits one match into several events by market family ("- Player Props",
- * "- Total Corners", "- Moneyline", …), so a single event is not enough — we
- * scan `discoverLimit` near-term events (the old 60 was too small: real matches
- * fell outside the window) and return every variant, best-scored first.
+ * splits one match into several events by market family ("- More Markets",
+ * "- Player Props", "- Total Corners", …) and the base "Home vs. Away" — these
+ * land on DIFFERENT pages (Gamma caps a response at 100 events), so a single
+ * request misses them. We page through `discoverLimit` events and return every
+ * variant, best-scored first. Fetched pages are cached per sport for the tick.
  */
 export async function findMatchEvents(
   cfg: PolymarketConfig,
@@ -282,17 +283,34 @@ export async function findMatchEvents(
 ): Promise<PolyEvent[]> {
   const tag = SPORT_TAG_IDS[q.sport];
   if (tag == null) return [];
-  const limit = q.limit ?? cfg.discoverLimit ?? 300;
-  const events = await gammaEvents(
-    cfg,
-    `tag_id=${tag}&closed=false&limit=${limit}&order=startDate&ascending=false`,
-    deps,
-  );
+  const events = await fetchSportEvents(cfg, tag, q.limit ?? cfg.discoverLimit ?? 1000, deps);
   return events
     .map((ev) => ({ ev, score: titleMatchScore(ev.title, q.home, q.away) }))
     .filter((x) => x.score >= 2)
     .sort((a, b) => b.score - a.score)
     .map((x) => x.ev);
+}
+
+const GAMMA_PAGE = 100; // Gamma caps a single /events response at 100
+const sportEventCache = new Map<number, { at: number; events: PolyEvent[] }>();
+const SPORT_CACHE_TTL_MS = 120_000;
+
+/** Page through a sport's open events up to `limit`. Real fetches are cached
+ *  briefly so linking many matches in one tick doesn't refetch every page. */
+async function fetchSportEvents(cfg: PolymarketConfig, tag: number, limit: number, deps: FetchDeps): Promise<PolyEvent[]> {
+  const live = !deps.fetchImpl; // don't cache injected (test) fetches
+  if (live) {
+    const c = sportEventCache.get(tag);
+    if (c && Date.now() - c.at < SPORT_CACHE_TTL_MS) return c.events;
+  }
+  const all: PolyEvent[] = [];
+  for (let off = 0; off < limit; off += GAMMA_PAGE) {
+    const page = await gammaEvents(cfg, `tag_id=${tag}&closed=false&limit=${GAMMA_PAGE}&offset=${off}&order=startDate&ascending=false`, deps);
+    all.push(...page);
+    if (page.length < GAMMA_PAGE) break; // last page
+  }
+  if (live) sportEventCache.set(tag, { at: Date.now(), events: all });
+  return all;
 }
 
 /** 0..2: how many of the two competitor names appear in the event title.
@@ -352,6 +370,7 @@ export function matchMarketSnapshots(
   for (const ev of events) {
     for (const m of ev.markets) {
       if (m.priceCents == null || !m.label) continue;
+      if (dropNoise && (m.priceCents <= 1 || m.priceCents >= 99)) continue; // effectively-resolved / dead line
       if (dropNoise && isNoiseMarket(m.label)) continue;
       const key = m.label.toLowerCase().trim();
       if (seen.has(key)) continue;
