@@ -182,6 +182,20 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     if (app.matchDb) setMatchDb(app.matchDb);
     if (app.catalog) setCatalog(app.catalog);
   };
+
+  // "Pull matches" — parse Polymarket + ESPN lineups + odds (no LLM). Fast.
+  const [discovering, setDiscovering] = useState(false);
+  const [discoverMsg, setDiscoverMsg] = useState<string | null>(null);
+  const doDiscover = async () => {
+    setDiscovering(true); setDiscoverMsg(null);
+    try {
+      const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "discover" }) }).then((x) => x.json());
+      if (r.ok) { await reloadApp(); setDiscoverMsg(`+${r.discovered} матчей · котировки: ${r.oddsUpdated}`); }
+      else setDiscoverMsg(r.error || "не удалось подтянуть");
+    } catch { setDiscoverMsg("сеть недоступна"); }
+    setDiscovering(false);
+    setTimeout(() => setDiscoverMsg(null), 6000);
+  };
   // Poll the durable job until it settles, then reload. Used both after a fresh
   // kick and to RESUME a run already in flight (e.g. after navigating back — the
   // server tracks the job, so the card picks the analysis back up on its own).
@@ -224,6 +238,11 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
         <div style={S.trCell}><div style={S.trLbl}>Распределено</div><div style={{ ...S.trVal, color: "#e8a838" }}>{fmtMoney0(allocatedSum)}</div></div>
         <div style={S.trDiv} />
         <div style={S.trCell}><div style={S.trLbl}>Свободно</div><div style={{ ...S.trVal, color: freeBalance >= 0 ? "#5fd08a" : "#ff6b6b" }}>{fmtMoney0(freeBalance)}</div></div>
+        <div style={S.trDiv} />
+        <div style={S.trCell}>
+          <button style={{ ...S.discoverBtn, opacity: discovering ? 0.6 : 1 }} disabled={discovering} onClick={doDiscover} title="Подтянуть матчи с Polymarket + составы ESPN + котировки (без ИИ)">{discovering ? "подтягиваю…" : "↧ Подтянуть матчи"}</button>
+          {discoverMsg && <div style={S.discoverMsg}>{discoverMsg}</div>}
+        </div>
       </div>
 
       <div style={S.screenSwitch} className="el-screen-switch">
@@ -323,6 +342,8 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   tabs.push({ id: "strat", label: "Ставки стратегий" });
   if (hasReassess) tabs.push({ id: "reassess", label: "Переоценки" });
   if (hasSettled) tabs.push({ id: "settle", label: "Расчёт" });
+  const hasLive = !!((match.lineups && (match.lineups.home || match.lineups.away)) || (match.events && match.events.length));
+  if (hasLive) tabs.push({ id: "live", label: "Составы · события" });
   if (hasLog) tabs.push({ id: "log", label: "Лог" });
   const defaultTab = hasSettled ? "settle" : (match.preLineup || match.postLineup) ? "analysis" : "strat";
   const [tab, setTab] = useState(defaultTab);
@@ -494,6 +515,32 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                   {(match.logByStrat?.[logStrat] || []).length === 0 && <div style={S.noPos}>действий пока нет</div>}
                   {(match.logByStrat?.[logStrat] || []).map((e: any, i: number) => <div key={i} style={S.logEntry}><span style={S.logMin}>{e.min}</span><span style={{ ...S.logType, ...logTypeStyle(e.type) }}>{e.type}</span><span style={S.logText}>{e.text}</span></div>)}
                 </div>
+              </div>
+            )}
+            {tab === "live" && hasLive && (
+              <div style={S.liveWrap}>
+                {match.lineups && (
+                  <div style={S.lineupGrid}>
+                    {[match.lineups.home, match.lineups.away].filter(Boolean).map((l: any, i: number) => (
+                      <div key={i} style={S.lineupCol}>
+                        <div style={S.lineupTeam}>{l.team}{l.formation && <span style={S.lineupForm}> · {l.formation}</span>}</div>
+                        <ol style={S.lineupList}>{l.starters.map((p: string, j: number) => <li key={j} style={S.lineupPlayer}>{p}</li>)}</ol>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {match.events?.length > 0 && (
+                  <div style={S.eventsBox}>
+                    <div style={S.eventsLabel}>События матча (ESPN)</div>
+                    {match.events.map((e: any, i: number) => (
+                      <div key={i} style={S.eventRow}>
+                        <span style={S.eventMin}>{e.minute != null ? `${e.minute}'` : ""}</span>
+                        <span style={{ ...S.eventTag, ...eventTagStyle(e.type) }}>{eventTagChar(e.type)}</span>
+                        <span style={S.eventText}>{e.team ? <b>{e.team}</b> : null} {e.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -668,7 +715,8 @@ function improveStats(q: any, overall: any) {
 function FeedScreen({ feed }: any) {
   const [filter, setFilter] = useState("all");
   const types = [["all", "Всё"], ["enter", "Входы"], ["reassess", "Переоценки"], ["settle", "Расчёты"], ["goal", "События матча"], ["skip", "Пропуски"]];
-  const shown = filter === "all" ? feed : feed.filter((e: any) => e.type === filter || (filter === "goal" && (e.type === "goal" || e.type === "lineup")));
+  const MATCH_EVENT = new Set(["goal", "lineup", "card", "sub"]);
+  const shown = filter === "all" ? feed : feed.filter((e: any) => e.type === filter || (filter === "goal" && MATCH_EVENT.has(e.type)));
   return (
     <main style={S.main}>
       <div style={S.feedHead}>
@@ -697,9 +745,11 @@ function FeedScreen({ feed }: any) {
     </main>
   );
 }
-function feedIconChar(t: string) { return ({ enter: "→", reassess: "↻", settle: "✓", goal: "⚽", lineup: "📋", skip: "—" } as any)[t] || "•"; }
+function eventTagChar(t: string) { return ({ goal: "⚽", red_card: "🟥", yellow_card: "🟨", sub: "⇄" } as any)[t] || "•"; }
+function eventTagStyle(t: string) { const map: any = { goal: { color: "#e8a838" }, red_card: { color: "#ff6b6b" }, yellow_card: { color: "#e8c838" }, sub: { color: "#4fc3c7" } }; return map[t] || { color: "#8b95a5" }; }
+function feedIconChar(t: string) { return ({ enter: "→", reassess: "↻", settle: "✓", goal: "⚽", card: "▪", sub: "⇄", lineup: "📋", skip: "—" } as any)[t] || "•"; }
 function feedIconStyle(t: string) {
-  const map: any = { enter: { color: "#70b56a", borderColor: "#70b56a55" }, reassess: { color: "#5b9bd5", borderColor: "#5b9bd555" }, settle: { color: "#c98bdb", borderColor: "#c98bdb55" }, goal: { color: "#e8a838", borderColor: "#e8a83855" }, lineup: { color: "#e8a838", borderColor: "#e8a83855" }, skip: { color: "#8b95a5", borderColor: "#2c3543" } };
+  const map: any = { enter: { color: "#70b56a", borderColor: "#70b56a55" }, reassess: { color: "#5b9bd5", borderColor: "#5b9bd555" }, settle: { color: "#c98bdb", borderColor: "#c98bdb55" }, goal: { color: "#e8a838", borderColor: "#e8a83855" }, card: { color: "#e07a5f", borderColor: "#e07a5f55" }, sub: { color: "#4fc3c7", borderColor: "#4fc3c755" }, lineup: { color: "#e8a838", borderColor: "#e8a83855" }, skip: { color: "#8b95a5", borderColor: "#2c3543" } };
   return map[t] || {};
 }
 
@@ -1060,6 +1110,21 @@ const S: Record<string, React.CSSProperties> = {
   trLbl: { fontSize: 9.5, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em" },
   trVal: { fontSize: 17, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", marginTop: 2 },
   trDiv: { width: 1, height: 30, background: LINE },
+  discoverBtn: { background: PANEL2, border: `1px solid #e8a83866`, color: "#e8a838", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
+  discoverMsg: { fontSize: 10.5, color: MUTE, marginTop: 4, whiteSpace: "nowrap" },
+  liveWrap: { display: "flex", flexDirection: "column", gap: 14 },
+  lineupGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
+  lineupCol: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px" },
+  lineupTeam: { fontSize: 13, fontWeight: 700, color: "#e6ebf2", marginBottom: 6 },
+  lineupForm: { color: "#e8a838", fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" },
+  lineupList: { margin: 0, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 2 },
+  lineupPlayer: { fontSize: 12, color: "#b8c1cf" },
+  eventsBox: { display: "flex", flexDirection: "column", gap: 5 },
+  eventsLabel: { fontSize: 10.5, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 2 },
+  eventRow: { display: "flex", alignItems: "baseline", gap: 8, fontSize: 12.5 },
+  eventMin: { minWidth: 30, color: MUTE, fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5 },
+  eventTag: { fontSize: 13, flexShrink: 0 },
+  eventText: { color: "#c4cdd9", lineHeight: 1.35 },
   screenSwitch: { display: "flex", gap: 2, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 4, marginBottom: 12, overflowX: "auto" },
   screenBtn: { background: "transparent", border: "none", color: MUTE, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", borderRadius: 7, whiteSpace: "nowrap", flexShrink: 0 },
   screenOn: { background: PANEL2, color: TEXT },

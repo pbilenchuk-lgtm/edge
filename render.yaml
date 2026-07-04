@@ -13,7 +13,7 @@ services:
       - key: POLYMARKET_ENABLED
         value: "true"    # pull matches + odds from Polymarket
       - key: SPORTS_ENABLED
-        value: "false"   # set true to also pull ESPN live scores
+        value: "true"    # pull ESPN live scores + real lineups/events (reassessment triggers)
       # Automated cron (in-process scheduler): parse + analyze + enter/exit on a loop.
       - key: AUTO_TICK
         value: "true"

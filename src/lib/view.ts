@@ -38,7 +38,12 @@ export interface MatchView {
   logByStrat: Record<string, { min: string | null; text: string; type: string }[]>;
   settledBets: Record<string, { market: string; stake: number; result: string; payout: number }[]>;
   result: Record<string, number>;
+  /** real lineups (ESPN), if enriched — shown under the СОСТАВ toggle */
+  lineups: { home: LineupView | null; away: LineupView | null } | null;
+  /** real in-match events (ESPN): goals / cards / subs, newest last */
+  events: { minute: number | null; type: string; team: string | null; text: string }[];
 }
+export interface LineupView { team: string; formation: string | null; starters: string[] }
 export interface StrategyView {
   id: string; name: string; tag: string | null; color: string; version: number;
   sport: string; model: string | null; prompt: string; params: StrategyParams;
@@ -140,6 +145,14 @@ export function buildAppData(db: Database, env = process.env): AppData {
       for (const l of R.tradeLogForMatch(db, m.id))
         (logByStrat[l.strategy_id] ||= []).push({ min: l.minute, text: l.text, type: l.type });
 
+      // real lineups + events from ESPN enrichment (if any)
+      const live = R.getMatchLive(db, m.id);
+      const parseLineup = (j: string | null): LineupView | null => { if (!j) return null; try { const l = JSON.parse(j); return { team: l.team ?? "?", formation: l.formation ?? null, starters: Array.isArray(l.starters) ? l.starters : [] }; } catch { return null; } };
+      const lineups = live && (live.home_lineup || live.away_lineup)
+        ? { home: parseLineup(live.home_lineup), away: parseLineup(live.away_lineup) } : null;
+      const events = R.eventsForMatch(db, m.id).filter((e) => e.type !== "other")
+        .map((e) => ({ minute: e.minute, type: e.type, team: e.team, text: e.text }));
+
       matchDb[m.id] = {
         id: m.id, competitionId: m.competition_id, home: m.home, away: m.away, state: m.state,
         minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
@@ -147,7 +160,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
         endTime: m.end_time, duration: m.duration, endNote: m.end_note,
         analyzing: jobActive(R.getAnalysisJob(db, m.id), nowMs),
         preLineup: pre ? view(pre) : null, postLineup: post ? view(post) : null,
-        markets, bets, reassessByStrat, logByStrat, settledBets, result,
+        markets, bets, reassessByStrat, logByStrat, settledBets, result, lineups, events,
       };
     }
   }
@@ -178,6 +191,10 @@ function view(a: { confidence: string | null; short: string | null; body: string
   return { confidence: a.confidence, short: a.short, text: a.body, verdict: a.verdict, status: a.status };
 }
 
+const EVENT_LABEL: Record<string, string> = { goal: "⚽ гол", red_card: "🟥 красная", yellow_card: "🟨 жёлтая", sub: "🔁 замена" };
+// The feed filters group all match events under "События матча" (type "goal").
+const FEED_EVENT_TYPE: Record<string, string> = { goal: "goal", red_card: "card", yellow_card: "card", sub: "sub" };
+
 function buildFeed(
   db: Database,
   comps: { id: string; sport_id: string; name: string }[],
@@ -206,6 +223,15 @@ function buildFeed(
         rows.push({ at: r.created_at, item: {
           t: r.minute ?? "", type: "reassess", sport: sp, match: matchName,
           strat: st?.name, color: st?.color ?? undefined, text: r.body.slice(0, 120),
+        } });
+      }
+      // real in-match events pulled from ESPN (goals / cards / subs)
+      for (const e of R.eventsForMatch(db, mt.id)) {
+        if (e.type === "other") continue;
+        const label = EVENT_LABEL[e.type] ?? "событие";
+        rows.push({ at: e.created_at, item: {
+          t: e.minute != null ? `${e.minute}'` : "", type: FEED_EVENT_TYPE[e.type] ?? "goal",
+          sport: sp, match: matchName, text: `${label}${e.team ? " · " + e.team : ""} — ${e.text}`,
         } });
       }
     }

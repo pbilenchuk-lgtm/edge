@@ -62,6 +62,29 @@ export async function POST(req: Request) {
           analyzed: res.analyzed.length, entered: res.entered.length, exited: res.exited.length,
         });
       }
+      case "discover": {
+        // Fast "pull matches" for the UI button: parse Polymarket (many matches,
+        // ~7 days out), import ESPN-linked matches + real lineups/events, refresh
+        // odds. NO LLM — analysis stays pointwise (button "Оценить матч" / cron).
+        const { importPolymarketMatches, syncCompetitions, enrichFromEspn } = engine;
+        const { SPORT_TAG_IDS, loadPolymarketConfig } = await import("@/lib/polymarket");
+        const provider = loadSportsProvider(loadSportsConfig());
+        let discovered = 0;
+        if (loadPolymarketConfig().enabled) {
+          for (const sport of Object.keys(SPORT_TAG_IDS)) {
+            const items = await importPolymarketMatches(db, sport, {}, { limit: 200 });
+            discovered += items.length;
+          }
+        }
+        let enriched = 0;
+        if (provider) {
+          await syncCompetitions(db, provider, {}, { linkOdds: loadPolymarketConfig().enabled });
+          const e = await enrichFromEspn(db, provider, {});
+          enriched = e.enriched;
+        }
+        const odds = await engine.refreshActiveOdds(db, {});
+        return NextResponse.json({ ok: true, discovered, enriched, oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0) });
+      }
       case "sync": {
         const cfg = loadSportsConfig();
         const provider = loadSportsProvider(cfg);
