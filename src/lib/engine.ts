@@ -260,8 +260,11 @@ export async function syncMatchStatus(
   const reassessments: ReassessResult[] = [];
   let goals = 0;
 
-  // goal trigger (score increased while live)
-  if ((status.state === "live" || status.state === "finished") && match.score_home != null && newTotal > prevTotal) {
+  // goal trigger (score increased while live). prevTotal already coalesces a
+  // null prior score to 0, so an upcoming→live first goal is caught too; fresh
+  // imports don't double-count because upsertImportedMatch has already set the
+  // score before this runs (prevTotal == newTotal there).
+  if ((status.state === "live" || status.state === "finished") && newTotal > prevTotal) {
     goals = newTotal - prevTotal;
     for (const sid of strategiesWithOpenBets(db, match.id)) {
       reassessments.push(await triggerReassessment(db, { match: updated, strategyId: sid, trigger: "goal", minute: status.minute }, deps));

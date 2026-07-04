@@ -12,7 +12,7 @@
 // ============================================================
 
 import type { Confidence, StrategyParams } from "./types.js";
-import { decimalOdds, edgePct as calcEdge } from "./edge.js";
+import { edgePct as calcEdge } from "./edge.js";
 
 const CONFIDENCE_RANK: Record<string, number> = {
   низкая: 1,
@@ -170,6 +170,9 @@ export interface SizeInput {
   /** $ already staked by this strategy on this match (for §9.3). */
   exposure?: number;
   confidence?: Confidence | null;
+  /** current P&L fraction of the strategy on the competition (negative = drawdown),
+   *  used to enforce params.stop — halt entries once the stop-loss is hit. */
+  drawdown?: number;
 }
 
 export interface SizeDecision {
@@ -201,6 +204,12 @@ export function sizeBet(input: SizeInput): SizeDecision {
   });
 
   if (budget <= 0) return skip("нет бюджета на турнире");
+
+  // Portfolio stop-loss (§ risk control): once the strategy's drawdown on this
+  // competition reaches the stop, halt ALL new entries until it recovers.
+  if (params.stop != null && input.drawdown != null && input.drawdown <= params.stop) {
+    return skip(`портфель на стоп-лоссе (${(input.drawdown * 100).toFixed(0)}% ≤ ${(params.stop * 100).toFixed(0)}%) — входы остановлены`);
+  }
 
   if (params.minConfidence != null) {
     if (confidenceRank(input.confidence) < confidenceRank(params.minConfidence)) {
@@ -255,11 +264,14 @@ function rawFraction(
     return 0; // below the lowest tier => no entry
   }
   if (params.kellyFraction != null) {
-    // Simplified Kelly the prompts describe: k * edge / (decimalOdds - 1).
-    const b = decimalOdds(priceCents) - 1;
-    if (!isFinite(b) || b <= 0) return 0;
-    const edgeFrac = aiProb - priceCents / 100;
-    return Math.max(0, (params.kellyFraction * edgeFrac) / b);
+    // Kelly for buying a binary outcome at price p (prob) with model prob q:
+    //   f* = (q − p) / (1 − p)   (edge over the room left above the price),
+    // scaled by kellyFraction. (The earlier k·edge/(d−1) form understated the
+    // stake by a factor of p and mis-sized high-odds bets.)
+    const p = priceCents / 100;
+    if (p <= 0 || p >= 1) return 0;
+    const edgeFrac = aiProb - p;
+    return Math.max(0, (params.kellyFraction * edgeFrac) / (1 - p));
   }
   if (params.flatSize != null) return params.flatSize;
   return 0;

@@ -104,12 +104,19 @@ test("sizeBet: respects remaining match budget (§9.3)", () => {
   assert.ok(d.stake <= 10, "cannot exceed remaining $10 of budget");
 });
 
-test("sizeBet: Kelly uses simplified edge/net-odds formula", () => {
+test("sizeBet: Kelly uses true fractional formula edge/(1-price)", () => {
   const params: StrategyParams = { kellyFraction: 0.5, cap: 0.25, minEdge: 2 };
   const d = sizeBet({ params, aiProb: 0.55, priceCents: 46.8, budget: 450 });
-  // b = 100/46.8 - 1 = 1.1368; f = 0.5*0.082/1.1368 = 0.0361
+  // p=0.468; f = 0.5*(0.55-0.468)/(1-0.468) = 0.5*0.082/0.532 = 0.0771
   assert.ok(d.enter);
-  assert.ok(Math.abs(d.fraction - 0.0361) < 0.002, `fraction ~0.036, got ${d.fraction}`);
+  assert.ok(Math.abs(d.fraction - 0.0771) < 0.002, `fraction ~0.077, got ${d.fraction}`);
+});
+
+test("sizeBet: Kelly sizes larger on low-price (high-odds) bets", () => {
+  // The old edge/(d-1) form understated this by ~1/price. p=0.2, q=0.3, k=0.5:
+  // true half-Kelly = 0.5*0.1/0.8 = 0.0625 (not 0.0125).
+  const d = sizeBet({ params: { kellyFraction: 0.5, minEdge: 1 }, aiProb: 0.3, priceCents: 20, budget: 1000 });
+  assert.ok(Math.abs(d.fraction - 0.0625) < 0.001, `fraction ~0.0625, got ${d.fraction}`);
 });
 
 // ---------------- settlement (§3.4) ----------------
@@ -156,6 +163,16 @@ test("thresholds: numeric minConfidence still gates (не отключается
   const skip = sizeBet({ params: p, aiProb: 0.9, priceCents: 50, budget: 1000, confidence: "низкая" });
   assert.equal(skip.enter, false);
   assert.match(skip.reason, /уверенность/);
+});
+
+test("sizeBet: portfolio stop-loss halts entries once drawdown hits it", () => {
+  const params: StrategyParams = { flatSize: 0.05, minEdge: 1, stop: -0.2 };
+  const base = { params, aiProb: 0.6, priceCents: 50, budget: 1000, confidence: "высокая" as const };
+  assert.equal(sizeBet({ ...base, drawdown: -0.1 }).enter, true);   // above the stop
+  const halted = sizeBet({ ...base, drawdown: -0.25 });             // past the stop
+  assert.equal(halted.enter, false);
+  assert.match(halted.reason, /стоп-лосс/);
+  assert.equal(sizeBet({ ...base }).enter, true);                   // no drawdown info => no halt
 });
 
 test("thresholds: stop-loss captured in both sign conventions", () => {

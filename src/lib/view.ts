@@ -183,28 +183,30 @@ function buildFeed(
 ): FeedItem[] {
   const stratById = Object.fromEntries(strategies.map((s) => [s.id, s]));
   const sportLabel: Record<string, string> = { football: "Футбол", tennis: "Теннис" };
-  const items: FeedItem[] = [];
+  // Collect with each source row's created_at so the feed is the 40 MOST RECENT
+  // events across all matches, not the first 40 in iteration order.
+  const rows: { at: string; item: FeedItem }[] = [];
   for (const c of comps) {
-    for (const mid of R.listMatches(db, c.id).map((m) => m.id)) {
-      const m = matchDb[mid];
+    const sp = sportLabel[c.sport_id] ?? c.sport_id;
+    for (const mt of R.listMatches(db, c.id)) {
+      const m = matchDb[mt.id];
       const matchName = `${m.home}–${m.away}`;
-      const sp = sportLabel[c.sport_id] ?? c.sport_id;
-      for (const [sid, entries] of Object.entries(m.logByStrat)) {
-        for (const e of entries) {
-          const st = stratById[sid];
-          items.push({
-            t: e.min ?? "", type: e.type === "settle" ? "settle" : e.type === "exit" ? "reassess" : "enter",
-            sport: sp, match: matchName, strat: st?.name, color: st?.color ?? undefined, text: e.text,
-          });
-        }
+      for (const e of R.tradeLogForMatch(db, mt.id)) {
+        const st = stratById[e.strategy_id];
+        rows.push({ at: e.created_at, item: {
+          t: e.minute ?? "", type: e.type === "settle" ? "settle" : e.type === "exit" ? "reassess" : "enter",
+          sport: sp, match: matchName, strat: st?.name, color: st?.color ?? undefined, text: e.text,
+        } });
       }
-      for (const [sid, rs] of Object.entries(m.reassessByStrat)) {
-        for (const r of rs) {
-          const st = stratById[sid];
-          items.push({ t: r.min ?? "", type: "reassess", sport: sp, match: matchName, strat: st?.name, color: st?.color ?? undefined, text: r.text.slice(0, 120) });
-        }
+      for (const r of R.reassessmentsForMatch(db, mt.id)) {
+        const st = stratById[r.strategy_id];
+        rows.push({ at: r.created_at, item: {
+          t: r.minute ?? "", type: "reassess", sport: sp, match: matchName,
+          strat: st?.name, color: st?.color ?? undefined, text: r.body.slice(0, 120),
+        } });
       }
     }
   }
-  return items.slice(0, 40);
+  rows.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)); // newest first
+  return rows.slice(0, 40).map((r) => r.item);
 }

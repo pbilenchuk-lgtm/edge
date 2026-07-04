@@ -71,11 +71,19 @@ export async function analyzeMatch(
 
   R.upsertAssessment(db, { id: R.uid(), match_id: matchId, stage, confidence: a.confidence, short: a.short, body: a.body, verdict: a.verdict, model, status: "ok", created_at: now() });
 
-  // update market ai_prob from the model
-  const probByLabel = new Map(a.markets.map((m) => [norm(m.label), m.prob]));
+  // update market ai_prob from the model. Match exactly on the normalized
+  // label first; if the model paraphrased ("Over 2.5" vs "Over 2.5 goals"),
+  // fall back to a token-subset match so minor wording drift doesn't silently
+  // drop the probability (the distinctive number must still line up).
+  const modelProbs = a.markets.map((mm) => ({ key: norm(mm.label), toks: tokenSet(mm.label), prob: mm.prob }));
   for (const m of markets) {
-    const p = probByLabel.get(norm(m.label));
-    if (p != null) R.setMarketAiProb(db, m.id, p);
+    const key = norm(m.label);
+    let hit = modelProbs.find((e) => e.key === key);
+    if (!hit) {
+      const mt = tokenSet(m.label);
+      hit = modelProbs.find((e) => isSubset(mt, e.toks) || isSubset(e.toks, mt));
+    }
+    if (hit && hit.prob != null) R.setMarketAiProb(db, m.id, hit.prob);
   }
   const freshMarkets = R.latestMarkets(db, matchId);
 
@@ -98,13 +106,15 @@ export async function analyzeMatch(
   for (const strat of strategies) {
     const share = R.sharesForComp(db, match.competition_id).find((x) => x.strategy_id === strat.id)!;
     const budget = stratBudget(comp!.budget, share.pct);
+    // Portfolio drawdown so far (realized + open) — enforces params.stop.
+    const drawdown = strategyDrawdown(db, match.competition_id, strat.id, budget);
     let exposure = 0, entries = 0, skipped = 0;
     // best edges first
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
       .map((m) => ({ m, edge: edgePct(m.ai_prob as number, m.price) }))
       .sort((x, y) => y.edge - x.edge);
     for (const { m } of ranked) {
-      const d = sizeBet({ params: strat.params, aiProb: m.ai_prob as number, priceCents: m.price, budget, exposure, confidence: a.confidence as Confidence });
+      const d = sizeBet({ params: strat.params, aiProb: m.ai_prob as number, priceCents: m.price, budget, exposure, confidence: a.confidence as Confidence, drawdown });
       if (!d.enter) { skipped++; continue; }
       exposure += d.stake;
       entries++;
@@ -124,6 +134,29 @@ export async function analyzeMatch(
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+const tokenSet = (s: string) => new Set(norm(s).split(" ").filter(Boolean));
+const isSubset = (a: Set<string>, b: Set<string>) => a.size > 0 && [...a].every((t) => b.has(t));
+
+/**
+ * Strategy's current P&L on a competition as a fraction of its budget
+ * (negative = drawdown): realized P&L on settled bets + mark-to-market on open
+ * bets, across every match of the competition. Feeds the stop-loss gate.
+ */
+function strategyDrawdown(db: Database, competitionId: string, strategyId: string, budget: number): number {
+  if (budget <= 0) return 0;
+  let pnl = 0;
+  for (const mt of R.listMatches(db, competitionId)) {
+    for (const b of R.betsForMatch(db, mt.id, strategyId)) {
+      const stake = b.stake ?? 0;
+      if (b.status === "settled_won" || b.status === "settled_lost") {
+        pnl += (b.payout ?? 0) - stake;
+      } else if (b.status === "open" && b.current_price != null && b.entry_price != null && b.entry_price > 0) {
+        pnl += stake * (b.current_price / b.entry_price) - stake;
+      }
+    }
+  }
+  return pnl / budget;
+}
 
 // ============================================================
 // Async, per-match orchestration (discover/analyze split).

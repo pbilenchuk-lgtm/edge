@@ -13,6 +13,12 @@ import {
   resolveModel, apiKeyFor, callLLM, generateStrategyName, heuristicName,
 } from "../src/lib/llm.js";
 import { extractThresholds } from "../src/lib/thresholds.js";
+import { analyzeMatch } from "../src/lib/analysis.js";
+
+// Mock an Anthropic response carrying a JSON assessment for assessMatchLLM.
+function mockLLM(assessment: unknown) {
+  return async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify(assessment) }] }) }) as any;
+}
 
 // ---------------- DB + seed + repo (§2) ----------------
 test("seed populates the full slice", () => {
@@ -187,4 +193,47 @@ test("llm: name generation and threshold extraction fall back without a key", as
   );
   assert.equal(params.flatSize, 0.05);
   assert.equal(params.minEdge, 3);
+});
+
+test("analyzeMatch: fuzzy label mapping survives model paraphrase", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const labels = R.latestMarkets(db, "m-lineup").map((m) => m.label);
+  // model paraphrases "Over 2.5" -> "Over 2.5 goals"; all others verbatim.
+  const assessment = {
+    confidence: "высокая", short: "s", body: "b", verdict: "v",
+    markets: labels.map((l) => ({ label: l === "Over 2.5" ? "Over 2.5 goals" : l, prob: 0.5 })),
+  };
+  const r = await analyzeMatch(db, "m-lineup", { fetchImpl: mockLLM(assessment), env: { ANTHROPIC_API_KEY: "k" } });
+  assert.equal(r.ok, true);
+  const over25 = R.latestMarkets(db, "m-lineup").find((m) => m.label === "Over 2.5")!;
+  assert.equal(over25.ai_prob, 0.5); // fuzzy-matched despite the "goals" drift
+});
+
+test("analyzeMatch: portfolio stop-loss halts a strategy's entries", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const labels = R.latestMarkets(db, "m-lineup").map((m) => m.label);
+  const assessment = { confidence: "высокая", short: "s", body: "b", verdict: "v", markets: labels.map((l) => ({ label: l, prob: 0.99 })) };
+  const deps = { fetchImpl: mockLLM(assessment), env: { ANTHROPIC_API_KEY: "k" } };
+
+  // baseline: strong edges => at least one strategy proposes bets
+  await analyzeMatch(db, "m-lineup", deps);
+  const baseline = R.betsForMatch(db, "m-lineup").filter((b) => b.status === "proposed");
+  assert.ok(baseline.length > 0, "baseline should propose bets");
+  const strat = baseline[0].strategy_id;
+
+  // give that strategy a stop-loss and blow it with a big settled loss on
+  // another match of the same competition, then re-analyze.
+  const s = R.getStrategy(db, strat)!;
+  R.updateStrategy(db, strat, { params: { ...s.params, stop: -0.1, minEdge: 1 } });
+  R.insertBet(db, {
+    id: R.uid(), match_id: "m-finished", strategy_id: strat, market_label: "x",
+    status: "settled_lost", proposed_price: 50, entry_price: 50, current_price: 50,
+    closing_price: 50, ai_prob: 0.5, stake: 100000, rationale: "blown", entered_minute: null,
+    result: "lost", payout: 0, created_at: "t",
+  });
+  await analyzeMatch(db, "m-lineup", deps);
+  const after = R.betsForMatch(db, "m-lineup").filter((b) => b.status === "proposed" && b.strategy_id === strat);
+  assert.equal(after.length, 0, "stopped-out strategy proposes nothing");
 });

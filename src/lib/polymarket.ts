@@ -287,7 +287,7 @@ export function titleMatchScore(title: string, home: string, away: string): numb
 }
 function matchesTitle(name: string, titleWords: Set<string>): boolean {
   const key = nameKey(name);
-  return key.length >= 3 && titleWords.has(key);
+  return key.length >= 2 && titleWords.has(key);
 }
 
 /**
@@ -322,8 +322,10 @@ function norm(s: string): string {
 /** Most distinctive token of a name: the trailing ≥3-char token (surname /
  * club-defining word). "Carlos Alcaraz"→"alcaraz", "Real Madrid"→"madrid". */
 function nameKey(name: string): string {
-  const toks = norm(name).split(/\s+/).filter((w) => w.length >= 3);
-  return toks.length ? toks[toks.length - 1] : "";
+  const all = norm(name).split(/\s+/).filter(Boolean);
+  const long = all.filter((w) => w.length >= 3);
+  const pool = long.length ? long : all; // fall back to short tokens if that's all there is
+  return pool.length ? pool[pool.length - 1] : "";
 }
 async function withTimeout(
   ms: number,
