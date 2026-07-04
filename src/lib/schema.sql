@@ -200,5 +200,31 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
   finished_at TEXT
 );
 
+-- match_live — ESPN enrichment for a match: the linked ESPN event, real
+-- lineups (starters JSON), refreshed each tick. Live scores/minute stay on the
+-- matches row; this holds what the scoreboard alone doesn't give.
+CREATE TABLE IF NOT EXISTS match_live (
+  match_id       TEXT PRIMARY KEY REFERENCES matches(id),
+  espn_event_id  TEXT,
+  league         TEXT,
+  home_lineup    TEXT,  -- json {team, formation, starters[]}
+  away_lineup    TEXT,
+  updated_at     TEXT NOT NULL
+);
+
+-- match_events — real in-match events (goal / card / sub) pulled from ESPN,
+-- deduped by event_key, used to fire strategy reassessment on real triggers.
+CREATE TABLE IF NOT EXISTS match_events (
+  id         TEXT PRIMARY KEY,
+  match_id   TEXT NOT NULL REFERENCES matches(id),
+  event_key  TEXT NOT NULL,
+  minute     INTEGER,
+  type       TEXT NOT NULL,
+  team       TEXT,
+  text       TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (match_id, event_key)
+);
+
 -- §2.15 event_feed — агрегируется из bets/reassessments/trade_log/matches (view),
 -- поэтому отдельной таблицы нет: строится в репозитории по времени.

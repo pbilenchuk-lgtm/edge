@@ -160,6 +160,31 @@ function mapStrategy(r: any): Strategy {
   return { ...r, params: safeJson<StrategyParams>(r.params, {}) };
 }
 
+// ---------- match live (ESPN link + lineups) & events ----------
+export interface MatchLive { match_id: string; espn_event_id: string | null; league: string | null; home_lineup: string | null; away_lineup: string | null; updated_at: string }
+export function getMatchLive(db: Database, matchId: string): MatchLive | undefined {
+  return db.prepare(`SELECT * FROM match_live WHERE match_id=?`).get(matchId) as MatchLive | undefined;
+}
+export function upsertMatchLive(db: Database, m: MatchLive): void {
+  db.prepare(
+    `INSERT INTO match_live(match_id,espn_event_id,league,home_lineup,away_lineup,updated_at)
+     VALUES(?,?,?,?,?,?)
+     ON CONFLICT(match_id) DO UPDATE SET espn_event_id=excluded.espn_event_id, league=excluded.league,
+       home_lineup=excluded.home_lineup, away_lineup=excluded.away_lineup, updated_at=excluded.updated_at`,
+  ).run(m.match_id, m.espn_event_id, m.league, m.home_lineup, m.away_lineup, m.updated_at);
+}
+export interface MatchEventRow { id: string; match_id: string; event_key: string; minute: number | null; type: string; team: string | null; text: string; created_at: string }
+/** Insert a match event; returns true if it was new (deduped by match+key). */
+export function insertMatchEvent(db: Database, e: MatchEventRow): boolean {
+  const r = db.prepare(
+    `INSERT OR IGNORE INTO match_events(id,match_id,event_key,minute,type,team,text,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+  ).run(e.id, e.match_id, e.event_key, e.minute, e.type, e.team, e.text, e.created_at);
+  return r.changes > 0;
+}
+export function eventsForMatch(db: Database, matchId: string): MatchEventRow[] {
+  return db.prepare(`SELECT * FROM match_events WHERE match_id=? ORDER BY created_at`).all(matchId) as MatchEventRow[];
+}
+
 // ---------- provider keys (optional, entered via UI; server-side only) ----------
 export function getProviderKeys(db: Database): Partial<Record<string, string>> {
   const rows = db.prepare(`SELECT provider, api_key FROM provider_keys`).all() as { provider: string; api_key: string }[];

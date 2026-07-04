@@ -4,11 +4,12 @@ import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
 import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
-import { parseEspnEvent, MockSportsProvider } from "../src/lib/sports.js";
+import { parseEspnEvent, parseEspnSummary, MockSportsProvider } from "../src/lib/sports.js";
 import {
-  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics,
+  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn,
 } from "../src/lib/engine.js";
-import type { SportsMatchStatus } from "../src/lib/sports.js";
+import { matchContext } from "../src/lib/analysis.js";
+import type { SportsMatchStatus, SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
 const CFG = { config: { reassessGapMinutes: 5, priceMoveThreshold: 5 } };
 
@@ -42,6 +43,78 @@ test("MockSportsProvider yields a scripted sequence", async () => {
   const p = new MockSportsProvider({ X: seq });
   assert.equal((await p.scoreboard())[0].minute, 10);
   assert.equal((await p.scoreboard())[0].state, "finished");
+});
+
+test("parseEspnSummary extracts lineups + typed key events", () => {
+  const s = {
+    rosters: [
+      { homeAway: "home", team: { displayName: "Colombia" }, formation: "4-3-3", roster: [{ starter: true, athlete: { displayName: "James" } }, { starter: false, athlete: { displayName: "Sub" } }] },
+      { homeAway: "away", team: { displayName: "Ghana" }, formation: "4-1-4-1", roster: [{ starter: true, athlete: { displayName: "Kudus" } }] },
+    ],
+    keyEvents: [
+      { id: "1", type: { text: "Goal" }, clock: { displayValue: "23'" }, team: { displayName: "Colombia" }, text: "Goal by James" },
+      { id: "2", type: { text: "Yellow Card" }, clock: { displayValue: "40'" }, team: { displayName: "Ghana" }, text: "Booking" },
+    ],
+  };
+  const d = parseEspnSummary(s);
+  assert.equal(d.lineupOut, true);            // both sides have starters
+  assert.equal(d.lineups.home!.formation, "4-3-3");
+  assert.deepEqual(d.lineups.home!.starters, ["James"]); // non-starters dropped
+  assert.equal(d.events[0].type, "goal");
+  assert.equal(d.events[0].minute, 23);
+  assert.equal(d.events[0].team, "Colombia");
+  assert.equal(d.events[1].type, "yellow_card");
+});
+
+// Mock ESPN provider with lineups + a scripted goal.
+function mockDetailProvider(detail: MatchDetail, status: Partial<SportsMatchStatus> = {}): SportsProvider {
+  return {
+    name: "mock",
+    async scoreboard(_sport: string, league: string) {
+      if (league !== "fifa.world") return []; // only our WC league lists this match
+      return [{ externalRef: "E1", home: "Colombia", away: "Ghana", state: "live", minute: 30, scoreHome: 1, scoreAway: 0, final: false, ...status }];
+    },
+    async matchDetail() { return detail; },
+  };
+}
+
+test("enrichFromEspn stores lineups, records new events, reports triggers, and feeds matchContext", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const compId = R.uid();
+  R.upsertCompetition(db, { id: compId, sport_id: "football", name: "WC", budget: 1000, external_league: "fifa.world", created_at: "t" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: compId, home: "Colombia", away: "Ghana", state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+
+  const detail: MatchDetail = {
+    lineupOut: true,
+    lineups: {
+      home: { team: "Colombia", formation: "4-3-3", starters: ["James", "Diaz", "Muñoz"] },
+      away: { team: "Ghana", formation: "4-1-4-1", starters: ["Kudus", "Partey"] },
+    },
+    events: [{ key: "ev1", minute: 25, type: "goal", team: "Colombia", text: "Goal! Colombia 1-0" }],
+  };
+  const provider = mockDetailProvider(detail);
+
+  const res = await enrichFromEspn(db, provider, {});
+  assert.equal(res.enriched, 1);
+  assert.ok(res.newEvents.some((e) => e.matchId === mid && e.type === "goal"), "goal surfaced as a trigger");
+  const live = R.getMatchLive(db, mid);
+  assert.ok(live && live.home_lineup && live.away_lineup, "lineups persisted");
+  const m = R.getMatch(db, mid)!;
+  assert.equal(m.lineup_out, true);   // real rosters flip the stage
+  assert.equal(m.score_home, 1);      // live state synced from the board
+  assert.equal(m.state, "live");
+
+  // matchContext turns the stored lineups + events into a prompt string
+  const ctx = matchContext(db, mid)!;
+  assert.match(ctx, /Colombia \(4-3-3\)/);
+  assert.match(ctx, /James/);
+  assert.match(ctx, /goal/);
+
+  // second pass: the same event is deduped (INSERT OR IGNORE) — no new trigger
+  const res2 = await enrichFromEspn(db, provider, {});
+  assert.equal(res2.newEvents.length, 0, "known events don't re-trigger");
 });
 
 // ---------------- triggers + rate limit (§9.7) ----------------

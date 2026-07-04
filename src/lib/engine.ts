@@ -384,6 +384,54 @@ export async function importPolymarketMatches(
   return out;
 }
 
+// ------------------------------------------------------------
+// Enrich matches with REAL lineups + events from ESPN (so reassessment has
+// teeth). Cross-refs DB matches (any competition, incl. Polymarket-discovered)
+// to ESPN scoreboard events by team names, updates live state, stores lineups,
+// and records new in-match events (goals/cards/subs) as reassessment triggers.
+// ------------------------------------------------------------
+
+function teamKey(name: string): string {
+  const t = name.toLowerCase().normalize("NFD").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 3);
+  return t.length ? t[t.length - 1] : name.toLowerCase().trim();
+}
+function sameTeams(h1: string, a1: string, h2: string, a2: string): boolean {
+  const s = new Set([teamKey(h1), teamKey(a1)]);
+  return s.has(teamKey(h2)) && s.has(teamKey(a2));
+}
+
+export interface EnrichResult { enriched: number; newEvents: { matchId: string; type: string; minute: number | null; text: string }[] }
+
+export async function enrichFromEspn(db: Database, provider: SportsProvider, deps: EngineDeps = {}): Promise<EnrichResult> {
+  if (!provider.matchDetail) return { enriched: 0, newEvents: [] };
+  const now = nowFn(deps)();
+  const leagues = [...new Set(R.linkedCompetitions(db).map((c) => c.external_league).filter(Boolean))] as string[];
+  if (!leagues.length) leagues.push("fifa.world");
+  const dbMatches = R.listCompetitions(db).flatMap((c) => R.listMatches(db, c.id)).filter((m) => m.state !== "finished");
+  const out: EnrichResult = { enriched: 0, newEvents: [] };
+  for (const league of leagues) {
+    const board = await provider.scoreboard("football", league);
+    for (const s of board) {
+      const m = dbMatches.find((dm) => sameTeams(dm.home, dm.away, s.home, s.away));
+      if (!m) continue;
+      R.updateMatch(db, m.id, { state: s.state, minute: s.minute, score_home: s.scoreHome, score_away: s.scoreAway, ...(s.final ? { final_score: `${s.scoreHome ?? 0}:${s.scoreAway ?? 0}` } : {}) });
+      const detail = await provider.matchDetail!("football", league, s.externalRef);
+      if (detail) {
+        R.upsertMatchLive(db, { match_id: m.id, espn_event_id: s.externalRef, league, home_lineup: detail.lineups.home ? JSON.stringify(detail.lineups.home) : null, away_lineup: detail.lineups.away ? JSON.stringify(detail.lineups.away) : null, updated_at: now });
+        if (detail.lineupOut && !m.lineup_out) R.updateMatch(db, m.id, { lineup_out: true, state: s.state === "upcoming" ? "lineup" : s.state });
+        for (const e of detail.events) {
+          if (e.type === "other") continue;
+          if (R.insertMatchEvent(db, { id: R.uid(), match_id: m.id, event_key: e.key, minute: e.minute, type: e.type, team: e.team, text: e.text, created_at: now })) {
+            out.newEvents.push({ matchId: m.id, type: e.type, minute: e.minute, text: e.text });
+          }
+        }
+      }
+      out.enriched++;
+    }
+  }
+  return out;
+}
+
 export interface CompetitionSyncItem {
   competition: string; match: string; created: boolean; state: string; oddsLinked?: number;
 }

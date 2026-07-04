@@ -316,6 +316,7 @@ export interface AssessInput {
   home: string; away: string; sport: string; state: string;
   analyticsPrompt: string;
   markets: { label: string; price: number }[]; // price in cents
+  context?: string; // real lineups + in-match events (from ESPN), if available
 }
 export interface MatchAssessment {
   ok: boolean;
@@ -338,7 +339,7 @@ export async function assessMatchLLM(
     model,
     system:
       "Ты — объективный спортивный аналитик. Оцени матч по инструкции. НЕ думай про деньги и ставки — только вероятности и разбор. Верни ТОЛЬКО JSON: {confidence:'низкая'|'средняя'|'высокая', short:'2-3 предложения', body:'развёрнутый разбор', verdict:'итог', markets:[{label, prob}]}. Для КАЖДОГО рынка из списка укажи prob — свою вероятность (0..1), что рынок сыграет ДА. Не копируй рыночную цену слепо: где видишь расхождение — покажи его.",
-    prompt: `Спорт: ${input.sport}. Матч: ${input.home} — ${input.away} (состояние: ${input.state}).\n\nИнструкция аналитики:\n${input.analyticsPrompt}\n\nРынки для оценки:\n${marketList}`,
+    prompt: `Спорт: ${input.sport}. Матч: ${input.home} — ${input.away} (состояние: ${input.state}).\n\nИнструкция аналитики:\n${input.analyticsPrompt}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы/события):\n${input.context}\n` : ""}\nРынки для оценки:\n${marketList}`,
     maxTokens: 1500,
   }, deps);
 
@@ -377,6 +378,7 @@ export interface StrategistInput {
   assessment: { confidence: string; short: string; verdict: string };
   markets: { label: string; priceCents: number; aiProb: number | null }[];
   openPositions: { market: string; entryCents: number; currentCents: number }[];
+  context?: string; // real lineups + in-match events (ESPN) — the reassessment triggers
 }
 export interface StrategistPick { label: string; conviction: "низкая" | "средняя" | "высокая"; reason: string }
 export interface StrategistExit { market: string; reason: string; fraction: number } // fraction 0..1 of the position to close
@@ -401,7 +403,7 @@ export async function strategistDecide(
     model,
     system:
       "Ты — трейдер на прогнозных рынках, действующий СТРОГО по методологии из промта стратегии (это твой единственный свод правил). На основе оценки матча и цен реши ДЕЙСТВИЯ. Правила вывода: входи в рынок ТОЛЬКО если методология это разрешает и ты можешь назвать конкретную причину, почему цена неверна; не давай конфликтующих ставок на один матч; уважай стадию матча (предматч/лайв) и правила управления позицией; выход может быть ЧАСТИЧНЫМ (fraction — доля позиции 0..1, напр. 0.5 = зафиксировать половину на пике, 1 = закрыть полностью). Верни ТОЛЬКО JSON {picks:[{label, conviction:'низкая'|'средняя'|'высокая', reason}], exits:[{market, fraction, reason}], note}. label/market бери ДОСЛОВНО из списков. Пусто — значит воздержаться. Без пояснений вне JSON.",
-    prompt: `СТРАТЕГИЯ «${input.strategyName}» (методология):\n${input.strategyPrompt}\n\nМАТЧ: ${input.match.home} — ${input.match.away} (${input.match.sport}, ${input.match.state}${input.match.state === "live" ? `, ${input.match.minute ?? "?"}'` : ""}, счёт ${score}).\nОценка аналитики: уверенность ${input.assessment.confidence}. ${input.assessment.short} Итог: ${input.assessment.verdict}\n\nРЫНКИ:\n${mkList}\n\nОТКРЫТЫЕ ПОЗИЦИИ:\n${posList}\n\nРеши: во что входить (picks) и что закрывать (exits) по методологии.`,
+    prompt: `СТРАТЕГИЯ «${input.strategyName}» (методология):\n${input.strategyPrompt}\n\nМАТЧ: ${input.match.home} — ${input.match.away} (${input.match.sport}, ${input.match.state}${input.match.state === "live" ? `, ${input.match.minute ?? "?"}'` : ""}, счёт ${score}).\nОценка аналитики: уверенность ${input.assessment.confidence}. ${input.assessment.short} Итог: ${input.assessment.verdict}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы + события матча — твои триггеры переоценки):\n${input.context}\n` : ""}\nРЫНКИ:\n${mkList}\n\nОТКРЫТЫЕ ПОЗИЦИИ:\n${posList}\n\nРеши по методологии: во что входить (picks) и что закрывать/фиксировать (exits, можно частично).`,
     maxTokens: 900,
   }, deps);
   if (!res.ok) return { ok: false, picks: [], exits: [], note: "", source: "none", error: res.error };

@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, strategistExits, advanceClocks } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, strategistReassess, advanceClocks } from "../src/lib/lifecycle.js";
 
 const mockLLM = (a: unknown) => (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify(a) }] }) })) as any;
 
@@ -65,7 +65,7 @@ test("advanceClocks flips lineup_out ~1h before kickoff", () => {
   assert.equal(R.getMatch(db, far)!.lineup_out, false);
 });
 
-test("strategistExits supports partial fixation (fraction)", async () => {
+test("strategistReassess supports partial fixation (fraction)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
@@ -78,7 +78,7 @@ test("strategistExits supports partial fixation (fraction)", async () => {
   R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Under 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 80, closing_price: null, ai_prob: 0.7, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
 
   const mock = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Under 2.5", fraction: 0.5, reason: "фиксирую половину на пике (п.4.2)" }] }) }] }) }) as any);
-  await strategistExits(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
+  await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
   const bets = R.betsForMatch(db, mid);
   const open = bets.find((b) => b.status === "open")!;
   const settled = bets.find((b) => b.status === "settled_won");
@@ -87,7 +87,7 @@ test("strategistExits supports partial fixation (fraction)", async () => {
   assert.equal(settled!.payout, 80);   // 50 * 80/50
 });
 
-test("strategistExits closes a position the strategy prompt says to cut", async () => {
+test("strategistReassess closes a position the strategy prompt says to cut", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
@@ -101,13 +101,39 @@ test("strategistExits closes a position the strategy prompt says to cut", async 
 
   // strategist says to exit "Under 2.5" (goal broke the thesis)
   const mock = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Under 2.5", reason: "гол сломал сценарий few-goals (п.4.2)" }], note: "" }) }] }) }) as any);
-  const exits = await strategistExits(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
+  const { exits } = await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
   const myExit = exits.find((e) => e.matchId === mid);
   assert.ok(myExit, "our position was cut by the strategist");
   assert.match(myExit!.reason, /стратег/);
   const b = R.betsForMatch(db, mid).find((x) => x.id === bid)!;
   assert.ok(b.status === "settled_won" || b.status === "settled_lost");
   assert.equal(b.payout, 72.73); // 100 * 40/55
+});
+
+test("strategistReassess opens a fresh entry on a live trigger (no prior position)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  // priced market with a model probability well above price → positive edge to size
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "A wins", price: 40, ai_prob: 0.7, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+
+  // strategist picks the market a live goal opened; no exits
+  const mock = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [{ label: "A wins", conviction: "высокая", reason: "гол открыл камбэк-паттерн (п.4.3)" }], exits: [], note: "" }) }] }) }) as any);
+  const res = await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } }, { newEventMatchIds: new Set([mid]), max: 50 });
+
+  assert.ok(res.entries.some((e) => e.matchId === mid && e.market === "A wins"), "strategist opened a fresh entry on the trigger");
+  const proposed = R.betsForMatch(db, mid, strat.id).filter((b) => b.status === "proposed");
+  assert.equal(proposed.length, 1);
+  assert.ok((proposed[0].stake ?? 0) > 0);
+  assert.match(proposed[0].rationale ?? "", /переоценка/);
+
+  // a non-triggered match with no open positions is left alone (no model call needed)
+  const res2 = await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } }, { newEventMatchIds: new Set(), max: 50 });
+  assert.ok(!res2.entries.some((e) => e.matchId === mid), "no re-entry without a trigger or position");
 });
 
 test("autoAnalyze analyzes an eligible match once per stage", async () => {

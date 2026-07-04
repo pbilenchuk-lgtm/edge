@@ -17,12 +17,14 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
-import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches } from "./engine.js";
+import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn } from "./engine.js";
 import { SPORT_TAG_IDS } from "./polymarket.js";
-import { analyzeMatch, jobActive } from "./analysis.js";
-import { exitDecision } from "./thresholds.js";
+import { analyzeMatch, jobActive, matchContext, strategyDrawdown } from "./analysis.js";
+import { exitDecision, sizeBet } from "./thresholds.js";
+import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
 import { hoursUntil } from "./time.js";
+import type { Confidence } from "./types.js";
 
 // Timing gates (hours before kickoff). Pre-match assessment opens ~12h out;
 // lineups are treated as out ~1h before (WC teamsheets), triggering the final
@@ -184,51 +186,103 @@ export function evaluateExits(db: Database, deps: EngineDeps = {}): ExitItem[] {
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 
+export interface ReassessEntry { matchId: string; strategyId: string; market: string; stake: number }
+export interface ReassessResult { exits: ExitItem[]; entries: ReassessEntry[] }
+
 /**
- * Strategist-driven exits: for matches with open positions (funded comps), let
- * the strategy PROMPT decide what to cut per its in-match methodology (scenario
- * change, "this event broke the position"). Complements the deterministic
- * evaluateExits. Capped per run — one model call per (match, strategy) with
- * open positions — so it only runs where the user actually holds risk.
+ * Strategist-driven in-match reassessment. For funded matches that either hold
+ * open positions OR just saw a fresh live event (goal / red card / lineups —
+ * pulled from ESPN by enrichFromEspn, passed in via opts.newEventMatchIds), we
+ * hand the strategy PROMPT the real match context (lineups + events) and let its
+ * own methodology decide BOTH what to EXIT (full/partial fixation, "this event
+ * broke the thesis") and what fresh markets to ENTER (a new pattern the event
+ * opened). Code still sizes/gates entries (§9.6). Capped per run — one model
+ * call per (match, strategy) — so it only fires where the user holds risk or a
+ * trigger actually fired. This is what makes reassessment *react* to live data.
  */
-export async function strategistExits(db: Database, deps: EngineDeps = {}, opts: { max?: number } = {}): Promise<ExitItem[]> {
+export async function strategistReassess(
+  db: Database, deps: EngineDeps = {}, opts: { max?: number; newEventMatchIds?: Set<string> } = {},
+): Promise<ReassessResult> {
   const max = opts.max ?? 4;
+  const triggered = opts.newEventMatchIds ?? new Set<string>();
   const now = nowFn(deps)();
   const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
-  const budgetByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.budget]));
-  const out: ExitItem[] = [];
+  const comps = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
+  const out: ReassessResult = { exits: [], entries: [] };
   const touched = new Set<string>();
   let calls = 0;
   for (const { comp, sport, match: m } of activeMatches(db)) {
     if (calls >= max) break;
-    if ((budgetByComp.get(comp) ?? 0) <= 0) continue;
+    const c = comps.get(comp);
+    if (!c || c.budget <= 0) continue;
     const open = R.betsForMatch(db, m.id).filter((b) => b.status === "open");
-    if (!open.length) continue;
+    // Reassess only where there's live risk (open positions) or a fresh trigger.
+    if (!open.length && !triggered.has(m.id)) continue;
     const markets = R.latestMarkets(db, m.id);
+    if (!markets.length) continue;
     const assess = R.assessmentsForMatch(db, m.id).filter((a) => a.status === "ok").sort((a, b) => (a.created_at >= b.created_at ? -1 : 1))[0];
-    const byStrat = new Map<string, typeof open>();
-    for (const b of open) (byStrat.get(b.strategy_id) ?? byStrat.set(b.strategy_id, []).get(b.strategy_id)!).push(b);
-    for (const [sid, bets] of byStrat) {
+    const ctx = matchContext(db, m.id); // real lineups + events
+
+    // Strategies to run: those with an active share (can enter) plus any that
+    // already hold an open position on this match (must be able to exit).
+    const shares = R.sharesForComp(db, comp);
+    const sids = new Set<string>();
+    for (const s of shares) if (s.pct > 0) sids.add(s.strategy_id);
+    for (const b of open) sids.add(b.strategy_id);
+
+    for (const sid of sids) {
       if (calls >= max) break;
       const strat = R.getStrategy(db, sid);
       if (!strat) continue;
+      const myOpen = open.filter((b) => b.strategy_id === sid);
       calls++;
       const dec = await strategistDecide({
         strategyName: strat.name, strategyPrompt: strat.prompt,
         match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away },
         assessment: { confidence: assess?.confidence ?? "средняя", short: assess?.short ?? "", verdict: assess?.verdict ?? "" },
         markets: markets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob })),
-        openPositions: bets.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
+        openPositions: myOpen.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
+        context: ctx,
       }, strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
       if (!dec.ok) continue;
+
+      // (a) EXITS — full or partial fixation on this strategy's open positions.
       for (const ex of dec.exits) {
-        const b = bets.find((x) => norm(x.market_label) === norm(ex.market));
+        const b = myOpen.find((x) => norm(x.market_label) === norm(ex.market));
         const mk = b && markets.find((x) => x.label === b.market_label);
         if (!b || !mk || mk.price == null || b.entry_price == null) continue;
         const { pnl, partial } = closeBetPortion(db, b, ex.fraction, mk.price, minuteLabel(m), now);
         const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag}) @ ${mk.price}¢ · стратег: ${ex.reason} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
-        out.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}`, pnl });
+        out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}`, pnl });
+        touched.add(sid);
+      }
+
+      // (b) ENTRIES — fresh positions the trigger opened. Only strategies with a
+      // live share can enter; code sizes/gates. Dedup against markets this
+      // strategy already holds/proposed so we never double up on the same bet.
+      const share = shares.find((s) => s.strategy_id === sid);
+      if (!share || share.pct <= 0 || !dec.picks.length) continue;
+      const budget = stratBudget(c.budget, share.pct);
+      const drawdown = strategyDrawdown(db, comp, sid, budget);
+      const held = new Set(R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").map((b) => norm(b.market_label)));
+      let exposure = R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open").reduce((n, b) => n + (b.stake ?? 0), 0);
+      for (const pick of dec.picks) {
+        const mk = markets.find((x) => norm(x.label) === norm(pick.label));
+        if (!mk || mk.ai_prob == null || mk.price == null) continue; // need a probability to size
+        if (held.has(norm(mk.label))) continue;                       // already in this market
+        const d = sizeBet({ params: strat.params, aiProb: mk.ai_prob, priceCents: mk.price, budget, exposure, confidence: pick.conviction as Confidence, drawdown });
+        if (!d.enter) continue;
+        exposure += d.stake;
+        held.add(norm(mk.label));
+        R.insertBet(db, {
+          id: R.uid(), match_id: m.id, strategy_id: sid, market_label: mk.label,
+          status: "proposed", proposed_price: mk.price, entry_price: null, current_price: null,
+          closing_price: null, ai_prob: mk.ai_prob, stake: d.stake,
+          rationale: `переоценка: «${mk.label}» край ${d.edge.toFixed(1)}%. ${pick.reason || d.reason}.`,
+          entered_minute: null, result: null, payout: null, created_at: now,
+        });
+        out.entries.push({ matchId: m.id, strategyId: sid, market: mk.label, stake: d.stake });
         touched.add(sid);
       }
     }
@@ -243,7 +297,8 @@ export async function strategistExits(db: Database, deps: EngineDeps = {}, opts:
 
 export interface AutoCycleResult {
   synced: number; imported: number; discovered: number; oddsMatches: number; oddsUpdated: number;
-  analyzed: AutoAnalyzeItem[]; entered: AutoEnterItem[]; exited: ExitItem[];
+  enriched: number; triggers: number;
+  analyzed: AutoAnalyzeItem[]; entered: AutoEnterItem[]; exited: ExitItem[]; reassessEntries: ReassessEntry[];
 }
 
 /**
@@ -266,14 +321,21 @@ export async function runAutoCycle(
     }
   }
   const odds = await refreshActiveOdds(db, deps);
-  advanceClocks(db, deps); // flip lineup_out ~1h before kickoff
-  // deterministic safety-net exits first, then strategist-driven cuts on what's left
-  const exited = [...evaluateExits(db, deps), ...(await strategistExits(db, deps))];
+  // Pull real lineups + live events (ESPN) — this feeds matchContext and, via
+  // its fresh events, arms the strategist's in-match reassessment triggers.
+  const enrich = provider ? await enrichFromEspn(db, provider, deps) : { enriched: 0, newEvents: [] };
+  const triggers = new Set(enrich.newEvents.map((e) => e.matchId));
+  advanceClocks(db, deps); // flip lineup_out ~1h before kickoff (time-scheduled fallback)
+  // deterministic safety-net exits first, then strategist-driven reassessment
+  // (exits + fresh entries) on matches with risk or a fresh live trigger.
+  const reassess = await strategistReassess(db, deps, { newEventMatchIds: triggers });
+  const exited = [...evaluateExits(db, deps), ...reassess.exits];
   const analyzed = await autoAnalyze(db, deps);
-  const entered = autoEnter(db, deps);
+  const entered = autoEnter(db, deps); // fills both analyze- and reassess-proposed bets
   return {
     synced: synced.length, imported: synced.filter((r) => r.created).length, discovered,
     oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),
-    analyzed, entered, exited,
+    enriched: enrich.enriched, triggers: triggers.size,
+    analyzed, entered, exited, reassessEntries: reassess.entries,
   };
 }

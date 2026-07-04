@@ -28,9 +28,24 @@ export interface SportsMatchStatus {
   detail?: string;
 }
 
+export interface TeamLineup { team: string; formation: string | null; starters: string[] }
+export interface MatchEvent { key: string; minute: number | null; type: "goal" | "red_card" | "yellow_card" | "sub" | "other"; team: string | null; text: string }
+export interface MatchDetail { lineupOut: boolean; lineups: { home: TeamLineup | null; away: TeamLineup | null }; events: MatchEvent[] }
+
 export interface SportsProvider {
   readonly name: string;
   scoreboard(sport: string, league: string): Promise<SportsMatchStatus[]>;
+  /** Lineups + key events for one event (ESPN summary). Optional per provider. */
+  matchDetail?(sport: string, league: string, eventId: string): Promise<MatchDetail | null>;
+}
+
+function eventType(text: string): MatchEvent["type"] {
+  const t = text.toLowerCase();
+  if (/red card/.test(t)) return "red_card";
+  if (/yellow card/.test(t)) return "yellow_card";
+  if (/goal/.test(t) && !/no goal|disallow/.test(t)) return "goal";
+  if (/substitution|\bsub\b/.test(t)) return "sub";
+  return "other";
 }
 
 export interface SportsConfig {
@@ -86,6 +101,45 @@ export class EspnSportsProvider implements SportsProvider {
       clearTimeout(timer);
     }
   }
+
+  /** Real lineups + key events from ESPN's summary endpoint. Degrades to null. */
+  async matchDetail(sport: string, league: string, eventId: string): Promise<MatchDetail | null> {
+    const espnSport = ESPN_SPORT[sport];
+    if (!espnSport) return null;
+    const url = `${this.cfg.espnBase}/${espnSport}/${league}/summary?event=${encodeURIComponent(eventId)}`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs);
+    try {
+      const res = await this.fetchImpl(url, { signal: ctrl.signal });
+      if (!res.ok) return null;
+      const s = (await res.json()) as any;
+      return parseEspnSummary(s);
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+export function parseEspnSummary(s: any): MatchDetail {
+  const teamLineup = (r: any): TeamLineup | null => {
+    if (!r) return null;
+    const starters = (r.roster ?? []).filter((p: any) => p.starter).map((p: any) => p.athlete?.displayName).filter(Boolean);
+    return { team: r.team?.displayName ?? "?", formation: r.formation ?? null, starters };
+  };
+  const rosters = s.rosters ?? [];
+  const home = teamLineup(rosters.find((r: any) => r.homeAway === "home") ?? rosters[0]);
+  const away = teamLineup(rosters.find((r: any) => r.homeAway === "away") ?? rosters[1]);
+  const events: MatchEvent[] = (s.keyEvents ?? []).map((e: any): MatchEvent => {
+    const text = String(e.text ?? e.shortText ?? "");
+    const type = eventType(String(e.type?.text ?? text));
+    const minute = (() => { const m = String(e.clock?.displayValue ?? e.time?.displayValue ?? "").match(/(\d+)/); return m ? parseInt(m[1], 10) : null; })();
+    return { key: String(e.id ?? `${minute}-${text.slice(0, 30)}`), minute, type, team: e.team?.displayName ?? null, text };
+  });
+  // lineups are "out" once starters are published for both sides
+  const lineupOut = !!(home?.starters.length && away?.starters.length);
+  return { lineupOut, lineups: { home, away }, events };
 }
 
 export function parseEspnEvent(e: any): SportsMatchStatus | null {
