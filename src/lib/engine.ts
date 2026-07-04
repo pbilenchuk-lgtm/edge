@@ -218,7 +218,24 @@ export function settleMatch(
   for (const b of R.betsForMatch(db, match.id)) {
     if (b.status !== "open") continue;
     const won = resolveOutcome(b, match, overrides);
-    if (won == null) { skipped++; continue; } // needs external result (e.g. Advance)
+    if (won == null) {
+      // The match is FINISHED but this market can't be auto-resolved (Advance /
+      // penalties / an unknown label, no override supplied). Leaving it open
+      // locks the stake in strategyDrawdown forever — the match is never active
+      // again. Void it: refund the stake, zero P&L, tagged 'void' so it's
+      // excluded from win/lose accuracy. Honest fallback when we lack the result.
+      R.updateBet(db, b.id, {
+        status: "settled_lost", result: null, payout: b.stake ?? 0,
+        closing_price: b.current_price ?? b.entry_price ?? null, settled_by: "void",
+      });
+      R.insertTradeLog(db, {
+        id: R.uid(), match_id: match.id, strategy_id: b.strategy_id, minute: "финал",
+        type: "settle", text: `${b.market_label}: рынок не рассчитывается автоматически — возврат ставки ${fmt(b.stake ?? 0)} (P&L $0)`,
+        created_at: now,
+      });
+      skipped++; affected.add(b.strategy_id);
+      continue;
+    }
     const closing = kickoff[b.market_label] ?? closingByLabel[b.market_label] ?? b.current_price ?? b.entry_price ?? null;
     const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, closing);
     R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price });
@@ -426,7 +443,10 @@ export async function importPolymarketMatches(
   for (const d of discovered) {
     // Route into the tournament category this match belongs to (Polymarket series).
     const compId = ensureCategoryComp(db, sport, d.series, d.seriesSlug, now);
-    const ref = `pm:${sport}:${d.home}-${d.away}`.toLowerCase().replace(/\s+/g, "");
+    // Order-INSENSITIVE ref (teams sorted): Polymarket may list a fixture as
+    // "A vs B" one run and "B vs A" the next, which with an orientation-sensitive
+    // key produced a duplicate row. Sorting the two sides collapses both to one.
+    const ref = `pm:${sport}:${[d.home, d.away].map((s) => s.toLowerCase().replace(/\s+/g, "")).sort().join("-")}`;
     // Dedup by pm: ref first, then by teams (the fixture may already exist under
     // an ESPN id if syncCompetitions imported it) — never duplicate the game.
     let match = R.matchByExternalRef(db, ref) ?? findTwinMatch(db, compId, d.home, d.away);

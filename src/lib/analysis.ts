@@ -136,7 +136,7 @@ export async function analyzeMatch(
       openPositions: openPos.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
       context: ctx,
     }, stratModel, { fetchImpl: deps.fetchImpl, env });
-    const picks = dec.ok ? new Map(dec.picks.map((p) => [norm(p.label), p])) : null;
+    const picksArr = dec.ok ? dec.picks : null;
 
     // Seed exposure from positions this strategy ALREADY holds on the match, and
     // never re-propose on a market it's already in — otherwise the post-lineup
@@ -156,8 +156,8 @@ export async function analyzeMatch(
     for (const { m } of ranked) {
       // When the strategist ran, only its picks are eligible and its conviction
       // (from the prompt's methodology) drives the confidence gate.
-      const pick = picks?.get(norm(m.label));
-      if (picks && !pick) { skipped++; continue; }
+      const pick = picksArr?.find((p) => sameMarketLabel(p.label, m.label));
+      if (picksArr && !pick) { skipped++; continue; }
       if (held.has(norm(m.label))) { skipped++; continue; } // already open on this market
       const conf = (pick?.conviction ?? a.confidence) as Confidence;
       const d = sizeBet({ params: strat.params, aiProb: m.ai_prob as number, priceCents: m.price, budget, exposure, realizedPnl, confidence: conf, drawdown });
@@ -222,6 +222,15 @@ const extraAllFiller = (a: Set<string>, b: Set<string>): boolean => {
   for (const t of b) if (!a.has(t) && !LABEL_FILLER.has(t) && !/^\d/.test(t)) return false;
   return true;
 };
+/** Do two market labels refer to the same market? Exact (normalized) match, or a
+ *  SAFE fuzzy match where the numbers line up and the only differing tokens are
+ *  filler ("Over 2.5" ↔ "Over 2.5 goals") — never "Draw" ↔ "Draw no bet". Used
+ *  to resolve the strategist's paraphrased pick/exit labels back to real markets. */
+export function sameMarketLabel(a: string, b: string): boolean {
+  const na = norm(a), nb = norm(b);
+  if (na === nb) return true;
+  return numTokens(na) === numTokens(nb) && extraAllFiller(tokenSet(a), tokenSet(b));
+}
 
 /**
  * Strategy's current P&L on a competition as a fraction of its budget

@@ -257,7 +257,7 @@ export async function llmExtractThresholds(
     deps,
   );
   if (!res.ok) throw new Error(res.error);
-  return JSON.parse(stripFences(res.text));
+  return JSON.parse(extractJson(res.text));
 }
 
 /** Generate a 1–2 word strategy name; falls back to a keyword heuristic. */
@@ -360,7 +360,7 @@ export async function assessMatchLLM(
 
   if (!res.ok) return failed(res.error);
   try {
-    const j = JSON.parse(stripFences(res.text));
+    const j = JSON.parse(extractJson(res.text));
     const markets = Array.isArray(j.markets)
       ? j.markets.filter((m: any) => m && typeof m.label === "string" && Number.isFinite(m.prob))
           .map((m: any) => ({ label: String(m.label), prob: clamp01(m.prob) }))
@@ -423,7 +423,7 @@ export async function strategistDecide(
   }, deps);
   if (!res.ok) return { ok: false, picks: [], exits: [], note: "", source: "none", error: res.error };
   try {
-    const j = JSON.parse(stripFences(res.text));
+    const j = JSON.parse(extractJson(res.text));
     const conv = (c: unknown) => (["низкая", "средняя", "высокая"].includes(c as string) ? c : "средняя") as StrategistPick["conviction"];
     const picks: StrategistPick[] = Array.isArray(j.picks)
       ? j.picks.filter((p: any) => p && typeof p.label === "string").map((p: any) => ({ label: String(p.label), conviction: conv(p.conviction), reason: String(p.reason ?? "") }))
@@ -465,7 +465,7 @@ export async function proposeImprovement(
     }, deps);
     if (res.ok) {
       try {
-        const j = JSON.parse(stripFences(res.text));
+        const j = JSON.parse(extractJson(res.text));
         if (j.newPrompt) return { removed: "(текущий промт)", added: "(предложение ИИ)", newPrompt: String(j.newPrompt), reason: String(j.reason ?? ""), source: "llm" };
       } catch { /* fall through to heuristic */ }
     }
@@ -506,4 +506,23 @@ function stripFences(s: string): string {
     .replace(/^```(?:json)?/i, "")
     .replace(/```$/, "")
     .trim();
+}
+
+/** Pull the first balanced {...} object out of a model reply — tolerates prose
+ *  before/after the JSON (a common failure when a prompt "describes the format"
+ *  and the model adds a sentence). Falls back to the fenced text if there's no
+ *  object. String-aware so braces inside quoted values don't miscount. */
+export function extractJson(s: string): string {
+  const t = stripFences(s);
+  const start = t.indexOf("{");
+  if (start < 0) return t;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < t.length; i++) {
+    const ch = t[i];
+    if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") { if (--depth === 0) return t.slice(start, i + 1); }
+  }
+  return t.slice(start); // unbalanced (truncated) — best effort, parse may still throw
 }

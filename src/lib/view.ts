@@ -282,7 +282,10 @@ function computeStrategyStats(db: Database, strategies: { id: string }[]): Recor
         // remaining part is still an open bet row — its money is real, but it is
         // NOT a separate prediction. Count its P&L, skip the prediction/inMatch
         // tallies so one logical position isn't counted twice.
-        const isPartialSlice = settled && b.settled_by === "partial";
+        // A partial fixation is a slice of an open position; a 'void' is a
+        // refunded, unscorable market. Neither is a distinct prediction — count
+        // their (zero, for void) P&L but not a second prediction/in-match tally.
+        const isPartialSlice = settled && (b.settled_by === "partial" || b.settled_by === "void");
         if (!isPartialSlice) { st.predictions++; seenMatch[b.strategy_id].add(m.id); }
         const inMatch = !isPartialSlice && !!b.entered_minute && /\d/.test(b.entered_minute); // a live minute, not "предматч"
         let pnl = 0;
