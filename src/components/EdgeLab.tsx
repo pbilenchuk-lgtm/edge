@@ -609,17 +609,14 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
             {match.oddsUpdated && <div style={S.oddsUpdated}>обновлено {match.oddsUpdated}</div>}
             <div style={S.oddsScroll}>
               {match.markets.map((mk: any) => {
-                const impl = mk.price != null ? mk.price / 100 : impliedProb(mk.odds);
-                const edge = ((mk.aiProb ?? impl) - impl) * 100;
-                const priceDisp = `${mk.price}¢`;
+                const move = mk.openCents != null ? Math.round(mk.price - mk.openCents) : 0;
                 return (
                   <div key={mk.id} style={S.oddsRow}>
-                    <div style={S.oddsTop}><span style={S.oddsLabel}>{mk.label}</span><span style={S.oddsVal}>{priceDisp}</span></div>
+                    <div style={S.oddsTop}><span style={S.oddsLabel}>{mk.label}</span><span style={S.oddsVal}>{mk.price}¢</span></div>
                     <div style={S.oddsBot}>
-                      {mk.aiProb != null && <span style={S.oddsAi}>ИИ {(mk.aiProb * 100).toFixed(0)}%</span>}
-                      {mk.aiProb != null && <span style={{ ...S.oddsEdge, color: edge >= 5 ? "#5fd08a" : edge >= 3 ? "#e8a838" : edge > 0 ? "#9aa4b2" : "#ff6b6b" }} title="Край: оценка ИИ минус рыночная вероятность">край {edge >= 0 ? "+" : ""}{edge.toFixed(1)}%</span>}
-                      {mk.openCents != null && Math.round(mk.price - mk.openCents) !== 0 && (
-                        <span style={{ ...S.oddsMove, color: mk.price >= mk.openCents ? "#5fd08a" : "#ff6b6b" }} title={`Движение цены с открытия: ${mk.openCents}¢ → ${mk.price}¢`}>{mk.price >= mk.openCents ? "▲" : "▼"}{mk.price >= mk.openCents ? "+" : ""}{Math.round(mk.price - mk.openCents)}¢ от старта</span>
+                      {mk.aiProb != null && <span style={S.oddsAi} title="Объективная оценка вероятности аналитическим ИИ (не привязана к стратегии)">ИИ {(mk.aiProb * 100).toFixed(0)}%</span>}
+                      {move !== 0 && (
+                        <span style={{ ...S.oddsMove, color: move > 0 ? "#5fd08a" : "#ff6b6b" }} title={`Цена до матча ${mk.openCents}¢ → сейчас ${mk.price}¢`}>{move > 0 ? "▲+" : "▼"}{move}¢ с предматча</span>
                       )}
                       {mk.liq && <span style={S.oddsLiq}>{mk.liq}</span>}
                     </div>

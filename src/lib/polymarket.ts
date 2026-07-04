@@ -56,7 +56,7 @@ export function loadPolymarketConfig(
     clobBase: env.POLYMARKET_CLOB_BASE ?? "https://clob.polymarket.com",
     timeoutMs: Number(env.POLYMARKET_TIMEOUT_MS ?? 6000),
     discoverLimit: Number(env.POLYMARKET_DISCOVER_LIMIT ?? 1000),
-    maxMarketsPerMatch: Number(env.POLYMARKET_MAX_MARKETS ?? 16),
+    maxMarketsPerMatch: Number(env.POLYMARKET_MAX_MARKETS ?? 40),
   };
 }
 
@@ -479,13 +479,23 @@ export function matchMarketSnapshots(
  * Spread/winner/Yes-No titles already name their side and are left untouched.
  */
 export function clarifyLabel(label: string, outcomes: string[]): string {
-  const s = (outcomes[0] ?? "").toLowerCase();
-  if (!s.startsWith("over") && !s.startsWith("under")) return label; // only totals
-  if (/\bover\b|\bunder\b/i.test(label)) return label;               // already explicit
-  const word = s.startsWith("over") ? "Over" : "Under";
-  if (/o\/u/i.test(label)) return label.replace(/o\/u/i, word);      // keep context
-  const line = (label.match(/\d+(?:\.\d+)?/) || [])[0];
-  return line ? `${word} ${line}` : `${word} — ${label}`;
+  const raw = outcomes[0] ?? "";
+  const s = raw.toLowerCase();
+  // Totals: resolve "O/U 3.5" to the priced side ("Over 3.5").
+  if (s.startsWith("over") || s.startsWith("under")) {
+    if (/\bover\b|\bunder\b/i.test(label)) return label;            // already explicit
+    const word = s.startsWith("over") ? "Over" : "Under";
+    if (/o\/u/i.test(label)) return label.replace(/o\/u/i, word);   // keep context
+    const line = (label.match(/\d+(?:\.\d+)?/) || [])[0];
+    return line ? `${word} ${line}` : `${word} — ${label}`;
+  }
+  // Yes/No markets (Draw, BTTS, penalties…) read fine as-is.
+  if (s === "yes" || s === "no" || !raw) return label;
+  // Team/player-named outcome (moneyline, "Team to Advance", spreads): the price
+  // is for the FIRST side, so if the label doesn't already name it, append it —
+  // "Team to Advance" → "Team to Advance — Canada".
+  if (!label.toLowerCase().includes(s)) return `${label} — ${raw}`;
+  return label;
 }
 
 // ------------------------------------------------------------
