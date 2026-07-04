@@ -826,6 +826,11 @@ function MetricsScreen({ catalog, quality, stats }: any) {
       <div style={S.feedHead}>
         <div><div style={S.feedTitle}>Статистика стратегий</div><div style={S.feedSub}>Подробная статистика по каждой стратегии. Открытые позиции — по актуальной котировке. Ниже — метрики качества эджа.</div></div>
       </div>
+      <div style={S.metricExplain}>
+        <div style={S.metricExplainItem}><b style={{ color: "#7fb4e8" }}>Brier</b> — точность вероятностей (ниже = лучше). Насколько «70%» ИИ реально значит 70%.</div>
+        <div style={S.metricExplainItem}><b style={{ color: "#70b56a" }}>CLV</b> — closing line value. Двигался ли рынок в твою сторону после входа. Лучший ранний признак реального эджа.</div>
+        <div style={S.metricExplainItem}><b style={{ color: "#e8a838" }}>Калибровка</b> — совпадают ли предсказанные вероятности с фактической частотой исходов.</div>
+      </div>
       {catalog.map((s: any) => {
         const st = { ...S0, ...(stats?.[s.id] || {}) };
         const q = quality[s.id];
