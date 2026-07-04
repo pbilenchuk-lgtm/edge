@@ -35,6 +35,10 @@ export interface PolymarketConfig {
   gammaBase: string;
   clobBase: string;
   timeoutMs: number;
+  /** how many near-term events of a sport to scan when linking a match */
+  discoverLimit: number;
+  /** cap on markets attached per match (best by liquidity) */
+  maxMarketsPerMatch: number;
 }
 
 /** ТЗ sport id -> Polymarket Gamma tag id. */
@@ -51,6 +55,8 @@ export function loadPolymarketConfig(
     gammaBase: env.POLYMARKET_GAMMA_BASE ?? "https://gamma-api.polymarket.com",
     clobBase: env.POLYMARKET_CLOB_BASE ?? "https://clob.polymarket.com",
     timeoutMs: Number(env.POLYMARKET_TIMEOUT_MS ?? 6000),
+    discoverLimit: Number(env.POLYMARKET_DISCOVER_LIMIT ?? 300),
+    maxMarketsPerMatch: Number(env.POLYMARKET_MAX_MARKETS ?? 16),
   };
 }
 
@@ -258,20 +264,35 @@ export async function findMatchEvent(
   q: MatchQuery,
   deps: FetchDeps = {},
 ): Promise<PolyEvent | null> {
+  const events = await findMatchEvents(cfg, q, deps);
+  return events[0] ?? null;
+}
+
+/**
+ * All Gamma events for a match (score >= 2 => both names present). Polymarket
+ * splits one match into several events by market family ("- Player Props",
+ * "- Total Corners", "- Moneyline", …), so a single event is not enough — we
+ * scan `discoverLimit` near-term events (the old 60 was too small: real matches
+ * fell outside the window) and return every variant, best-scored first.
+ */
+export async function findMatchEvents(
+  cfg: PolymarketConfig,
+  q: MatchQuery,
+  deps: FetchDeps = {},
+): Promise<PolyEvent[]> {
   const tag = SPORT_TAG_IDS[q.sport];
-  if (tag == null) return null;
-  const limit = q.limit ?? 60;
+  if (tag == null) return [];
+  const limit = q.limit ?? cfg.discoverLimit ?? 300;
   const events = await gammaEvents(
     cfg,
     `tag_id=${tag}&closed=false&limit=${limit}&order=startDate&ascending=false`,
     deps,
   );
-  let best: { ev: PolyEvent; score: number } | null = null;
-  for (const ev of events) {
-    const score = titleMatchScore(ev.title, q.home, q.away);
-    if (score >= 2 && (!best || score > best.score)) best = { ev, score };
-  }
-  return best?.ev ?? null;
+  return events
+    .map((ev) => ({ ev, score: titleMatchScore(ev.title, q.home, q.away) }))
+    .filter((x) => x.score >= 2)
+    .sort((a, b) => b.score - a.score)
+    .map((x) => x.ev);
 }
 
 /** 0..2: how many of the two competitor names appear in the event title.
@@ -295,18 +316,51 @@ function matchesTitle(name: string, titleWords: Set<string>): boolean {
  * the `markets` table): label, price in cents, the backing CLOB token as
  * external_ref, and liquidity. Markets without a usable price are skipped.
  */
-export function eventToMarketSnapshots(
-  event: PolyEvent,
-  snapshotAt: string,
-): Array<{ label: string; price: number; external_ref: string | null; liquidity: string | null }> {
-  return event.markets
-    .filter((m) => m.priceCents != null && m.label)
-    .map((m) => ({
-      label: m.label,
-      price: m.priceCents as number,
-      external_ref: m.tokenIds[0] ?? null,
-      liquidity: m.liquidity,
-    }));
+export interface MarketSnapshot { label: string; price: number; external_ref: string | null; liquidity: string | null }
+
+export function eventToMarketSnapshots(event: PolyEvent, snapshotAt: string): MarketSnapshot[] {
+  return matchMarketSnapshots([event], snapshotAt, Infinity, false);
+}
+
+/**
+ * Niche / prop markets the engine can't settle (settlement.ts only resolves
+ * full-time totals, BTTS, moneyline and handicaps). Attaching these would flood
+ * the UI and create bets that never settle — so we drop them by default.
+ */
+export function isNoiseMarket(label: string): boolean {
+  const l = label.toLowerCase();
+  return (
+    /:\s*\d+\+?\s/.test(l) || // player prop "Name: 1+ goals / 4+ saves / 2+ shots …"
+    /\bcorners?\b|\bcards?\b|\bbookings?\b|\boffsides?\b|\bfouls?\b|\bthrow-?ins?\b|\bsaves?\b/.test(l) ||
+    /1st half|first half|half[- ]?time|halftime|2nd half|second half/.test(l) ||
+    /exact|correct score/.test(l) ||
+    /\d\s*[-–]\s*\d/.test(l) || // correct-score "Team A 3 - 3 Team B" (handicaps like "-1.5" don't match)
+    /first (team )?to score|to score first|anytime (goal ?)?scorer/.test(l)
+  );
+}
+
+/**
+ * Aggregate priced markets across a match's events, drop noise (unless kept),
+ * dedup by label, and cap to the most liquid `cap` markets. This is what a
+ * match's odds column is built from.
+ */
+export function matchMarketSnapshots(
+  events: PolyEvent[], snapshotAt: string, cap = 16, dropNoise = true,
+): MarketSnapshot[] {
+  const seen = new Set<string>();
+  const rows: (MarketSnapshot & { liq: number })[] = [];
+  for (const ev of events) {
+    for (const m of ev.markets) {
+      if (m.priceCents == null || !m.label) continue;
+      if (dropNoise && isNoiseMarket(m.label)) continue;
+      const key = m.label.toLowerCase().trim();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({ label: m.label, price: m.priceCents, external_ref: m.tokenIds[0] ?? null, liquidity: m.liquidity, liq: Number(m.liquidity ?? 0) || 0 });
+    }
+  }
+  rows.sort((a, b) => b.liq - a.liq);
+  return rows.slice(0, cap).map(({ liq, ...s }) => s);
 }
 
 // ------------------------------------------------------------

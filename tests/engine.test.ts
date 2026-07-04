@@ -118,7 +118,7 @@ test("refreshMatchOdds writes a snapshot, marks to market, and triggers on a big
   const fetchImpl = (async () => ({ ok: true, json: async () => ({ mid: "0.50" }) })) as unknown as typeof fetch;
   const res = await refreshMatchOdds(db, "m-live", {
     fetchImpl,
-    polymarket: { enabled: true, gammaBase: "", clobBase: "", timeoutMs: 1000 },
+    polymarket: { enabled: true, gammaBase: "", clobBase: "", timeoutMs: 1000, discoverLimit: 300, maxMarketsPerMatch: 16 },
     config: { reassessGapMinutes: 5, priceMoveThreshold: 5 },
     now: () => "2026-07-03T13:00:00Z",
   });

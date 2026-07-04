@@ -8,6 +8,7 @@ import {
   loadPolymarketConfig, getQuotes, fetchMidpointCents,
   normalizeEvent, eventToMarketSnapshots, titleMatchScore,
   findMatchEvent, fetchEventBySlug, listSportEvents,
+  isNoiseMarket, matchMarketSnapshots,
 } from "../src/lib/polymarket.js";
 import {
   resolveModel, apiKeyFor, callLLM, generateStrategyName, heuristicName,
@@ -124,6 +125,26 @@ test("polymarket: eventToMarketSnapshots drops priceless markets", () => {
   assert.equal(snaps.length, 2); // the priceless one is dropped
   assert.deepEqual(snaps[0], { label: "Connor Doig vs Eudald Gonzalez", price: 62, external_ref: "tok-a", liquidity: "1234" });
   assert.equal(snaps[1].label, "Total Sets: O/U 2.5");
+});
+
+test("polymarket: isNoiseMarket keeps settleable markets, drops props/niche", () => {
+  for (const l of ["Over 2.5", "Under 2.5", "Both Teams to Score — Yes", "Colombia -1.5", "Draw", "Henan FC", "Match O/U 22.5", "Set 1 Winner"])
+    assert.equal(isNoiseMarket(l), false, `should keep: ${l}`);
+  for (const l of ["David Ospina: 4+ saves", "James Rodríguez: 1+ goals", "Total Corners Over 9.5", "Henan FC 3 - 3 Qingdao", "Halftime Result", "Exact Score 2-1", "First Team to Score"])
+    assert.equal(isNoiseMarket(l), true, `should drop: ${l}`);
+});
+
+test("polymarket: matchMarketSnapshots aggregates events, drops noise, dedups, caps", () => {
+  const mk = (label: string, price: string, tok: string, liq: string) => ({ groupItemTitle: label, question: label, outcomes: '["Yes","No"]', outcomePrices: `["${price}","0.5"]`, clobTokenIds: `["${tok}","z"]`, liquidity: liq, conditionId: "c" });
+  const evA = normalizeEvent({ id: "1", slug: "a", title: "A vs B", markets: [mk("Over 2.5", "0.5", "t1", "900"), mk("James: 1+ goals", "0.3", "t2", "999")] });
+  const evB = normalizeEvent({ id: "2", slug: "b", title: "A vs B - Corners", markets: [mk("Both Teams to Score", "0.6", "t3", "800"), mk("Total Corners Over 9.5", "0.4", "t4", "999"), mk("Over 2.5", "0.5", "t5", "700")] });
+  const snaps = matchMarketSnapshots([evA, evB], "t", 10);
+  const labels = snaps.map((s) => s.label);
+  assert.ok(labels.includes("Over 2.5") && labels.includes("Both Teams to Score"));
+  assert.ok(!labels.some((l) => /goals|corners/i.test(l)), "noise dropped");
+  assert.equal(labels.filter((l) => l === "Over 2.5").length, 1, "deduped across events");
+  const capped = matchMarketSnapshots([evA, evB], "t", 1);
+  assert.equal(capped.length, 1); // most-liquid kept
 });
 
 test("polymarket: titleMatchScore matches on surnames", () => {

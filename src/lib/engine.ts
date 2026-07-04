@@ -18,7 +18,7 @@ import type { SportsMatchStatus } from "./sports.js";
 import { reassessNarrative, effectiveEnv } from "./llm.js";
 import { settleBet, resolveFootballMarket } from "./settlement.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
-import { loadPolymarketConfig, getQuotes, findMatchEvent, eventToMarketSnapshots, type PolymarketConfig } from "./polymarket.js";
+import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, type PolymarketConfig } from "./polymarket.js";
 import type { SportsProvider } from "./sports.js";
 
 export interface EngineConfig {
@@ -309,10 +309,12 @@ export async function linkMatchOdds(
   if (R.latestMarkets(db, match.id).length) return 0;
   const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
   if (!poly.enabled) return 0;
-  const ev = await findMatchEvent(poly, { sport, home: match.home, away: match.away }, { fetchImpl: deps.fetchImpl });
-  if (!ev) return 0;
+  const events = await findMatchEvents(poly, { sport, home: match.home, away: match.away }, { fetchImpl: deps.fetchImpl });
+  if (!events.length) return 0;
   const now = nowFn(deps)();
-  const snaps = eventToMarketSnapshots(ev, now);
+  // Aggregate the match's settleable markets across its event variants, drop
+  // prop/corner/card/halftime noise, cap to the most liquid.
+  const snaps = matchMarketSnapshots(events, now, poly.maxMarketsPerMatch);
   for (const s of snaps) {
     R.insertMarket(db, {
       id: R.uid(), match_id: match.id, label: s.label, price: s.price, ai_prob: null,
@@ -340,7 +342,13 @@ export async function syncCompetitions(
     for (const s of statuses) {
       const { match, created } = upsertImportedMatch(db, c.id, s);
       let oddsLinked: number | undefined;
-      if (created && opts.linkOdds) oddsLinked = await linkMatchOdds(db, match, c.sport_id, deps);
+      // Attempt odds linking for any non-finished match that still has none —
+      // not just on first import. Polymarket often lists a match's markets only
+      // closer to kickoff, so a match imported early must be retried on later
+      // syncs (linkMatchOdds is a no-op once markets exist).
+      if (opts.linkOdds && s.state !== "finished" && !R.latestMarkets(db, match.id).length) {
+        oddsLinked = await linkMatchOdds(db, match, c.sport_id, deps);
+      }
       const r = await syncMatchStatus(db, s, deps);
       out.push({ competition: c.id, match: `${s.home}–${s.away}`, created, state: r?.to ?? s.state, oddsLinked });
     }
