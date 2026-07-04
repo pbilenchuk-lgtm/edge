@@ -254,7 +254,30 @@ Argentina–Cape Verde LIVE, Colombia–Ghana) под «ЧМ-2026», а PSG–Ar
 То же одним запросом: `POST /api/engine {action:"tick"}` (а `refreshAllOdds` —
 только переквотировка). `sync:once` остаётся как есть (только импорт).
 
+## Деплой (публичный URL)
+
+Приложение контейнеризовано (`Dockerfile`) и поднимается на любом Docker-хосте.
+Демо-БД засевается при первом старте (`scripts/start.sh`), так что ссылка сразу
+рабочая; правки в UI живут до перезапуска (для персистентности — примонтировать
+диск на `EDGE_DB_PATH`).
+
+**Render (в один клик, есть free-план):** `render.yaml` — блюпринт. В дашборде
+Render: **New → Blueprint → подключить репозиторий** → Render соберёт Docker и
+выдаст `https://…onrender.com`. Free-план засыпает после ~15 мин простоя и
+просыпается на первом запросе.
+
+**Railway / Fly / Cloud Run:** тот же `Dockerfile` — «Deploy from repo», порт
+берётся из `$PORT`.
+
+Живой ИИ-анализ (Claude) — **опционально**: добавь `ANTHROPIC_API_KEY` в env
+хостинга. Без ключа работают эвристические фолбэки, приложение полностью
+функционально. Спорт-данные и котировки Polymarket включаются флагами
+`SPORTS_ENABLED` / `POLYMARKET_ENABLED` (см. `.env.example`).
+
+Локально прод-режим: `npm run build && EDGE_DB_PATH=./data/edge.db sh scripts/start.sh`.
+
 ## Дальше
 
-- Развернуть под публичный URL (Railway/Render — почти без правок; Vercel — вынести
-  БД в Postgres, слой `db.ts` для этого изолирован).
+- Персистентная БД в проде: диск на `EDGE_DB_PATH`, либо Postgres-адаптер вместо
+  `db.ts` (слой изолирован — выше него ничего от SQLite не зависит; актуально для
+  Vercel и мульти-инстанса).

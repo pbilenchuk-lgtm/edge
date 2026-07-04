@@ -1,0 +1,19 @@
+# Render blueprint — one-click deploy of EDGE LAB.
+# In the Render dashboard: New → Blueprint → connect this repo. Render reads
+# this file, builds the Dockerfile, and gives you a public https URL.
+# The free plan sleeps after ~15 min idle and wakes on the next request.
+services:
+  - type: web
+    name: edge-lab
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: SPORTS_ENABLED
+        value: "false"
+      - key: POLYMARKET_ENABLED
+        value: "false"
+      # Live Claude analysis is optional — add your key in the dashboard to enable it:
+      # - key: ANTHROPIC_API_KEY
+      #   sync: false

@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "EDGE LAB — paper-trading platform for AI analysis of live prediction-market bets",
+  "engines": {
+    "node": ">=22.5"
+  },
   "scripts": {
     "dev": "NODE_OPTIONS=--experimental-sqlite next dev",
     "build": "next build",
