@@ -278,9 +278,13 @@ function computeStrategyStats(db: Database, strategies: { id: string }[]): Recor
         const open = b.status === "open";
         const settled = b.status === "settled_won" || b.status === "settled_lost";
         if (!open && !settled) continue; // proposed / not_filled — not a prediction yet
-        st.predictions++;
-        seenMatch[b.strategy_id].add(m.id);
-        const inMatch = !!b.entered_minute && /\d/.test(b.entered_minute); // a live minute, not "предматч"
+        // A partial fixation ('partial') is a settled SLICE of a position whose
+        // remaining part is still an open bet row — its money is real, but it is
+        // NOT a separate prediction. Count its P&L, skip the prediction/inMatch
+        // tallies so one logical position isn't counted twice.
+        const isPartialSlice = settled && b.settled_by === "partial";
+        if (!isPartialSlice) { st.predictions++; seenMatch[b.strategy_id].add(m.id); }
+        const inMatch = !isPartialSlice && !!b.entered_minute && /\d/.test(b.entered_minute); // a live minute, not "предматч"
         let pnl = 0;
         if (settled) {
           pnl = (b.payout ?? 0) - (b.stake ?? 0);

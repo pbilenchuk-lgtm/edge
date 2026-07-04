@@ -538,11 +538,21 @@ function norm(s: string): string {
 }
 /** Most distinctive token of a name: the trailing ≥3-char token (surname /
  * club-defining word). "Carlos Alcaraz"→"alcaraz", "Real Madrid"→"madrid". */
+// Generic club suffixes that don't identify a team on their own. Picking the
+// LAST token blindly made "Manchester United" key on "united" and false-match
+// "Newcastle United"; skipping these keys on "manchester" instead. (Mirrors
+// engine.ts TEAM_STOPWORDS; kept local to avoid an engine→polymarket cycle.)
+const NAME_STOPWORDS = new Set(["fc", "afc", "sc", "cf", "ac", "as", "cd", "sv", "fk", "if", "bk", "club", "united", "city", "town", "county", "calcio", "sporting", "real", "athletic", "atletico"]);
 function nameKey(name: string): string {
   const all = norm(name).split(/\s+/).filter(Boolean);
   const long = all.filter((w) => w.length >= 3);
   const pool = long.length ? long : all; // fall back to short tokens if that's all there is
-  return pool.length ? pool[pool.length - 1] : "";
+  // Prefer the last DISTINCTIVE (non-suffix) token — the surname / the club's
+  // identifying word — over a generic trailing "united"/"city". Fall back to the
+  // last token when every token is generic.
+  const distinctive = pool.filter((w) => !NAME_STOPWORDS.has(w));
+  const pick = distinctive.length ? distinctive : pool;
+  return pick.length ? pick[pick.length - 1] : "";
 }
 async function withTimeout(
   ms: number,

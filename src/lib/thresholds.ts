@@ -172,6 +172,10 @@ export interface SizeInput {
   budget: number;
   /** $ already staked by this strategy on this match (for §9.3). */
   exposure?: number;
+  /** realized P&L ($) this strategy has already booked on this match — a loss
+   *  shrinks what's left to deploy, so cashing out at a loss and re-entering
+   *  can't recycle the whole budget again (bankroll = budget + realized). */
+  realizedPnl?: number;
   confidence?: Confidence | null;
   /** current P&L fraction of the strategy on the competition (negative = drawdown),
    *  used to enforce params.stop — halt entries once the stop-loss is hit. */
@@ -236,8 +240,10 @@ export function sizeBet(input: SizeInput): SizeDecision {
   const cap = params.maxPerBet ?? params.cap;
   if (cap != null) fraction = Math.min(fraction, cap);
 
-  // Respect remaining budget for this match (invariant §9.3).
-  const remainingFrac = Math.max(0, (budget - exposure) / budget);
+  // Respect remaining budget for this match (invariant §9.3). Bankroll left =
+  // budget + realized P&L − open exposure, so a realized LOSS reduces what can
+  // be re-staked (a cash-out-and-re-enter cycle can't recycle the full budget).
+  const remainingFrac = Math.max(0, (budget + (input.realizedPnl ?? 0) - exposure) / budget);
   fraction = Math.min(fraction, remainingFrac);
   if (fraction <= 0) return skip("бюджет стратегии на матче исчерпан");
 
