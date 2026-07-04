@@ -266,7 +266,9 @@ test("analyzeMatch: portfolio stop-loss halts a strategy's entries", async () =>
   const db = openDb(":memory:");
   seedDatabase(db);
   const labels = R.latestMarkets(db, "m-lineup").map((m) => m.label);
-  const assessment = { confidence: "высокая", short: "s", body: "b", verdict: "v", markets: labels.map((l) => ({ label: l, prob: 0.99 })) };
+  // mock carries both assessment fields and strategist picks (one static JSON
+  // answers both LLM calls); the strategist picks every market so bets flow.
+  const assessment = { confidence: "высокая", short: "s", body: "b", verdict: "v", markets: labels.map((l) => ({ label: l, prob: 0.99 })), picks: labels.map((l) => ({ label: l, conviction: "высокая", reason: "t" })), exits: [] };
   const deps = { fetchImpl: mockLLM(assessment), env: { ANTHROPIC_API_KEY: "k" } };
 
   // baseline: strong edges => at least one strategy proposes bets

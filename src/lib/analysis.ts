@@ -12,7 +12,7 @@
 
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
-import { assessMatchLLM, effectiveEnv } from "./llm.js";
+import { assessMatchLLM, effectiveEnv, strategistDecide } from "./llm.js";
 import { sizeBet } from "./thresholds.js";
 import { edgePct } from "./edge.js";
 import { stratBudget } from "./money.js";
@@ -111,13 +111,33 @@ export async function analyzeMatch(
     const budget = stratBudget(comp!.budget, share.pct);
     // Portfolio drawdown so far (realized + open) — enforces params.stop.
     const drawdown = strategyDrawdown(db, match.competition_id, strat.id, budget);
+
+    // Universal path: let the strategy's PROMPT (any methodology) pick the
+    // markets + conviction. Code still sizes/gates (§9.6). If no key / the
+    // strategist fails, fall back to the pure edge+threshold path below.
+    const stratModel = strat.model ?? model;
+    const openPos = R.betsForMatch(db, matchId, strat.id).filter((b) => b.status === "open");
+    const dec = await strategistDecide({
+      strategyName: strat.name, strategyPrompt: strat.prompt,
+      match: { home: match.home, away: match.away, sport, state: match.state, minute: match.minute, scoreHome: match.score_home, scoreAway: match.score_away },
+      assessment: { confidence: a.confidence, short: a.short, verdict: a.verdict },
+      markets: freshMarkets.map((m) => ({ label: m.label, priceCents: m.price, aiProb: m.ai_prob })),
+      openPositions: openPos.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
+    }, stratModel, { fetchImpl: deps.fetchImpl, env });
+    const picks = dec.ok ? new Map(dec.picks.map((p) => [norm(p.label), p])) : null;
+
     let exposure = 0, entries = 0, skipped = 0;
     // best edges first
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
       .map((m) => ({ m, edge: edgePct(m.ai_prob as number, m.price) }))
       .sort((x, y) => y.edge - x.edge);
     for (const { m } of ranked) {
-      const d = sizeBet({ params: strat.params, aiProb: m.ai_prob as number, priceCents: m.price, budget, exposure, confidence: a.confidence as Confidence, drawdown });
+      // When the strategist ran, only its picks are eligible and its conviction
+      // (from the prompt's methodology) drives the confidence gate.
+      const pick = picks?.get(norm(m.label));
+      if (picks && !pick) { skipped++; continue; }
+      const conf = (pick?.conviction ?? a.confidence) as Confidence;
+      const d = sizeBet({ params: strat.params, aiProb: m.ai_prob as number, priceCents: m.price, budget, exposure, confidence: conf, drawdown });
       if (!d.enter) { skipped++; continue; }
       exposure += d.stake;
       entries++;
@@ -125,7 +145,7 @@ export async function analyzeMatch(
         id: R.uid(), match_id: matchId, strategy_id: strat.id, market_label: m.label,
         status: "proposed", proposed_price: m.price, entry_price: null, current_price: null,
         closing_price: null, ai_prob: m.ai_prob, stake: d.stake,
-        rationale: `«${m.label}»: край ${d.edge.toFixed(1)}%. ${d.reason}.`,
+        rationale: pick ? `«${m.label}»: край ${d.edge.toFixed(1)}%. ${pick.reason || d.reason}.` : `«${m.label}»: край ${d.edge.toFixed(1)}%. ${d.reason}.`,
         entered_minute: null, result: null, payout: null, created_at: now(),
       });
     }

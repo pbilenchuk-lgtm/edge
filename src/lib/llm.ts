@@ -364,6 +364,62 @@ function failed(error?: string): MatchAssessment {
 }
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
 
+// ------------------------------------------------------------
+// Strategist — turns a strategy PROMPT (any methodology) into market picks
+// (§9.5: strategy reads analytics; §9.6: CODE still sizes the actual stake).
+// This is what makes the strategy universal — the prompt drives the decisions,
+// nothing about a specific methodology is hard-coded.
+// ------------------------------------------------------------
+
+export interface StrategistInput {
+  strategyName: string; strategyPrompt: string;
+  match: { home: string; away: string; sport: string; state: string; minute: number | null; scoreHome: number | null; scoreAway: number | null };
+  assessment: { confidence: string; short: string; verdict: string };
+  markets: { label: string; priceCents: number; aiProb: number | null }[];
+  openPositions: { market: string; entryCents: number; currentCents: number }[];
+}
+export interface StrategistPick { label: string; conviction: "низкая" | "средняя" | "высокая"; reason: string }
+export interface StrategistExit { market: string; reason: string }
+export interface StrategistDecision { ok: boolean; picks: StrategistPick[]; exits: StrategistExit[]; note: string; source: "llm" | "none"; error?: string }
+
+/**
+ * Apply the strategy's methodology (its prompt) to a match: which markets to
+ * ENTER (with conviction + a nameable reason) and which OPEN positions to EXIT.
+ * The model must follow the prompt literally — entry discipline, "name why the
+ * market is wrong", no conflicting bets, in-match management. Returns picks;
+ * the engine sizes and gates them (budget/caps/stop) in code.
+ */
+export async function strategistDecide(
+  input: StrategistInput, model: string, deps: Deps = {},
+): Promise<StrategistDecision> {
+  const mkList = input.markets.map((m) => `- ${m.label}: рынок ${m.priceCents}¢${m.aiProb != null ? `, оценка ИИ ${(m.aiProb * 100).toFixed(0)}%` : ""}`).join("\n");
+  const posList = input.openPositions.length
+    ? input.openPositions.map((p) => `- ${p.market}: вход ${p.entryCents}¢ → сейчас ${p.currentCents}¢`).join("\n")
+    : "(открытых позиций нет)";
+  const score = input.match.scoreHome != null ? `${input.match.scoreHome}:${input.match.scoreAway}` : "—";
+  const res = await callLLM({
+    model,
+    system:
+      "Ты — трейдер на прогнозных рынках, действующий СТРОГО по методологии из промта стратегии (это твой единственный свод правил). На основе оценки матча и цен реши ДЕЙСТВИЯ. Правила вывода: входи в рынок ТОЛЬКО если методология это разрешает и ты можешь назвать конкретную причину, почему цена неверна; не давай конфликтующих ставок на один матч; уважай стадию матча (предматч/лайв) и правила управления позицией. Верни ТОЛЬКО JSON {picks:[{label, conviction:'низкая'|'средняя'|'высокая', reason}], exits:[{market, reason}], note}. label бери ДОСЛОВНО из списка рынков. Пусто — значит воздержаться. Без пояснений вне JSON.",
+    prompt: `СТРАТЕГИЯ «${input.strategyName}» (методология):\n${input.strategyPrompt}\n\nМАТЧ: ${input.match.home} — ${input.match.away} (${input.match.sport}, ${input.match.state}${input.match.state === "live" ? `, ${input.match.minute ?? "?"}'` : ""}, счёт ${score}).\nОценка аналитики: уверенность ${input.assessment.confidence}. ${input.assessment.short} Итог: ${input.assessment.verdict}\n\nРЫНКИ:\n${mkList}\n\nОТКРЫТЫЕ ПОЗИЦИИ:\n${posList}\n\nРеши: во что входить (picks) и что закрывать (exits) по методологии.`,
+    maxTokens: 900,
+  }, deps);
+  if (!res.ok) return { ok: false, picks: [], exits: [], note: "", source: "none", error: res.error };
+  try {
+    const j = JSON.parse(stripFences(res.text));
+    const conv = (c: unknown) => (["низкая", "средняя", "высокая"].includes(c as string) ? c : "средняя") as StrategistPick["conviction"];
+    const picks: StrategistPick[] = Array.isArray(j.picks)
+      ? j.picks.filter((p: any) => p && typeof p.label === "string").map((p: any) => ({ label: String(p.label), conviction: conv(p.conviction), reason: String(p.reason ?? "") }))
+      : [];
+    const exits: StrategistExit[] = Array.isArray(j.exits)
+      ? j.exits.filter((e: any) => e && typeof e.market === "string").map((e: any) => ({ market: String(e.market), reason: String(e.reason ?? "") }))
+      : [];
+    return { ok: true, picks, exits, note: String(j.note ?? ""), source: "llm" };
+  } catch {
+    return { ok: false, picks: [], exits: [], note: "", source: "none", error: "невалидный JSON от стратега" };
+  }
+}
+
 export interface ImprovementProposal {
   removed: string; added: string; newPrompt: string; reason: string; source: "llm" | "heuristic";
 }
