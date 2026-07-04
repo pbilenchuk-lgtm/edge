@@ -201,10 +201,13 @@ export interface ReassessResult { exits: ExitItem[]; entries: ReassessEntry[] }
  * trigger actually fired. This is what makes reassessment *react* to live data.
  */
 export async function strategistReassess(
-  db: Database, deps: EngineDeps = {}, opts: { max?: number; newEventMatchIds?: Set<string> } = {},
+  db: Database, deps: EngineDeps = {}, opts: { max?: number; newEventMatchIds?: Set<string>; triggeredOnly?: boolean } = {},
 ): Promise<ReassessResult> {
   const max = opts.max ?? 4;
   const triggered = opts.newEventMatchIds ?? new Set<string>();
+  // Event-driven mode (fast live loop): only reassess matches with a fresh
+  // trigger — don't burn an LLM call every tick on quiet open positions.
+  const triggeredOnly = opts.triggeredOnly ?? false;
   const now = nowFn(deps)();
   const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
   const comps = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
@@ -217,7 +220,9 @@ export async function strategistReassess(
     if (!c || c.budget <= 0) continue;
     const open = R.betsForMatch(db, m.id).filter((b) => b.status === "open");
     // Reassess only where there's live risk (open positions) or a fresh trigger.
-    if (!open.length && !triggered.has(m.id)) continue;
+    // In triggeredOnly mode (fast loop) a trigger is REQUIRED — quiet positions
+    // are handled by the deterministic exits + the slow full cycle.
+    if (triggeredOnly ? !triggered.has(m.id) : (!open.length && !triggered.has(m.id))) continue;
     const markets = R.latestMarkets(db, m.id);
     if (!markets.length) continue;
     const assess = R.assessmentsForMatch(db, m.id).filter((a) => a.status === "ok").sort((a, b) => (a.created_at >= b.created_at ? -1 : 1))[0];
@@ -337,5 +342,47 @@ export async function runAutoCycle(
     oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),
     enriched: enrich.enriched, triggers: triggers.size,
     analyzed, entered, exited, reassessEntries: reassess.entries,
+  };
+}
+
+// High-impact events that warrant an immediate strategist reassessment (an LLM
+// call). Goals and red cards change the game state; yellows/subs are recorded
+// and shown, but don't burn a model call on the fast loop.
+const LIVE_TRIGGER_TYPES = new Set(["goal", "red_card"]);
+
+export interface LiveCycleResult { live: number; oddsUpdated: number; enriched: number; triggers: number; exits: number; entries: number }
+
+/**
+ * FAST live loop — runs on a short cadence (every LIVE_TICK_SEC, default 90s)
+ * so the system reacts to what happens ON the pitch, not on the 30-minute tick.
+ * It is deliberately narrow and cheap:
+ *   1) re-price only live/lineup matches (mark to market),
+ *   2) pull fresh ESPN events (goals / cards / subs),
+ *   3) deterministic exits (take-profit / stop) — no LLM, every tick,
+ *   4) strategist reassessment ONLY on a high-impact trigger (goal / red card),
+ *      handing it the live context so it acts on open positions or opens new.
+ * No Polymarket discovery, no pre-match analysis — those stay on the slow cycle.
+ * Returns quickly (and does ~nothing) when no match is in play.
+ */
+export async function runLiveCycle(
+  db: Database, provider: SportsProvider | null, deps: EngineDeps = {},
+): Promise<LiveCycleResult> {
+  const inPlay = activeMatches(db).filter(({ match: m }) => m.state === "live" || m.state === "lineup" || m.lineup_out);
+  if (!inPlay.length) return { live: 0, oddsUpdated: 0, enriched: 0, triggers: 0, exits: 0, entries: 0 };
+
+  const odds = await refreshActiveOdds(db, deps, { onlyLive: true });
+  advanceClocks(db, deps);
+  const enrich = provider ? await enrichFromEspn(db, provider, deps) : { enriched: 0, newEvents: [] };
+  // only goals / red cards trigger the (LLM) strategist reassessment
+  const triggers = new Set(enrich.newEvents.filter((e) => LIVE_TRIGGER_TYPES.has(e.type)).map((e) => e.matchId));
+
+  const detExits = evaluateExits(db, deps); // cheap TP/stop, reacts to price every tick
+  const reassess = await strategistReassess(db, deps, { newEventMatchIds: triggers, triggeredOnly: true });
+  autoEnter(db, deps); // fill any positions the strategist just opened
+
+  return {
+    live: inPlay.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),
+    enriched: enrich.enriched, triggers: triggers.size,
+    exits: detExits.length + reassess.exits.length, entries: reassess.entries.length,
   };
 }

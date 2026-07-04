@@ -17,8 +17,10 @@ services:
       # Automated cron (in-process scheduler): parse + analyze + enter/exit on a loop.
       - key: AUTO_TICK
         value: "true"
+      - key: LIVE_TICK_SEC
+        value: "90"      # fast real-time loop while a match is in play (goals → reassessment)
       - key: TICK_INTERVAL_MIN
-        value: "30"      # odds/exits/analyze/enter cadence
+        value: "30"      # odds/exits/analyze/enter cadence (pre-match)
       - key: DISCOVER_INTERVAL_HR
         value: "24"      # Polymarket parse cadence (matches surface ~7 days out)
       # Live Claude analysis needs a key — add it in the dashboard or the Models screen:

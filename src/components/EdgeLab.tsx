@@ -962,7 +962,7 @@ function BalanceCard({ total, allocated, onSetTotal }: any) {
 
 function CronPanel({ cron }: any) {
   if (!cron) return null;
-  const kindLabel: any = { tick: "тик", discover: "парсинг", manual: "вручную" };
+  const kindLabel: any = { tick: "тик", discover: "парсинг", manual: "вручную", live: "лайв" };
   return (
     <section style={S.card}>
       <div style={S.cronHead}>
@@ -971,7 +971,7 @@ function CronPanel({ cron }: any) {
       </div>
       <div style={S.cronPlan}>
         {cron.enabled
-          ? <>Тик каждые <b>{cron.tickMin} мин</b> (котировки · составы · переоценка · входы/выходы) · парсинг Polymarket каждые <b>{cron.discoverHr} ч</b>{cron.nextRunAt && <> · следующий ≈ <b>{fmtWarsaw(cron.nextRunAt)}</b></>}</>
+          ? <><b>Лайв каждые {cron.liveSec} сек</b> — пока идёт матч: котировки + события (гол/красная) → стратегия реагирует на позиции. Общий тик каждые <b>{cron.tickMin} мин</b> · парсинг Polymarket каждые <b>{cron.discoverHr} ч</b>{cron.nextRunAt && <> · следующий тик ≈ <b>{fmtWarsaw(cron.nextRunAt)}</b></>}</>
           : <>Авто-цикл выключен (<code>AUTO_TICK=false</code>). Матчи и переоценка — только по кнопке «Подтянуть матчи» и «Оценить матч».</>}
       </div>
       <div style={S.cronList}>

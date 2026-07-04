@@ -5,7 +5,8 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, strategistReassess, advanceClocks } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, strategistReassess, advanceClocks, runLiveCycle } from "../src/lib/lifecycle.js";
+import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
 const mockLLM = (a: unknown) => (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify(a) }] }) })) as any;
 
@@ -134,6 +135,48 @@ test("strategistReassess opens a fresh entry on a live trigger (no prior positio
   // a non-triggered match with no open positions is left alone (no model call needed)
   const res2 = await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } }, { newEventMatchIds: new Set(), max: 50 });
   assert.ok(!res2.entries.some((e) => e.matchId === mid), "no re-entry without a trigger or position");
+});
+
+test("runLiveCycle reacts to a live goal, and quiet re-runs don't re-fire the strategist", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0 && c.external_league === "fifa.world")!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Colombia", away: "Ghana", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  // market with no external_ref → odds refresh skips it (no CLOB mock needed)
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 40, ai_prob: 0.5, liquidity: null, external_ref: null, snapshot_at: "t", is_closing: false });
+  const bid = R.uid();
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Under 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 40, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+
+  let detailCalls = 0;
+  const goal: MatchDetail = { lineupOut: true, lineups: { home: null, away: null }, events: [{ key: "g1", minute: 14, type: "goal", team: "Colombia", text: "Goal!" }] };
+  const provider: SportsProvider = {
+    name: "mock",
+    async scoreboard(_s, league) { return league === "fifa.world" ? [{ externalRef: "E1", home: "Colombia", away: "Ghana", state: "live", minute: 30, scoreHome: 1, scoreAway: 0, final: false }] : []; },
+    async matchDetail() { detailCalls++; return goal; },
+  };
+  // strategist says to cut the Under after the goal
+  const mock = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Under 2.5", reason: "гол сломал few-goals (п.4.2)" }] }) }] }) }) as any);
+
+  const r1 = await runLiveCycle(db, provider, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
+  assert.ok(r1.live >= 1, "a live match is in play");
+  assert.equal(r1.triggers, 1, "the goal is a trigger");
+  assert.ok(r1.exits >= 1, "strategist cut the position on the goal");
+  assert.ok(R.betsForMatch(db, mid).find((b) => b.id === bid)!.status.startsWith("settled"), "position closed");
+
+  // second pass: same goal (deduped) → no new trigger → strategist not re-called
+  const r2 = await runLiveCycle(db, provider, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
+  assert.equal(r2.triggers, 0, "known event doesn't re-trigger");
+});
+
+test("runLiveCycle is a cheap no-op when nothing is in play", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("UPDATE matches SET state='finished'");
+  const r = await runLiveCycle(db, null, {});
+  assert.deepEqual(r, { live: 0, oddsUpdated: 0, enriched: 0, triggers: 0, exits: 0, entries: 0 });
 });
 
 test("autoAnalyze analyzes an eligible match once per stage", async () => {

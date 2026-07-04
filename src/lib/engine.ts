@@ -161,11 +161,13 @@ export interface OddsRefreshItem { matchId: string; match: string; updated: numb
  * strategies already holding an open bet, and with a heuristic fallback, exactly
  * as the manual per-match refresh button behaves.
  */
-export async function refreshActiveOdds(db: Database, deps: EngineDeps = {}): Promise<OddsRefreshItem[]> {
+export async function refreshActiveOdds(db: Database, deps: EngineDeps = {}, opts: { onlyLive?: boolean } = {}): Promise<OddsRefreshItem[]> {
   const out: OddsRefreshItem[] = [];
   for (const c of R.listCompetitions(db)) {
     for (const m of R.listMatches(db, c.id)) {
       if (m.state === "finished") continue;
+      // fast live loop: only re-price matches in play (or with lineups out)
+      if (opts.onlyLive && !(m.state === "live" || m.state === "lineup" || m.lineup_out)) continue;
       if (!R.latestMarkets(db, m.id).some((mk) => mk.external_ref)) continue;
       const r = await refreshMatchOdds(db, m.id, deps);
       if (r.updated || r.triggers.length) {

@@ -1,19 +1,22 @@
 // ============================================================
 // EDGE LAB — in-process scheduler (the cron). Runs the automated lifecycle on
 // an interval inside the server process, so it shares the SQLite DB. Opt-in via
-// AUTO_TICK=true. Two cadences (ТЗ §4.1 timing):
+// AUTO_TICK=true. Three cadences (ТЗ §4.1 timing):
+//   - LIVE every LIVE_TICK_SEC (default 90s): only while a match is in play —
+//     re-price live matches, pull fresh ESPN events, deterministic exits, and
+//     strategist reassessment on a goal / red card. This is the real-time loop.
 //   - TICK every TICK_INTERVAL_MIN (default 30): odds refresh, clocks, exits,
 //     analyze (12h/lineup gated), enter. No discovery.
 //   - DISCOVER every DISCOVER_INTERVAL_HR (default 24): parse Polymarket for the
 //     next 7 days of matches. Runs on the first tick, then daily.
-// Live Claude analysis needs a key (env ANTHROPIC_API_KEY or the Models screen).
+// Live Claude analysis needs a key (env ANTHROPIC_API_KEY or the Настройки screen).
 // ============================================================
 
 import { getDb } from "./db.js";
 import * as R from "./repo.js";
 import { loadSportsProvider, loadSportsConfig } from "./sports.js";
 import { loadPolymarketConfig } from "./polymarket.js";
-import { runAutoCycle } from "./lifecycle.js";
+import { runAutoCycle, runLiveCycle } from "./lifecycle.js";
 
 let started = false;
 
@@ -23,8 +26,10 @@ export function startScheduler(env: Record<string, string | undefined> = process
   started = true;
   const tickMin = Math.max(1, Number(env.TICK_INTERVAL_MIN ?? 30));
   const discoverHr = Math.max(1, Number(env.DISCOVER_INTERVAL_HR ?? 24));
+  const liveSec = Math.max(20, Number(env.LIVE_TICK_SEC ?? 90));
   const linkOdds = loadPolymarketConfig(env).enabled;
   let lastDiscover = 0;
+  let liveBusy = false;
 
   const run = async () => {
     const db = getDb();
@@ -45,7 +50,32 @@ export function startScheduler(env: Record<string, string | undefined> = process
     }
   };
 
-  console.log(`[scheduler] on — tick ${tickMin}m, discover ${discoverHr}h`);
-  setTimeout(run, 5_000);              // first pass shortly after boot (discovers)
-  setInterval(run, tickMin * 60_000);  // then every tickMin
+  // Fast live loop — only does work while a match is in play; logs to the cron
+  // journal only when something actually happened (so it doesn't flood it).
+  const liveRun = async () => {
+    if (liveBusy) return;               // skip if the previous live pass is still running
+    liveBusy = true;
+    const db = getDb();
+    const at = new Date(Date.now()).toISOString();
+    try {
+      const provider = loadSportsProvider(loadSportsConfig(env));
+      const r = await runLiveCycle(db, provider, {});
+      if (r.live > 0 && (r.triggers || r.exits || r.entries)) {
+        const summary = `live ${r.live} · триггеры ${r.triggers} · котировки ${r.oddsUpdated} · выходы ${r.exits} · входы ${r.entries}`;
+        console.log(`[scheduler:live] ${summary}`);
+        try { R.insertCronLog(db, { id: R.uid(), at, kind: "live", ok: 1, summary, created_at: at }); } catch {}
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[scheduler:live] error:", msg);
+      try { R.insertCronLog(db, { id: R.uid(), at, kind: "live", ok: 0, summary: `ошибка: ${msg}`, created_at: at }); } catch {}
+    } finally {
+      liveBusy = false;
+    }
+  };
+
+  console.log(`[scheduler] on — live ${liveSec}s, tick ${tickMin}m, discover ${discoverHr}h`);
+  setTimeout(run, 5_000);               // first full pass shortly after boot (discovers)
+  setInterval(run, tickMin * 60_000);   // then every tickMin
+  setInterval(liveRun, liveSec * 1000); // fast real-time loop for in-play matches
 }

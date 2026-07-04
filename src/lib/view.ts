@@ -75,7 +75,7 @@ export interface AppData {
   cron: CronView;
 }
 export interface CronView {
-  enabled: boolean; tickMin: number; discoverHr: number; nextRunAt: string | null;
+  enabled: boolean; tickMin: number; discoverHr: number; liveSec: number; nextRunAt: string | null;
   recent: { at: string; kind: string; ok: boolean; summary: string }[];
 }
 
@@ -194,11 +194,13 @@ export function buildAppData(db: Database, env = process.env): AppData {
   const cronEnabled = (env.AUTO_TICK ?? "false").toLowerCase() === "true";
   const tickMin = Math.max(1, Number(env.TICK_INTERVAL_MIN ?? 30));
   const discoverHr = Math.max(1, Number(env.DISCOVER_INTERVAL_HR ?? 24));
+  const liveSec = Math.max(20, Number(env.LIVE_TICK_SEC ?? 90));
   const recentRuns = R.recentCronLog(db, 15);
-  const lastAt = recentRuns[0] ? Date.parse(recentRuns[0].at) : NaN;
+  const lastFull = recentRuns.find((r) => r.kind !== "live");
+  const lastAt = lastFull ? Date.parse(lastFull.at) : NaN;
   const nextRunAt = cronEnabled && !isNaN(lastAt) ? new Date(lastAt + tickMin * 60_000).toISOString() : null;
   const cron: CronView = {
-    enabled: cronEnabled, tickMin, discoverHr, nextRunAt,
+    enabled: cronEnabled, tickMin, discoverHr, liveSec, nextRunAt,
     recent: recentRuns.map((r) => ({ at: r.at, kind: r.kind, ok: r.ok === 1, summary: r.summary })),
   };
 
