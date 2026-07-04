@@ -245,7 +245,13 @@ const now = (deps: AnalyzeDeps) => deps.now ?? (() => new Date().toISOString());
  * died (crash/restart/another instance) and will never call finishAnalysisJob.
  * Comfortably longer than any real analyze round-trip (~30s LLM timeout).
  */
-export const ANALYSIS_STALE_MS = 5 * 60_000;
+// One analyze is a CHAIN of LLM calls: 1 assessment + one strategist per funded
+// strategy, each with a 120s ceiling (llm.ts). A legit run with several
+// strategies can therefore take many minutes; a 5-min window flagged it stale
+// mid-flight → false "таймаут" in the UI AND let a second run start concurrently
+// (duplicate proposals). 10 min comfortably covers a realistic chain while still
+// self-healing a genuinely dead job.
+export const ANALYSIS_STALE_MS = 10 * 60_000;
 export function jobActive(job: { status: string; started_at: string } | undefined, nowMs: number): boolean {
   if (!job || job.status !== "running") return false;
   const started = Date.parse(job.started_at);

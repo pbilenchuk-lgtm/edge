@@ -331,7 +331,11 @@ async function fetchSportEvents(cfg: PolymarketConfig, tag: number, limit: numbe
     all.push(...page);
     if (page.length < GAMMA_PAGE) break; // last page
   }
-  if (live) sportEventCache.set(tag, { at: Date.now(), events: all });
+  // Never cache an EMPTY result: gammaEvents returns [] on both "no events" and
+  // a transient error/timeout, and caching that would blank discovery for the
+  // whole 2-min TTL even after the network recovers. A genuinely empty sport
+  // just refetches next tick (cheap, rare).
+  if (live && all.length) sportEventCache.set(tag, { at: Date.now(), events: all });
   return all;
 }
 

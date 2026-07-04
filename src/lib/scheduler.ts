@@ -37,11 +37,15 @@ export function startScheduler(env: Record<string, string | undefined> = process
   const run = async () => {
     if (busy) return; // don't overlap with a live pass or a previous slow pass
     busy = true;
-    const db = getDb();
+    // Everything that can throw goes INSIDE the try so `finally` always clears
+    // `busy` — a throw from getDb()/Date before the try would wedge the cron
+    // (busy stuck true) for the whole process lifetime.
     const nowMs = Date.now();
     const discover = nowMs - lastDiscover >= discoverHr * 3_600_000;
     const at = new Date(nowMs).toISOString();
+    let db: ReturnType<typeof getDb> | null = null;
     try {
+      db = getDb();
       const provider = loadSportsProvider(loadSportsConfig(env));
       if (discover) lastDiscover = nowMs;
       const r = await runAutoCycle(db, provider, {}, { linkOdds, discover });
@@ -51,7 +55,7 @@ export function startScheduler(env: Record<string, string | undefined> = process
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("[scheduler] error:", msg);
-      try { R.insertCronLog(db, { id: R.uid(), at, kind: discover ? "discover" : "tick", ok: 0, summary: `ошибка: ${msg}`, created_at: at }); } catch {}
+      try { if (db) R.insertCronLog(db, { id: R.uid(), at, kind: discover ? "discover" : "tick", ok: 0, summary: `ошибка: ${msg}`, created_at: at }); } catch {}
     } finally {
       busy = false;
     }
@@ -62,9 +66,10 @@ export function startScheduler(env: Record<string, string | undefined> = process
   const liveRun = async () => {
     if (busy) return;                   // yield to a running full/live pass
     busy = true;
-    const db = getDb();
     const at = new Date(Date.now()).toISOString();
+    let db: ReturnType<typeof getDb> | null = null;
     try {
+      db = getDb();
       const provider = loadSportsProvider(loadSportsConfig(env));
       const r = await runLiveCycle(db, provider, {});
       if (r.live > 0 && (r.triggers || r.exits || r.entries)) {
@@ -75,7 +80,7 @@ export function startScheduler(env: Record<string, string | undefined> = process
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("[scheduler:live] error:", msg);
-      try { R.insertCronLog(db, { id: R.uid(), at, kind: "live", ok: 0, summary: `ошибка: ${msg}`, created_at: at }); } catch {}
+      try { if (db) R.insertCronLog(db, { id: R.uid(), at, kind: "live", ok: 0, summary: `ошибка: ${msg}`, created_at: at }); } catch {}
     } finally {
       busy = false;
     }
