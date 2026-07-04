@@ -356,18 +356,18 @@ export async function importPolymarketMatches(
   const now = nowFn(deps)();
   const nowMs = Date.parse(now) || Date.now();
   const compId = ensurePolymarketComp(db, sport, now);
-  const discovered = await discoverSportMatches(poly, sport, now, { fetchImpl: deps.fetchImpl }, opts.limit ?? 60);
+  const discovered = await discoverSportMatches(poly, sport, now, { fetchImpl: deps.fetchImpl }, { limit: opts.limit ?? 200, windowDays: 7, nowMs });
   const out: DiscoverItem[] = [];
   for (const d of discovered) {
     const ref = `pm:${sport}:${d.home}-${d.away}`.toLowerCase().replace(/\s+/g, "");
     let match = R.matchByExternalRef(db, ref);
     let created = false;
     if (!match) {
-      const startMs = d.startDate ? Date.parse(d.startDate) : NaN;
-      const lineupOut = !isNaN(startMs) && startMs <= nowMs + 24 * 3600_000;
+      const startMs = d.kickoff ? Date.parse(d.kickoff) : NaN;
+      // kickoff stored as ISO for scheduling; the view renders it in Warsaw time.
       match = {
         id: R.uid(), competition_id: compId, home: d.home, away: d.away,
-        state: "upcoming", lineup_out: lineupOut, kickoff_at: d.startDate ? d.startDate.slice(0, 16).replace("T", " ") : null,
+        state: "upcoming", lineup_out: !isNaN(startMs) && startMs <= nowMs + 3600_000, kickoff_at: d.kickoff ?? null,
         minute: null, score_home: null, score_away: null, final_score: null,
         kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: ref,
       };

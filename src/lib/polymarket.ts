@@ -161,6 +161,9 @@ export interface PolyEvent {
   slug: string;
   title: string;
   startDate: string | null;
+  /** actual kickoff (Gamma `startTime`/`gameStartTime`) — NOT startDate, which
+   *  is the market creation date. Null when Polymarket hasn't set it. */
+  startTime: string | null;
   markets: PolyMarketRow[];
 }
 
@@ -193,11 +196,15 @@ export function normalizeEvent(raw: any): PolyEvent {
       conditionId: m.conditionId ?? null,
     };
   });
+  // kickoff: event startTime, else a market's gameStartTime ("YYYY-MM-DD HH:MM:SS+00").
+  const gst = raw.markets?.find?.((m: any) => m.gameStartTime)?.gameStartTime;
+  const startTime = raw.startTime ?? (gst ? String(gst).replace(" ", "T").replace("+00", "Z") : null);
   return {
     id: String(raw.id ?? ""),
     slug: String(raw.slug ?? ""),
     title: String(raw.title ?? ""),
     startDate: raw.startDate ?? null,
+    startTime: startTime ? String(startTime) : null,
     markets,
   };
 }
@@ -358,7 +365,7 @@ export function parseMatchTitle(title: string, sport: string): { home: string; a
   return { home, away };
 }
 
-export interface DiscoveredMatch { home: string; away: string; startDate: string | null; markets: MarketSnapshot[]; liquidity: number }
+export interface DiscoveredMatch { home: string; away: string; kickoff: string | null; markets: MarketSnapshot[]; liquidity: number }
 
 /**
  * Discover matches a sport lists on Polymarket: group events by competitors,
@@ -366,29 +373,40 @@ export interface DiscoveredMatch { home: string; away: string; startDate: string
  * the most-liquid up to `limit`.
  */
 export async function discoverSportMatches(
-  cfg: PolymarketConfig, sport: string, snapshotAt: string, deps: FetchDeps = {}, limit = 60,
+  cfg: PolymarketConfig, sport: string, snapshotAt: string, deps: FetchDeps = {},
+  opts: { limit?: number; windowDays?: number; nowMs?: number } = {},
 ): Promise<DiscoveredMatch[]> {
   const tag = SPORT_TAG_IDS[sport];
   if (tag == null) return [];
+  const limit = opts.limit ?? 200;
+  const nowMs = opts.nowMs ?? (Date.parse(snapshotAt) || 0);
+  const windowMs = (opts.windowDays ?? 7) * 86_400_000;
   const events = await fetchSportEvents(cfg, tag, cfg.discoverLimit ?? 1000, deps);
-  const groups = new Map<string, { home: string; away: string; startDate: string | null; events: PolyEvent[] }>();
+  const groups = new Map<string, { home: string; away: string; kickoff: string | null; events: PolyEvent[] }>();
   for (const ev of events) {
     const p = parseMatchTitle(ev.title, sport);
     if (!p) continue;
     const key = `${norm(p.home)}|${norm(p.away)}`;
-    const g = groups.get(key) ?? { home: p.home, away: p.away, startDate: ev.startDate, events: [] };
+    const g = groups.get(key) ?? { home: p.home, away: p.away, kickoff: ev.startTime, events: [] };
+    if (!g.kickoff && ev.startTime) g.kickoff = ev.startTime; // real kickoff, not creation date
     g.events.push(ev);
-    if (ev.startDate && (!g.startDate || ev.startDate < g.startDate)) g.startDate = ev.startDate;
     groups.set(key, g);
   }
   const out: DiscoveredMatch[] = [];
   for (const g of groups.values()) {
+    // window on the real kickoff: from a few hours ago up to `windowDays` ahead
+    // (so a match surfaces ~7 days before it starts). Unknown kickoff → keep.
+    if (nowMs && g.kickoff) {
+      const s = Date.parse(g.kickoff);
+      if (!isNaN(s) && (s < nowMs - 6 * 3600_000 || s > nowMs + windowMs)) continue;
+    }
     const markets = matchMarketSnapshots(g.events, snapshotAt, cfg.maxMarketsPerMatch);
     if (!markets.length) continue;
     const liquidity = markets.reduce((n, m) => n + (Number(m.liquidity ?? 0) || 0), 0);
-    out.push({ home: g.home, away: g.away, startDate: g.startDate, markets, liquidity });
+    out.push({ home: g.home, away: g.away, kickoff: g.kickoff, markets, liquidity });
   }
-  return out.sort((a, b) => b.liquidity - a.liquidity).slice(0, limit);
+  // soonest kickoff first; cap to keep it usable
+  return out.sort((a, b) => (a.kickoff ?? "9") < (b.kickoff ?? "9") ? -1 : 1).slice(0, limit);
 }
 
 export interface MarketSnapshot { label: string; price: number; external_ref: string | null; liquidity: string | null }

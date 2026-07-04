@@ -22,6 +22,13 @@ import { SPORT_TAG_IDS } from "./polymarket.js";
 import { analyzeMatch, jobActive } from "./analysis.js";
 import { exitDecision } from "./thresholds.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
+import { hoursUntil } from "./time.js";
+
+// Timing gates (hours before kickoff). Pre-match assessment opens ~12h out;
+// lineups are treated as out ~1h before (WC teamsheets), triggering the final
+// (post-lineup) reassessment.
+export const ANALYZE_PRE_HOURS = 12;
+export const LINEUP_HOURS = 1;
 import type { SportsProvider } from "./sports.js";
 import type { Match } from "./types.js";
 
@@ -38,6 +45,23 @@ function activeMatches(db: Database): { comp: string; sport: string; match: Matc
 }
 
 // ------------------------------------------------------------
+// 0) Advance clocks — flip lineup_out / state from the kickoff time
+// ------------------------------------------------------------
+
+/** For matches with a real kickoff time, mark lineups out ~1h before (WC), so
+ *  the post-lineup reassessment fires. Only touches time-scheduled (PM) matches;
+ *  ESPN-driven live state is left to syncMatchStatus. */
+export function advanceClocks(db: Database, deps: EngineDeps = {}): void {
+  const nowMs = Date.parse(nowFn(deps)()) || Date.now();
+  for (const { match: m } of activeMatches(db)) {
+    const h = hoursUntil(m.kickoff_at, nowMs);
+    if (h == null) continue;
+    const lineupOut = h <= LINEUP_HOURS;
+    if (lineupOut !== m.lineup_out) R.updateMatch(db, m.id, { lineup_out: lineupOut, state: lineupOut ? "lineup" : "upcoming" });
+  }
+}
+
+// ------------------------------------------------------------
 // 1) Auto-analyze
 // ------------------------------------------------------------
 
@@ -51,6 +75,7 @@ export interface AutoAnalyzeItem { matchId: string; match: string; stage: string
  */
 export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { max?: number } = {}): Promise<AutoAnalyzeItem[]> {
   const max = opts.max ?? 6;
+  const nowMs = Date.parse(nowFn(deps)()) || Date.now();
   const budgetByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.budget]));
   const out: AutoAnalyzeItem[] = [];
   for (const { comp, match: m } of activeMatches(db)) {
@@ -58,6 +83,11 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
     if ((budgetByComp.get(comp) ?? 0) <= 0) continue;              // unfunded → skip (economical)
     if (!R.latestMarkets(db, m.id).length) continue;               // needs tradeable odds
     const stage = m.lineup_out ? "post_lineup" : "pre_lineup";
+    // Time gate: pre-match assessment only within ~12h of kickoff; the final
+    // (post-lineup) pass runs once lineups are out (advanceClocks flips it ~1h
+    // before). Matches with no known kickoff (e.g. ESPN live) aren't gated.
+    const h = hoursUntil(m.kickoff_at, nowMs);
+    if (stage === "pre_lineup" && h != null && h > ANALYZE_PRE_HOURS) continue;
     if (R.assessmentsForMatch(db, m.id).some((a) => a.stage === stage && a.status === "ok")) continue; // already done this stage
     if (jobActive(R.getAnalysisJob(db, m.id), Date.now())) continue; // a run is in flight
     const r = await analyzeMatch(db, m.id, deps);
@@ -95,7 +125,7 @@ export function autoEnter(db: Database, deps: EngineDeps = {}): AutoEnterItem[] 
 
 export interface ExitItem { matchId: string; strategyId: string; market: string; reason: string; pnl: number }
 
-/** Close a single open bet at the current price (cash out the paper position). */
+/** Close a single open bet fully at the current price (cash out the position). */
 function closeBetEarly(db: Database, bet: { id: string; stake: number | null; entry_price: number | null }, currentPriceCents: number, reason: string, minute: string, now: string): number {
   const stake = bet.stake ?? 0;
   const entry = bet.entry_price ?? 0;
@@ -103,6 +133,29 @@ function closeBetEarly(db: Database, bet: { id: string; stake: number | null; en
   const pnl = round2(payout - stake);
   R.updateBet(db, bet.id, { status: pnl >= 0 ? "settled_won" : "settled_lost", result: pnl >= 0 ? "won" : "lost", payout, closing_price: currentPriceCents });
   return pnl;
+}
+
+/**
+ * Close a FRACTION of an open position (partial fixation, §4.2). fraction>=1 is
+ * a full close; otherwise the closed slice is booked as a settled child bet and
+ * the original open bet's stake shrinks by that slice, leaving the rest running.
+ */
+function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceCents: number, minute: string, now: string): { pnl: number; partial: boolean } {
+  if (fraction >= 1) return { pnl: closeBetEarly(db, bet, currentPriceCents, "", minute, now), partial: false };
+  const stake = bet.stake ?? 0, entry = bet.entry_price ?? 0;
+  const closed = round2(stake * fraction);
+  if (closed <= 0 || entry <= 0) return { pnl: closeBetEarly(db, bet, currentPriceCents, "", minute, now), partial: false };
+  const payout = round2(closed * (currentPriceCents / entry));
+  const pnl = round2(payout - closed);
+  R.insertBet(db, {
+    id: R.uid(), match_id: bet.match_id, strategy_id: bet.strategy_id, market_label: bet.market_label,
+    status: pnl >= 0 ? "settled_won" : "settled_lost", proposed_price: bet.proposed_price, entry_price: entry,
+    current_price: currentPriceCents, closing_price: currentPriceCents, ai_prob: bet.ai_prob, stake: closed,
+    rationale: `частичная фиксация ${Math.round(fraction * 100)}%`, entered_minute: bet.entered_minute,
+    result: pnl >= 0 ? "won" : "lost", payout, created_at: now,
+  });
+  R.updateBet(db, bet.id, { stake: round2(stake - closed) }); // keep the remainder open
+  return { pnl, partial: true };
 }
 
 export function evaluateExits(db: Database, deps: EngineDeps = {}): ExitItem[] {
@@ -172,9 +225,10 @@ export async function strategistExits(db: Database, deps: EngineDeps = {}, opts:
         const b = bets.find((x) => norm(x.market_label) === norm(ex.market));
         const mk = b && markets.find((x) => x.label === b.market_label);
         if (!b || !mk || mk.price == null || b.entry_price == null) continue;
-        const pnl = closeBetEarly(db, b, mk.price, ex.reason, minuteLabel(m), now);
-        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${mk.price}¢ · стратег: ${ex.reason} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
-        out.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег: ${ex.reason}`, pnl });
+        const { pnl, partial } = closeBetPortion(db, b, ex.fraction, mk.price, minuteLabel(m), now);
+        const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag}) @ ${mk.price}¢ · стратег: ${ex.reason} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+        out.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}`, pnl });
         touched.add(sid);
       }
     }
@@ -199,16 +253,20 @@ export interface AutoCycleResult {
  * newly-eligible matches, then fill their proposals.
  */
 export async function runAutoCycle(
-  db: Database, provider: SportsProvider | null, deps: EngineDeps = {}, opts: { linkOdds?: boolean; discoverLimit?: number } = {},
+  db: Database, provider: SportsProvider | null, deps: EngineDeps = {}, opts: { linkOdds?: boolean; discoverLimit?: number; discover?: boolean } = {},
 ): Promise<AutoCycleResult> {
   const synced = provider ? await syncCompetitions(db, provider, deps, opts) : [];
   // Discover the many matches Polymarket lists directly (into catch-all comps).
+  // Gated by opts.discover so the frequent tick can skip the daily-ish parse.
   let discovered = 0;
-  for (const sport of Object.keys(SPORT_TAG_IDS)) {
-    const items = await importPolymarketMatches(db, sport, deps, { limit: opts.discoverLimit ?? 60 });
-    discovered += items.length;
+  if (opts.discover !== false) {
+    for (const sport of Object.keys(SPORT_TAG_IDS)) {
+      const items = await importPolymarketMatches(db, sport, deps, { limit: opts.discoverLimit ?? 200 });
+      discovered += items.length;
+    }
   }
   const odds = await refreshActiveOdds(db, deps);
+  advanceClocks(db, deps); // flip lineup_out ~1h before kickoff
   // deterministic safety-net exits first, then strategist-driven cuts on what's left
   const exited = [...evaluateExits(db, deps), ...(await strategistExits(db, deps))];
   const analyzed = await autoAnalyze(db, deps);

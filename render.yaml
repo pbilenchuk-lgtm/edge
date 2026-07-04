@@ -10,10 +10,17 @@ services:
     healthCheckPath: /api/health
     autoDeploy: true
     envVars:
-      - key: SPORTS_ENABLED
-        value: "false"
       - key: POLYMARKET_ENABLED
-        value: "false"
-      # Live Claude analysis is optional — add your key in the dashboard to enable it:
+        value: "true"    # pull matches + odds from Polymarket
+      - key: SPORTS_ENABLED
+        value: "false"   # set true to also pull ESPN live scores
+      # Automated cron (in-process scheduler): parse + analyze + enter/exit on a loop.
+      - key: AUTO_TICK
+        value: "true"
+      - key: TICK_INTERVAL_MIN
+        value: "30"      # odds/exits/analyze/enter cadence
+      - key: DISCOVER_INTERVAL_HR
+        value: "24"      # Polymarket parse cadence (matches surface ~7 days out)
+      # Live Claude analysis needs a key — add it in the dashboard or the Models screen:
       # - key: ANTHROPIC_API_KEY
       #   sync: false

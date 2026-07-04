@@ -8,6 +8,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { providerEnabled, effectiveEnv } from "./llm.js";
 import { jobActive } from "./analysis.js";
+import { warsawLabel } from "./time.js";
 import type { StrategyParams } from "./types.js";
 
 export interface MarketView {
@@ -142,7 +143,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
       matchDb[m.id] = {
         id: m.id, competitionId: m.competition_id, home: m.home, away: m.away, state: m.state,
         minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
-        kickoff: m.kickoff_at, oddsUpdated: null, finalScore: m.final_score, kickoffTime: m.kickoff_time,
+        kickoff: warsawLabel(m.kickoff_at), oddsUpdated: null, finalScore: m.final_score, kickoffTime: m.kickoff_time,
         endTime: m.end_time, duration: m.duration, endNote: m.end_note,
         analyzing: jobActive(R.getAnalysisJob(db, m.id), nowMs),
         preLineup: pre ? view(pre) : null, postLineup: post ? view(post) : null,

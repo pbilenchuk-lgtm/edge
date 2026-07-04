@@ -14,6 +14,7 @@ import {
   brierScore, clvValue, calibration, computeMetrics, verdict, MIN_SAMPLES,
 } from "../src/lib/metrics.js";
 import { checkInvariants } from "../src/lib/invariants.js";
+import { warsawLabel, hoursUntil, isIso } from "../src/lib/time.js";
 import type { StrategyParams } from "../src/lib/types.js";
 
 // ---------------- money (§3.1, §9.1–3) ----------------
@@ -117,6 +118,25 @@ test("sizeBet: Kelly sizes larger on low-price (high-odds) bets", () => {
   // true half-Kelly = 0.5*0.1/0.8 = 0.0625 (not 0.0125).
   const d = sizeBet({ params: { kellyFraction: 0.5, minEdge: 1 }, aiProb: 0.3, priceCents: 20, budget: 1000 });
   assert.ok(Math.abs(d.fraction - 0.0625) < 0.001, `fraction ~0.0625, got ${d.fraction}`);
+});
+
+// ---------------- time (Warsaw display + scheduling) ----------------
+test("time: warsawLabel formats ISO in Warsaw, passes non-ISO through", () => {
+  // 2026-07-07T18:45Z = 20:45 Warsaw (CEST, +2)
+  const lbl = warsawLabel("2026-07-07T18:45:00.000Z");
+  assert.match(lbl!, /20:45/);
+  assert.match(lbl!, /07\.07/);
+  assert.equal(warsawLabel("через 40 мин"), "через 40 мин"); // non-ISO untouched
+  assert.equal(warsawLabel(null), null);
+  assert.equal(isIso("2026-07-07T18:45:00Z"), true);
+  assert.equal(isIso("через 40 мин"), false);
+});
+
+test("time: hoursUntil computes lead time", () => {
+  const now = Date.parse("2026-07-07T12:00:00Z");
+  assert.equal(hoursUntil("2026-07-07T18:00:00Z", now), 6);
+  assert.ok(hoursUntil("2026-07-07T11:00:00Z", now)! < 0); // already started
+  assert.equal(hoursUntil("через час", now), null);
 });
 
 // ---------------- settlement (§3.4) ----------------

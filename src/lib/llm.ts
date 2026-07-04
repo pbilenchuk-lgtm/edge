@@ -379,7 +379,7 @@ export interface StrategistInput {
   openPositions: { market: string; entryCents: number; currentCents: number }[];
 }
 export interface StrategistPick { label: string; conviction: "низкая" | "средняя" | "высокая"; reason: string }
-export interface StrategistExit { market: string; reason: string }
+export interface StrategistExit { market: string; reason: string; fraction: number } // fraction 0..1 of the position to close
 export interface StrategistDecision { ok: boolean; picks: StrategistPick[]; exits: StrategistExit[]; note: string; source: "llm" | "none"; error?: string }
 
 /**
@@ -400,7 +400,7 @@ export async function strategistDecide(
   const res = await callLLM({
     model,
     system:
-      "Ты — трейдер на прогнозных рынках, действующий СТРОГО по методологии из промта стратегии (это твой единственный свод правил). На основе оценки матча и цен реши ДЕЙСТВИЯ. Правила вывода: входи в рынок ТОЛЬКО если методология это разрешает и ты можешь назвать конкретную причину, почему цена неверна; не давай конфликтующих ставок на один матч; уважай стадию матча (предматч/лайв) и правила управления позицией. Верни ТОЛЬКО JSON {picks:[{label, conviction:'низкая'|'средняя'|'высокая', reason}], exits:[{market, reason}], note}. label бери ДОСЛОВНО из списка рынков. Пусто — значит воздержаться. Без пояснений вне JSON.",
+      "Ты — трейдер на прогнозных рынках, действующий СТРОГО по методологии из промта стратегии (это твой единственный свод правил). На основе оценки матча и цен реши ДЕЙСТВИЯ. Правила вывода: входи в рынок ТОЛЬКО если методология это разрешает и ты можешь назвать конкретную причину, почему цена неверна; не давай конфликтующих ставок на один матч; уважай стадию матча (предматч/лайв) и правила управления позицией; выход может быть ЧАСТИЧНЫМ (fraction — доля позиции 0..1, напр. 0.5 = зафиксировать половину на пике, 1 = закрыть полностью). Верни ТОЛЬКО JSON {picks:[{label, conviction:'низкая'|'средняя'|'высокая', reason}], exits:[{market, fraction, reason}], note}. label/market бери ДОСЛОВНО из списков. Пусто — значит воздержаться. Без пояснений вне JSON.",
     prompt: `СТРАТЕГИЯ «${input.strategyName}» (методология):\n${input.strategyPrompt}\n\nМАТЧ: ${input.match.home} — ${input.match.away} (${input.match.sport}, ${input.match.state}${input.match.state === "live" ? `, ${input.match.minute ?? "?"}'` : ""}, счёт ${score}).\nОценка аналитики: уверенность ${input.assessment.confidence}. ${input.assessment.short} Итог: ${input.assessment.verdict}\n\nРЫНКИ:\n${mkList}\n\nОТКРЫТЫЕ ПОЗИЦИИ:\n${posList}\n\nРеши: во что входить (picks) и что закрывать (exits) по методологии.`,
     maxTokens: 900,
   }, deps);
@@ -411,8 +411,9 @@ export async function strategistDecide(
     const picks: StrategistPick[] = Array.isArray(j.picks)
       ? j.picks.filter((p: any) => p && typeof p.label === "string").map((p: any) => ({ label: String(p.label), conviction: conv(p.conviction), reason: String(p.reason ?? "") }))
       : [];
+    const frac = (f: unknown) => (typeof f === "number" && f > 0 && f <= 1 ? f : 1);
     const exits: StrategistExit[] = Array.isArray(j.exits)
-      ? j.exits.filter((e: any) => e && typeof e.market === "string").map((e: any) => ({ market: String(e.market), reason: String(e.reason ?? "") }))
+      ? j.exits.filter((e: any) => e && typeof e.market === "string").map((e: any) => ({ market: String(e.market), reason: String(e.reason ?? ""), fraction: frac(e.fraction) }))
       : [];
     return { ok: true, picks, exits, note: String(j.note ?? ""), source: "llm" };
   } catch {
