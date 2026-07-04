@@ -17,6 +17,11 @@ const T = "2026-07-03T12:00:00.000Z"; // deterministic seed timestamp
 const oddsToCents = (odds: number) => Math.round((1 / odds) * 100);
 
 export function seedDatabase(db: Database): void {
+  // DESTRUCTIVE demo seed (SEED_DEMO=true / tests only). Refuse to run in a real
+  // deployment so an accidental SEED_DEMO can never wipe a live DB.
+  if ((process.env.NODE_ENV === "production") && (process.env.SEED_DEMO ?? "").toLowerCase() !== "true") {
+    throw new Error("seedDatabase is destructive; set SEED_DEMO=true to run it explicitly");
+  }
   // idempotent: wipe in FK-safe order
   for (const t of [
     "trade_log", "reassessments", "bets", "markets", "assessments", "analysis_jobs", "match_events", "match_live", "market_open", "cron_log",

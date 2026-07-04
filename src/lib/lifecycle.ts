@@ -61,7 +61,15 @@ export function advanceClocks(db: Database, deps: EngineDeps = {}): void {
     const h = hoursUntil(m.kickoff_at, nowMs);
     if (h == null) continue;
     const lineupOut = h <= LINEUP_HOURS;
-    if (lineupOut !== m.lineup_out) R.updateMatch(db, m.id, { lineup_out: lineupOut, state: lineupOut ? "lineup" : "upcoming" });
+    // Never clobber a live (or finished) match back to lineup/upcoming — only
+    // pre-match matches follow the time-based lineup schedule. A live match with
+    // lineup_out=false (e.g. a league ESPN gives no teamsheet for) would
+    // otherwise get regressed to "lineup" once kickoff is <1h away.
+    if (lineupOut !== m.lineup_out) {
+      const patch: any = { lineup_out: lineupOut };
+      if (m.state === "upcoming" || m.state === "lineup") patch.state = lineupOut ? "lineup" : "upcoming";
+      R.updateMatch(db, m.id, patch);
+    }
   }
 }
 
@@ -356,35 +364,46 @@ export interface AutoCycleResult {
 export async function runAutoCycle(
   db: Database, provider: SportsProvider | null, deps: EngineDeps = {}, opts: { linkOdds?: boolean; discoverLimit?: number; discover?: boolean } = {},
 ): Promise<AutoCycleResult> {
-  const synced = provider ? await syncCompetitions(db, provider, deps, opts) : [];
+  // Each stage is isolated: a transient throw in one provider call (ESPN /
+  // Polymarket network blip) must NOT abort the whole cycle and skip the
+  // downstream money-management steps (exits / entries / settlement). Failed
+  // stages degrade to their empty result and the pass continues.
+  const step = async <T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
+    try { return await fn(); } catch (e) { console.error(`[autoCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
+  };
+  const stepSync = <T>(label: string, fn: () => T, fallback: T): T => {
+    try { return fn(); } catch (e) { console.error(`[autoCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
+  };
+
+  const synced = provider ? await step("sync", () => syncCompetitions(db, provider!, deps, opts), []) : [];
   // Discover the many matches Polymarket lists directly (into catch-all comps).
   // Gated by opts.discover so the frequent tick can skip the daily-ish parse.
   let discovered = 0;
   if (opts.discover !== false) {
     for (const sport of Object.keys(SPORT_TAG_IDS)) {
-      const items = await importPolymarketMatches(db, sport, deps, { limit: opts.discoverLimit ?? 200 });
+      const items = await step("discover", () => importPolymarketMatches(db, sport, deps, { limit: opts.discoverLimit ?? 200 }), [] as any[]);
       discovered += items.length;
     }
   }
-  const odds = await refreshActiveOdds(db, deps);
+  const odds = await step("odds", () => refreshActiveOdds(db, deps), [] as Awaited<ReturnType<typeof refreshActiveOdds>>);
   // Pull real lineups + live events (ESPN) — this feeds matchContext and, via
   // its fresh events, arms the strategist's in-match reassessment triggers.
-  const enrich = provider ? await enrichFromEspn(db, provider, deps) : { enriched: 0, newEvents: [] };
+  const enrich = provider ? await step("enrich", () => enrichFromEspn(db, provider!, deps), { enriched: 0, newEvents: [] }) : { enriched: 0, newEvents: [] };
   const labelFor = new Map<string, ReassessTrigger>();
   for (const e of enrich.newEvents) if (!labelFor.has(e.matchId)) labelFor.set(e.matchId, LIVE_TRIGGER_TYPES.has(e.type) ? (e.type as ReassessTrigger) : "price_move");
   const triggers = new Set(enrich.newEvents.map((e) => e.matchId));
-  advanceClocks(db, deps); // flip lineup_out ~1h before kickoff (time-scheduled fallback)
-  captureLiveOpens(db, deps); // kickoff-price baseline for the odds column
+  stepSync("advanceClocks", () => advanceClocks(db, deps), undefined); // flip lineup_out ~1h before kickoff
+  stepSync("captureLiveOpens", () => captureLiveOpens(db, deps), undefined); // kickoff-price baseline
   // Analyze BEFORE reassessment: analyzeMatch wipes a match's proposed bets to
   // replace them with the fresh stage's, which would otherwise delete brand-new
   // reassessment proposals created in the same cycle. Running it first means the
   // reassessment's entries are added afterwards and survive to autoEnter.
-  const analyzed = await autoAnalyze(db, deps);
+  const analyzed = await step("analyze", () => autoAnalyze(db, deps), [] as AutoAnalyzeItem[]);
   // deterministic safety-net exits, then strategist-driven reassessment (exits +
   // fresh entries) on matches with risk or a fresh live trigger.
-  const reassess = await strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor });
-  const exited = [...evaluateExits(db, deps), ...reassess.exits];
-  const entered = autoEnter(db, deps); // fills both analyze- and reassess-proposed bets
+  const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [] } as ReassessResult);
+  const exited = [...stepSync("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
+  const entered = stepSync("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
   return {
     synced: synced.length, imported: synced.filter((r) => r.created).length, discovered,
     oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),

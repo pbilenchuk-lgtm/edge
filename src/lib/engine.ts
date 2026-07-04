@@ -497,7 +497,13 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       const flip = nameMatch(m.home, s.away); // DB home is ESPN's away side → scores/lineups mirrored
       const scoreHome = flip ? s.scoreAway : s.scoreHome;
       const scoreAway = flip ? s.scoreHome : s.scoreAway;
+      // Did THIS enrich transition the match into "finished"? Settlement lives
+      // in settleMatch (called by syncMatchStatus, guarded on from!=="finished"),
+      // so if enrich flips a match to finished first, syncMatchStatus would skip
+      // it forever and its open bets would never resolve. Settle here instead.
+      const becameFinished = (s.final || s.state === "finished") && m.state !== "finished";
       R.updateMatch(db, m.id, { state: s.state, minute: s.minute, score_home: scoreHome, score_away: scoreAway, clock: s.clock ?? null, ...(s.final ? { final_score: `${scoreHome ?? 0}:${scoreAway ?? 0}` } : {}) });
+      if (becameFinished) { const fresh = R.getMatch(db, m.id); if (fresh) settleMatch(db, fresh, deps); }
       const detail = await provider.matchDetail!("football", league, s.externalRef);
       if (detail) {
         const homeLineup = flip ? detail.lineups.away : detail.lineups.home;

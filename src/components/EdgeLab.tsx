@@ -163,10 +163,13 @@ class ErrorBoundary extends React.Component<{ label?: string; children: React.Re
 
 export default function EdgeLab({ initial }: { initial: AppData }) {
   const SPORTS = initial.sports;
-  const QUALITY = initial.quality;
-  const EVENT_FEED = initial.eventFeed;
   const COMPETITIONS = initial.competitions;
   const [TOTAL_BALANCE, setTotalBalance] = useState(initial.treasuryTotal);
+  // These update on reloadApp too (not just at first load) so the Metrics/Feed
+  // screens reflect live settlement/stats instead of the initial snapshot.
+  const [QUALITY, setQuality] = useState(initial.quality);
+  const [EVENT_FEED, setEventFeed] = useState(initial.eventFeed);
+  const [strategyStats, setStrategyStats] = useState(initial.strategyStats);
 
   const [screen, setScreen] = useState("matches");
   const toastId = useRef(0);
@@ -185,7 +188,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [compModal, setCompModal] = useState<string | null>(null);
   const [shareModal, setShareModal] = useState<string | null>(null);
 
-  const onSport = (id: string) => { setSportId(id); setCompId(COMPETITIONS.find((c) => c.sport === id)!.id); };
+  const onSport = (id: string) => { setSportId(id); const c = COMPETITIONS.find((c) => c.sport === id); if (c) setCompId(c.id); }; // sport may have no comps yet — don't crash
 
   const allocatedSum = Object.values(compBudget).reduce((a, b) => a + b, 0);
   const freeBalance = TOTAL_BALANCE - allocatedSum;
@@ -247,9 +250,20 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     }
   };
   const reloadApp = async () => {
-    const app = await (await fetch("/api/app")).json();
+    let app: any;
+    try { app = await (await fetch("/api/app")).json(); } catch { return; } // cold start / redeploy — keep current state
+    if (!app || app.error) return;
     if (app.matchDb) setMatchDb(app.matchDb);
     if (app.catalog) setCatalog(app.catalog);
+    // Keep the allocation maps in sync with the server too — otherwise a
+    // strategy the cron funded/activated stays excluded from `compStrats`, and
+    // all its per-strategy tab content (log / reassess / settle) renders empty.
+    if (app.compBudget) setCompBudget(app.compBudget);
+    if (app.shares) setShares(app.shares);
+    if (typeof app.treasuryTotal === "number") setTotalBalance(app.treasuryTotal);
+    if (app.strategyStats) setStrategyStats(app.strategyStats);
+    if (app.eventFeed) setEventFeed(app.eventFeed);
+    if (app.quality) setQuality(app.quality);
   };
 
   // Live auto-refresh: while ANY match is in play, every 3s (a) pull fresh CLOB
@@ -433,7 +447,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       ) : screen === "feed" ? (
         <FeedScreen feed={EVENT_FEED} />
       ) : screen === "metrics" ? (
-        <MetricsScreen catalog={catalog} quality={QUALITY} stats={initial.strategyStats} />
+        <MetricsScreen catalog={catalog} quality={QUALITY} stats={strategyStats} />
       ) : (
         <ModelsScreen providers={providers} setProviders={setProviders} total={TOTAL_BALANCE} allocated={allocatedSum} cron={initial.cron}
           onSetTotal={async (amount: number) => {
@@ -458,8 +472,21 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess, onAnalyze, onResumeAnalyze }: any) {
   const meta = STATE_META[match.state];
   const hasLineups = LINEUP_SPORTS.has(comp.sport); // does this sport have team sheets?
-  const hasLog = match.state === "live" || match.state === "finished";
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
+  // Strategies to surface in the per-strategy bars (log / reassess / settle): the
+  // funded ones PLUS any that actually have data on THIS match. A strategy can
+  // place a bet and then have its share zeroed (or the client's share map lag
+  // the server), which would drop it from `compStrats` and make its log /
+  // reassessments unreachable. Union keeps its history visible.
+  const dataStratIds = new Set<string>([
+    ...Object.keys(match.logByStrat || {}), ...Object.keys(match.reassessByStrat || {}),
+    ...Object.keys(match.settledBets || {}), ...Object.keys(match.bets || {}),
+  ]);
+  const barStrats = catalog.filter((s: any) => compStrats.some((c: any) => c.id === s.id) || dataStratIds.has(s.id));
+  // Show the Лог tab whenever there ARE log rows, not only for live/finished —
+  // a pre-match (upcoming/lineup) entry writes a trade-log row too, and gating
+  // on state alone hid it entirely ("ставку поставило, но лог не отобразило").
+  const hasLog = match.state === "live" || match.state === "finished" || Object.values(match.logByStrat || {}).some((a: any) => a?.length);
   const hasReassess = Object.keys(match.reassessByStrat || {}).length > 0;
   // Split settled bets: resolution = the market actually resolved (settledBy null);
   // cashout = closed early or partially fixed mid-match (settledBy early/partial).
@@ -480,7 +507,15 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   // mid-match partial fixation must not hijack a live card into "рассчитано".
   const defaultTab = hasResolution ? "settle" : "strat";
   const [tab, setTab] = useState(defaultTab);
-  const [logStrat, setLogStrat] = useState(compStrats[0]?.id);
+  const [logStrat, setLogStrat] = useState(barStrats[0]?.id);
+  // Re-sync selections after a reload: the card never remounts, so a `logStrat`
+  // pinned to a since-removed strategy (or undefined from an empty first mount)
+  // would leave the log/reassess panels pointed at nothing. Likewise, keep the
+  // active tab valid when the visible tab set changes (e.g. a match resolves).
+  const barStratKey = barStrats.map((s: any) => s.id).join(",");
+  const tabKey = tabs.map((t) => t.id).join(",");
+  useEffect(() => { if (!barStrats.some((s: any) => s.id === logStrat)) setLogStrat(barStrats[0]?.id); }, [barStratKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!tabs.some((t) => t.id === tab)) setTab(defaultTab); }, [tabKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const [refreshing, setRefreshing] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
@@ -623,8 +658,8 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                       {items.length === 0 ? <div style={S.noBets}>ставок нет — край недостаточен, стратегия пропускает матч</div> : (
                         <div style={S.betList}>
                           {items.map((b: any, i: number) => {
-                            const impl = b.price != null ? b.price / 100 : impliedProb(b.odds);
-                            const edge = (b.aiProb - impl) * 100;
+                            const impl = b.price != null ? b.price / 100 : impliedProb(b.currentPrice ?? b.entryPrice);
+                            const edge = b.aiProb != null ? (b.aiProb - impl) * 100 : null; // no model prob → no edge, don't show "NaN%"
                             const stake = b.stake != null ? b.stake : Math.round(budget * (b.pct || 0));
                             const isOpen = b.status === "open";
                             const live = isOpen && b.currentPrice != null && b.entryPrice != null ? b.stake * (b.currentPrice / b.entryPrice) - b.stake : null;
@@ -633,7 +668,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                               <div key={i} style={S.betRow}>
                                 <div style={S.betMain}><span style={S.betMarket}>{b.market}</span><span style={S.betOdds}>@ {entryDisp}</span></div>
                                 <div style={S.betMeta}>
-                                  <span style={{ ...S.betEdge, color: edge >= 5 ? "#5fd08a" : edge >= 3 ? "#e8a838" : "#9aa4b2" }}>edge {edge >= 0 ? "+" : ""}{edge.toFixed(1)}%</span>
+                                  {edge != null && <span style={{ ...S.betEdge, color: edge >= 5 ? "#5fd08a" : edge >= 3 ? "#e8a838" : "#9aa4b2" }}>edge {edge >= 0 ? "+" : ""}{edge.toFixed(1)}%</span>}
                                   <span style={S.betStake}>{fmtMoney(stake)}</span>
                                   {isOpen && live != null && <span style={{ ...S.betLive, color: live >= 0 ? "#5fd08a" : "#ff6b6b" }}>{live >= 0 ? "▲" : "▼"}{fmtMoney(live)}</span>}
                                   {b.status === "proposed" && <span style={S.betProposed}>предлагается</span>}
@@ -655,7 +690,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                 <div style={S.reassessTop}>
                   <span style={S.reassessHint}>Развёрнутые переоценки ИИ по ходу матча (в отличие от сухого лога). Запустить вручную — кнопкой ↻ у стратегии во вкладке «Ставки стратегий».</span>
                 </div>
-                <div style={S.logStratBar}>{compStrats.map((st: any) => <button key={st.id} onClick={() => setLogStrat(st.id)} style={{ ...S.logStratBtn, ...(logStrat === st.id ? { background: st.color + "22", color: st.color, borderColor: st.color + "66" } : {}) }}>{st.name}</button>)}</div>
+                <div style={S.logStratBar}>{barStrats.map((st: any) => <button key={st.id} onClick={() => setLogStrat(st.id)} style={{ ...S.logStratBtn, ...(logStrat === st.id ? { background: st.color + "22", color: st.color, borderColor: st.color + "66" } : {}) }}>{st.name}</button>)}</div>
                 <div style={S.reassessList}>
                   {(match.reassessByStrat?.[logStrat] || []).length === 0 && <div style={S.noPos}>переоценок пока нет</div>}
                   {(match.reassessByStrat?.[logStrat] || []).map((r: any, i: number) => (
@@ -673,7 +708,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                 {hasResolution && (
                   <div style={{ marginBottom: hasCashout ? 18 : 0 }}>
                     <div style={S.settleHead}>Финальный счёт <b style={{ color: "#e8a838" }}>{match.finalScore}</b> — ставки рассчитаны</div>
-                    {compStrats.filter((st: any) => (match.settledBets[st.id] || []).some((b: any) => !b.settledBy)).map((st: any) => (
+                    {barStrats.filter((st: any) => (match.settledBets[st.id] || []).some((b: any) => !b.settledBy)).map((st: any) => (
                       <div key={st.id} style={S.settleStrat}>
                         <div style={S.settleStratHead}><span style={{ ...S.dot, background: st.color }} /><span style={S.stratName}>{st.name}</span></div>
                         {match.settledBets[st.id].filter((b: any) => !b.settledBy).map((b: any, i: number) => (
@@ -693,7 +728,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                 {hasCashout && (
                   <div>
                     <div style={S.settleHead}>Закрытия по ходу матча — реализованный P&L (не итог матча)</div>
-                    {compStrats.filter((st: any) => (match.settledBets[st.id] || []).some((b: any) => b.settledBy)).map((st: any) => (
+                    {barStrats.filter((st: any) => (match.settledBets[st.id] || []).some((b: any) => b.settledBy)).map((st: any) => (
                       <div key={st.id} style={S.settleStrat}>
                         <div style={S.settleStratHead}><span style={{ ...S.dot, background: st.color }} /><span style={S.stratName}>{st.name}</span></div>
                         {match.settledBets[st.id].filter((b: any) => b.settledBy).map((b: any, i: number) => {
@@ -718,7 +753,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
             )}
             {tab === "log" && hasLog && (
               <div>
-                <div style={S.logStratBar}>{compStrats.map((st: any) => <button key={st.id} onClick={() => setLogStrat(st.id)} style={{ ...S.logStratBtn, ...(logStrat === st.id ? { background: st.color + "22", color: st.color, borderColor: st.color + "66" } : {}) }}>{st.name}</button>)}</div>
+                <div style={S.logStratBar}>{barStrats.map((st: any) => <button key={st.id} onClick={() => setLogStrat(st.id)} style={{ ...S.logStratBtn, ...(logStrat === st.id ? { background: st.color + "22", color: st.color, borderColor: st.color + "66" } : {}) }}>{st.name}</button>)}</div>
                 <div style={S.logList}>
                   {(match.logByStrat?.[logStrat] || []).length === 0 && <div style={S.noPos}>действий пока нет</div>}
                   {(match.logByStrat?.[logStrat] || []).map((e: any, i: number) => <div key={i} style={S.logEntry}><span style={S.logMin}>{e.min}</span><span style={{ ...S.logType, ...logTypeStyle(e.type) }}>{e.type}</span><span style={S.logText}>{e.text}</span></div>)}
@@ -764,7 +799,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
             <div style={S.oddsColLabel}>Итог стратегий</div>
             <div style={S.oddsColSub}>как отработала каждая</div>
             <div style={S.oddsScroll}>
-              {compStrats.filter((st: any) => match.result?.[st.id] != null).map((st: any) => {
+              {barStrats.filter((st: any) => match.result?.[st.id] != null).map((st: any) => {
                 const budget = stratBudget(compBudget, comp.id, shares, st.id);
                 const roi = budget ? (match.result[st.id] / budget) * 100 : 0;
                 return (

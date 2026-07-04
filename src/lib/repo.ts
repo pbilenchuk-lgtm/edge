@@ -296,6 +296,12 @@ export function appendAssessmentHistory(
     `INSERT INTO assessment_history(id,match_id,stage,confidence,short,body,verdict,model,created_at)
      VALUES(?,?,?,?,?,?,?,?,?)`,
   ).run(a.id, a.match_id, a.stage, a.confidence, a.short, a.body, a.verdict, a.model, a.created_at);
+  // Cap per-match history so a long tournament (many re-analyses) can't grow the
+  // table without bound; reads only ever show the last couple dozen anyway.
+  db.prepare(
+    `DELETE FROM assessment_history WHERE match_id=? AND id NOT IN (
+       SELECT id FROM assessment_history WHERE match_id=? ORDER BY created_at DESC LIMIT 40)`,
+  ).run(a.match_id, a.match_id);
 }
 export interface AssessmentHistoryRow {
   id: string; match_id: string; stage: string; confidence: string | null;
