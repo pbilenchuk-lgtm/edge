@@ -83,15 +83,21 @@ export async function analyzeMatch(
   // label first; if the model paraphrased ("Over 2.5" vs "Over 2.5 goals"),
   // fall back to a token-subset match so minor wording drift doesn't silently
   // drop the probability (the distinctive number must still line up).
-  const modelProbs = a.markets.map((mm) => ({ key: norm(mm.label), toks: tokenSet(mm.label), prob: mm.prob }));
+  const modelProbs = a.markets.map((mm) => ({ key: norm(mm.label), toks: tokenSet(mm.label), prob: mm.prob, used: false }));
   for (const m of markets) {
     const key = norm(m.label);
-    let hit = modelProbs.find((e) => e.key === key);
+    const mt = tokenSet(m.label);
+    // Exact normalized match first; consume the entry so it can't be reused.
+    let hit = modelProbs.find((e) => !e.used && e.key === key);
     if (!hit) {
-      const mt = tokenSet(m.label);
-      hit = modelProbs.find((e) => isSubset(mt, e.toks) || isSubset(e.toks, mt));
+      // Fuzzy fallback ONLY when it's SAFE: numbers must line up and every extra
+      // token is pure filler ("Over 2.5" ↔ "Over 2.5 goals"). This stops "Draw"
+      // from grabbing "Draw no bet" (differs by the meaningful {no,bet}), and
+      // requires a unique candidate so ambiguous labels aren't guessed.
+      const cands = modelProbs.filter((e) => !e.used && numTokens(e.key) === numTokens(key) && extraAllFiller(mt, e.toks));
+      if (cands.length === 1) hit = cands[0];
     }
-    if (hit && hit.prob != null) R.setMarketAiProb(db, m.id, hit.prob);
+    if (hit) { hit.used = true; if (hit.prob != null) R.setMarketAiProb(db, m.id, hit.prob); }
   }
   const freshMarkets = R.latestMarkets(db, matchId);
 
@@ -137,6 +143,11 @@ export async function analyzeMatch(
     // re-analysis would double up and breach the per-match budget cap (§9.3).
     const held = new Set(openPos.map((b) => norm(b.market_label)));
     let exposure = openPos.reduce((n, b) => n + (b.stake ?? 0), 0);
+    // Realized P&L this strategy already booked on this match (settled bets) —
+    // feeds the bankroll cap so a loss can't be re-staked in full.
+    const realizedPnl = R.betsForMatch(db, matchId, strat.id)
+      .filter((b) => b.status === "settled_won" || b.status === "settled_lost")
+      .reduce((n, b) => n + ((b.payout ?? 0) - (b.stake ?? 0)), 0);
     let entries = 0, skipped = 0;
     // best edges first
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
@@ -149,7 +160,7 @@ export async function analyzeMatch(
       if (picks && !pick) { skipped++; continue; }
       if (held.has(norm(m.label))) { skipped++; continue; } // already open on this market
       const conf = (pick?.conviction ?? a.confidence) as Confidence;
-      const d = sizeBet({ params: strat.params, aiProb: m.ai_prob as number, priceCents: m.price, budget, exposure, confidence: conf, drawdown });
+      const d = sizeBet({ params: strat.params, aiProb: m.ai_prob as number, priceCents: m.price, budget, exposure, realizedPnl, confidence: conf, drawdown });
       if (!d.enter) { skipped++; continue; }
       exposure += d.stake;
       entries++;
@@ -199,7 +210,18 @@ export function matchContext(db: Database, matchId: string): string | undefined 
   return parts.length ? parts.join("\n") : undefined;
 }
 const tokenSet = (s: string) => new Set(norm(s).split(" ").filter(Boolean));
-const isSubset = (a: Set<string>, b: Set<string>) => a.size > 0 && [...a].every((t) => b.has(t));
+// Numbers a label carries (e.g. "over 2.5 goals" → "2.5"). Two labels can only
+// fuzzy-match if their numbers are identical.
+const numTokens = (s: string) => (s.match(/\d+(?:\.\d+)?/g) ?? []).sort().join(",");
+// Non-numeric words safe to differ between a market label and the model's
+// paraphrase of it. Anything OUTSIDE this set changes the market's meaning.
+const LABEL_FILLER = new Set(["goals", "goal", "total", "points", "point", "match", "result", "the", "full", "time", "of"]);
+/** True iff every token present in exactly one of the two sets is pure filler. */
+const extraAllFiller = (a: Set<string>, b: Set<string>): boolean => {
+  for (const t of a) if (!b.has(t) && !LABEL_FILLER.has(t) && !/^\d/.test(t)) return false;
+  for (const t of b) if (!a.has(t) && !LABEL_FILLER.has(t) && !/^\d/.test(t)) return false;
+  return true;
+};
 
 /**
  * Strategy's current P&L on a competition as a fraction of its budget

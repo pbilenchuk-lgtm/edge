@@ -50,7 +50,11 @@ const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 export function canReassess(
   db: Database, matchId: string, strategyId: string, minute: number | null, gapMinutes: number,
 ): boolean {
-  const prior = R.reassessmentsForMatch(db, matchId).filter((r) => r.strategy_id === strategyId);
+  // Only engine-driven narratives (goal / red_card / price_move) count toward
+  // THIS gap — a routine strategist heartbeat ('time') or a manual run must not
+  // suppress a real on-pitch trigger's narrative (they use separate cadences).
+  const prior = R.reassessmentsForMatch(db, matchId)
+    .filter((r) => r.strategy_id === strategyId && r.trigger !== "time" && r.trigger !== "manual");
   if (!prior.length || minute == null) return true;
   // Compare against the last reassessment that HAS a parseable match-minute;
   // skip null-minute ones (e.g. manual triggers) so they don't reset the gap.

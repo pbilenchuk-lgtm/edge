@@ -105,6 +105,17 @@ test("sizeBet: respects remaining match budget (§9.3)", () => {
   assert.ok(d.stake <= 10, "cannot exceed remaining $10 of budget");
 });
 
+test("sizeBet: a realized loss shrinks re-stakeable budget (no full re-stake after cash-out)", () => {
+  const params: StrategyParams = { flatSize: 1, minEdge: 1 };
+  // budget $100, no open exposure, but $40 already lost on this match →
+  // bankroll left is $60, so a fresh entry can't re-stake the whole $100.
+  const d = sizeBet({ params, aiProb: 0.6, priceCents: 50, budget: 100, exposure: 0, realizedPnl: -40 });
+  assert.ok(d.stake <= 60, `capped to $60 bankroll, got ${d.stake}`);
+  // with no realized loss the same call can use the full budget
+  const full = sizeBet({ params, aiProb: 0.6, priceCents: 50, budget: 100, exposure: 0 });
+  assert.ok(full.stake > 60, `full budget available without a loss, got ${full.stake}`);
+});
+
 test("sizeBet: Kelly uses true fractional formula edge/(1-price)", () => {
   const params: StrategyParams = { kellyFraction: 0.5, cap: 0.25, minEdge: 2 };
   const d = sizeBet({ params, aiProb: 0.55, priceCents: 46.8, budget: 450 });

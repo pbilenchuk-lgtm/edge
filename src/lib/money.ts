@@ -41,9 +41,12 @@ export function canSetBudget(
   return others + newBudget <= totalBalance + 1e-9;
 }
 
-/** $ budget of a strategy on a competition = budget * pct / 100. */
+/** $ budget of a strategy on a competition = budget * pct / 100. Floors (not
+ *  rounds) so that even with shares summing to exactly 100%, the sum of the
+ *  per-strategy budgets can never exceed the competition budget (rounding each
+ *  up could over-allocate by up to $1 per strategy). */
 export function stratBudget(compBudget: number, pct: number): number {
-  return Math.round(((compBudget || 0) * (pct || 0)) / 100);
+  return Math.floor(((compBudget || 0) * (pct || 0)) / 100);
 }
 
 /** Sum of shares (%) on a competition. */

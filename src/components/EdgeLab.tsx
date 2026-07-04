@@ -52,7 +52,7 @@ async function mutate(action: any): Promise<any> {
 
 function stratBudget(compBudget: Record<string, number>, compId: string, shares: any, stratId: string) {
   const pct = shares[compId]?.[stratId] || 0;
-  return Math.round((compBudget[compId] || 0) * pct / 100);
+  return Math.floor((compBudget[compId] || 0) * pct / 100); // floor: summed strat budgets never exceed the comp budget
 }
 function betItems(raw: any) {
   if (!raw) return [];
@@ -83,9 +83,14 @@ function stratEquityOnComp(matchDb: any, comp: any, stratId: string, budget: num
     // state==="finished", so money booked mid-match never showed up in the
     // tournament budget/equity until the match ended.
     if (m.result?.[stratId] != null) realized += m.result[stratId];
+    // Mark opens to the FRESHEST quote (same source the Metrics screen uses), so
+    // the budget/portfolio and stats views agree between odds refreshes.
+    const cur: Record<string, number> = {};
+    for (const mk of (m.markets || [])) if (!(mk.label in cur)) cur[mk.label] = mk.price;
     for (const b of betItems(m.bets?.[stratId])) {
-      if (b.status === "open") {
-        if (b.currentPrice != null && b.entryPrice != null) unreal += b.stake * (b.currentPrice / b.entryPrice) - b.stake;
+      if (b.status === "open" && b.entryPrice != null && b.entryPrice > 0) {
+        const price = cur[b.market] ?? b.currentPrice ?? b.entryPrice;
+        unreal += b.stake * (price / b.entryPrice) - b.stake;
       }
     }
   }
@@ -97,7 +102,7 @@ function stratOverall(competitions: any[], matchDb: any, stratId: string, sportI
   for (const c of comps) {
     const pct = shares[c.id]?.[stratId] || 0;
     if (pct <= 0 || (compBudget[c.id] || 0) <= 0) continue;
-    const budget = Math.round((compBudget[c.id]) * pct / 100);
+    const budget = Math.floor((compBudget[c.id]) * pct / 100);
     const e = stratEquityOnComp(matchDb, c, stratId, budget);
     const pnl = e.equity - budget;
     sumPnl += pnl; sumBudget += budget;
@@ -112,17 +117,20 @@ function collectPortfolio(competitions: any[], matchDb: any, catalog: any[], com
     for (const mid of comp.matches) {
       const m = matchDb[mid];
       if (!m || m.state !== "live") continue;
+      const cur: Record<string, number> = {};
+      for (const mk of (m.markets || [])) if (!(mk.label in cur)) cur[mk.label] = mk.price;
       for (const st of catalog) {
         if (st.sport !== comp.sport) continue;
         if ((shares[comp.id]?.[st.id] || 0) <= 0 || (compBudget[comp.id] || 0) <= 0) continue;
         for (const b of betItems(m.bets?.[st.id])) {
           if (b.status !== "open") continue;
-          const live = b.currentPrice != null && b.entryPrice != null ? b.stake * (b.currentPrice / b.entryPrice) - b.stake : 0;
+          const price = b.entryPrice != null ? (cur[b.market] ?? b.currentPrice ?? b.entryPrice) : null; // freshest quote
+          const live = price != null && b.entryPrice != null && b.entryPrice > 0 ? b.stake * (price / b.entryPrice) - b.stake : 0;
           positions.push({
             sport: comp.sport, compName: comp.name, compId: comp.id,
             match: `${m.home}–${m.away}`, minute: m.minute,
             strat: st.name, stratColor: st.color, stratId: st.id,
-            market: b.market, stake: b.stake, entryPrice: b.entryPrice, currentPrice: b.currentPrice,
+            market: b.market, stake: b.stake, entryPrice: b.entryPrice, currentPrice: price ?? b.currentPrice,
             live, entered: b.entered,
           });
         }
@@ -192,6 +200,12 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 
   const allocatedSum = Object.values(compBudget).reduce((a, b) => a + b, 0);
   const freeBalance = TOTAL_BALANCE - allocatedSum;
+  // Total realized P&L booked across ALL tournaments (settled bets). Surfaced in
+  // the treasury bar so winnings/losses are visible there too — previously only
+  // the per-tournament equity reflected them, so the treasury looked frozen
+  // after a win/loss. (Allocation still validates against the base balance.)
+  const totalRealized = Object.values(matchDb).reduce((a: number, m: any) =>
+    a + Object.values(m?.result || {}).reduce((x: number, v: any) => x + (v as number), 0), 0);
 
   const setBudget = (cid: string, amt: number) => {
     setCompBudget((p) => ({ ...p, [cid]: amt })); setCompModal(null);
@@ -361,6 +375,11 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
         <div style={S.trDiv} />
         <div style={S.trCell}><div style={S.trLbl}>Свободно</div><div style={{ ...S.trVal, color: freeBalance >= 0 ? "#5fd08a" : "#ff6b6b" }}>{fmtMoney0(freeBalance)}</div></div>
         <div style={S.trDiv} />
+        <div style={S.trCell} title="Суммарный реализованный P&L по всем турнирам (расчёты и закрытия). Распределение бюджета считается от базового баланса.">
+          <div style={S.trLbl}>P&amp;L реализ.</div>
+          <div style={{ ...S.trVal, color: totalRealized >= 0 ? "#5fd08a" : "#ff6b6b" }}>{totalRealized >= 0 ? "+" : ""}{fmtMoney0(totalRealized)}</div>
+        </div>
+        <div style={S.trDiv} />
         <div style={S.trCell}>
           <button style={{ ...S.discoverBtn, opacity: discovering ? 0.6 : 1 }} disabled={discovering} onClick={doDiscover} title="Подтянуть матчи с Polymarket + составы ESPN + котировки (без ИИ)">{discovering ? "подтягиваю…" : "↧ Подтянуть матчи"}</button>
         </div>
@@ -390,6 +409,10 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
               // tournament shows "бюджет свободен", not a phantom -100%.
               const delta = cStrats.reduce((a, s) => { const e = stratEquityOnComp(matchDb, c, s.id, stratBudget(compBudget, c.id, shares, s.id)); return a + e.realized + e.unreal; }, 0);
               const eq = budget + delta;
+              // ROI denominator = the ACTIVE (allocated) strategy budgets, not the
+              // whole comp budget — so the comp-card % reconciles with the sum of
+              // the per-strategy rows below instead of being diluted by idle budget.
+              const activeBudget = cStrats.reduce((a, s) => a + stratBudget(compBudget, c.id, shares, s.id), 0);
               return (
                 <div key={c.id} style={{ ...S.compCard, ...(c.id === comp?.id ? S.compOn : {}) }}>
                   <button style={S.compMain} onClick={() => setCompId(c.id)}>
@@ -397,7 +420,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
                     {budget > 0 ? <>
                       <div style={S.compBudget}>{fmtMoney0(budget)} <span style={S.compBudgetLbl}>бюджет</span></div>
                       {Math.round(delta * 100) !== 0
-                        ? <div style={{ ...S.compDelta, color: delta >= 0 ? "#5fd08a" : "#ff6b6b" }}>{delta >= 0 ? "▲ +" : "▼ "}{fmtMoney(delta)} ({delta >= 0 ? "+" : ""}{((delta / budget) * 100).toFixed(1)}%) <span style={S.compRoi}>· сейчас {fmtMoney0(eq)}</span></div>
+                        ? <div style={{ ...S.compDelta, color: delta >= 0 ? "#5fd08a" : "#ff6b6b" }}>{delta >= 0 ? "▲ +" : "▼ "}{fmtMoney(delta)} ({delta >= 0 ? "+" : ""}{(activeBudget > 0 ? (delta / activeBudget) * 100 : 0).toFixed(1)}%) <span style={S.compRoi}>· сейчас {fmtMoney0(eq)}</span></div>
                         : <div style={S.compFlat}>ставок нет · бюджет свободен</div>}
                     </> : <div style={S.compUnalloc}>{c.matches.length ? "нет бюджета" : "нет матчей"}</div>}
                   </button>
@@ -1352,7 +1375,7 @@ function SharesModal({ comp, strats, budget, current, onClose, onSave }: any) {
           <span style={S.shareName}>{s.name}</span>
           <input type="range" min="0" max="100" value={sh[s.id]} onChange={(e) => setPct(s.id, +e.target.value)} style={S.shareRange} />
           <div style={S.sharePctBox}><input type="number" min="0" max="100" value={sh[s.id]} onChange={(e) => setPct(s.id, +e.target.value)} style={S.sharePctInput} /><span style={S.sharePctSign}>%</span></div>
-          <span style={S.shareDollar}>{fmtMoney0(Math.round(budget * sh[s.id] / 100))}</span>
+          <span style={S.shareDollar}>{fmtMoney0(Math.floor(budget * sh[s.id] / 100))}</span>
         </div>
       ))}
       <div style={S.allocNote}>Проверенной стратегии — больше %, тестовой — меньше. Сумма не обязана быть 100%.</div>

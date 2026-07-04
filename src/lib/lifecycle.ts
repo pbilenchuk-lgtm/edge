@@ -119,11 +119,20 @@ export function autoEnter(db: Database, deps: EngineDeps = {}): AutoEnterItem[] 
   const out: AutoEnterItem[] = [];
   for (const { match: m } of activeMatches(db)) {
     const markets = R.latestMarkets(db, m.id);
-    for (const b of R.betsForMatch(db, m.id)) {
+    const bets = R.betsForMatch(db, m.id);
+    // A strategy must never hold two OPEN positions on the SAME market — that's
+    // the double-exposure a concurrent analyze/reassess race (or analyze+reassess
+    // in one cycle) could otherwise fill. This single choke point guards it
+    // regardless of how duplicate proposals were created.
+    const openKey = new Set(bets.filter((b) => b.status === "open").map((b) => `${b.strategy_id}|${b.market_label}`));
+    for (const b of bets) {
       if (b.status !== "proposed") continue;
+      const key = `${b.strategy_id}|${b.market_label}`;
+      if (openKey.has(key)) { R.updateBet(db, b.id, { status: "not_filled" }); continue; } // already in this market — drop the dup
       const price = markets.find((x) => x.label === b.market_label)?.price ?? b.proposed_price ?? 0;
       if (price <= 0) continue;
       R.updateBet(db, b.id, { status: "open", entry_price: price, current_price: price, entered_minute: minuteLabel(m) });
+      openKey.add(key);
       R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "enter", text: `вход «${b.market_label}» @ ${price}¢ · $${b.stake ?? 0}`, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, price, stake: b.stake ?? 0 });
     }
@@ -321,11 +330,14 @@ export async function strategistReassess(
       // Seed exposure from BOTH open and still-proposed stakes — autoEnter will
       // fill the proposals, so a new entry must be sized against them too (§9.3).
       let exposure = R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").reduce((n, b) => n + (b.stake ?? 0), 0);
+      const realizedPnl = R.betsForMatch(db, m.id, sid)
+        .filter((b) => b.status === "settled_won" || b.status === "settled_lost")
+        .reduce((n, b) => n + ((b.payout ?? 0) - (b.stake ?? 0)), 0);
       for (const pick of dec.picks) {
         const mk = markets.find((x) => norm(x.label) === norm(pick.label));
         if (!mk || mk.ai_prob == null || mk.price == null) continue; // need a probability to size
         if (held.has(norm(mk.label))) continue;                       // already in this market
-        const d = sizeBet({ params: strat.params, aiProb: mk.ai_prob, priceCents: mk.price, budget, exposure, confidence: pick.conviction as Confidence, drawdown });
+        const d = sizeBet({ params: strat.params, aiProb: mk.ai_prob, priceCents: mk.price, budget, exposure, realizedPnl, confidence: pick.conviction as Confidence, drawdown });
         if (!d.enter) continue;
         exposure += d.stake;
         held.add(norm(mk.label));
