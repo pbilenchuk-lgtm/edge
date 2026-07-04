@@ -621,7 +621,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
             </div>
             {match.oddsUpdated && <div style={S.oddsUpdated}>обновлено {match.oddsUpdated}</div>}
             <div style={S.oddsScroll}>
-              {match.markets.map((mk: any) => {
+              {[...match.markets].sort((a: any, b: any) => (b.price ?? 0) - (a.price ?? 0)).map((mk: any) => {
                 const move = mk.openCents != null ? Math.round(mk.price - mk.openCents) : 0;
                 return (
                   <div key={mk.id} style={S.oddsRow}>

@@ -150,6 +150,8 @@ export interface PolyMarketRow {
   outcomes: string[]; // ["Alcaraz","Sinner"] | ["Over","Under"]
   /** price of the FIRST outcome, in cents 0..100 */
   priceCents: number | null;
+  /** all outcome prices in cents, aligned with `outcomes` (for 2-way expansion) */
+  prices: (number | null)[];
   /** CLOB token ids aligned with outcomes; tokenIds[0] backs priceCents */
   tokenIds: string[];
   liquidity: string | null;
@@ -191,11 +193,12 @@ export function normalizeEvent(raw: any): PolyEvent {
     const outcomes = parseJsonArray(m.outcomes);
     const prices = parseJsonArray(m.outcomePrices);
     const tokenIds = parseJsonArray(m.clobTokenIds);
-    const first = prices.length ? Number(prices[0]) : NaN;
+    const cents = prices.map((p) => { const n = Number(p); return isFinite(n) ? round1(n * 100) : null; });
     return {
       label: m.groupItemTitle || m.question || "",
       outcomes,
-      priceCents: isFinite(first) ? round1(first * 100) : null,
+      priceCents: cents[0] ?? null,
+      prices: cents,
       tokenIds,
       liquidity: m.liquidity != null ? String(m.liquidity) : null,
       conditionId: m.conditionId ?? null,
@@ -457,18 +460,39 @@ export function matchMarketSnapshots(
   const rows: (MarketSnapshot & { liq: number })[] = [];
   for (const ev of events) {
     for (const m of ev.markets) {
-      if (m.priceCents == null || !m.label) continue;
-      if (dropNoise && (m.priceCents <= 1 || m.priceCents >= 99)) continue; // effectively-resolved / dead line
+      if (!m.label) continue;
       if (dropNoise && isNoiseMarket(m.label)) continue;
-      const label = clarifyLabel(m.label, m.outcomes);
-      const key = label.toLowerCase().trim();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      rows.push({ label, price: m.priceCents, external_ref: m.tokenIds[0] ?? null, liquidity: m.liquidity, liq: Number(m.liquidity ?? 0) || 0 });
+      for (const side of marketSides(m)) {
+        if (side.price == null) continue;
+        if (dropNoise && (side.price <= 1 || side.price >= 99)) continue; // effectively-resolved / dead line
+        const key = side.label.toLowerCase().trim();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rows.push({ label: side.label, price: side.price, external_ref: side.token, liquidity: m.liquidity, liq: Number(m.liquidity ?? 0) || 0 });
+      }
     }
   }
   rows.sort((a, b) => b.liq - a.liq);
   return rows.slice(0, cap).map(({ liq, ...s }) => s);
+}
+
+/**
+ * The tradeable side(s) of a market. Usually one (the priced first outcome).
+ * But a GENERIC 2-way market — two entity outcomes and a title that names
+ * neither (e.g. "Team to Advance" with outcomes ["Canada","Morocco"]) — is
+ * expanded into BOTH sides, each backed by its own CLOB token, so the second
+ * team isn't hidden. Spreads/moneylines already name their side in the title
+ * (and Polymarket lists each side separately), so they stay single.
+ */
+function marketSides(m: PolyMarketRow): { label: string; price: number | null; token: string | null }[] {
+  const o = m.outcomes;
+  const isEntity = (s: string) => !!s && !/^(over|under|yes|no)\b/i.test(s.trim());
+  const l = m.label.toLowerCase();
+  if (o.length === 2 && isEntity(o[0]) && isEntity(o[1]) && !l.includes(o[0].toLowerCase()) && !l.includes(o[1].toLowerCase())) {
+    const sides = [0, 1].map((i) => ({ label: `${m.label} — ${o[i]}`, price: m.prices[i] ?? null, token: m.tokenIds[i] ?? null }));
+    if (sides.every((s) => s.price != null)) return sides;
+  }
+  return [{ label: clarifyLabel(m.label, o), price: m.priceCents, token: m.tokenIds[0] ?? null }];
 }
 
 /**

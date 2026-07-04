@@ -194,7 +194,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
   const cronEnabled = (env.AUTO_TICK ?? "false").toLowerCase() === "true";
   const tickMin = Math.max(1, Number(env.TICK_INTERVAL_MIN ?? 30));
   const discoverHr = Math.max(1, Number(env.DISCOVER_INTERVAL_HR ?? 24));
-  const liveSec = Math.max(20, Number(env.LIVE_TICK_SEC ?? 90));
+  const liveSec = Math.max(15, Number(env.LIVE_TICK_SEC ?? 20));
   const recentRuns = R.recentCronLog(db, 15);
   const lastFull = recentRuns.find((r) => r.kind !== "live");
   const lastAt = lastFull ? Date.parse(lastFull.at) : NaN;

@@ -26,7 +26,7 @@ export function startScheduler(env: Record<string, string | undefined> = process
   started = true;
   const tickMin = Math.max(1, Number(env.TICK_INTERVAL_MIN ?? 30));
   const discoverHr = Math.max(1, Number(env.DISCOVER_INTERVAL_HR ?? 24));
-  const liveSec = Math.max(20, Number(env.LIVE_TICK_SEC ?? 90));
+  const liveSec = Math.max(15, Number(env.LIVE_TICK_SEC ?? 20));
   const linkOdds = loadPolymarketConfig(env).enabled;
   let lastDiscover = 0;
   // One shared mutex: the slow full cycle and the fast live loop both touch

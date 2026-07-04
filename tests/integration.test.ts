@@ -156,6 +156,29 @@ test("polymarket: matchMarketSnapshots aggregates events, drops noise, dedups, c
   assert.equal(capped.length, 1); // most-liquid kept
 });
 
+test("polymarket: a generic 2-way market expands into BOTH sides (own tokens)", () => {
+  // "Team to Advance" names neither team → show both, each with its token/price
+  const evA = normalizeEvent({ id: "1", slug: "a", title: "Paraguay vs France", markets: [
+    { groupItemTitle: "Team to Advance", question: "To advance", outcomes: '["Paraguay","France"]', outcomePrices: '["0.075","0.925"]', clobTokenIds: '["tk-par","tk-fra"]', liquidity: "5000", conditionId: "c" },
+  ] });
+  const snaps = matchMarketSnapshots([evA], "t", 10);
+  const par = snaps.find((s) => s.label === "Team to Advance — Paraguay");
+  const fra = snaps.find((s) => s.label === "Team to Advance — France");
+  assert.ok(par && fra, "both sides present");
+  assert.equal(par!.price, 7.5);
+  assert.equal(fra!.price, 92.5);
+  assert.equal(par!.external_ref, "tk-par");
+  assert.equal(fra!.external_ref, "tk-fra"); // distinct tradeable tokens
+
+  // a spread already names its side → stays a single row (PM lists the other side separately)
+  const evB = normalizeEvent({ id: "2", slug: "b", title: "A vs B", markets: [
+    { groupItemTitle: "Morocco (-1.5)", question: "Spread", outcomes: '["Morocco","Canada"]', outcomePrices: '["0.3","0.7"]', clobTokenIds: '["t1","t2"]', liquidity: "900", conditionId: "c" },
+  ] });
+  const s2 = matchMarketSnapshots([evB], "t", 10);
+  assert.equal(s2.length, 1);
+  assert.equal(s2[0].label, "Morocco (-1.5)");
+});
+
 test("polymarket: titleMatchScore matches on surnames", () => {
   const t = "Wimbledon Juniors, Boys: Connor Doig vs Eudald Gonzalez";
   assert.equal(titleMatchScore(t, "Connor Doig", "Eudald Gonzalez"), 2);
