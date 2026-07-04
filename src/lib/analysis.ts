@@ -275,7 +275,18 @@ export function startAnalysis(db: Database, matchId: string, deps: AnalyzeDeps =
   // (§6); we mirror the outcome onto the durable job so any client/instance can
   // see that this run failed even when we kept the previous good assessment.
   void analyzeMatch(db, matchId, deps)
-    .then((r) => R.finishAnalysisJob(db, matchId, !r.ok, r.error ?? null, now(deps)()))
+    .then(async (r) => {
+      // A manual "Прогнать стратегию" must actually PLACE the bets it proposes —
+      // otherwise they sit as «предлагается» until a cron tick happens to fill
+      // them (and never, if the in-process cron isn't running). Fill immediately
+      // at the current quote, the same step the cron/reassess run. Dynamic import
+      // avoids the analysis⇄lifecycle import cycle; best-effort so a fill error
+      // never masks a successful analysis.
+      if (r.ok) {
+        try { const { autoEnter } = await import("./lifecycle.js"); autoEnter(db, deps); } catch { /* fill is best-effort */ }
+      }
+      R.finishAnalysisJob(db, matchId, !r.ok, r.error ?? null, now(deps)());
+    })
     .catch((e) => R.finishAnalysisJob(db, matchId, true, e instanceof Error ? e.message : String(e), now(deps)()));
   return { ok: true, status: "analyzing" };
 }
