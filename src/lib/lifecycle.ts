@@ -278,6 +278,11 @@ export async function strategistReassess(
     if (calls >= max) break;
     const c = comps.get(comp);
     if (!c || c.budget <= 0) continue;
+    // Reassessment is IN-MATCH management that reacts to real events — never run
+    // it pre-match / pre-lineup, where there is nothing to react to and it only
+    // emits "реальных событий нет, ничего не фиксирую" noise. Allow it once the
+    // match is LIVE, or (for lineup sports) once the lineups are out.
+    if (!(m.state === "live" || (LINEUP_SPORTS.has(sport) && m.lineup_out))) continue;
     const open = R.betsForMatch(db, m.id).filter((b) => b.status === "open");
     // Reassess only where there's live risk (open positions) or a fresh trigger.
     // In triggeredOnly mode (fast loop) a trigger is REQUIRED — quiet positions

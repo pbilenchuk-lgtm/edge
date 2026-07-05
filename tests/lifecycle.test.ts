@@ -89,6 +89,20 @@ test("advanceClocks flips lineup_out ~1h before kickoff", () => {
   assert.equal(R.getMatch(db, far)!.lineup_out, false);
 });
 
+test("strategistReassess skips a pre-lineup match (no reassessment before lineups/live)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const pm = R.uid();
+  // upcoming, NO lineup, but carrying an open position → must NOT be reassessed
+  R.insertMatch(db, { id: pm, competition_id: comp.id, home: "A", away: "B", state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: pm });
+  R.insertMarket(db, { id: R.uid(), match_id: pm, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "pm-open", match_id: pm, strategy_id: strat.id, market_label: "Over 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: null, ai_prob: 0.6, stake: 50, rationale: null, entered_minute: "предматч", result: null, payout: null, settled_by: null, created_at: "t" });
+  await strategistReassess(db, { fetchImpl: mockLLM({ picks: [], exits: [], note: "x" }), env: { ANTHROPIC_API_KEY: "k" } }, { max: 50 });
+  assert.equal(R.reassessmentsForMatch(db, pm).length, 0, "no pre-lineup reassessment even with an open position");
+});
 test("strategistReassess supports partial fixation (fraction)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
