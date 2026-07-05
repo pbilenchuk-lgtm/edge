@@ -269,3 +269,29 @@ test("autoAnalyze analyzes an eligible match once per stage", async () => {
   const second = await autoAnalyze(db, deps);
   assert.ok(!second.some((a) => a.matchId === "m-lineup"), "not re-analyzed for the same stage");
 });
+
+test("pruneMarketSnapshots caps non-closing history, keeps closing snapshots", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const now = (n: number) => `2026-07-01T00:${String(n).padStart(2, "0")}:00.000Z`;
+  // 20 non-closing snapshots + 1 closing snapshot for one market label
+  for (let i = 0; i < 20; i++) R.insertMarket(db, { id: R.uid(), match_id: "m-live", label: "PRUNE ME", price: 50 + i, ai_prob: null, liquidity: null, external_ref: `tok-${i}`, snapshot_at: now(i), is_closing: false });
+  R.insertMarket(db, { id: R.uid(), match_id: "m-live", label: "PRUNE ME", price: 99, ai_prob: null, liquidity: null, external_ref: "tok-close", snapshot_at: now(30), is_closing: true });
+  const before = (db.prepare("SELECT COUNT(*) c FROM markets WHERE label='PRUNE ME'").get() as any).c;
+  assert.equal(before, 21);
+  R.pruneMarketSnapshots(db, 8);
+  const nonClosing = (db.prepare("SELECT COUNT(*) c FROM markets WHERE label='PRUNE ME' AND is_closing=0").get() as any).c;
+  const closing = (db.prepare("SELECT COUNT(*) c FROM markets WHERE label='PRUNE ME' AND is_closing=1").get() as any).c;
+  assert.equal(nonClosing, 8, "kept only the latest 8 non-closing");
+  assert.equal(closing, 1, "closing snapshot preserved");
+});
+
+test("matchByMarketTokens finds a fixture by a shared CLOB token", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const tok = R.latestMarkets(db, "m-live")[0]?.external_ref;
+  assert.ok(tok, "seed market has a token ref");
+  const hit = R.matchByMarketTokens(db, ["nope", tok as string]);
+  assert.equal(hit?.id, "m-live");
+  assert.equal(R.matchByMarketTokens(db, ["does-not-exist"]), null);
+});

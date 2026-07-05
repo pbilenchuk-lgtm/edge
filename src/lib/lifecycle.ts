@@ -419,6 +419,7 @@ export async function runAutoCycle(
   const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [] } as ReassessResult);
   const exited = [...stepSync("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
   const entered = stepSync("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
+  stepSync("prune", () => R.pruneMarketSnapshots(db), 0); // keep the snapshot history bounded (persistent DB)
   return {
     synced: synced.length, imported: synced.filter((r) => r.created).length, discovered,
     oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),

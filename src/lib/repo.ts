@@ -348,6 +348,34 @@ export function insertMarket(db: Database, m: Market): void {
      VALUES(?,?,?,?,?,?,?,?,?)`,
   ).run(m.id, m.match_id, m.label, m.price, m.ai_prob, m.liquidity, m.external_ref, m.snapshot_at, m.is_closing ? 1 : 0);
 }
+/** Find the match that already owns a market backed by any of these CLOB token
+ *  refs — a spelling-independent way to recognise the same Polymarket fixture
+ *  across runs (the tokens are stable even when the title's wording drifts). */
+export function matchByMarketTokens(db: Database, tokenRefs: string[]): Match | null {
+  const refs = tokenRefs.filter(Boolean);
+  if (!refs.length) return null;
+  const ph = refs.map(() => "?").join(",");
+  const row = db.prepare(
+    `SELECT m.* FROM matches m JOIN markets k ON k.match_id = m.id
+     WHERE k.external_ref IN (${ph}) LIMIT 1`,
+  ).get(...refs) as Match | undefined;
+  return row ?? null;
+}
+/** Cap the market-snapshot history to the latest `keepPerLabel` NON-closing rows
+ *  per (match, label); closing snapshots (CLV) are always kept. Only the latest
+ *  snapshot per label is ever read, so old ones are dead weight — pruning keeps
+ *  the table bounded now that the DB is on a persistent disk. */
+export function pruneMarketSnapshots(db: Database, keepPerLabel = 8): number {
+  const res = db.prepare(
+    `DELETE FROM markets WHERE id IN (
+       SELECT id FROM (
+         SELECT id, ROW_NUMBER() OVER (PARTITION BY match_id, label ORDER BY snapshot_at DESC, rowid DESC) AS rn
+         FROM markets WHERE is_closing = 0
+       ) WHERE rn > ?
+     )`,
+  ).run(keepPerLabel);
+  return res.changes;
+}
 /** Latest snapshot per market label (or only closing prices). */
 export function latestMarkets(db: Database, matchId: string, closingOnly = false): Market[] {
   const rows = db.prepare(
