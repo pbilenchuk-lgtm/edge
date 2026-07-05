@@ -540,15 +540,35 @@ export function recordMatchStats(db: Database, deps: EngineDeps = {}): number {
   for (const { match: m } of activeMatches(db)) {
     if (m.state !== "live") continue;
     const live = R.getMatchLive(db, m.id);
-    const text = formatMatchStats(live?.stats);
+    // Prefer real ESPN team stats (possession/shots); fall back to a basic market
+    // snapshot (score + prices) so «События матча» ALWAYS shows a 5-min heartbeat,
+    // even on matches ESPN can't feed (tennis / obscure leagues) — otherwise the
+    // tab would be empty and vanish there.
+    const text = formatMatchStats(live?.stats) ?? formatMarketSnapshot(db, m);
     if (!text) continue;
+    // Elapsed minute for a clock-only match (no ESPN minute), for the event label.
+    const elapsed = m.minute ?? (isIsoTs(m.kickoff_at) ? Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at as string)) / 60000)) : null);
     // Cadence gate: skip if a stats snapshot landed within the last interval.
     const prior = R.eventsForMatch(db, m.id).filter((e) => e.type === "stats");
     const last = prior.length ? Date.parse(prior[prior.length - 1].created_at) : NaN;
     if (!isNaN(last) && nowMs - last < STATS_INTERVAL_MIN * 60_000) continue;
-    if (R.insertMatchEvent(db, { id: R.uid(), match_id: m.id, event_key: `stats-${now}`, minute: m.minute, type: "stats", team: null, text, created_at: now })) written++;
+    if (R.insertMatchEvent(db, { id: R.uid(), match_id: m.id, event_key: `stats-${now}`, minute: elapsed, type: "stats", team: null, text, created_at: now })) written++;
   }
   return written;
+}
+
+const isIsoTs = (s: string | null | undefined): boolean => !!s && /^\d{4}-\d\d-\d\dT/.test(s) && !isNaN(Date.parse(s));
+
+/** Basic market snapshot for a live match with no sport-stats feed: current score
+ *  (if any) + the most-liquid markets' prices — «what's happening now» expressed
+ *  through the market, so «События матча» has a heartbeat even without ESPN. */
+function formatMarketSnapshot(db: Database, m: Match): string | null {
+  const markets = R.latestMarkets(db, m.id).filter((mk) => mk.price != null);
+  if (!markets.length) return null;
+  const top = markets.slice().sort((a, b) => (b.price ?? 0) - (a.price ?? 0)).slice(0, 4); // favourite first (liquidity is a display string)
+  const prices = top.map((mk) => `${mk.label} ${mk.price}¢`).join(" · ");
+  const score = (m.score_home != null && m.score_away != null) ? `счёт ${m.score_home}:${m.score_away} · ` : "";
+  return `${score}рынок: ${prices}`;
 }
 
 /** LIVE matches due for a periodic reassessment — those not reassessed in the

@@ -8,7 +8,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { providerEnabled, effectiveEnv } from "./llm.js";
 import { jobActive } from "./analysis.js";
-import { warsawLabel, warsawClock } from "./time.js";
+import { warsawLabel, warsawClock, isIso } from "./time.js";
 import { resolveFootballMarket } from "./settlement.js";
 import type { StrategyParams } from "./types.js";
 
@@ -212,10 +212,16 @@ export function buildAppData(db: Database, env = process.env): AppData {
         ? { home: parseLineup(live.home_lineup), away: parseLineup(live.away_lineup) } : null;
       const events = R.eventsForMatch(db, m.id).filter((e) => e.type !== "other")
         .map((e) => ({ minute: e.minute, type: e.type, team: e.team, text: e.text }));
+      // For a clock-driven live match (no ESPN minute) show how long it's been
+      // going, computed from kickoff — so the card reads "LIVE · N'" instead of a
+      // bare "LIVE". ESPN-driven matches keep their real match minute.
+      const liveMinute = m.state === "live" && m.minute == null && isIso(m.kickoff_at)
+        ? Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at)) / 60000))
+        : m.minute;
 
       matchDb[m.id] = {
         id: m.id, competitionId: m.competition_id, home: m.home, away: m.away, state: m.state,
-        minute: m.minute, clock: m.clock ?? null, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
+        minute: liveMinute, clock: m.clock ?? null, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
         kickoff: warsawLabel(m.kickoff_at), oddsUpdated: null, finalScore: m.final_score, kickoffTime: m.kickoff_time,
         endTime: m.end_time, duration: m.duration, endNote: m.end_note,
         analyzing: jobActive(R.getAnalysisJob(db, m.id), nowMs),

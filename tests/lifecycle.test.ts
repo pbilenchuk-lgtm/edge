@@ -401,28 +401,38 @@ test("recordMatchStats writes a stats event for a live match, then rate-limits t
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Real", away: "City", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   R.upsertMatchLive(db, { match_id: mid, espn_event_id: "E1", league: "eng.1", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { team: "Real", items: [{ label: "владение", value: "58%" }] }, away: { team: "City", items: [{ label: "владение", value: "42%" }] } }), updated_at: "t" });
 
-  const n1 = recordMatchStats(db, { now: () => "2026-07-05T18:00:00Z" });
-  assert.equal(n1, 1, "first snapshot written");
+  recordMatchStats(db, { now: () => "2026-07-05T18:00:00Z" });
   const evts = R.eventsForMatch(db, mid).filter((e) => e.type === "stats");
-  assert.equal(evts.length, 1);
+  assert.equal(evts.length, 1, "first snapshot written");
   assert.match(evts[0].text, /владение 58%–42%/);
 
-  // 3 min later — within the 5-min interval → no new snapshot
-  assert.equal(recordMatchStats(db, { now: () => "2026-07-05T18:03:00Z" }), 0, "rate-limited within 5 min");
+  // 3 min later — within the 5-min interval → no new snapshot for this match
+  recordMatchStats(db, { now: () => "2026-07-05T18:03:00Z" });
+  assert.equal(R.eventsForMatch(db, mid).filter((e) => e.type === "stats").length, 1, "rate-limited within 5 min");
   // 6 min later — a fresh snapshot lands
-  assert.equal(recordMatchStats(db, { now: () => "2026-07-05T18:06:00Z" }), 1, "new snapshot after the interval");
-  assert.equal(R.eventsForMatch(db, mid).filter((e) => e.type === "stats").length, 2);
+  recordMatchStats(db, { now: () => "2026-07-05T18:06:00Z" });
+  assert.equal(R.eventsForMatch(db, mid).filter((e) => e.type === "stats").length, 2, "new snapshot after the interval");
 });
 
-test("recordMatchStats ignores non-live matches and matches without stats", () => {
+test("recordMatchStats: market-snapshot fallback when no ESPN stats; skips non-live and marketless", () => {
   const db = openDb(":memory:");
   seedDatabase(db);
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
-  const up = R.uid(), noStats = R.uid();
-  // upcoming with stats → skipped (not live)
+  const up = R.uid(), noMkt = R.uid(), fb = R.uid();
+  // upcoming (even with stats) → skipped: not live
   R.insertMatch(db, { id: up, competition_id: comp.id, home: "A", away: "B", state: "upcoming", lineup_out: true, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: up });
   R.upsertMatchLive(db, { match_id: up, espn_event_id: "E", league: "x", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { team: "A", items: [{ label: "владение", value: "50%" }] }, away: { team: "B", items: [] } }), updated_at: "t" });
-  // live but no stats row → skipped
-  R.insertMatch(db, { id: noStats, competition_id: comp.id, home: "C", away: "D", state: "live", lineup_out: true, kickoff_at: null, minute: 10, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: noStats });
-  assert.equal(recordMatchStats(db, { now: () => "2026-07-05T18:00:00Z" }), 0);
+  // live, no ESPN stats AND no markets → nothing to snapshot → skipped
+  R.insertMatch(db, { id: noMkt, competition_id: comp.id, home: "C", away: "D", state: "live", lineup_out: true, kickoff_at: null, minute: 10, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: noMkt });
+  // live, no ESPN stats, but HAS markets → market-snapshot fallback
+  R.insertMatch(db, { id: fb, competition_id: comp.id, home: "Alcaraz", away: "Sinner", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: fb });
+  R.insertMarket(db, { id: R.uid(), match_id: fb, label: "Alcaraz", price: 62, ai_prob: null, liquidity: "300K", external_ref: "t1", snapshot_at: "t", is_closing: false });
+  R.insertMarket(db, { id: R.uid(), match_id: fb, label: "Sinner", price: 38, ai_prob: null, liquidity: "200K", external_ref: "t2", snapshot_at: "t", is_closing: false });
+
+  recordMatchStats(db, { now: () => "2026-07-05T18:00:00Z" });
+  assert.equal(R.eventsForMatch(db, up).filter((e) => e.type === "stats").length, 0, "upcoming skipped");
+  assert.equal(R.eventsForMatch(db, noMkt).filter((e) => e.type === "stats").length, 0, "live without markets skipped");
+  const snaps = R.eventsForMatch(db, fb).filter((e) => e.type === "stats");
+  assert.equal(snaps.length, 1, "market-snapshot fallback written");
+  assert.match(snaps[0].text, /рынок: Alcaraz 62¢ · Sinner 38¢/); // favourite (higher price) first
 });

@@ -965,7 +965,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                 )}
                 {match.events?.length > 0 && (
                   <div style={S.eventsBox}>
-                    <div style={S.eventsLabel}>События матча (ESPN)</div>
+                    <div style={S.eventsLabel}>События и статистика по ходу матча</div>
                     {match.events.map((e: any, i: number) => (
                       <div key={i} style={S.eventRow}>
                         <span style={S.eventMin}>{e.minute != null ? `${e.minute}'` : ""}</span>
