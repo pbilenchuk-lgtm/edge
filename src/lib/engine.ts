@@ -150,8 +150,12 @@ export async function refreshMatchOdds(
     for (const b of R.betsForMatch(db, matchId)) {
       if (b.status === "open" && b.market_label === m.label) R.updateBet(db, b.id, { current_price: price });
     }
-    // price_move reassessment trigger
-    if (Math.abs(price - m.price) >= cfg.priceMoveThreshold) {
+    // price_move reassessment trigger — LIVE only (ТЗ §3.3). Pre-match a
+    // discovered match sits in `lineup`/time-flipped `lineup_out` with no game,
+    // and illiquid Polymarket markets drift ≥threshold constantly, which fired a
+    // flood of "движение цены на старте без игрового триггера" reassessments on a
+    // not-yet-started match. Mark-to-market above still runs; only the trigger waits.
+    if (match.state === "live" && Math.abs(price - m.price) >= cfg.priceMoveThreshold) {
       for (const sid of strategiesWithOpenBets(db, matchId)) {
         if (R.betsForMatch(db, matchId, sid).some((b) => b.status === "open" && b.market_label === m.label)) {
           triggers.push(await triggerReassessment(db, { match, strategyId: sid, trigger: "price_move", minute: match.minute }, deps));

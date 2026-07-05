@@ -209,6 +209,12 @@ export function evaluateExits(db: Database, deps: EngineDeps = {}): ExitItem[] {
   const out: ExitItem[] = [];
   const touched = new Set<string>();
   for (const { match: m } of activeMatches(db)) {
+    // Price-driven exits (take-profit / stop / edge-gone) are LIVE management —
+    // per ТЗ §3.3 mark-to-market and price triggers belong to the live phase. A
+    // position opened on lineup is HELD untouched until kickoff; letting exits run
+    // pre-match closed positions on pure Polymarket drift (the «вход… → выход…
+    // предматч» churn). Settlement of finished matches is handled elsewhere.
+    if (m.state !== "live") continue;
     const markets = R.latestMarkets(db, m.id);
     for (const b of R.betsForMatch(db, m.id)) {
       if (b.status !== "open") continue;
@@ -278,11 +284,15 @@ export async function strategistReassess(
     if (calls >= max) break;
     const c = comps.get(comp);
     if (!c || c.budget <= 0) continue;
-    // Reassessment is IN-MATCH management that reacts to real events — never run
-    // it pre-match / pre-lineup, where there is nothing to react to and it only
-    // emits "реальных событий нет, ничего не фиксирую" noise. Allow it once the
-    // match is LIVE, or (for lineup sports) once the lineups are out.
-    if (!(m.state === "live" || (LINEUP_SPORTS.has(sport) && m.lineup_out))) continue;
+    // Reassessment is IN-MATCH management that reacts to real events (goal / red
+    // card / price move) — per ТЗ §3.3 it belongs to the LIVE phase. Never run it
+    // pre-match: for leagues we can't enrich, `lineup_out` is a pure time-flip
+    // (advanceClocks, ~1h before kickoff) with NO real teamsheet, so allowing the
+    // lineup_out branch churned not-yet-started matches on pre-match price noise
+    // ("движение цены на старте без игрового триггера; статичное 0:0"). Entry on
+    // lineup still happens (autoAnalyze post_lineup + autoEnter); we just hold
+    // those positions untouched until the ball is actually rolling.
+    if (m.state !== "live") continue;
     const open = R.betsForMatch(db, m.id).filter((b) => b.status === "open");
     // Reassess only where there's live risk (open positions) or a fresh trigger.
     // In triggeredOnly mode (fast loop) a trigger is REQUIRED — quiet positions
@@ -471,17 +481,19 @@ const LIVE_TRIGGER_TYPES = new Set(["goal", "red_card"]);
 // exit) and fresh analytics land on a steady heartbeat, not only on goals.
 export const REASSESS_INTERVAL_MIN = 5;
 
-/** Live matches due for a periodic reassessment — those not reassessed in the
+/** LIVE matches due for a periodic reassessment — those not reassessed in the
  *  last REASSESS_INTERVAL_MIN minutes (or never). Fires on ANY funded live match
  *  with tradeable markets, regardless of whether a position is open: reassessment
  *  is both fresh analytics AND a chance to open/exit, so it must not wait for an
- *  on-pitch event (user: «переоценку надо делать каждые 5 минут независимо»). */
+ *  on-pitch event (user: «переоценку надо делать каждые 5 минут независимо»).
+ *  Gated to state==="live" only: pre-match (`lineup`/time-flipped `lineup_out`)
+ *  has no game to react to, and the heartbeat there just churned reassessments. */
 function periodicReassessMatches(db: Database, deps: EngineDeps): Set<string> {
   const nowMs = Date.parse(nowFn(deps)()) || Date.now();
   const budgetByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.budget]));
   const due = new Set<string>();
   for (const { comp, match: m } of activeMatches(db)) {
-    if (m.state !== "live" && m.state !== "lineup" && !m.lineup_out) continue;
+    if (m.state !== "live") continue;
     if ((budgetByComp.get(comp) ?? 0) <= 0) continue;        // unfunded → skip (economical)
     if (!R.latestMarkets(db, m.id).length) continue;         // nothing to price/trade
     const notes = R.reassessmentsForMatch(db, m.id);

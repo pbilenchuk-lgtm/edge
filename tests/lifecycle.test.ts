@@ -103,6 +103,43 @@ test("strategistReassess skips a pre-lineup match (no reassessment before lineup
   await strategistReassess(db, { fetchImpl: mockLLM({ picks: [], exits: [], note: "x" }), env: { ANTHROPIC_API_KEY: "k" } }, { max: 50 });
   assert.equal(R.reassessmentsForMatch(db, pm).length, 0, "no pre-lineup reassessment even with an open position");
 });
+
+test("strategistReassess skips a time-flipped lineup match that is not yet live (no pre-match churn)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const pm = R.uid();
+  // lineup_out flipped by the 1h-before-kickoff timer (advanceClocks), NOT by a
+  // real teamsheet, and the ball has NOT kicked off. Holds an open position.
+  // This is the exact leak that churned not-yet-started matches — must stay quiet.
+  R.insertMatch(db, { id: pm, competition_id: comp.id, home: "A", away: "B", state: "lineup", lineup_out: true, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: pm });
+  R.insertMarket(db, { id: R.uid(), match_id: pm, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "lm-open", match_id: pm, strategy_id: strat.id, market_label: "Over 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: null, ai_prob: 0.6, stake: 50, rationale: null, entered_minute: "предматч", result: null, payout: null, settled_by: null, created_at: "t" });
+  await strategistReassess(db, { fetchImpl: mockLLM({ picks: [], exits: [], note: "x" }), env: { ANTHROPIC_API_KEY: "k" } }, { max: 50, newEventMatchIds: new Set([pm]) });
+  assert.equal(R.reassessmentsForMatch(db, pm).length, 0, "no reassessment on a not-yet-live lineup match");
+});
+
+test("evaluateExits holds an open position pre-match (lineup_out, not live) — no churn", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  // Pre-match: lineups out by the timer, edge would read as "gone" (aiProb 0.4,
+  // price 62) — but the match is NOT live, so nothing should be closed.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "lineup", lineup_out: true, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 62, ai_prob: 0.4, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  const bid = R.uid();
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 62, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  const exits = evaluateExits(db, { now: () => "t" });
+  assert.equal(exits.length, 0, "no pre-match exit");
+  assert.equal(R.getBet(db, bid)!.status, "open", "position held until kickoff");
+  // once live, the same edge-gone rule fires
+  R.updateMatch(db, mid, { state: "live", minute: 10 });
+  assert.equal(evaluateExits(db, { now: () => "t" }).length, 1, "closes once live");
+});
 test("strategistReassess supports partial fixation (fraction)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

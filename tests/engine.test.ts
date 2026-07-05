@@ -336,6 +336,28 @@ test("refreshMatchOdds writes a snapshot, marks to market, and triggers on a big
   assert.ok(res.triggers.some((t) => t.created), "price_move reassessment fired");
 });
 
+test("refreshMatchOdds marks to market but fires NO price_move trigger pre-match (not live)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const mid = R.uid();
+  // lineup_out by the timer, but NOT live: a big pre-match Polymarket move must
+  // mark to market yet NOT trigger a reassessment (§3.3 — triggers are live-only).
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "lineup", lineup_out: true, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 62, ai_prob: 0.6, liquidity: null, external_ref: "tok-a", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: "edge", market_label: "Over 1.5", status: "open", proposed_price: 62, entry_price: 62, current_price: 62, closing_price: null, ai_prob: 0.6, stake: 50, rationale: null, entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  const fetchImpl = (async () => ({ ok: true, json: async () => ({ mid: "0.50" }) })) as unknown as typeof fetch;
+  const res = await refreshMatchOdds(db, mid, {
+    fetchImpl,
+    polymarket: { enabled: true, gammaBase: "", clobBase: "", timeoutMs: 1000, discoverLimit: 300, maxMarketsPerMatch: 16 },
+    config: { reassessGapMinutes: 5, priceMoveThreshold: 5 },
+    now: () => "2026-07-03T13:00:00Z",
+  });
+  assert.ok(res.updated > 0, "still re-quotes / marks to market");
+  assert.equal(res.triggers.length, 0, "no price_move reassessment pre-match");
+  assert.equal(R.reassessmentsForMatch(db, mid).length, 0);
+});
+
 // ---------------- metrics recompute directly ----------------
 test("recomputeMetrics writes quality from settled bets", async () => {
   const db = openDb(":memory:");
