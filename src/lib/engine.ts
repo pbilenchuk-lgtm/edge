@@ -254,11 +254,14 @@ export function settleMatch(
       skipped++; affected.add(b.strategy_id);
       continue;
     }
-    // Closing line for CLV = the KICKOFF snapshot. With no kickoff captured,
-    // fall back to the ENTRY price (neutral CLV = 0), NOT the latest/current
-    // snapshot — at settle time that is the post-resolution (~0/100) finish
-    // price and would degrade CLV into P&L.
-    const closing = kickoff[b.market_label] ?? b.entry_price ?? null;
+    // Closing line for CLV = the KICKOFF snapshot — but ONLY for PRE-match bets.
+    // CLV measures beating the closing (kickoff) line, which is defined relative
+    // to a bet placed BEFORE kickoff. For an IN-MATCH entry the kickoff price
+    // predates the bet, so benchmarking against it is meaningless and biased the
+    // metric negative — give those a NEUTRAL CLV (closing = entry). With no
+    // kickoff captured, fall back to entry too (never the post-resolution price).
+    const preMatch = b.entered_minute == null || /предматч/i.test(b.entered_minute);
+    const closing = preMatch ? (kickoff[b.market_label] ?? b.entry_price ?? null) : (b.entry_price ?? null);
     const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, closing);
     R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price });
     R.insertTradeLog(db, {

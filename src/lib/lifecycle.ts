@@ -19,7 +19,7 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets } from "./engine.js";
 import { SPORT_TAG_IDS } from "./polymarket.js";
-import { analyzeMatch, jobActive, matchContext, strategyDrawdown, sameMarketLabel } from "./analysis.js";
+import { analyzeMatch, jobActive, matchContext, strategyDrawdown, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision, sizeBet } from "./thresholds.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -372,12 +372,12 @@ export async function strategistReassess(
       const budget = stratBudget(c.budget, share.pct);
       const drawdown = strategyDrawdown(db, comp, sid, budget);
       const held = new Set(R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").map((b) => norm(b.market_label)));
-      // Seed exposure from BOTH open and still-proposed stakes — autoEnter will
-      // fill the proposals, so a new entry must be sized against them too (§9.3).
-      let exposure = R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").reduce((n, b) => n + (b.stake ?? 0), 0);
-      const realizedPnl = R.betsForMatch(db, m.id, sid)
-        .filter((b) => b.status === "settled_won" || b.status === "settled_lost")
-        .reduce((n, b) => n + ((b.payout ?? 0) - (b.stake ?? 0)), 0);
+      // Seed exposure + realized from ALL the strategy's matches in this comp
+      // (open AND still-proposed — autoEnter will fill the proposals), so the
+      // §9.3 cap is per-COMPETITION, not per-match: concurrent matches can't each
+      // stake the full share.
+      let exposure = strategyCompExposure(db, comp, sid);
+      const realizedPnl = strategyCompRealized(db, comp, sid);
       for (const pick of dec.picks) {
         const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
         if (!mk || mk.ai_prob == null || mk.price == null) continue; // need a probability to size

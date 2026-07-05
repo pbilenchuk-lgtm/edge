@@ -6,7 +6,7 @@ import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { parseEspnEvent, parseEspnSummary, MockSportsProvider } from "../src/lib/sports.js";
 import {
-  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch, settleStaleOpenBets,
+  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch, settleStaleOpenBets, settleMatch,
 } from "../src/lib/engine.js";
 import { matchContext } from "../src/lib/analysis.js";
 import type { SportsMatchStatus, SportsProvider, MatchDetail } from "../src/lib/sports.js";
@@ -398,4 +398,37 @@ test("pruneStaleMatches drops no-bet finished/stale matches but keeps any match 
   assert.equal(R.reassessmentsForMatch(db, "fin-nobet").length, 0);
   // the kept bet survives
   assert.ok(R.getBet(db, "b-keep"));
+});
+
+test("strategyCompExposure / strategyCompRealized aggregate across the whole competition", async () => {
+  const { strategyCompExposure, strategyCompRealized } = await import("../src/lib/analysis.js");
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mA = R.uid(), mB = R.uid();
+  for (const id of [mA, mB]) R.insertMatch(db, { id, competition_id: comp.id, home: "A"+id, away: "B"+id, state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+  R.insertBet(db, { id: R.uid(), match_id: mA, strategy_id: strat.id, market_label: "Over 1.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: null, ai_prob: 0.6, stake: 40, rationale: null, entered_minute: "10'", result: null, payout: null, created_at: "t" });
+  R.insertBet(db, { id: R.uid(), match_id: mB, strategy_id: strat.id, market_label: "Under 2.5", status: "proposed", proposed_price: 55, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.6, stake: 30, rationale: null, entered_minute: null, result: null, payout: null, created_at: "t" });
+  R.insertBet(db, { id: R.uid(), match_id: mB, strategy_id: strat.id, market_label: "BTTS", status: "settled_won", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: 55, ai_prob: 0.6, stake: 20, rationale: null, entered_minute: "5'", result: "won", payout: 44, created_at: "t" });
+  assert.equal(strategyCompExposure(db, comp.id, strat.id), 70, "open 40 (mA) + proposed 30 (mB)"); // settled excluded
+  assert.equal(strategyCompRealized(db, comp.id, strat.id), 24, "payout 44 − stake 20");
+});
+
+test("settleMatch: CLV closing = kickoff for pre-match bets, entry (neutral) for in-match", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Home", away: "Away", state: "finished", lineup_out: true, kickoff_at: null, minute: 90, score_home: 2, score_away: 0, final_score: "2:0", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  // kickoff snapshot for the market = 40¢
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 40, ai_prob: 0.6, liquidity: null, external_ref: "tk", snapshot_at: "t1", is_closing: false });
+  R.captureOpenOdds(db, mid, "t1");
+  const pre = R.uid(), inm = R.uid();
+  R.insertBet(db, { id: pre, match_id: mid, strategy_id: strat.id, market_label: "Over 1.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 60, closing_price: null, ai_prob: 0.6, stake: 100, rationale: null, entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  R.insertBet(db, { id: inm, match_id: mid, strategy_id: strat.id, market_label: "Over 1.5", status: "open", proposed_price: 70, entry_price: 70, current_price: 60, closing_price: null, ai_prob: 0.6, stake: 100, rationale: null, entered_minute: "63'", result: null, payout: null, created_at: "t" });
+  settleMatch(db, R.getMatch(db, mid), {});
+  assert.equal(R.getBet(db, pre)!.closing_price, 40, "pre-match bet benchmarked to kickoff (40)");
+  assert.equal(R.getBet(db, inm)!.closing_price, 70, "in-match bet neutral (closing = entry 70)");
 });
