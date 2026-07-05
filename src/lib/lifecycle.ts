@@ -114,10 +114,19 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
 
 export interface AutoEnterItem { matchId: string; strategyId: string; market: string; price: number; stake: number }
 
+// Sports where a confirmed starting lineup materially changes the read, so we
+// hold pre-match capital until it's out (mirrors the frontend LINEUP_SPORTS).
+const LINEUP_SPORTS = new Set(["football"]);
+
 export function autoEnter(db: Database, deps: EngineDeps = {}): AutoEnterItem[] {
   const now = nowFn(deps)();
   const out: AutoEnterItem[] = [];
-  for (const { match: m } of activeMatches(db)) {
+  for (const { sport, match: m } of activeMatches(db)) {
+    // Don't DEPLOY capital on a lineup-sport match before its lineups are out —
+    // pre-lineup we still analyze and PROPOSE possible bets (shown as
+    // «предлагается»), but they only fill once the lineup lands (lineup_out) or
+    // the match is live. This keeps the pre-match read a preview, not an entry.
+    const preLineupHold = LINEUP_SPORTS.has(sport) && !m.lineup_out && (m.state === "upcoming" || m.state === "lineup");
     const markets = R.latestMarkets(db, m.id);
     const bets = R.betsForMatch(db, m.id);
     // A strategy must never hold two OPEN positions on the SAME market — that's
@@ -127,6 +136,7 @@ export function autoEnter(db: Database, deps: EngineDeps = {}): AutoEnterItem[] 
     const openKey = new Set(bets.filter((b) => b.status === "open").map((b) => `${b.strategy_id}|${b.market_label}`));
     for (const b of bets) {
       if (b.status !== "proposed") continue;
+      if (preLineupHold) continue; // preview only — keep it «предлагается» until lineups are out
       const key = `${b.strategy_id}|${b.market_label}`;
       if (openKey.has(key)) { R.updateBet(db, b.id, { status: "not_filled" }); continue; } // already in this market — drop the dup
       const price = markets.find((x) => x.label === b.market_label)?.price ?? b.proposed_price ?? 0;

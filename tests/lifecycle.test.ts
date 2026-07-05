@@ -40,6 +40,22 @@ test("autoEnter fills proposed bets at the current price", () => {
   assert.ok(R.tradeLogForMatch(db, "m-lineup").some((l) => l.type === "enter"));
 });
 
+test("autoEnter holds a football bet until lineups are out (no pre-lineup entry)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "pl-1", match_id: mid, strategy_id: strat.id, market_label: "Over 2.5", status: "proposed", proposed_price: 55, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.6, stake: 50, rationale: null, entered_minute: null, result: null, payout: null, settled_by: null, created_at: "t" });
+  autoEnter(db, { now: () => "t" });
+  assert.equal(R.getBet(db, "pl-1")!.status, "proposed", "held as a preview before lineups are out");
+  R.updateMatch(db, mid, { lineup_out: true });
+  autoEnter(db, { now: () => "t" });
+  assert.equal(R.getBet(db, "pl-1")!.status, "open", "enters once lineups are out");
+});
+
 test("evaluateExits closes an open position when the edge is gone", () => {
   const db = openDb(":memory:");
   seedDatabase(db);

@@ -666,6 +666,25 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                               <span style={S.decisionName}>{st.name}</span>
                               <span style={S.decisionVerdict}>{items.length === 0 ? "пропуск" : `${items.length} ${items.length === 1 ? "ставка" : "ставки"}`}</span>
                             </div>
+                            {/* The concrete decision — which markets, at what edge/size, and
+                                whether it's a preview (предлагается) or an actual entry (вошёл).
+                                The rationale below then EXPLAINS this, not floats on its own. */}
+                            {items.length > 0 && (
+                              <div style={S.decisionBets}>
+                                {items.map((b: any, i: number) => {
+                                  const price = curByLabel[b.market] ?? b.price ?? b.currentPrice ?? b.entryPrice;
+                                  const edge = b.aiProb != null && price ? (b.aiProb - price / 100) * 100 : null;
+                                  const statusTxt = b.status === "open" ? "вошёл" : b.status === "proposed" ? "предлагается" : b.status === "not_filled" ? "не заполнилась" : b.status;
+                                  return (
+                                    <div key={i} style={S.decisionBetRow}>
+                                      <span style={S.decisionBetMkt}>{b.market}</span>
+                                      <span style={S.decisionBetMeta}>{price != null ? `${price}¢` : "—"}{edge != null && <span style={{ color: edge >= 0 ? "#5fd08a" : "#ff6b6b" }}> · edge {edge >= 0 ? "+" : ""}{edge.toFixed(1)}%</span>}{b.stake != null && ` · ${fmtMoney(b.stake)}`}</span>
+                                      <span style={{ ...S.decisionBetStatus, color: b.status === "open" ? "#5fd08a" : b.status === "proposed" ? "#e8a838" : MUTE }}>{statusTxt}</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
                             <p style={S.decisionText}>{rationale || (items.length === 0 ? "Край недостаточен — стратегия воздерживается." : "—")}</p>
                           </div>
                         );
@@ -1750,7 +1769,12 @@ const S: Record<string, React.CSSProperties> = {
   decisionHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 5 },
   decisionName: { fontSize: 13, fontWeight: 700 },
   decisionVerdict: { marginLeft: "auto", fontSize: 10.5, color: "#7fb4e8", background: "#1e2836", borderRadius: 20, padding: "2px 10px", fontFamily: "'JetBrains Mono', monospace" },
-  decisionText: { fontSize: 12.5, color: "#d3d8e0", lineHeight: 1.55 },
+  decisionText: { fontSize: 12.5, color: "#d3d8e0", lineHeight: 1.55, marginTop: 8 },
+  decisionBets: { display: "flex", flexDirection: "column", gap: 4, marginTop: 8 },
+  decisionBetRow: { display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" },
+  decisionBetMkt: { fontSize: 12, fontWeight: 600, color: "#e6e9ef" },
+  decisionBetMeta: { fontSize: 11, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
+  decisionBetStatus: { marginLeft: "auto", fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em" },
   pastWrap: { marginTop: 2 },
   pastToggle: { background: "transparent", border: "none", color: MUTE, fontSize: 11.5, cursor: "pointer", padding: "2px 0", fontWeight: 600 },
   pastList: { display: "flex", flexDirection: "column", gap: 6, marginTop: 6 },
