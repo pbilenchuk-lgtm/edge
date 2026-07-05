@@ -570,6 +570,12 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   }, [priceSig]);
 
   const doRefresh = async () => { setRefreshing(true); await onRefreshOdds(match.id); setRefreshing(false); };
+  const runAnalyze = async () => {
+    setAnalyzing(true); setAnalyzeErr(null);
+    try { const r = await onAnalyze(match.id); if (r && r.ok === false) setAnalyzeErr(r.error || "оценка не удалась"); }
+    catch (e: any) { setAnalyzeErr(e?.message || "оценка не удалась"); }
+    finally { setAnalyzing(false); }
+  };
 
   // Resume a run already in flight on the server (durable job): if the user
   // kicked analysis then navigated away, the card picks the poll back up on
@@ -601,21 +607,22 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
             {tabs.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
           </select>
           <div style={S.tabBody}>
-            {tab === "analysis" && (
+            {tab === "analysis" && (() => {
+              const hasAnalysis = !!(match.preLineup || match.postLineup);
+              const noQuotes = !match.markets?.length;
+              const canRun = match.state !== "finished";
+              return (
               <div style={S.analysisFlow}>
-                {match.state !== "finished" && (
-                  <div style={S.reassessTop}>
-                    <span style={S.reassessHint}>
-                      {match.markets?.length > 0
-                        ? <>ИИ оценит матч по рынкам (промт аналитики{hasLineups ? ", учёт составов" : ""}), проставит вероятности и предложит ставки стратегий.</>
-                        : <>Нет котировок — сначала нажми «Подтянуть матчи» или ↻ в колонке котировок.</>}
-                    </span>
-                    <button style={{ ...S.reassessBtn, opacity: (analyzing || !match.markets?.length) ? 0.5 : 1 }} disabled={analyzing || !match.markets?.length} onClick={async () => { setAnalyzing(true); setAnalyzeErr(null); try { const r = await onAnalyze(match.id); if (r && r.ok === false) setAnalyzeErr(r.error || "оценка не удалась"); } catch (e: any) { setAnalyzeErr(e?.message || "оценка не удалась"); } finally { setAnalyzing(false); } }}>
-                      {analyzing ? "ИИ оценивает…" : match.preLineup || match.postLineup ? "↻ Переоценить (ИИ)" : "✨ Оценить матч (ИИ)"}
-                    </button>
+                {analyzeErr && <div style={S.analysisPending}>{analyzeErr}</div>}
+                {/* Empty state — clean, centered: one line + one button */}
+                {!hasAnalysis && (
+                  <div style={S.analysisEmpty}>
+                    <div style={S.analysisEmptyText}>{noQuotes ? "Нет котировок — сначала «Подтянуть матчи»." : "ИИ оценит матч и предложит ставки стратегий."}</div>
+                    {canRun
+                      ? <button style={{ ...S.analysisRunBtn, opacity: (analyzing || noQuotes) ? 0.6 : 1 }} disabled={analyzing || noQuotes} onClick={runAnalyze}>{analyzing ? <><span style={S.spinner} /> ИИ оценивает…</> : "✨ Оценить матч (ИИ)"}</button>
+                      : <div style={S.analysisEmptyMuted}>матч завершён — анализа не было</div>}
                   </div>
                 )}
-                {analyzeErr && <div style={S.analysisPending}>{analyzeErr}</div>}
                 {hasLineups ? <>
                   {match.preLineup && (
                     <div style={S.analysisStage}>
@@ -629,13 +636,15 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                       <Assessment a={match.postLineup} />
                     </div>
                   )}
-                  {!match.preLineup && !match.postLineup && <div style={S.analysisPending}>Анализа пока нет — нажми «Оценить матч (ИИ)». После выхода составов появится приоритетная оценка.</div>}
-                  {match.preLineup && !match.postLineup && match.state !== "finished" && <div style={S.analysisPending}>Приоритетная оценка после состава появится, когда объявят составы.</div>}
                 </> : <>
-                  {(match.postLineup || match.preLineup)
-                    ? <div style={S.analysisStage}><div style={S.analysisStageLabel}><span style={S.stageNum}>✓</span> Анализ</div><Assessment a={match.postLineup || match.preLineup} /></div>
-                    : <div style={S.analysisPending}>Анализа пока нет — нажми «Оценить матч (ИИ)».</div>}
+                  {(match.postLineup || match.preLineup) && <div style={S.analysisStage}><div style={S.analysisStageLabel}><span style={S.stageNum}>✓</span> Анализ</div><Assessment a={match.postLineup || match.preLineup} /></div>}
                 </>}
+                {/* Compact re-run — only once an analysis exists */}
+                {hasAnalysis && canRun && (
+                  <div style={S.analysisRerunRow}>
+                    <button style={{ ...S.analysisRerunBtn, opacity: analyzing ? 0.6 : 1 }} disabled={analyzing} onClick={runAnalyze}>{analyzing ? <><span style={S.spinner} /> ИИ оценивает…</> : "↻ Переоценить (ИИ)"}</button>
+                  </div>
+                )}
                 {compStrats.length > 0 && compStrats.some((st: any) => { const r = match.bets?.[st.id]; return r && r.rationale; }) && (
                   <div style={S.analysisStage}>
                     <div style={S.analysisStageLabel}><span style={{ ...S.stageNum, background: "#5b9bd5", color: "#12161d" }}>3</span> Решения стратегий</div>
@@ -660,17 +669,13 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                 )}
                 <PastAssessments history={match.assessmentHistory} />
               </div>
-            )}
+              );
+            })()}
             {tab === "strat" && (
               <div style={S.stratListGrid} className="el-strat-grid">
-                {match.state !== "finished" && (
-                  <div style={S.reassessTop}>
-                    <span style={S.reassessHint}>{match.markets?.length ? "Прогнать стратегию по матчу: ИИ оценит рынки и предложит ставки по методологии стратегии." : "Нет котировок — сначала «Подтянуть матчи»."}</span>
-                    <button style={{ ...S.reassessBtn, opacity: (analyzing || !match.markets?.length) ? 0.5 : 1 }} disabled={analyzing || !match.markets?.length} onClick={async () => { setAnalyzing(true); setAnalyzeErr(null); try { const r = await onAnalyze(match.id); if (r && r.ok === false) setAnalyzeErr(r.error || "не удалось"); } catch (e: any) { setAnalyzeErr(e?.message || "не удалось"); } finally { setAnalyzing(false); } }}>
-                      {analyzing ? "ИИ работает…" : "✨ Прогнать стратегию (ИИ)"}
-                    </button>
-                  </div>
-                )}
+                {/* Прогон запускается из вкладки «Анализ» / кнопкой ↻ у каждой
+                    стратегии (live). Здесь — только лёгкий индикатор, пока идёт. */}
+                {analyzing && <div style={S.runningRow}><span style={S.spinner} /> ИИ прогоняет стратегии…</div>}
                 {analyzeErr && <div style={S.analysisPending}>{analyzeErr}</div>}
                 {compStrats.length === 0 && <div style={S.noStrat}>Стратегия не активирована на «{comp.name}». Задай бюджет турниру (кнопка <b>$</b> на плашке) и распредели долю стратегии («⚙ Распределить доли %» над матчами) — тогда она начнёт играть и появится здесь.</div>}
                 {compStrats.map((st: any) => {
@@ -1075,6 +1080,26 @@ function feedIconStyle(t: string) {
   return map[t] || {};
 }
 
+function EquitySpark({ data }: any) {
+  const w = 100, h = 32;
+  const min = Math.min(...data), max = Math.max(...data);
+  const range = max - min || 1;
+  const pts = data.map((v: number, i: number) => { const x = (i / (data.length - 1)) * w; const y = h - ((v - min) / range) * h; return `${x.toFixed(1)},${y.toFixed(1)}`; }).join(" ");
+  const start = data[0], end = data[data.length - 1];
+  const up = end >= start;
+  return (
+    <div style={S.equityWrap}>
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={S.equitySvg}>
+        <polyline points={pts} fill="none" stroke={up ? "#5fd08a" : "#ff6b6b"} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div style={S.equityMeta}>
+        <span style={S.equityStart}>{fmtMoney0(start)}</span>
+        <span style={{ ...S.equityEnd, color: up ? "#5fd08a" : "#ff6b6b" }}>{fmtMoney0(end)} ({up ? "+" : ""}{start ? (((end - start) / start) * 100).toFixed(1) : "0.0"}%)</span>
+      </div>
+    </div>
+  );
+}
+
 function MetricsScreen({ catalog, quality, stats }: any) {
   const S0 = { matches: 0, predictions: 0, won: 0, lost: 0, openPlus: 0, openMinus: 0, openPnl: 0, earned: 0, lostMoney: 0, inMatch: 0, inMatchPlus: 0, inMatchMinus: 0 };
   return (
@@ -1134,6 +1159,79 @@ function MetricsScreen({ catalog, quality, stats }: any) {
             </div>
             {q.samples < 20 && <div style={S.metricWarn}>Выборка мала ({q.samples}) — не доверяй метрикам качества до 20+ рассчитанных ставок.</div>}
             </> : null}
+
+            {/* Результативность по фазам входа */}
+            {q?.phases && q.phases.some((p: any) => p.bets > 0) && (
+              <div style={S.phaseBlock}>
+                <div style={S.phaseBlockLabel}>Результативность по фазам входа <span style={S.phaseHint}>где стратегия реально зарабатывает</span></div>
+                <div style={S.phaseRows}>
+                  {q.phases.map((ph: any) => {
+                    const empty = ph.bets === 0;
+                    const wr = ph.bets ? Math.round((ph.wins / ph.bets) * 100) : 0;
+                    return (
+                      <div key={ph.id} style={{ ...S.phaseRow, opacity: empty ? 0.45 : 1 }}>
+                        <span style={S.phaseName}>{ph.label}</span>
+                        <span style={S.phaseBets}>{empty ? "—" : `${ph.bets} ст. · ${wr}% W`}</span>
+                        <span style={{ ...S.phasePnl, color: empty ? MUTE : ph.pnl >= 0 ? "#5fd08a" : "#ff6b6b" }}>{empty ? "$0" : `${ph.pnl >= 0 ? "+" : ""}${fmtMoney(ph.pnl)}`}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Ценность активного управления */}
+            {q?.mgmt && (
+              <div style={S.phaseBlock}>
+                <div style={S.phaseBlockLabel}>Ценность активного управления <span style={S.phaseHint}>edge в управлении позицией, а не в прогнозе</span></div>
+                {q.mgmt.managed === 0 ? (
+                  <div style={S.mgmtNeutral}>Стратегия не управляет по ходу — держит до финала. Нечего сравнивать.</div>
+                ) : (() => {
+                  const delta = q.mgmt.actualPnl - q.mgmt.heldToEndPnl;
+                  return (
+                    <>
+                      <div style={S.mgmtRow}>
+                        <div style={S.mgmtCell}><div style={S.mgmtLbl}>факт (с выходами)</div><div style={S.mgmtVal}>{fmtMoney(q.mgmt.actualPnl)}</div></div>
+                        <div style={S.mgmtVs}>vs</div>
+                        <div style={S.mgmtCell}><div style={S.mgmtLbl}>держал бы до конца</div><div style={S.mgmtVal}>{fmtMoney(q.mgmt.heldToEndPnl)}</div></div>
+                        <div style={S.mgmtVs}>=</div>
+                        <div style={S.mgmtCell}><div style={S.mgmtLbl}>вклад управления</div><div style={{ ...S.mgmtDelta, color: delta >= 0 ? "#5fd08a" : "#ff6b6b" }}>{delta >= 0 ? "+" : ""}{fmtMoney(delta)}</div></div>
+                      </div>
+                      <div style={{ ...S.mgmtVerdict, color: delta >= 0 ? "#5fd08a" : "#ff6b6b" }}>
+                        {delta >= 0 ? `Управление приносит деньги: ранние выходы/фиксации лучше, чем держать (${q.mgmt.managed} упр. позиций).` : `Управление вредит: стратегия зря дёргается, лучше держать до конца (${q.mgmt.managed} упр. позиций).`}
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* CLV по фазам */}
+            {q?.phases && q.phases.some((p: any) => p.clv != null) && (
+              <div style={S.phaseBlock}>
+                <div style={S.phaseBlockLabel}>CLV по фазам <span style={S.phaseHint}>двигался ли рынок в твою сторону после входа</span></div>
+                <div style={S.clvRows}>
+                  {q.phases.filter((p: any) => p.clv != null).map((ph: any) => (
+                    <div key={ph.id} style={S.clvRow}>
+                      <span style={S.clvName}>{ph.label}</span>
+                      <div style={S.clvBarWrap}>
+                        <div style={S.clvBarZero} />
+                        <div style={{ ...S.clvBarFill, width: `${Math.min(50, Math.abs(ph.clv) * 6)}%`, left: ph.clv >= 0 ? "50%" : "auto", right: ph.clv < 0 ? "50%" : "auto", background: ph.clv >= 0 ? "#5fd08a" : "#ff6b6b" }} />
+                      </div>
+                      <span style={{ ...S.clvVal, color: ph.clv >= 0 ? "#5fd08a" : "#ff6b6b" }}>{ph.clv >= 0 ? "+" : ""}{ph.clv.toFixed(1)}%</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Кривая банка */}
+            {q?.equity && q.equity.length > 1 && (
+              <div style={S.phaseBlock}>
+                <div style={S.phaseBlockLabel}>Кривая банка <span style={S.phaseHint}>стоимость по матчам</span></div>
+                <EquitySpark data={q.equity} />
+              </div>
+            )}
           </section>
         );
       })}
@@ -1486,6 +1584,7 @@ const CSS = `* { box-sizing: border-box; } button { font-family: inherit; } butt
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
 @keyframes elOddFlash { 0%{opacity:0;transform:scale(.4)} 15%{opacity:1;transform:scale(1)} 60%{opacity:1} 100%{opacity:0;transform:scale(1)} }
 .el-odds-flash { animation: elOddFlash 1.6s ease-out forwards; }
+@keyframes elSpin { to { transform: rotate(360deg) } }
 .el-tab-select { display: none; }
 @media (min-width: 760px) {
   .el-match-body { display: grid !important; grid-template-columns: 1fr 280px; gap: 16px; align-items: start; }
@@ -1624,6 +1723,14 @@ const S: Record<string, React.CSSProperties> = {
   stageNum: { width: 20, height: 20, borderRadius: "50%", background: LINE, color: TEXT, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, flexShrink: 0 },
   stagePriority: { fontSize: 10, color: "#e8a838", background: "#2e2a1a", borderRadius: 20, padding: "2px 8px", marginLeft: "auto", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" },
   analysisPending: { fontSize: 12, color: MUTE, fontStyle: "italic", padding: "10px 12px", background: PANEL2, borderRadius: 10, border: `1px dashed ${LINE}` },
+  analysisEmpty: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, textAlign: "center", padding: "34px 18px", background: PANEL2, border: `1px dashed ${LINE}`, borderRadius: 12 },
+  analysisEmptyText: { fontSize: 13, color: "#c3c9d3", lineHeight: 1.5, maxWidth: 380 },
+  analysisEmptyMuted: { fontSize: 12, color: MUTE, fontStyle: "italic" },
+  analysisRunBtn: { background: "#1e2836", border: `1px solid #5b9bd566`, color: "#7fb4e8", borderRadius: 10, padding: "10px 22px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 8 },
+  analysisRerunRow: { display: "flex", justifyContent: "flex-end" },
+  analysisRerunBtn: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 8, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 },
+  runningRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#7fb4e8", fontWeight: 600, padding: "10px 12px", background: "#1a2230", border: `1px solid #5b9bd533`, borderRadius: 10 },
+  spinner: { display: "inline-block", width: 12, height: 12, border: "2px solid #5b9bd555", borderTopColor: "#7fb4e8", borderRadius: "50%", animation: "elSpin 0.7s linear infinite", flexShrink: 0 },
   decisionList: { display: "flex", flexDirection: "column", gap: 8 },
   decisionItem: { background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px" },
   decisionHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 5 },
@@ -1806,6 +1913,34 @@ const S: Record<string, React.CSSProperties> = {
   calibDot: { position: "absolute", top: "50%", width: 8, height: 8, borderRadius: "50%", background: "#e8a838", transform: "translate(-50%, -50%)", boxShadow: "0 0 0 2px #12161d" },
   calibDiff: { fontSize: 12, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, width: 32, textAlign: "right", flexShrink: 0 },
   metricWarn: { fontSize: 11.5, color: "#e8a838", background: "#2e2a1a", borderRadius: 8, padding: "8px 12px", marginTop: 12, lineHeight: 1.5 },
+  phaseBlock: { marginTop: 16, paddingTop: 14, borderTop: `1px solid ${LINE}` },
+  phaseBlockLabel: { fontSize: 10.5, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 700, marginBottom: 10 },
+  phaseHint: { textTransform: "none", letterSpacing: 0, fontWeight: 400, color: "#6b7686", marginLeft: 6, fontSize: 10.5 },
+  phaseRows: { display: "flex", flexDirection: "column", gap: 6 },
+  phaseRow: { display: "flex", alignItems: "center", gap: 10, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 12px" },
+  phaseName: { fontSize: 12.5, fontWeight: 600, flex: 1 },
+  phaseBets: { fontSize: 11.5, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
+  phasePnl: { fontSize: 14, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", width: 80, textAlign: "right" },
+  mgmtNeutral: { fontSize: 12, color: MUTE, fontStyle: "italic", background: PANEL2, borderRadius: 8, padding: "10px 12px" },
+  mgmtRow: { display: "flex", alignItems: "center", gap: 8, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: 12, flexWrap: "wrap" },
+  mgmtCell: { flex: 1, textAlign: "center", minWidth: 80 },
+  mgmtLbl: { fontSize: 10, color: MUTE, textTransform: "uppercase", letterSpacing: "0.04em" },
+  mgmtVal: { fontSize: 16, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", marginTop: 3 },
+  mgmtDelta: { fontSize: 18, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", marginTop: 3 },
+  mgmtVs: { fontSize: 12, color: MUTE, flexShrink: 0 },
+  mgmtVerdict: { fontSize: 12.5, lineHeight: 1.5, marginTop: 10, fontWeight: 600 },
+  clvRows: { display: "flex", flexDirection: "column", gap: 8 },
+  clvRow: { display: "flex", alignItems: "center", gap: 10 },
+  clvName: { fontSize: 12, color: "#c3c9d3", width: 150, flexShrink: 0 },
+  clvBarWrap: { flex: 1, height: 16, background: INK, borderRadius: 4, position: "relative", border: `1px solid ${LINE}`, overflow: "hidden" },
+  clvBarZero: { position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "#4a5568" },
+  clvBarFill: { position: "absolute", top: 2, bottom: 2, borderRadius: 2 },
+  clvVal: { fontSize: 12, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", width: 48, textAlign: "right", flexShrink: 0 },
+  equityWrap: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px" },
+  equitySvg: { width: "100%", height: 44, display: "block" },
+  equityMeta: { display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 11.5, fontFamily: "'JetBrains Mono', monospace" },
+  equityStart: { color: MUTE },
+  equityEnd: { fontWeight: 700 },
   settleHead: { fontSize: 13, color: "#d3d8e0", marginBottom: 12, paddingBottom: 10, borderBottom: `1px solid ${LINE}` },
   settleStrat: { marginBottom: 12 },
   settleStratHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6 },
