@@ -624,14 +624,27 @@ export interface EnrichResult { enriched: number; newEvents: { matchId: string; 
 export async function enrichFromEspn(db: Database, provider: SportsProvider, deps: EngineDeps = {}): Promise<EnrichResult> {
   if (!provider.matchDetail) return { enriched: 0, newEvents: [] };
   const now = nowFn(deps)();
-  const leagues = [...new Set(R.linkedCompetitions(db).map((c) => c.external_league).filter(Boolean))] as string[];
-  if (!leagues.length) leagues.push("fifa.world");
+  const compSport = new Map(R.listCompetitions(db).map((c) => [c.id, c.sport_id]));
+  // Build the (sport, league) scoreboards to poll. Football (and any other
+  // ESPN-linked competition) contributes its mapped league; the provider also
+  // declares fixed leagues per sport (nba/nhl/mlb…). Deduped per sport.
+  const jobs = new Map<string, Set<string>>();
+  const addJob = (sport: string, league: string | null) => {
+    if (!league) return;
+    let set = jobs.get(sport); if (!set) jobs.set(sport, (set = new Set()));
+    set.add(league);
+  };
+  for (const c of R.linkedCompetitions(db)) addJob(c.sport_id, c.external_league);
+  if (!jobs.has("football")) addJob("football", "fifa.world");
+  if (provider.leaguesFor) for (const sport of new Set(compSport.values())) for (const lg of provider.leaguesFor(sport)) addJob(sport, lg);
   const dbMatches = R.listCompetitions(db).flatMap((c) => R.listMatches(db, c.id)).filter((m) => m.state !== "finished");
   const out: EnrichResult = { enriched: 0, newEvents: [] };
-  for (const league of leagues) {
-    const board = await provider.scoreboard("football", league);
+  for (const [sport, leagues] of jobs) for (const league of leagues) {
+    const board = await provider.scoreboard(sport, league);
     for (const s of board) {
-      const m = dbMatches.find((dm) => sameTeams(dm.home, dm.away, s.home, s.away));
+      // Same-sport only — otherwise "Poland vs Netherlands" basketball could
+      // match a soccer fixture of the same nations.
+      const m = dbMatches.find((dm) => compSport.get(dm.competition_id) === sport && sameTeams(dm.home, dm.away, s.home, s.away));
       if (!m) continue;
       // sameTeams is order-insensitive: the DB match's home/away orientation
       // (from the Polymarket title) may be the reverse of ESPN's. Align scores
@@ -649,7 +662,7 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       const sh = scoreHome ?? m.score_home, sa = scoreAway ?? m.score_away;
       R.updateMatch(db, m.id, { state: nextState, minute: s.minute, score_home: sh, score_away: sa, clock: s.clock ?? null, ...(s.final ? { final_score: `${sh ?? 0}:${sa ?? 0}` } : {}) });
       if (becameFinished) { const fresh = R.getMatch(db, m.id); if (fresh) settleMatch(db, fresh, deps); }
-      const detail = await provider.matchDetail!("football", league, s.externalRef);
+      const detail = await provider.matchDetail!(sport, league, s.externalRef);
       if (detail) {
         const homeLineup = flip ? detail.lineups.away : detail.lineups.home;
         const awayLineup = flip ? detail.lineups.home : detail.lineups.away;

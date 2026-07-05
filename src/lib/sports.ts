@@ -48,6 +48,10 @@ export interface SportsProvider {
   scoreboard(sport: string, league: string): Promise<SportsMatchStatus[]>;
   /** Lineups + key events for one event (ESPN summary). Optional per provider. */
   matchDetail?(sport: string, league: string, eventId: string): Promise<MatchDetail | null>;
+  /** The leagues/feeds to poll for a sport (e.g. ESPN: ["nba","wnba"]). Lets the
+   *  enrichment loop stay provider-agnostic — a unified paid provider can return
+   *  a single "" feed per sport instead of ESPN's per-league slugs. */
+  leaguesFor?(sport: string): string[];
 }
 
 function eventType(text: string): MatchEvent["type"] {
@@ -65,6 +69,15 @@ export interface SportsConfig {
   timeoutMs: number;
   /** default league per ТЗ sport id */
   leagues: Record<string, string>;
+  /** ESPN leagues to poll per sport (football comes from linked competitions).
+   *  These have stable slugs; tennis/table-tennis/esports aren't on ESPN. */
+  sportLeagues: Record<string, string[]>;
+}
+
+/** Parse a comma-separated env override into a league slug list. */
+function leaguesEnv(v: string | undefined, fallback: string[]): string[] {
+  const list = (v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  return list.length ? list : fallback;
 }
 
 export function loadSportsConfig(env: Record<string, string | undefined> = process.env): SportsConfig {
@@ -73,11 +86,22 @@ export function loadSportsConfig(env: Record<string, string | undefined> = proce
     espnBase: env.ESPN_BASE ?? "https://site.api.espn.com/apis/site/v2/sports",
     timeoutMs: Number(env.SPORTS_TIMEOUT_MS ?? 8000),
     leagues: { football: env.ESPN_SOCCER_LEAGUE ?? "eng.1", tennis: "atp" },
+    sportLeagues: {
+      basketball: leaguesEnv(env.ESPN_BASKETBALL_LEAGUES, ["nba", "wnba"]),
+      hockey: leaguesEnv(env.ESPN_HOCKEY_LEAGUES, ["nhl"]),
+      baseball: leaguesEnv(env.ESPN_BASEBALL_LEAGUES, ["mlb"]),
+      // ESPN cricket needs numeric series ids (no stable slug) — off by default,
+      // set ESPN_CRICKET_LEAGUES=8039,... when a covered series is live.
+      cricket: leaguesEnv(env.ESPN_CRICKET_LEAGUES, []),
+    },
   };
 }
 
-/** ТЗ sport id -> ESPN sport path. */
-const ESPN_SPORT: Record<string, string> = { football: "soccer", tennis: "tennis" };
+/** ТЗ sport id -> ESPN sport path. Sports absent here (tennis per-match,
+ *  table tennis, esports) have no ESPN feed — they need a paid provider. */
+const ESPN_SPORT: Record<string, string> = {
+  football: "soccer", basketball: "basketball", hockey: "hockey", baseball: "baseball", cricket: "cricket",
+};
 
 function mapState(espnState: string, completed: boolean): MatchState {
   if (completed || espnState === "post") return "finished";
@@ -94,6 +118,10 @@ function parseMinute(displayClock: unknown, detail: unknown): number | null {
 export class EspnSportsProvider implements SportsProvider {
   readonly name = "espn";
   constructor(private cfg: SportsConfig, private fetchImpl: typeof fetch = fetch) {}
+
+  leaguesFor(sport: string): string[] {
+    return this.cfg.sportLeagues[sport] ?? [];
+  }
 
   async scoreboard(sport: string, league: string): Promise<SportsMatchStatus[]> {
     const espnSport = ESPN_SPORT[sport];

@@ -148,6 +148,40 @@ test("enrichFromEspn stores lineups, records new events, reports triggers, and f
   assert.equal(res2.newEvents.length, 0, "known events don't re-trigger");
 });
 
+test("enrichFromEspn is sport-generic: enriches a basketball match via a provider-declared league, sport-scoped", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertSport(db, "basketball", "Баскетбол");
+  // a Polymarket-discovered basketball match (no ESPN league on its comp)
+  R.upsertCompetition(db, { id: "pm-basketball", sport_id: "basketball", name: "PM · Баскет", budget: 0, external_league: null, created_at: "t" });
+  const bid = R.uid();
+  R.insertMatch(db, { id: bid, competition_id: "pm-basketball", home: "Los Angeles Lakers", away: "Boston Celtics", state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: bid });
+  // a same-named-nations football match that must NOT be hit by the basketball board
+  const fid = R.uid();
+  const fcomp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  R.insertMatch(db, { id: fid, competition_id: fcomp.id, home: "Boston Celtics", away: "Los Angeles Lakers", state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: fid });
+
+  const provider: SportsProvider = {
+    name: "mock",
+    leaguesFor: (sport) => (sport === "basketball" ? ["nba"] : []),
+    async scoreboard(sport, league) {
+      if (sport === "basketball" && league === "nba")
+        return [{ externalRef: "B1", home: "Los Angeles Lakers", away: "Boston Celtics", state: "live", minute: 24, scoreHome: 55, scoreAway: 60, final: false }];
+      return [];
+    },
+    async matchDetail() { return { lineupOut: false, lineups: { home: null, away: null }, events: [] }; },
+  };
+
+  const res = await enrichFromEspn(db, provider, {});
+  assert.equal(res.enriched, 1, "only the basketball match enriched");
+  const bm = R.getMatch(db, bid)!;
+  assert.equal(bm.state, "live");
+  assert.equal(bm.score_home, 55);
+  assert.equal(bm.score_away, 60);
+  const fm = R.getMatch(db, fid)!;
+  assert.equal(fm.state, "upcoming", "football match of same nations left untouched (sport-scoped)");
+});
+
 test("enrichFromEspn aligns scores/lineups when the DB match orientation is reversed", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
