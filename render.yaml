@@ -40,3 +40,8 @@ services:
       # lost. Never commit the key to the repo.
       - key: ANTHROPIC_API_KEY
         sync: false
+      # StatPal (paid, self-serve) — live tennis / esports / cricket, the sports
+      # ESPN has no per-match feed for. sync:false → set the value in the Render
+      # dashboard; the key alone activates the StatPal+ESPN composite provider.
+      - key: STATPAL_KEY
+        sync: false
