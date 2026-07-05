@@ -406,23 +406,6 @@ export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number }
   return deleteMatches(db, doomed);
 }
 
-/**
- * Drop already-imported discovered matches from leagues with NO ESPN live feed —
- * uncovered `pm-*` competitions (external_league IS NULL) — that carry no bets.
- * The discovery filter (espnLeagueForSeries) stops importing these; this clears
- * the ones imported before it. Never touches a match with betting history or a
- * competition that has a real ESPN league. Returns the count removed.
- */
-export function pruneUncoveredMatches(db: Database): number {
-  const rows = db.prepare(
-    `SELECT m.id AS id FROM matches m
-       JOIN competitions c ON c.id = m.competition_id
-       WHERE c.external_league IS NULL AND c.id LIKE 'pm-%'
-         AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.match_id = m.id)`,
-  ).all() as { id: string }[];
-  return deleteMatches(db, rows.map((r) => r.id));
-}
-
 /** Delete matches + all their child rows (no ON DELETE CASCADE), atomically. */
 function deleteMatches(db: Database, ids: string[]): number {
   if (!ids.length) return 0;

@@ -39,13 +39,43 @@ export interface PolymarketConfig {
   discoverLimit: number;
   /** cap on markets attached per match (best by liquidity) */
   maxMarketsPerMatch: number;
+  /** skip discovered matches whose total market liquidity is below this (USD).
+   *  Low-liquidity fixtures aren't worth betting — user: «меня не интересуют
+   *  матчи с низкой ликвидностью». 0 disables the filter. */
+  minLiquidity: number;
 }
 
-/** ТЗ sport id -> Polymarket Gamma tag id. */
-export const SPORT_TAG_IDS: Record<string, number> = {
-  football: 100350, // soccer (NOT tag 10 = American football)
-  tennis: 864,
+/**
+ * ТЗ sport id -> Polymarket Gamma tag id(s). A sport may span SEVERAL tags:
+ * Polymarket has no single hub tag for cricket / e-sports / table tennis, so we
+ * union the relevant league tags. Discovery queries every tag and dedups events
+ * by id, so overlaps are harmless.
+ */
+export const SPORT_TAG_IDS: Record<string, number[]> = {
+  football: [100350],          // soccer (NOT tag 10 = American football)
+  tennis: [864],
+  basketball: [28],            // deep, liquid — NBA/EuroLeague/etc.
+  hockey: [900],               // ice hockey
+  cricket: [103813],           // Major League Cricket (no single cricket hub tag)
+  tabletennis: [103774, 105330], // WTT + Olympic table tennis
+  esports: [65, 102366, 100635], // League of Legends, Dota 2, CS
 };
+
+/** Human labels (RU) for the sports above — seeds the `sports` table + UI. */
+export const SPORT_LABELS: Record<string, string> = {
+  football: "Футбол",
+  tennis: "Теннис",
+  basketball: "Баскетбол",
+  hockey: "Хоккей",
+  cricket: "Крикет",
+  tabletennis: "Настольный теннис",
+  esports: "Киберспорт",
+};
+
+/** The Gamma tag ids backing a sport (empty for an unknown sport). */
+export function sportTags(sport: string): number[] {
+  return SPORT_TAG_IDS[sport] ?? [];
+}
 
 export function loadPolymarketConfig(
   env: Record<string, string | undefined> = process.env,
@@ -57,6 +87,7 @@ export function loadPolymarketConfig(
     timeoutMs: Number(env.POLYMARKET_TIMEOUT_MS ?? 6000),
     discoverLimit: Number(env.POLYMARKET_DISCOVER_LIMIT ?? 1000),
     maxMarketsPerMatch: Number(env.POLYMARKET_MAX_MARKETS ?? 40),
+    minLiquidity: Number(env.POLYMARKET_MIN_LIQUIDITY ?? 250),
   };
 }
 
@@ -261,13 +292,14 @@ export async function listSportEvents(
   limit = 40,
   deps: FetchDeps = {},
 ): Promise<PolyEvent[]> {
-  const tag = SPORT_TAG_IDS[sport];
-  if (tag == null) return [];
-  return gammaEvents(
-    cfg,
-    `tag_id=${tag}&closed=false&limit=${limit}&order=startDate&ascending=false`,
-    deps,
-  );
+  const tags = sportTags(sport);
+  if (!tags.length) return [];
+  const byId = new Map<string, PolyEvent>();
+  for (const tag of tags) {
+    for (const ev of await gammaEvents(cfg, `tag_id=${tag}&closed=false&limit=${limit}&order=startDate&ascending=false`, deps))
+      byId.set(ev.id, ev);
+  }
+  return [...byId.values()];
 }
 
 /** Direct lookup by event slug (e.g. "atp-alcaraz-sinner-2026-07-04"). */
@@ -314,9 +346,9 @@ export async function findMatchEvents(
   q: MatchQuery,
   deps: FetchDeps = {},
 ): Promise<PolyEvent[]> {
-  const tag = SPORT_TAG_IDS[q.sport];
-  if (tag == null) return [];
-  const events = await fetchSportEvents(cfg, tag, q.limit ?? cfg.discoverLimit ?? 1000, deps);
+  const tags = sportTags(q.sport);
+  if (!tags.length) return [];
+  const events = await fetchSportEvents(cfg, tags, q.limit ?? cfg.discoverLimit ?? 1000, deps);
   return events
     .map((ev) => ({ ev, score: titleMatchScore(ev.title, q.home, q.away) }))
     .filter((x) => x.score >= 2)
@@ -325,30 +357,35 @@ export async function findMatchEvents(
 }
 
 const GAMMA_PAGE = 100; // Gamma caps a single /events response at 100
-const sportEventCache = new Map<number, { at: number; events: PolyEvent[] }>();
+const sportEventCache = new Map<string, { at: number; events: PolyEvent[] }>();
 const SPORT_CACHE_TTL_MS = 120_000;
 
-/** Page through a sport's open events up to `limit`. Real fetches are cached
- *  briefly so linking many matches in one tick doesn't refetch every page. */
-async function fetchSportEvents(cfg: PolymarketConfig, tag: number, limit: number, deps: FetchDeps): Promise<PolyEvent[]> {
+/** Page through a sport's open events (across ALL its tags) up to `limit` per
+ *  tag, dedup by event id. Real fetches are cached briefly so linking many
+ *  matches in one tick doesn't refetch every page. */
+async function fetchSportEvents(cfg: PolymarketConfig, tags: number[], limit: number, deps: FetchDeps): Promise<PolyEvent[]> {
   const live = !deps.fetchImpl; // don't cache injected (test) fetches
+  const key = [...tags].sort((a, b) => a - b).join(",");
   if (live) {
-    const c = sportEventCache.get(tag);
+    const c = sportEventCache.get(key);
     if (c && Date.now() - c.at < SPORT_CACHE_TTL_MS) return c.events;
   }
-  const all: PolyEvent[] = [];
+  const byId = new Map<string, PolyEvent>(); // a match tagged with two of a sport's tags appears once
   let ok = true;
-  for (let off = 0; off < limit; off += GAMMA_PAGE) {
-    const page = await gammaEventsRaw(cfg, `tag_id=${tag}&closed=false&limit=${GAMMA_PAGE}&offset=${off}&order=startDate&ascending=false`, deps);
-    if (!page.ok) { ok = false; break; } // transient error mid-pagination → result is PARTIAL
-    all.push(...page.events);
-    if (page.events.length < GAMMA_PAGE) break; // genuinely the last page
+  outer: for (const tag of tags) {
+    for (let off = 0; off < limit; off += GAMMA_PAGE) {
+      const page = await gammaEventsRaw(cfg, `tag_id=${tag}&closed=false&limit=${GAMMA_PAGE}&offset=${off}&order=startDate&ascending=false`, deps);
+      if (!page.ok) { ok = false; break outer; } // transient error mid-pagination → result is PARTIAL
+      for (const ev of page.events) byId.set(ev.id, ev);
+      if (page.events.length < GAMMA_PAGE) break; // last page of this tag
+    }
   }
+  const all = [...byId.values()];
   // Cache ONLY a complete, non-empty fetch. A transient error mid-pagination
-  // (ok=false, partial `all`) or a fully-empty result is never cached — otherwise
+  // (ok=false, partial) or a fully-empty result is never cached — otherwise
   // a timeout on page N would truncate discovery for the whole 2-min TTL even
   // after the network recovers, dropping matches that live on later pages.
-  if (live && ok && all.length) sportEventCache.set(tag, { at: Date.now(), events: all });
+  if (live && ok && all.length) sportEventCache.set(key, { at: Date.now(), events: all });
   return all;
 }
 
@@ -386,19 +423,33 @@ function matchesTitle(name: string, titleWords: Set<string>): boolean {
 // (home, away), and aggregate the settleable markets.
 // ------------------------------------------------------------
 
-// Tennis titles carry a "Tournament: " prefix ("ITF Skopje:", "Wimbledon ATP:").
+// Many sports prefix the title with the tournament ("ITF Skopje:", "LoL:",
+// "Dota 2:", "Major League Cricket:"). Strip everything up to the first colon.
 const TOURNEY_PREFIX_RE = /^[^:]*:\s*/;
 // Trailing market-family text appended to a title after the "A vs B" core.
 const FAMILY_SUFFIX_RE = /\s*(?:[-–]\s*)?(?:more markets|player props|total corners|exact score|halftime result|1st half result|first half result|second half result|first (?:team )?to score|to score first|moneyline|corners?|cards?|bookings?|set\s*\d.*|match o\/u.*|total sets.*|set handicap.*|completed match|winner|o\/u\s*[\d.]+.*)\s*$/i;
+// Per-side trailing junk on e-sports / cricket titles:
+//   "Dplus KIA (BO1) - Esports World Cup Group A"  ->  "Dplus KIA"
+//   "Virtus.pro - Match Result (1x2)"              ->  "Virtus.pro"
+// A " - …" tail (space-hyphen-space) or a "(BOx)/(1x2)/(Map n)" bracket is never
+// part of a real team/player name, so both are safe to drop.
+const SIDE_TAIL_RE = /\s+[-–]\s+.*$/;
+const SIDE_BRACKET_RE = /\s*\((?:bo\s*\d+|best of \d+|1x2|map \d+|game \d+)\)\s*$/i;
+function cleanSide(name: string): string {
+  return name.replace(SIDE_TAIL_RE, "").replace(SIDE_BRACKET_RE, "").trim();
+}
 
 /** Extract {home, away} from an event title, or null if it isn't an A-vs-B match. */
 export function parseMatchTitle(title: string, sport: string): { home: string; away: string } | null {
   let s = title.trim();
-  if (sport === "tennis") s = s.replace(TOURNEY_PREFIX_RE, "");
+  // Drop a "Tournament: " prefix — but only if the remainder is still an A-vs-B
+  // title, so a colon inside a non-match title can't corrupt the parse.
+  const noPrefix = s.replace(TOURNEY_PREFIX_RE, "");
+  if (/\s+vs\.?\s+/i.test(noPrefix)) s = noPrefix;
   s = s.replace(FAMILY_SUFFIX_RE, "").replace(FAMILY_SUFFIX_RE, "").trim(); // twice: "… Set 1 Winner"
   const parts = s.split(/\s+vs\.?\s+/i);
   if (parts.length !== 2) return null;
-  const home = parts[0].trim(), away = parts[1].trim();
+  const home = cleanSide(parts[0]), away = cleanSide(parts[1]);
   if (home.length < 2 || away.length < 2) return null;
   return { home, away };
 }
@@ -414,12 +465,12 @@ export async function discoverSportMatches(
   cfg: PolymarketConfig, sport: string, snapshotAt: string, deps: FetchDeps = {},
   opts: { limit?: number; windowDays?: number; nowMs?: number } = {},
 ): Promise<DiscoveredMatch[]> {
-  const tag = SPORT_TAG_IDS[sport];
-  if (tag == null) return [];
+  const tags = sportTags(sport);
+  if (!tags.length) return [];
   const limit = opts.limit ?? 200;
   const nowMs = opts.nowMs ?? (Date.parse(snapshotAt) || 0);
   const windowMs = (opts.windowDays ?? 7) * 86_400_000;
-  const events = await fetchSportEvents(cfg, tag, cfg.discoverLimit ?? 1000, deps);
+  const events = await fetchSportEvents(cfg, tags, cfg.discoverLimit ?? 1000, deps);
   const groups = new Map<string, { home: string; away: string; kickoff: string | null; series: string | null; seriesSlug: string | null; events: PolyEvent[] }>();
   for (const ev of events) {
     const p = parseMatchTitle(ev.title, sport);

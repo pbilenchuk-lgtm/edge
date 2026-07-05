@@ -18,7 +18,7 @@ import type { SportsMatchStatus } from "./sports.js";
 import { reassessNarrative, effectiveEnv } from "./llm.js";
 import { settleBet, resolveFootballMarket } from "./settlement.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
-import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, type PolymarketConfig } from "./polymarket.js";
+import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig } from "./polymarket.js";
 import type { SportsProvider } from "./sports.js";
 
 export interface EngineConfig {
@@ -436,7 +436,7 @@ export async function linkMatchOdds(
 // imports the many matches it lists into a per-sport catch-all competition.
 // ------------------------------------------------------------
 
-const PM_COMP_LABEL: Record<string, string> = { football: "Polymarket · Футбол · прочее", tennis: "Polymarket · Теннис · прочее" };
+const pmCompLabel = (sport: string): string => `Polymarket · ${SPORT_LABELS[sport] ?? sport} · прочее`;
 
 // Localized names + ESPN league (for lineup/event enrichment) for known series.
 const SERIES_RU: Record<string, string> = {
@@ -507,10 +507,14 @@ export function espnLeagueForSeries(series: string | null, seriesSlug: string | 
 }
 
 function ensureCategoryComp(db: Database, sport: string, series: string | null, seriesSlug: string | null, now: string): string {
+  // The persistent prod DB was seeded before these sports existed, so guarantee
+  // the sports(id) row exists (FK target for competitions.sport_id) at import
+  // time — idempotent, safe on every run.
+  R.upsertSport(db, sport, SPORT_LABELS[sport] ?? sport);
   if (!series && !seriesSlug) {
     const id = `pm-${sport}`;
     if (!R.listCompetitions(db).some((c) => c.id === id))
-      R.upsertCompetition(db, { id, sport_id: sport, name: PM_COMP_LABEL[sport] ?? `Polymarket · ${sport}`, budget: 0, external_league: null, created_at: now });
+      R.upsertCompetition(db, { id, sport_id: sport, name: pmCompLabel(sport), budget: 0, external_league: null, created_at: now });
     return id;
   }
   const slug = seriesSlug ?? slugify(series!);
@@ -543,11 +547,12 @@ export async function importPolymarketMatches(
   const discovered = await discoverSportMatches(poly, sport, now, { fetchImpl: deps.fetchImpl }, { limit: opts.limit ?? 200, windowDays: 7, nowMs });
   const out: DiscoverItem[] = [];
   for (const d of discovered) {
-    // Only import matches from leagues ESPN actually covers (real live scores /
-    // events) — user: «подтягиваем только то, для чего есть live-обзор». Tennis
-    // and minor/uncovered leagues (no ESPN feed) are skipped entirely, so every
-    // imported match has a real in-play view, not an empty «События матча».
-    if (!espnLeagueForSeries(d.series, d.seriesSlug)) continue;
+    // Import by LIQUIDITY, not by ESPN coverage — user: «меня не интересуют
+    // матчи с низкой ликвидностью… а где ликвидность есть — надо брать». A liquid
+    // fixture is worth trading even without a live scoreboard (its «События
+    // матча» then falls back to market-price snapshots); a thin one isn't, ESPN
+    // feed or not. 0 disables the floor.
+    if (poly.minLiquidity > 0 && d.liquidity < poly.minLiquidity) continue;
     // Route into the tournament category this match belongs to (Polymarket series).
     const compId = ensureCategoryComp(db, sport, d.series, d.seriesSlug, now);
     // Order-INSENSITIVE ref (teams sorted): Polymarket may list a fixture as

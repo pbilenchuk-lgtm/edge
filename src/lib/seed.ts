@@ -9,6 +9,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { extractThresholdsHeuristic } from "./thresholds.js";
+import { SPORT_LABELS } from "./polymarket.js";
 import type { Bet, Market } from "./types.js";
 
 const T = "2026-07-03T12:00:00.000Z"; // deterministic seed timestamp
@@ -33,8 +34,7 @@ export function seedDatabase(db: Database): void {
   R.setTreasury(db, 5000);
 
   // --- sports ---
-  R.upsertSport(db, "football", "Футбол");
-  R.upsertSport(db, "tennis", "Теннис");
+  for (const [id, label] of Object.entries(SPORT_LABELS)) R.upsertSport(db, id, label);
 
   // --- competitions (§2.2) with budgets + ESPN league (категоризация/авто-импорт) ---
   // ЧМ-2026 — ядро (fifa.world). Остальные — дополнения с их лигами.
@@ -278,8 +278,7 @@ export function seedMinimal(db: Database): void {
   if (seeded) return;
 
   R.setTreasury(db, 5000); // starting bankroll — editable on the Настройки screen
-  R.upsertSport(db, "football", "Футбол");
-  R.upsertSport(db, "tennis", "Теннис");
+  for (const [id, label] of Object.entries(SPORT_LABELS)) R.upsertSport(db, id, label);
 
   // Analytics: Промпт 1 at sport level (all football), Промпт 2 as the ЧМ-2026
   // competition override — analyticsPromptFor concatenates them for WC matches.

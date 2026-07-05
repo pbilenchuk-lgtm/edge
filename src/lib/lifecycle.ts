@@ -498,10 +498,6 @@ export async function runAutoCycle(
   // Polymarket discovery flood). Never touches a match with betting history, so
   // metrics/P&L are preserved. Keeps buildAppData's per-poll scan bounded (§502).
   stepSync("pruneMatches", () => R.pruneStaleMatches(db, { staleBeforeMs: (Date.parse(nowFn(deps)()) || Date.now()) - 3 * 86400_000 }), 0);
-  // Clear already-imported matches from leagues with no ESPN live feed (the
-  // discovery filter stops new ones; this removes the tennis/minor-league clutter
-  // imported before it). No-bet only — never drops a position.
-  stepSync("pruneUncovered", () => R.pruneUncoveredMatches(db), 0);
   return {
     synced: synced.length, imported: synced.filter((r) => r.created).length, discovered,
     oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),

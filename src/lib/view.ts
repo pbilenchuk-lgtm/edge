@@ -9,6 +9,7 @@ import * as R from "./repo.js";
 import { providerEnabled, effectiveEnv } from "./llm.js";
 import { jobActive } from "./analysis.js";
 import { warsawLabel, warsawClock, isIso } from "./time.js";
+import { SPORT_LABELS } from "./polymarket.js";
 import { resolveFootballMarket } from "./settlement.js";
 import type { StrategyParams } from "./types.js";
 
@@ -404,7 +405,7 @@ function buildFeed(
   matchDb: Record<string, MatchView>,
 ): FeedItem[] {
   const stratById = Object.fromEntries(strategies.map((s) => [s.id, s]));
-  const sportLabel: Record<string, string> = { football: "Футбол", tennis: "Теннис" };
+  const sportLabel = SPORT_LABELS;
   // Collect with each source row's created_at so the feed is the 40 MOST RECENT
   // events across all matches, not the first 40 in iteration order.
   const rows: { at: string; item: FeedItem }[] = [];

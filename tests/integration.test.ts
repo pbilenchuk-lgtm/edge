@@ -133,7 +133,13 @@ test("polymarket: parseMatchTitle extracts competitors across formats", () => {
   assert.deepEqual(parseMatchTitle("Colombia vs. Ghana - Player Props", "football"), { home: "Colombia", away: "Ghana" });
   assert.deepEqual(parseMatchTitle("ITF Skopje: Vladyslav Orlov vs Stefan Popovic Set 1 Winner", "tennis"), { home: "Vladyslav Orlov", away: "Stefan Popovic" });
   assert.deepEqual(parseMatchTitle("Wimbledon ATP: Taylor Fritz vs Lorenzo Sonego", "tennis"), { home: "Taylor Fritz", away: "Lorenzo Sonego" });
+  // e-sports / cricket: strip "League:" prefix and "(BOx) - Stage" / "- Match Result (1x2)" tails
+  assert.deepEqual(parseMatchTitle("LoL: T1 vs GAM Esports (BO1) - Esports World Cup Group C", "esports"), { home: "T1", away: "GAM Esports" });
+  assert.deepEqual(parseMatchTitle("Dota 2: LGD Gaming vs Virtus.pro - Match Result (1x2)", "esports"), { home: "LGD Gaming", away: "Virtus.pro" });
+  assert.deepEqual(parseMatchTitle("Major League Cricket: San Francisco Unicorns vs Mi New York", "cricket"), { home: "San Francisco Unicorns", away: "Mi New York" });
+  assert.deepEqual(parseMatchTitle("Poland vs. Netherlands", "basketball"), { home: "Poland", away: "Netherlands" });
   assert.equal(parseMatchTitle("Bitcoin Up or Down July 5", "football"), null);
+  assert.equal(parseMatchTitle("NHL: 2027 Champion", "hockey"), null); // futures, not a match
 });
 
 test("polymarket: isNoiseMarket keeps settleable markets, drops props/niche", () => {
@@ -215,6 +221,31 @@ test("polymarket: findMatchEvent / bySlug / listSportEvents via mocked Gamma", a
 
   assert.deepEqual(await listSportEvents(cfg, "curling", 10, { fetchImpl: eventsFetch }), []);
   assert.equal((await listSportEvents(cfg, "football", 10, { fetchImpl: eventsFetch })).length, 1);
+});
+
+test("importPolymarketMatches: liquid match imported even w/o ESPN coverage; thin one skipped", async () => {
+  const { importPolymarketMatches } = await import("../src/lib/engine.js");
+  const base = loadPolymarketConfig({ POLYMARKET_ENABLED: "true" });
+  const now = "2026-07-03T12:00:00Z";
+  // The tennis fixture is a Wimbledon Juniors match — ESPN doesn't cover it, so
+  // the old ESPN-only gate skipped it. With liquidity 1234+500 it now imports.
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const items = await importPolymarketMatches(db, "tennis",
+    { fetchImpl: eventsFetch, polymarket: { ...base, minLiquidity: 250 }, now: () => now });
+  assert.equal(items.length, 1, "liquid uncovered match imported");
+  assert.equal(items[0].created, true);
+  const m = R.matchByExternalRef(db, "pm:tennis:connordoig-eudaldgonzalez");
+  assert.ok(m, "match row created under a pm-* tennis category");
+  assert.ok(R.latestMarkets(db, m!.id).length >= 2, "settleable markets attached");
+  assert.ok(db.prepare("SELECT 1 FROM sports WHERE id='tennis'").get(), "sport row present (FK target)");
+
+  // Same fixture, threshold above its liquidity → skipped entirely.
+  const db2 = openDb(":memory:");
+  seedDatabase(db2);
+  const none = await importPolymarketMatches(db2, "tennis",
+    { fetchImpl: eventsFetch, polymarket: { ...base, minLiquidity: 100000 }, now: () => now });
+  assert.equal(none.length, 0, "sub-threshold liquidity → not imported");
 });
 
 // ---------------- LLM abstraction graceful (§5.3, §6, §9.9) ----------------
