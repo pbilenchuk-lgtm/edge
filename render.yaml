@@ -1,14 +1,24 @@
 # Render blueprint — one-click deploy of EDGE LAB.
 # In the Render dashboard: New → Blueprint → connect this repo. Render reads
 # this file, builds the Dockerfile, and gives you a public https URL.
-# The free plan sleeps after ~15 min idle and wakes on the next request.
+#
+# PERSISTENCE: a Persistent Disk is mounted at /app/data (= EDGE_DB_PATH's dir),
+# so the SQLite database SURVIVES deploys and restarts. Disks require a paid
+# instance (Starter+); they also pin the service to a single instance and make
+# deploys sequential (a few seconds of downtime on redeploy) — fine for this app.
+# The DB is seeded only when the file is absent (scripts/start.sh), so it seeds
+# once on the first deploy and persists thereafter — no more reseed-on-deploy.
 services:
   - type: web
     name: edge-lab
     runtime: docker
-    plan: free
+    plan: starter        # disks need a paid plan (free has no persistent storage)
     healthCheckPath: /api/health
     autoDeploy: true
+    disk:
+      name: edge-data
+      mountPath: /app/data   # matches EDGE_DB_PATH=/app/data/edge.db (Dockerfile)
+      sizeGB: 1              # SQLite paper-trading DB — 1 GB is ample
     envVars:
       - key: POLYMARKET_ENABLED
         value: "true"    # pull matches + odds from Polymarket
@@ -24,8 +34,9 @@ services:
       - key: DISCOVER_INTERVAL_HR
         value: "24"      # Polymarket parse cadence (matches surface ~7 days out)
       # Live Claude analysis needs a key. sync:false means Render PROMPTS you for
-      # the value in the dashboard on first deploy and KEEPS it across redeploys
-      # (the DB reseeds on every deploy, but this env var persists — so once you
-      # paste the key here it stays the default). Never commit the key to the repo.
+      # the value in the dashboard on first deploy and KEEPS it across redeploys.
+      # Recommended over entering the key in the UI: the env var is read before
+      # the DB (llm.effectiveEnv), so it works from the first request and is never
+      # lost. Never commit the key to the repo.
       - key: ANTHROPIC_API_KEY
         sync: false
