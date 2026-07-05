@@ -16,7 +16,7 @@ import {
 } from "../src/lib/llm.js";
 import { extractThresholds } from "../src/lib/thresholds.js";
 import { analyzeMatch } from "../src/lib/analysis.js";
-import { parseStatpalTennis, parseStatpalEsports, parseStatpalCricket, StatpalSportsProvider, CompositeSportsProvider, loadSportsConfig as loadSportsCfg, EspnSportsProvider } from "../src/lib/sports.js";
+import { parseStatpalTennis, parseStatpalEsports, parseStatpalCricket, parseStatpalSoccer, StatpalSportsProvider, CompositeSportsProvider, loadSportsConfig as loadSportsCfg, EspnSportsProvider } from "../src/lib/sports.js";
 
 // Mock an Anthropic response carrying a JSON assessment for assessMatchLLM.
 function mockLLM(assessment: unknown) {
@@ -420,12 +420,37 @@ test("parseStatpalCricket: winner/comment => finished; match as object; runs as 
   assert.equal(rows.find((r) => r.externalRef === "k2")!.state, "upcoming");
 });
 
-test("CompositeSportsProvider routes per sport (statpal gaps, espn majors)", () => {
+test("parseStatpalSoccer: minute-status=live, FT=finished, clock-time=upcoming (Morocco covered)", () => {
+  const json = { live_matches: { league: [
+    { name: "Morocco: Botola Pro", country: "morocco", match: [
+      { main_id: "s1", status: "63", minute: "63", home: { name: "Difaa El Jadidi", goals: "1" }, away: { name: "Berkane", goals: "3" } },
+    ] },
+    // XML collapse: single match arrives as an object
+    { name: "England: Premier League", country: "england", match: {
+      main_id: "s2", status: "FT", home: { name: "Arsenal", goals: "2" }, away: { name: "Chelsea", goals: "0" } } },
+    { name: "Spain: LaLiga", country: "spain", match: {
+      main_id: "s3", status: "20:00", home: { name: "A", goals: "" }, away: { name: "B", goals: "" } } },
+  ] } };
+  const rows = parseStatpalSoccer(json);
+  const s1 = rows.find((r) => r.externalRef === "s1")!;
+  assert.equal(s1.state, "live"); assert.equal(s1.minute, 63);
+  assert.equal(s1.scoreHome, 1); assert.equal(s1.scoreAway, 3);
+  assert.equal(rows.find((r) => r.externalRef === "s2")!.state, "finished");
+  assert.equal(rows.find((r) => r.externalRef === "s3")!.state, "upcoming"); // "20:00" clock = scheduled
+});
+
+test("CompositeSportsProvider routes by league tag (statpal gaps + football, espn majors)", async () => {
   const cfg = loadSportsCfg({ SPORTS_ENABLED: "true", STATPAL_KEY: "k" });
   const statpal = new StatpalSportsProvider(cfg);
   const espn = new EspnSportsProvider(cfg);
-  const comp = new CompositeSportsProvider({ tennis: statpal, esports: statpal, cricket: statpal }, espn);
-  assert.deepEqual(comp.leaguesFor("tennis"), [""]);        // -> statpal single feed
-  assert.deepEqual(comp.leaguesFor("basketball"), ["nba", "wnba"]); // -> espn league slugs
-  assert.deepEqual(comp.leaguesFor("football"), []);        // -> espn (from linked comps)
+  const comp = new CompositeSportsProvider(statpal, espn, new Set(["tennis", "esports", "cricket", "football"]));
+  assert.deepEqual(comp.leaguesFor("tennis"), ["sp:tennis"]);          // -> statpal only
+  assert.deepEqual(comp.leaguesFor("basketball"), ["nba", "wnba"]);    // -> espn only
+  assert.deepEqual(comp.leaguesFor("football"), ["sp:football"]);      // -> statpal feed + ESPN linked leagues (added by enrich)
+  // an "sp:*" league routes to StatPal; a real slug routes to ESPN
+  const espnMark = { async scoreboard(s: string, l: string) { return [{ externalRef: "espn:" + l }] as any; }, name: "e", leaguesFor: () => [] };
+  const spMark = { async scoreboard() { return [{ externalRef: "statpal" }] as any; }, name: "s", leaguesFor: () => [] };
+  const c2 = new CompositeSportsProvider(spMark as any, espnMark as any, new Set(["football"]));
+  assert.equal((await c2.scoreboard("football", "sp:football"))[0].externalRef, "statpal");
+  assert.equal((await c2.scoreboard("football", "eng.1"))[0].externalRef, "espn:eng.1");
 });

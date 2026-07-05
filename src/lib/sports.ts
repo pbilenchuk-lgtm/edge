@@ -181,26 +181,31 @@ const intOrNull = (x: unknown): number | null => {
   return Number.isFinite(n) ? Math.trunc(n) : null;
 };
 
-/** Which StatPal `/v1/<sport>/livescores` endpoint backs each ТЗ sport. */
-const STATPAL_ENDPOINT: Record<string, string> = { tennis: "v1/tennis", esports: "v1/esports", cricket: "v1/cricket" };
+/** StatPal live-feed path per ТЗ sport. Soccer is v2 with a different shape;
+ *  the rest are v1 `/<sport>/livescores`. */
+const STATPAL_FEED: Record<string, string> = {
+  tennis: "v1/tennis/livescores", esports: "v1/esports/livescores",
+  cricket: "v1/cricket/livescores", football: "v2/soccer/matches/live",
+};
 
 export class StatpalSportsProvider implements SportsProvider {
   readonly name = "statpal";
   constructor(private cfg: SportsConfig, private fetchImpl: typeof fetch = fetch) {}
 
   leaguesFor(sport: string): string[] {
-    return STATPAL_ENDPOINT[sport] ? [""] : []; // one feed per sport (no league slug)
+    return STATPAL_FEED[sport] ? [""] : []; // one live feed per sport (no league slug)
   }
 
   async scoreboard(sport: string, _league: string): Promise<SportsMatchStatus[]> {
-    const ep = STATPAL_ENDPOINT[sport];
-    if (!ep) return [];
-    const json = await this.get(`${ep}/livescores`);
+    const feed = STATPAL_FEED[sport];
+    if (!feed) return [];
+    const json = await this.get(feed);
     if (!json) return [];
     try {
       if (sport === "tennis") return parseStatpalTennis(json);
       if (sport === "esports") return parseStatpalEsports(json);
       if (sport === "cricket") return parseStatpalCricket(json);
+      if (sport === "football") return parseStatpalSoccer(json);
     } catch { /* malformed feed → nothing, keep last DB state */ }
     return [];
   }
@@ -293,18 +298,54 @@ export function parseStatpalCricket(json: any): SportsMatchStatus[] {
   return out;
 }
 
-/** Route each sport to the provider that covers it best; everything else to a
- *  fallback (ESPN). Lets the enrichment loop stay single-provider while tennis/
- *  esports/cricket come from StatPal and the majors from ESPN. */
+export function parseStatpalSoccer(json: any): SportsMatchStatus[] {
+  const out: SportsMatchStatus[] = [];
+  for (const lg of asArr(json?.live_matches?.league)) {
+    for (const m of asArr((lg as any).match)) {
+      const st = String((m as any).status ?? "").trim();
+      const finished = /^(ft|aet|aot|pen\.?|ap|ended|finished|awarded|abandoned|walk\s?over|wo)$/i.test(st);
+      const upcoming = isTime(st) || st === "" || /^(ns|not started|scheduled|postp\.?|tbd|susp\.?)$/i.test(st);
+      const live = !finished && !upcoming;
+      const minNum = /^\d{1,3}(\+\d+)?$/.test(st) ? parseInt(st, 10) : intOrNull((m as any).minute);
+      out.push({
+        externalRef: String((m as any).main_id ?? (m as any).id ?? (m as any).fallback_id_1 ?? ""),
+        home: String((m as any).home?.name ?? "?"), away: String((m as any).away?.name ?? "?"),
+        state: finished ? "finished" : upcoming ? "upcoming" : "live",
+        minute: live ? minNum : null,
+        scoreHome: intOrNull((m as any).home?.goals), scoreAway: intOrNull((m as any).away?.goals),
+        final: finished,
+        detail: (lg as any).name ? String((lg as any).name) : undefined,
+        clock: live && st ? st : null,
+      });
+    }
+  }
+  return out;
+}
+
+/** League tag telling the composite a job belongs to StatPal, not ESPN. */
+const SP_TAG = "sp:";
+
+/**
+ * Route scoreboards by league tag: an "sp:<sport>" job → StatPal, anything else
+ * → ESPN. `statpalSports` are the sports StatPal serves; FOOTBALL is in both —
+ * ESPN covers its mapped leagues (with lineups/stats), StatPal covers every
+ * other league (Morocco, minor leagues) that ESPN has no feed for.
+ */
 export class CompositeSportsProvider implements SportsProvider {
   readonly name = "composite";
-  constructor(private routes: Record<string, SportsProvider>, private fallback: SportsProvider) {}
-  private pick(sport: string): SportsProvider { return this.routes[sport] ?? this.fallback; }
-  leaguesFor(sport: string): string[] { const p = this.pick(sport); return p.leaguesFor ? p.leaguesFor(sport) : []; }
-  scoreboard(sport: string, league: string): Promise<SportsMatchStatus[]> { return this.pick(sport).scoreboard(sport, league); }
+  constructor(private statpal: SportsProvider, private espn: SportsProvider, private statpalSports: Set<string>) {}
+  leaguesFor(sport: string): string[] {
+    const out: string[] = [];
+    if (this.statpalSports.has(sport)) out.push(SP_TAG + sport);            // StatPal live feed
+    if (this.espn.leaguesFor) out.push(...this.espn.leaguesFor(sport));      // ESPN league slugs
+    return out;
+  }
+  scoreboard(sport: string, league: string): Promise<SportsMatchStatus[]> {
+    return league.startsWith(SP_TAG) ? this.statpal.scoreboard(sport, "") : this.espn.scoreboard(sport, league);
+  }
   matchDetail(sport: string, league: string, eventId: string): Promise<MatchDetail | null> {
-    const p = this.pick(sport);
-    return p.matchDetail ? p.matchDetail(sport, league, eventId) : Promise.resolve(null);
+    if (league.startsWith(SP_TAG)) return this.statpal.matchDetail ? this.statpal.matchDetail(sport, "", eventId) : Promise.resolve(null);
+    return this.espn.matchDetail ? this.espn.matchDetail(sport, league, eventId) : Promise.resolve(null);
   }
 }
 
@@ -408,6 +449,8 @@ export function loadSportsProvider(
   const espn = new EspnSportsProvider(cfg, fetchImpl);
   if (!cfg.statpalKey) return espn;
   const statpal = new StatpalSportsProvider(cfg, fetchImpl);
-  // ESPN for the majors (free, verified); StatPal for the sports it can't do.
-  return new CompositeSportsProvider({ tennis: statpal, esports: statpal, cricket: statpal }, espn);
+  // StatPal serves tennis/esports/cricket (no ESPN feed) AND football — for
+  // football it supplements ESPN, covering every league ESPN doesn't map
+  // (Morocco, minor leagues), so liquid discovered matches all get live data.
+  return new CompositeSportsProvider(statpal, espn, new Set(["tennis", "esports", "cricket", "football"]));
 }
