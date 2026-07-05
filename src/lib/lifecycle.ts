@@ -31,8 +31,11 @@ import type { Confidence, ReassessTrigger } from "./types.js";
 // (post-lineup) reassessment.
 export const ANALYZE_PRE_HOURS = 12;
 export const LINEUP_HOURS = 1;
+// Hours past kickoff after which a clock-only match (ESPN never finished it) is
+// auto-finished — generous enough to cover a long match + stoppage/extra time.
+export const FINISH_HOURS = 4;
 import type { SportsProvider } from "./sports.js";
-import type { Match } from "./types.js";
+import type { Match, MatchState } from "./types.js";
 
 const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 // Prefer the raw ESPN clock ("45'+2'") so logs/reassessments carry stoppage
@@ -52,23 +55,41 @@ function activeMatches(db: Database): { comp: string; sport: string; match: Matc
 // 0) Advance clocks — flip lineup_out / state from the kickoff time
 // ------------------------------------------------------------
 
-/** For matches with a real kickoff time, mark lineups out ~1h before (WC), so
- *  the post-lineup reassessment fires. Only touches time-scheduled (PM) matches;
- *  ESPN-driven live state is left to syncMatchStatus. */
+/**
+ * Drive match state from the kickoff CLOCK for time-scheduled matches (found via
+ * Polymarket, no ESPN live feed): upcoming → lineup (~1h before) → LIVE (at
+ * kickoff) → finished (well after, if ESPN never finished it and nothing's at
+ * risk). Without this a match ESPN can't drive (obscure leagues, most tennis)
+ * would sit in "lineup" forever — showing «состав» instead of LIVE, never
+ * lighting the live-dot, never capturing the kickoff price baseline, and starving
+ * the live-only machinery (reassessment / stats / exits). ESPN stays
+ * authoritative when it IS driving a match: those carry a real `minute`, so we
+ * never clock-finish them and never regress their state.
+ */
 export function advanceClocks(db: Database, deps: EngineDeps = {}): void {
   const nowMs = Date.parse(nowFn(deps)()) || Date.now();
   for (const { match: m } of activeMatches(db)) {
     const h = hoursUntil(m.kickoff_at, nowMs);
     if (h == null) continue;
-    const lineupOut = h <= LINEUP_HOURS;
-    // Never clobber a live (or finished) match back to lineup/upcoming — only
-    // pre-match matches follow the time-based lineup schedule. A live match with
-    // lineup_out=false (e.g. a league ESPN gives no teamsheet for) would
-    // otherwise get regressed to "lineup" once kickoff is <1h away.
-    if (lineupOut !== m.lineup_out) {
-      const patch: any = { lineup_out: lineupOut };
-      if (m.state === "upcoming" || m.state === "lineup") patch.state = lineupOut ? "lineup" : "upcoming";
-      R.updateMatch(db, m.id, patch);
+
+    // Clock-finish: a clock-only match (no ESPN minute) long past kickoff that
+    // ESPN never finished. Only when it holds NO open bets (unfunded discovered
+    // matches) — never strand a position; the prune then cleans it up. ESPN
+    // matches (minute set) are finished by ESPN, never by the clock.
+    if (m.state === "live" && m.minute == null && h <= -FINISH_HOURS
+        && !R.betsForMatch(db, m.id).some((b) => b.status === "open")) {
+      R.updateMatch(db, m.id, { state: "finished", final_score: m.final_score ?? null });
+      continue;
+    }
+
+    // Only TIME-schedule the pre-live states; ESPN owns live/finished once it drives.
+    if (m.state !== "upcoming" && m.state !== "lineup") continue;
+    let nextState: MatchState, lineupOut: boolean;
+    if (h <= 0) { nextState = "live"; lineupOut = true; }             // kicked off
+    else if (h <= LINEUP_HOURS) { nextState = "lineup"; lineupOut = true; }
+    else { nextState = "upcoming"; lineupOut = false; }
+    if (nextState !== m.state || lineupOut !== m.lineup_out) {
+      R.updateMatch(db, m.id, { state: nextState, lineup_out: lineupOut });
     }
   }
 }

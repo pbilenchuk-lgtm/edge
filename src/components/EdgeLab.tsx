@@ -252,6 +252,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   // Resolve within the CURRENT sport only — otherwise switching to a sport with
   // no comps would keep the old sport's compId and render a foreign comp's data.
   const comp = sportComps.find((c) => c.id === compId) || sportComps[0];
+  const [matchTab, setMatchTab] = useState("active"); // «Актуальные» (идут + будущие) по умолчанию; «Завершённые» отдельно
   const [compModal, setCompModal] = useState<string | null>(null);
   const [shareModal, setShareModal] = useState<string | null>(null);
 
@@ -558,12 +559,30 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
           </div>
 
           <main style={S.main}>
-            {comp?.matches.length === 0 && <div style={S.empty}>В этом турнире пока нет матчей.</div>}
-            {comp?.matches.map((mid) => matchDb[mid] && (
-              <ErrorBoundary key={mid} label={`${matchDb[mid].home}–${matchDb[mid].away}`}>
-                <MatchCard match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} onResumeAnalyze={pollAnalyze} oddsErrKey={oddsErr[mid] || 0} />
-              </ErrorBoundary>
-            ))}
+            {(() => {
+              const ids = (comp?.matches || []).filter((mid) => matchDb[mid]);
+              // «Актуальные» = идут сейчас + будущие (live → lineup → upcoming),
+              // live первыми; «Завершённые» = финал, свежие сверху.
+              const RANK: any = { live: 0, lineup: 1, upcoming: 2 };
+              const active = ids.filter((mid) => matchDb[mid].state !== "finished")
+                .sort((a, b) => (RANK[matchDb[a].state] ?? 3) - (RANK[matchDb[b].state] ?? 3));
+              const finished = ids.filter((mid) => matchDb[mid].state === "finished").reverse();
+              const shown = matchTab === "finished" ? finished : active;
+              return (
+                <>
+                  <div style={S.matchTabs}>
+                    <button style={{ ...S.matchTab, ...(matchTab === "active" ? S.matchTabOn : {}) }} onClick={() => setMatchTab("active")}>Актуальные{active.length ? ` · ${active.length}` : ""}</button>
+                    <button style={{ ...S.matchTab, ...(matchTab === "finished" ? S.matchTabOn : {}) }} onClick={() => setMatchTab("finished")}>Завершённые{finished.length ? ` · ${finished.length}` : ""}</button>
+                  </div>
+                  {shown.length === 0 && <div style={S.empty}>{matchTab === "finished" ? "Завершённых матчей пока нет." : "Актуальных матчей нет — появятся, когда подтянутся будущие или начнутся текущие."}</div>}
+                  {shown.map((mid) => (
+                    <ErrorBoundary key={mid} label={`${matchDb[mid].home}–${matchDb[mid].away}`}>
+                      <MatchCard match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} onResumeAnalyze={pollAnalyze} oddsErrKey={oddsErr[mid] || 0} />
+                    </ErrorBoundary>
+                  ))}
+                </>
+              );
+            })()}
           </main>
         </>
       ) : screen === "strategies" ? (
@@ -2139,6 +2158,9 @@ const S: Record<string, React.CSSProperties> = {
   pfHeader: { marginBottom: 4 },
   pfTitle: { fontSize: 17, fontWeight: 700 },
   pfSub: { fontSize: 12, color: MUTE, marginTop: 3 },
+  matchTabs: { display: "flex", gap: 6, marginBottom: 12 },
+  matchTab: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 8, padding: "7px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" },
+  matchTabOn: { background: PANEL2, color: TEXT, borderColor: "#e8a83666" },
   pfViewTabs: { display: "flex", gap: 6, margin: "10px 0" },
   pfViewTab: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 8, padding: "7px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" },
   pfViewTabOn: { background: PANEL2, color: TEXT, borderColor: "#e8a83866" },

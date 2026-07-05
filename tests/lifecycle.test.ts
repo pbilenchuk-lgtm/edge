@@ -87,6 +87,25 @@ test("advanceClocks flips lineup_out ~1h before kickoff", () => {
   advanceClocks(db, { now: () => "2026-07-07T12:00:00Z" });
   assert.equal(R.getMatch(db, soon)!.lineup_out, true);
   assert.equal(R.getMatch(db, far)!.lineup_out, false);
+  assert.equal(R.getMatch(db, soon)!.state, "lineup");
+  assert.equal(R.getMatch(db, far)!.state, "upcoming");
+});
+
+test("advanceClocks flips a time-scheduled match to LIVE at kickoff, and clock-finishes a stale no-bet one", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const mk = (id: string, ko: string, state = "upcoming", minute: number | null = null) => R.insertMatch(db, { id, competition_id: comp.id, home: "A"+id, away: "B"+id, state: state as any, lineup_out: state !== "upcoming", kickoff_at: ko, minute, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+  const now = "2026-07-07T18:00:00Z";
+  const started = R.uid(), stale = R.uid(), espn = R.uid();
+  mk(started, "2026-07-07T17:30:00Z");                 // kicked off 30 min ago → LIVE
+  mk(stale, "2026-07-07T12:00:00Z", "live");           // 6h ago, clock-live (minute null), no bets → finished
+  mk(espn, "2026-07-07T12:00:00Z", "live", 75);        // 6h ago BUT ESPN-driven (minute set) → stays live
+  advanceClocks(db, { now: () => now });
+  assert.equal(R.getMatch(db, started)!.state, "live", "kicked off → live");
+  assert.equal(R.getMatch(db, started)!.lineup_out, true);
+  assert.equal(R.getMatch(db, stale)!.state, "finished", "stale clock-live no-bet → finished");
+  assert.equal(R.getMatch(db, espn)!.state, "live", "ESPN-driven live not clock-finished");
 });
 
 test("strategistReassess skips a pre-lineup match (no reassessment before lineups/live)", async () => {
