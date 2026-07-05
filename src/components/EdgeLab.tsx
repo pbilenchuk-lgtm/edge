@@ -45,9 +45,26 @@ const fmtWarsaw = (iso: string) => {
   } catch { return iso; }
 };
 
+// Persist a UI action, surviving a brief gateway blip. On a single-instance
+// deploy (Render disk) a redeploy makes the app return 502/503 for a few
+// seconds; a plain fetch would fail the user's save with no retry. setBudget/
+// setShares are idempotent (absolute writes), so retrying a gateway error is
+// safe. A real 4xx/JSON error is returned as-is (no retry).
+const RETRIABLE_STATUS = new Set([502, 503, 504]);
 async function mutate(action: any): Promise<any> {
-  const r = await fetch("/api/mutations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(action) });
-  return r.json();
+  let lastErr = "сервер не ответил";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await fetch("/api/mutations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(action) });
+      if (r.ok) return await r.json();
+      if (!RETRIABLE_STATUS.has(r.status)) {
+        try { return await r.json(); } catch { return { ok: false, error: `ошибка сервера (${r.status})` }; }
+      }
+      lastErr = "сервер недоступен (возможно идёт передеплой)";
+    } catch { lastErr = "сеть недоступна"; }
+    if (attempt < 2) await new Promise((res) => setTimeout(res, 500 * (attempt + 1)));
+  }
+  return { ok: false, error: `${lastErr} — повтори через минуту` };
 }
 
 function stratBudget(compBudget: Record<string, number>, compId: string, shares: any, stratId: string) {
@@ -209,6 +226,11 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   // after a win/loss. (Allocation still validates against the base balance.)
   const totalRealized = Object.values(matchDb).reduce((a: number, m: any) =>
     a + Object.values(m?.result || {}).reduce((x: number, v: any) => x + (v as number), 0), 0);
+  // Effective bank = base balance + realized P&L. Realized winnings/losses stay
+  // in the tournament that earned them (auto-reinvested by the sizing), so the
+  // FREE pool stays base−allocated (no double-count); but the top-line balance
+  // grows/shrinks so funds visibly "go somewhere" after a position resolves.
+  const effectiveBalance = TOTAL_BALANCE + totalRealized;
 
   // Optimistic + confirmed: apply locally, persist, and if the POST fails (cold
   // start / rejected) toast so a silent revert on the next live reload isn't a
@@ -378,7 +400,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 
       <div style={S.treasury}>
         <div style={S.trBrand}><span style={S.mark}>&#9670;</span><span style={S.trBrandTxt}>EDGE LAB</span></div>
-        <div style={S.trCell}><div style={S.trLbl}>Общий баланс</div><div style={S.trVal}>{fmtMoney0(TOTAL_BALANCE)}</div></div>
+        <div style={S.trCell} title={`База ${fmtMoney0(TOTAL_BALANCE)} + реализованный P&L ${totalRealized >= 0 ? "+" : ""}${fmtMoney0(totalRealized)}. Реализованный остаётся в своём турнире (реинвест); свободный остаток — от базы.`}><div style={S.trLbl}>Общий баланс</div><div style={{ ...S.trVal, color: totalRealized > 0 ? "#5fd08a" : totalRealized < 0 ? "#ff6b6b" : undefined }}>{fmtMoney0(effectiveBalance)}</div></div>
         <div style={S.trDiv} />
         <div style={S.trCell}><div style={S.trLbl}>Распределено</div><div style={{ ...S.trVal, color: "#e8a838" }}>{fmtMoney0(allocatedSum)}</div></div>
         <div style={S.trDiv} />
