@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS bets (
   result         TEXT CHECK (result IN ('won','lost') OR result IS NULL),
   payout         REAL,
   settled_by     TEXT,             -- null=resolution, 'early'|'partial'=cash-out (excluded from metrics)
+  settled_at     TEXT,             -- when the bet was closed/settled (for the closures log time)
   created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bets_match_strat ON bets(match_id, strategy_id);
@@ -183,7 +184,7 @@ CREATE TABLE IF NOT EXISTS trade_log (
   match_id    TEXT NOT NULL REFERENCES matches(id),
   strategy_id TEXT NOT NULL REFERENCES strategies(id),
   minute      TEXT,
-  type        TEXT NOT NULL CHECK (type IN ('enter','exit','settle')),
+  type        TEXT NOT NULL CHECK (type IN ('enter','exit','settle','skip')),
   text        TEXT NOT NULL,
   created_at  TEXT NOT NULL
 );

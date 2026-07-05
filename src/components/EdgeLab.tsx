@@ -388,7 +388,14 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     // state with stale data. This keeps at most one tick in flight.
     const tick = async () => {
       try {
-        await Promise.all(liveMatchIds.map((id) => refreshOddsCore(id, true).catch(() => {})));
+        // Ping Polymarket for live prices ONLY on the Matches screen (where odds
+        // are shown), capped to avoid a 30+ concurrent-call storm every tick. On
+        // other screens (Лента / Портфель / Метрики) just re-pull server state so
+        // they stay live in real time without the heavy per-match refresh — the
+        // cron already keeps odds fresh server-side.
+        if (screen === "matches") {
+          await Promise.all(liveMatchIds.slice(0, 12).map((id) => refreshOddsCore(id, true).catch(() => {})));
+        }
         if (!stop) await reloadApp().catch(() => {});
       } finally {
         if (!stop) timer = setTimeout(tick, 3000);
@@ -397,7 +404,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     timer = setTimeout(tick, 3000);
     return () => { stop = true; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveKey]);
+  }, [liveKey, screen]);
 
   // Toasts — side notifications for actions, so the user sees what worked/failed.
   const [toasts, setToasts] = useState<{ id: number; kind: "ok" | "err" | "info"; text: string }[]>([]);
@@ -923,6 +930,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                           const orig = closedPct > 0 ? (b.stake ?? 0) / (closedPct / 100) : (b.stake ?? 0); // full position size
                           return (
                             <div key={i} style={S.settleBet}>
+                              {b.at && <span style={S.settleAt}>{b.at}</span>}
                               <span style={S.settleMarket}>{b.market}</span>
                               <span style={S.settleStake} title="Какая доля позиции закрыта и её размер в $">
                                 {closedPct >= 100 ? "закрыта полностью" : `фиксация ${closedPct}%`} · {fmtMoney(b.stake)}{closedPct < 100 && orig > 0 ? ` из ${fmtMoney(orig)}` : ""}
@@ -1200,12 +1208,13 @@ function FeedScreen({ feed }: any) {
         {shown.length === 0 && <div style={S.noPos}>событий нет</div>}
         {shown.map((e: any, i: number) => (
           <div key={i} style={S.feedItem}>
-            <div style={S.feedTime}>{e.t}</div>
+            <div style={S.feedTime}>{e.at && <span style={S.feedClock}>{e.at}</span>}{e.t && <span>{e.t}</span>}</div>
             <div style={{ ...S.feedIcon, ...feedIconStyle(e.type) }}>{feedIconChar(e.type)}</div>
             <div style={S.feedBody}>
               <div style={S.feedItemTop}>
                 {e.strat && <span style={{ ...S.feedStrat, color: e.color || "#8b95a5" }}>{e.strat}</span>}
                 <span style={S.feedMatch}>{e.sport} · {e.match}</span>
+                {e.score && <span style={S.feedScore}>{e.score}</span>}
               </div>
               <div style={S.feedText}>{e.text}</div>
             </div>
@@ -2091,12 +2100,14 @@ const S: Record<string, React.CSSProperties> = {
   feedFilterOn: { background: PANEL2, color: TEXT, borderColor: "#e8a83855" },
   feedList: { display: "flex", flexDirection: "column", gap: 6 },
   feedItem: { display: "flex", alignItems: "flex-start", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: "10px 12px" },
-  feedTime: { fontSize: 11, color: MUTE, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, width: 38, paddingTop: 3 },
+  feedTime: { fontSize: 11, color: MUTE, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, width: 48, paddingTop: 3, display: "flex", flexDirection: "column", lineHeight: 1.35 },
+  feedClock: { color: "#e8a838", fontWeight: 600 },
   feedIcon: { width: 26, height: 26, borderRadius: 7, border: "1px solid", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, flexShrink: 0 },
   feedBody: { flex: 1, minWidth: 0 },
   feedItemTop: { display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" },
   feedStrat: { fontSize: 12, fontWeight: 700 },
   feedMatch: { fontSize: 11, color: MUTE },
+  feedScore: { fontSize: 12, fontWeight: 700, color: "#e8a838", fontFamily: "'JetBrains Mono', monospace" },
   feedText: { fontSize: 13, color: "#d3d8e0", marginTop: 2, lineHeight: 1.4 },
   feedPnl: { fontSize: 14, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, paddingTop: 2 },
   metricExplain: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 14, display: "flex", flexDirection: "column", gap: 8 },
@@ -2151,6 +2162,7 @@ const S: Record<string, React.CSSProperties> = {
   settleStrat: { marginBottom: 12 },
   settleStratHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6 },
   settleBet: { display: "flex", alignItems: "center", gap: 10, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px", marginBottom: 4, flexWrap: "wrap" },
+  settleAt: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace", color: "#e8a838", flexShrink: 0 },
   settleMarket: { fontSize: 13, fontWeight: 600, flex: 1, minWidth: 100 },
   settleStake: { fontSize: 12, fontFamily: "'JetBrains Mono', monospace", color: MUTE },
   settleResult: { fontSize: 12, fontWeight: 700 },

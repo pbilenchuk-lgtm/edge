@@ -243,7 +243,7 @@ export function settleMatch(
       // is never active again. Void it: refund the stake, zero P&L, tagged
       // 'void' so it's excluded from win/lose accuracy.
       R.updateBet(db, b.id, {
-        status: "settled_lost", result: null, payout: b.stake ?? 0,
+        status: "settled_lost", result: null, payout: b.stake ?? 0, settled_at: now,
         closing_price: b.current_price ?? b.entry_price ?? null, settled_by: "void",
       });
       R.insertTradeLog(db, {
@@ -263,7 +263,7 @@ export function settleMatch(
     const preMatch = b.entered_minute == null || /предматч/i.test(b.entered_minute);
     const closing = preMatch ? (kickoff[b.market_label] ?? b.entry_price ?? null) : (b.entry_price ?? null);
     const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, closing);
-    R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price });
+    R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price, settled_at: now });
     R.insertTradeLog(db, {
       id: R.uid(), match_id: match.id, strategy_id: b.strategy_id, minute: "финал",
       type: "settle", text: `${b.market_label}: ${won ? "выигрыш" : "проигрыш"} → ${fmt(patch.payout)} (P&L ${fmt(patch.pnl)})`,

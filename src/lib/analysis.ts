@@ -181,6 +181,13 @@ export async function analyzeMatch(
         entered_minute: null, result: null, payout: null, created_at: now(),
       });
     }
+    // Discipline event: a funded, active strategy that looked at the match and
+    // entered NOTHING (край недостаточен) — a valid «Пропуск» (ТЗ §4.2), so it
+    // shows in the feed instead of the tab being permanently empty. One per
+    // (match, strategy, run), not per-market, to avoid flooding the log.
+    if (entries === 0 && skipped > 0) {
+      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — край недостаточен (${skipped} ${skipped === 1 ? "рынок" : "рынков"} ниже порога)`, created_at: now() });
+    }
     decisions.push({ strategy: strat.name, entries, skipped });
     betsCreated += entries;
   }

@@ -41,7 +41,7 @@ export interface MatchView {
   bets: Record<string, { rationale: string | null; items: BetItemView[] }>;
   reassessByStrat: Record<string, { min: string | null; at: string | null; text: string; conf: string | null }[]>;
   logByStrat: Record<string, { min: string | null; at: string | null; text: string; type: string }[]>;
-  settledBets: Record<string, { market: string; stake: number; result: string; payout: number; settledBy: string | null; closedPct: number }[]>;
+  settledBets: Record<string, { market: string; stake: number; result: string; payout: number; settledBy: string | null; closedPct: number; at: string | null }[]>;
   result: Record<string, number>;
   /** real lineups (ESPN), if enriched — shown under the СОСТАВ toggle */
   lineups: { home: LineupView | null; away: LineupView | null } | null;
@@ -64,8 +64,8 @@ export interface QualityView {
   equity?: number[];
 }
 export interface FeedItem {
-  t: string; type: string; sport: string; match: string; strat?: string;
-  color?: string; text: string; pnl?: number;
+  t: string; at?: string | null; type: string; sport: string; match: string; score?: string | null;
+  strat?: string; color?: string; text: string; pnl?: number;
 }
 export interface ProviderView { id: string; name: string; keyHint: string; models: string[]; hasKey: boolean; }
 
@@ -179,7 +179,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
           const closedPct = pctM ? Number(pctM[1]) : 100;
           (settledBets[b.strategy_id] ||= []).push({
             market: b.market_label, stake: b.stake ?? 0, result: b.result ?? "lost", payout: b.payout ?? 0,
-            settledBy: b.settled_by ?? null, closedPct,
+            settledBy: b.settled_by ?? null, closedPct, at: warsawClock(b.settled_at),
           });
           result[b.strategy_id] = (result[b.strategy_id] ?? 0) + ((b.payout ?? 0) - (b.stake ?? 0));
         } else {
@@ -413,27 +413,30 @@ function buildFeed(
     for (const mt of R.listMatches(db, c.id)) {
       const m = matchDb[mt.id];
       const matchName = `${m.home}–${m.away}`;
+      const score = (m.scoreHome != null && m.scoreAway != null) ? `${m.scoreHome}:${m.scoreAway}` : null;
       for (const e of R.tradeLogForMatch(db, mt.id)) {
         const st = stratById[e.strategy_id];
+        // enter → «Входы»; exit (cash-out) AND settle → «Расчёты» (both realize
+        // P&L — an exit is a closure, not a reassessment narrative).
         rows.push({ at: e.created_at, item: {
-          t: e.minute ?? "", type: e.type === "settle" ? "settle" : e.type === "exit" ? "reassess" : "enter",
-          sport: sp, match: matchName, strat: st?.name, color: st?.color ?? undefined, text: e.text,
+          t: e.minute ?? "", at: warsawClock(e.created_at), type: e.type === "enter" ? "enter" : e.type === "skip" ? "skip" : "settle",
+          sport: sp, match: matchName, score, strat: st?.name, color: st?.color ?? undefined, text: e.text,
         } });
       }
       for (const r of R.reassessmentsForMatch(db, mt.id)) {
         const st = stratById[r.strategy_id];
         rows.push({ at: r.created_at, item: {
-          t: r.minute ?? "", type: "reassess", sport: sp, match: matchName,
+          t: r.minute ?? "", at: warsawClock(r.created_at), type: "reassess", sport: sp, match: matchName, score,
           strat: st?.name, color: st?.color ?? undefined, text: r.body.slice(0, 120),
         } });
       }
-      // real in-match events pulled from ESPN (goals / cards / subs)
+      // real in-match events pulled from ESPN (goals / cards / subs) + stats snapshots
       for (const e of R.eventsForMatch(db, mt.id)) {
         if (e.type === "other") continue;
         const label = EVENT_LABEL[e.type] ?? "событие";
         rows.push({ at: e.created_at, item: {
-          t: e.minute != null ? `${e.minute}'` : "", type: FEED_EVENT_TYPE[e.type] ?? "goal",
-          sport: sp, match: matchName, text: `${label}${e.team ? " · " + e.team : ""} — ${e.text}`,
+          t: e.minute != null ? `${e.minute}'` : "", at: warsawClock(e.created_at), type: FEED_EVENT_TYPE[e.type] ?? "goal",
+          sport: sp, match: matchName, score, text: `${label}${e.team ? " · " + e.team : ""} — ${e.text}`,
         } });
       }
     }

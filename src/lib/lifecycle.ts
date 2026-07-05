@@ -40,7 +40,16 @@ import type { Match, MatchState } from "./types.js";
 const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 // Prefer the raw ESPN clock ("45'+2'") so logs/reassessments carry stoppage
 // time; fall back to the whole-minute figure, then "предматч".
-const minuteLabel = (m: Match) => (m.state === "live" ? (m.clock || (m.minute != null ? `${m.minute}'` : "предматч")) : "предматч");
+// Match-time label used to STAMP entries/exits/reassessments. For a clock-driven
+// live match (no ESPN minute) it computes elapsed minutes from kickoff, so an
+// in-match entry reads "63'" not a wrong "предматч".
+const minuteLabel = (m: Match, nowMs: number = Date.now()): string => {
+  if (m.state !== "live") return "предматч";
+  if (m.clock) return m.clock;
+  if (m.minute != null) return `${m.minute}'`;
+  if (isIsoTs(m.kickoff_at)) return `${Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at as string)) / 60000))}'`;
+  return "LIVE";
+};
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 function activeMatches(db: Database): { comp: string; sport: string; match: Match }[] {
@@ -192,7 +201,7 @@ function closeBetEarly(db: Database, bet: { id: string; stake: number | null; en
   // "early" cash-out: booked by P&L sign, NOT by real outcome — excluded from
   // the predictive metrics (Brier/CLV) so trading P&L doesn't masquerade as
   // prediction accuracy.
-  R.updateBet(db, bet.id, { status: pnl >= 0 ? "settled_won" : "settled_lost", result: pnl >= 0 ? "won" : "lost", payout, closing_price: currentPriceCents, settled_by: "early" });
+  R.updateBet(db, bet.id, { status: pnl >= 0 ? "settled_won" : "settled_lost", result: pnl >= 0 ? "won" : "lost", payout, closing_price: currentPriceCents, settled_by: "early", settled_at: now });
   return pnl;
 }
 
@@ -219,7 +228,7 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
     status: pnl >= 0 ? "settled_won" : "settled_lost", proposed_price: bet.proposed_price, entry_price: entry,
     current_price: currentPriceCents, closing_price: currentPriceCents, ai_prob: bet.ai_prob, stake: closed,
     rationale: `частичная фиксация ${Math.round(fraction * 100)}%`, entered_minute: bet.entered_minute,
-    result: pnl >= 0 ? "won" : "lost", payout, settled_by: "partial", created_at: now,
+    result: pnl >= 0 ? "won" : "lost", payout, settled_by: "partial", settled_at: now, created_at: now,
   });
   R.updateBet(db, bet.id, { stake: round2(stake - closed) }); // keep the remainder open
   return { pnl, partial: true };
@@ -559,16 +568,39 @@ export function recordMatchStats(db: Database, deps: EngineDeps = {}): number {
 
 const isIsoTs = (s: string | null | undefined): boolean => !!s && /^\d{4}-\d\d-\d\dT/.test(s) && !isNaN(Date.parse(s));
 
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Shorten a verbose Polymarket label for the snapshot: drop the "Tournament: "
+ *  prefix and the redundant "A vs B" match title, leaving just the market bit
+ *  ("Set 1 Over 10.5"). Falls back to the bare side/name for a plain moneyline. */
+function shortMarketLabel(label: string, home: string, away: string): string {
+  let s = label.replace(/^[^:]{1,40}:\s*/, ""); // "Quito: ..." → "..."
+  for (const [a, b] of [[home, away], [away, home]])
+    s = s.replace(new RegExp(`${escapeRe(a)}\\s+vs\\.?\\s+${escapeRe(b)}`, "i"), "");
+  s = s.replace(/\bvs\.?\b/i, "").replace(/\s{2,}/g, " ").trim();
+  return s || "победитель"; // the title emptied out → it's the match-winner market
+}
+
 /** Basic market snapshot for a live match with no sport-stats feed: current score
- *  (if any) + the most-liquid markets' prices — «what's happening now» expressed
- *  through the market, so «События матча» has a heartbeat even without ESPN. */
+ *  (if any) + the market-implied leaders — «what's happening now» through the
+ *  market, so «События матча» has a heartbeat even without ESPN. Kept short:
+ *  degenerate/settled markets (≈0/100¢, "Completed Match") dropped, labels
+ *  stripped of the repeated match title, capped to the top 2 by price. */
 function formatMarketSnapshot(db: Database, m: Match): string | null {
-  const markets = R.latestMarkets(db, m.id).filter((mk) => mk.price != null);
+  const markets = R.latestMarkets(db, m.id).filter((mk) =>
+    mk.price != null && mk.price > 2 && mk.price < 98 && !/completed match/i.test(mk.label));
   if (!markets.length) return null;
-  const top = markets.slice().sort((a, b) => (b.price ?? 0) - (a.price ?? 0)).slice(0, 4); // favourite first (liquidity is a display string)
-  const prices = top.map((mk) => `${mk.label} ${mk.price}¢`).join(" · ");
+  const seen = new Set<string>();
+  const top: string[] = [];
+  for (const mk of markets.slice().sort((a, b) => (b.price ?? 0) - (a.price ?? 0))) {
+    const lbl = shortMarketLabel(mk.label, m.home, m.away);
+    if (seen.has(lbl)) continue;
+    seen.add(lbl);
+    top.push(`${lbl} ${mk.price}¢`);
+    if (top.length >= 2) break;
+  }
+  if (!top.length) return null;
   const score = (m.score_home != null && m.score_away != null) ? `счёт ${m.score_home}:${m.score_away} · ` : "";
-  return `${score}рынок: ${prices}`;
+  return `${score}рынок: ${top.join(" · ")}`;
 }
 
 /** LIVE matches due for a periodic reassessment — those not reassessed in the

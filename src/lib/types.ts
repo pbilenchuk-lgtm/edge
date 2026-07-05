@@ -174,6 +174,8 @@ export interface Bet {
    *  "early" = cashed out at market; "partial" = a partial-fixation child slice.
    *  Only resolution-settled bets feed the predictive metrics (Brier/CLV). */
   settled_by?: string | null;
+  /** When the bet was closed/settled (ISO) — for the closures-log timestamp. */
+  settled_at?: string | null;
 }
 
 export interface Reassessment {
@@ -192,7 +194,7 @@ export interface TradeLogEntry {
   match_id: string;
   strategy_id: string;
   minute: string | null;
-  type: "enter" | "exit" | "settle";
+  type: "enter" | "exit" | "settle" | "skip";
   text: string;
   created_at: string;
 }
