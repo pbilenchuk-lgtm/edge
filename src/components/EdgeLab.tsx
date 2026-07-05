@@ -134,22 +134,54 @@ function collectPortfolio(competitions: any[], matchDb: any, catalog: any[], com
   for (const comp of competitions) {
     for (const mid of comp.matches) {
       const m = matchDb[mid];
-      if (!m || m.state !== "live") continue;
+      // Any NON-finished match with open positions — not just live: a bet placed
+      // on lineup (pre-match entry) is real exposure and must show in «Актуальные»
+      // (was live-only, so pre-match opens counted in the comp card but not here).
+      if (!m || m.state === "finished") continue;
       const cur: Record<string, number> = {};
       for (const mk of (m.markets || [])) if (!(mk.label in cur)) cur[mk.label] = mk.price;
+      const when = m.state === "live" ? (m.minute != null ? `${m.minute}'` : "LIVE") : "предматч";
       for (const st of catalog) {
         if (st.sport !== comp.sport) continue;
         if ((shares[comp.id]?.[st.id] || 0) <= 0 || (compBudget[comp.id] || 0) <= 0) continue;
         for (const b of betItems(m.bets?.[st.id])) {
           if (b.status !== "open") continue;
+          const stake = b.stake ?? 0;
           const price = b.entryPrice != null ? (cur[b.market] ?? b.currentPrice ?? b.entryPrice) : null; // freshest quote
-          const live = price != null && b.entryPrice != null && b.entryPrice > 0 ? b.stake * (price / b.entryPrice) - b.stake : 0;
+          const live = price != null && b.entryPrice != null && b.entryPrice > 0 ? stake * (price / b.entryPrice) - stake : 0;
           positions.push({
             sport: comp.sport, compName: comp.name, compId: comp.id,
-            match: `${m.home}–${m.away}`, minute: m.minute,
+            match: `${m.home}–${m.away}`, minute: when,
             strat: st.name, stratColor: st.color, stratId: st.id,
-            market: b.market, stake: b.stake, entryPrice: b.entryPrice, currentPrice: price ?? b.currentPrice,
+            market: b.market, stake, entryPrice: b.entryPrice, currentPrice: price ?? b.currentPrice,
             live, entered: b.entered,
+          });
+        }
+      }
+    }
+  }
+  return positions;
+}
+// Closed positions (settled bets) across ALL matches — the «Завершённые» tab of
+// the portfolio. Includes real-outcome settlements and early/partial cash-outs
+// (settledBy). Not gated on the strategy's CURRENT share/budget so history stays
+// visible even after a strategy is de-funded. Realized P&L = payout − stake.
+function collectClosed(competitions: any[], matchDb: any, catalog: any[]) {
+  const positions: any[] = [];
+  for (const comp of competitions) {
+    for (const mid of comp.matches) {
+      const m = matchDb[mid];
+      if (!m) continue;
+      for (const st of catalog) {
+        if (st.sport !== comp.sport) continue;
+        for (const b of (m.settledBets?.[st.id] || [])) {
+          const pnl = (b.payout ?? 0) - (b.stake ?? 0);
+          positions.push({
+            sport: comp.sport, compName: comp.name, compId: comp.id,
+            match: `${m.home}–${m.away}`, finalScore: m.finalScore, state: m.state,
+            strat: st.name, stratColor: st.color, stratId: st.id,
+            market: b.market, stake: b.stake, payout: b.payout, pnl,
+            result: b.result, settledBy: b.settledBy, closedPct: b.closedPct ?? 100,
           });
         }
       }
@@ -188,8 +220,11 @@ class ErrorBoundary extends React.Component<{ label?: string; children: React.Re
 }
 
 export default function EdgeLab({ initial }: { initial: AppData }) {
-  const SPORTS = initial.sports;
-  const COMPETITIONS = initial.competitions;
+  // State (not const) so a background discover/sync — new matches, new
+  // tournaments — surfaces on the next 3s reload instead of only after a full
+  // page reload (the live-dot + comp chips read these).
+  const [SPORTS, setSports] = useState(initial.sports);
+  const [COMPETITIONS, setCompetitions] = useState(initial.competitions);
   const [TOTAL_BALANCE, setTotalBalance] = useState(initial.treasuryTotal);
   // These update on reloadApp too (not just at first load) so the Metrics/Feed
   // screens reflect live settlement/stats instead of the initial snapshot.
@@ -206,6 +241,10 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [matchDb, setMatchDb] = useState(initial.matchDb);
   const [providers, setProviders] = useState(initial.providers);
   const PROVIDERS = providers;
+  // Per-match odds-refresh failure signal: a monotonically-bumped counter the
+  // MatchCard watches to flash a RED dot (vs the green "prices changed" flash)
+  // when a refresh didn't go through (network / server error).
+  const [oddsErr, setOddsErr] = useState<Record<string, number>>({});
 
   const [sportId, setSportId] = useState("football");
   const sportComps = COMPETITIONS.filter((c) => c.sport === sportId);
@@ -232,6 +271,13 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   // grows/shrinks so funds visibly "go somewhere" after a position resolves.
   const effectiveBalance = TOTAL_BALANCE + totalRealized;
 
+  // Live-now indicators: derive from matchDb (the live-updated source), not the
+  // static COMPETITIONS snapshot, so a match kicking off mid-session lights up
+  // its tournament chip and sport tab. compId→sport via the catalog of comps.
+  const compSport: Record<string, string> = Object.fromEntries(COMPETITIONS.map((c) => [c.id, c.sport]));
+  const liveCompIds = new Set(Object.values(matchDb).filter((m: any) => m.state === "live").map((m: any) => m.competitionId));
+  const liveSports = new Set([...liveCompIds].map((cid) => compSport[cid as string]).filter(Boolean));
+
   // Optimistic + confirmed: apply locally, persist, and if the POST fails (cold
   // start / rejected) toast so a silent revert on the next live reload isn't a
   // mystery. reloadApp reads server state, so a failed save visibly reverts —
@@ -252,11 +298,15 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   // so it works even when the client copy of a market lacks a tokenId (which was
   // why the manual ↻ silently returned "нет котировок"). `silent` skips toasts
   // for the background auto-refresh loop.
+  const bumpOddsErr = (matchId: string) => setOddsErr((p) => ({ ...p, [matchId]: (p[matchId] ?? 0) + 1 }));
   const refreshOddsCore = async (matchId: string, silent = false): Promise<void> => {
     let res: any;
     try {
       res = await engine("refreshOdds", matchId);
-    } catch { if (!silent) toast("err", "Котировки не обновились — сеть недоступна"); return; }
+    } catch { bumpOddsErr(matchId); if (!silent) toast("err", "Котировки не обновились — сеть недоступна"); return; }
+    // engine() returns {ok:false} on a network/cold-start failure instead of
+    // throwing — treat that as a failed refresh too (red dot in the card).
+    if (!res || res.ok === false) { bumpOddsErr(matchId); if (!silent) toast("err", res?.error || "Котировки не обновились — сервер не ответил"); return; }
     const byId: Record<string, any> = {};
     for (const mk of res?.markets || []) byId[mk.id] = mk;
     setMatchDb((prev) => {
@@ -300,6 +350,12 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     if (!app || app.error) return;
     if (app.matchDb) setMatchDb(app.matchDb);
     if (app.catalog) setCatalog(app.catalog);
+    // Sync the catalog of sports/competitions too, so newly discovered matches
+    // and tournaments appear (and their live-dot lights) without a page reload.
+    if (app.competitions) setCompetitions(app.competitions);
+    if (app.sports) setSports(app.sports);
+    if (app.analysis) setAnalysis(app.analysis);
+    if (app.providers) setProviders(app.providers);
     // Keep the allocation maps in sync with the server too — otherwise a
     // strategy the cron funded/activated stays excluded from `compStrats`, and
     // all its per-strategy tab content (log / reassess / settle) renders empty.
@@ -323,12 +379,22 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   useEffect(() => {
     if (!liveMatchIds.length) return;
     let stop = false;
+    let timer: any;
+    // Recursive setTimeout, NOT setInterval: schedule the next tick only AFTER the
+    // current one fully resolves. On a slow network (or a cold-starting free
+    // instance) a fixed 3s interval would pile up overlapping refresh+reload
+    // calls, and an older/slower reloadApp could land last and overwrite fresh
+    // state with stale data. This keeps at most one tick in flight.
     const tick = async () => {
-      await Promise.all(liveMatchIds.map((id) => refreshOddsCore(id, true).catch(() => {})));
-      if (!stop) await reloadApp().catch(() => {});
+      try {
+        await Promise.all(liveMatchIds.map((id) => refreshOddsCore(id, true).catch(() => {})));
+        if (!stop) await reloadApp().catch(() => {});
+      } finally {
+        if (!stop) timer = setTimeout(tick, 3000);
+      }
     };
-    const iv = setInterval(tick, 3000);
-    return () => { stop = true; clearInterval(iv); };
+    timer = setTimeout(tick, 3000);
+    return () => { stop = true; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveKey]);
 
@@ -344,13 +410,16 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [discovering, setDiscovering] = useState(false);
   const doDiscover = async () => {
     setDiscovering(true);
-    toast("info", "Подтягиваю матчи с Polymarket…");
+    // The server runs discovery in the BACKGROUND (202) so the request can't time
+    // out (→ 502). Kick it, then surface the new matches on a few delayed reloads
+    // as they land — competitions/matches now sync in reloadApp.
     try {
       const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "discover" }) }).then((x) => x.json());
-      if (r.ok) { await reloadApp(); toast("ok", `Подтянуто: +${r.discovered} матчей · составы: ${r.enriched} · котировки обновлены: ${r.oddsUpdated}`); }
-      else toast("err", r.error || "Не удалось подтянуть матчи");
-    } catch { toast("err", "Сеть недоступна — Polymarket/ESPN не ответили"); }
-    setDiscovering(false);
+      if (!r.ok) { toast("err", r.error || "Не удалось запустить подтягивание"); setDiscovering(false); return; }
+      toast("info", r.running ? "Подтягивание уже идёт — матчи скоро появятся" : "Подтягиваю матчи в фоне — появятся через несколько секунд…");
+    } catch { toast("err", "Сеть недоступна — Polymarket/ESPN не ответили"); setDiscovering(false); return; }
+    for (const d of [4000, 10000, 20000]) setTimeout(() => reloadApp().catch(() => {}), d);
+    setTimeout(() => { setDiscovering(false); toast("ok", "Готово — новые матчи подтянуты"); }, 22000);
   };
   // Poll the durable job until it settles, then reload. Used both after a fresh
   // kick and to RESUME a run already in flight (e.g. after navigating back — the
@@ -424,7 +493,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 
       {(screen === "matches" || screen === "strategies") && (
         <nav style={S.sportTabs}>
-          {SPORTS.map((s) => <button key={s.id} onClick={() => onSport(s.id)} style={{ ...S.sportTab, ...(sportId === s.id ? S.sportTabOn : {}) }}>{s.label}</button>)}
+          {SPORTS.map((s) => <button key={s.id} onClick={() => onSport(s.id)} style={{ ...S.sportTab, ...(sportId === s.id ? S.sportTabOn : {}) }}>{s.label}{liveSports.has(s.id) && <span style={S.liveDot} title="сейчас идёт матч" />}</button>)}
         </nav>
       )}
 
@@ -452,7 +521,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
               return (
                 <div key={c.id} style={{ ...S.compCard, ...(c.id === comp?.id ? S.compOn : {}) }}>
                   <button style={S.compMain} onClick={() => setCompId(c.id)}>
-                    <div style={S.compName}>{c.name}</div>
+                    <div style={S.compName}>{c.name}{liveCompIds.has(c.id) && <span style={S.liveDot} title="сейчас идёт матч" />}</div>
                     {budget > 0 ? <>
                       <div style={S.compBudget}>{fmtMoney0(budget)} <span style={S.compBudgetLbl}>бюджет</span></div>
                       {hasBets
@@ -492,17 +561,17 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
             {comp?.matches.length === 0 && <div style={S.empty}>В этом турнире пока нет матчей.</div>}
             {comp?.matches.map((mid) => matchDb[mid] && (
               <ErrorBoundary key={mid} label={`${matchDb[mid].home}–${matchDb[mid].away}`}>
-                <MatchCard match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} onResumeAnalyze={pollAnalyze} />
+                <MatchCard match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} onResumeAnalyze={pollAnalyze} oddsErrKey={oddsErr[mid] || 0} />
               </ErrorBoundary>
             ))}
           </main>
         </>
       ) : screen === "strategies" ? (
-        <StrategyScreen sportId={sportId} sportLabel={SPORTS.find((s) => s.id === sportId)!.label} catalog={catalog} setCatalog={setCatalog}
+        <StrategyScreen sportId={sportId} sportLabel={SPORTS.find((s) => s.id === sportId)?.label ?? sportId} catalog={catalog} setCatalog={setCatalog}
           competitions={COMPETITIONS} matchDb={matchDb} compBudget={compBudget} shares={shares} providers={PROVIDERS} quality={QUALITY}
           analysis={analysis} setAnalysis={setAnalysis} onGoModels={() => setScreen("models")} />
       ) : screen === "portfolio" ? (
-        <PortfolioScreen positions={collectPortfolio(COMPETITIONS, matchDb, catalog, compBudget, shares)} onGoMatches={() => setScreen("matches")} />
+        <PortfolioScreen open={collectPortfolio(COMPETITIONS, matchDb, catalog, compBudget, shares)} closed={collectClosed(COMPETITIONS, matchDb, catalog)} onGoMatches={() => setScreen("matches")} />
       ) : screen === "feed" ? (
         <FeedScreen feed={EVENT_FEED} />
       ) : screen === "metrics" ? (
@@ -528,8 +597,8 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   );
 }
 
-function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess, onAnalyze, onResumeAnalyze }: any) {
-  const meta = STATE_META[match.state];
+function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess, onAnalyze, onResumeAnalyze, oddsErrKey }: any) {
+  const meta = STATE_META[match.state] ?? { label: String(match.state ?? "—").toUpperCase(), color: "#8b95a5", bg: "#232a35" };
   const hasLineups = LINEUP_SPORTS.has(comp.sport); // does this sport have team sheets?
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
   // Strategies to surface in the per-strategy bars (log / reassess / settle): the
@@ -591,11 +660,18 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   // not the bet's currentPrice), keeping the views consistent between reloads.
   const curByLabel: Record<string, number> = {};
   for (const mk of (match.markets || [])) if (!(mk.label in curByLabel)) curByLabel[mk.label] = mk.price;
-  const [flashKey, setFlashKey] = useState(0);
+  // One flash slot next to ↻, two meanings: GREEN when a price actually changed,
+  // RED when a refresh failed (oddsErrKey bumped by the parent). `n` keys the
+  // animation restart; `kind` picks the colour.
+  const [flash, setFlash] = useState<{ n: number; kind: "ok" | "err" }>({ n: 0, kind: "ok" });
   const prevSig = useRef(priceSig);
   useEffect(() => {
-    if (prevSig.current !== priceSig) { prevSig.current = priceSig; setFlashKey((n) => n + 1); }
+    if (prevSig.current !== priceSig) { prevSig.current = priceSig; setFlash((f) => ({ n: f.n + 1, kind: "ok" })); }
   }, [priceSig]);
+  const prevErr = useRef(oddsErrKey);
+  useEffect(() => {
+    if (oddsErrKey !== prevErr.current) { prevErr.current = oddsErrKey; setFlash((f) => ({ n: f.n + 1, kind: "err" })); }
+  }, [oddsErrKey]);
 
   const doRefresh = async () => { setRefreshing(true); await onRefreshOdds(match.id); setRefreshing(false); };
   const runAnalyze = async () => {
@@ -784,7 +860,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                   {(match.reassessByStrat?.[logStrat] || []).length === 0 && <div style={S.noPos}>переоценок пока нет</div>}
                   {(match.reassessByStrat?.[logStrat] || []).map((r: any, i: number) => (
                     <div key={i} style={S.reassessItem}>
-                      <div style={S.reassessItemHead}><span style={S.reassessMin}>{r.min}</span>{r.conf && r.conf !== "—" && <span style={S.reassessConf}>уверенность: {r.conf}</span>}</div>
+                      <div style={S.reassessItemHead}>{r.at && <span style={S.reassessAt}>{r.at}</span>}<span style={S.reassessMin}>{r.min}</span>{r.conf && r.conf !== "—" && <span style={S.reassessConf}>уверенность: {r.conf}</span>}</div>
                       <p style={S.reassessText}>{r.text}</p>
                     </div>
                   ))}
@@ -847,7 +923,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                 <div style={S.logStratBar}>{barStrats.map((st: any) => <button key={st.id} onClick={() => setLogStrat(st.id)} style={{ ...S.logStratBtn, ...(logStrat === st.id ? { background: st.color + "22", color: st.color, borderColor: st.color + "66" } : {}) }}>{st.name}</button>)}</div>
                 <div style={S.logList}>
                   {(match.logByStrat?.[logStrat] || []).length === 0 && <div style={S.noPos}>действий пока нет</div>}
-                  {(match.logByStrat?.[logStrat] || []).map((e: any, i: number) => <div key={i} style={S.logEntry}><span style={S.logMin}>{e.min}</span><span style={{ ...S.logType, ...logTypeStyle(e.type) }}>{e.type}</span><span style={S.logText}>{e.text}</span></div>)}
+                  {(match.logByStrat?.[logStrat] || []).map((e: any, i: number) => <div key={i} style={S.logEntry}>{e.at && <span style={S.logAt}>{e.at}</span>}<span style={S.logMin}>{e.min}</span><span style={{ ...S.logType, ...logTypeStyle(e.type) }}>{e.type}</span><span style={S.logText}>{e.text}</span></div>)}
                 </div>
               </div>
             )}
@@ -908,7 +984,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
             <div style={S.oddsColHead}>
               <div><div style={S.oddsColLabel}>Котировки</div><div style={S.oddsColSub}>Polymarket · цена в ¢</div></div>
               <div style={S.oddsRefreshWrap}>
-                <span style={S.oddsFlashSlot}>{flashKey > 0 && <span key={flashKey} className="el-odds-flash" style={S.oddsFlash} title="котировки обновились">&#9679;</span>}</span>
+                <span style={S.oddsFlashSlot}>{flash.n > 0 && <span key={flash.n} className="el-odds-flash" style={flash.kind === "err" ? S.oddsFlashErr : S.oddsFlash} title={flash.kind === "err" ? "не удалось обновить котировки" : "котировки обновились"}>&#9679;</span>}</span>
                 <button style={S.oddsRefresh} title="Обновить котировки" onClick={doRefresh} disabled={refreshing}>{refreshing ? "…" : "↻"}</button>
               </div>
             </div>
@@ -1091,7 +1167,7 @@ function improveStats(q: any, overall: any) {
 function FeedScreen({ feed }: any) {
   const [filter, setFilter] = useState("all");
   const types = [["all", "Всё"], ["enter", "Входы"], ["reassess", "Переоценки"], ["settle", "Расчёты"], ["goal", "События матча"], ["skip", "Пропуски"]];
-  const MATCH_EVENT = new Set(["goal", "lineup", "card", "sub"]);
+  const MATCH_EVENT = new Set(["goal", "lineup", "card", "sub", "stats"]);
   const shown = filter === "all" ? feed : feed.filter((e: any) => e.type === filter || (filter === "goal" && MATCH_EVENT.has(e.type)));
   return (
     <main style={S.main}>
@@ -1121,11 +1197,11 @@ function FeedScreen({ feed }: any) {
     </main>
   );
 }
-function eventTagChar(t: string) { return ({ goal: "⚽", red_card: "🟥", yellow_card: "🟨", sub: "⇄" } as any)[t] || "•"; }
-function eventTagStyle(t: string) { const map: any = { goal: { color: "#e8a838" }, red_card: { color: "#ff6b6b" }, yellow_card: { color: "#e8c838" }, sub: { color: "#4fc3c7" } }; return map[t] || { color: "#8b95a5" }; }
-function feedIconChar(t: string) { return ({ enter: "→", reassess: "↻", settle: "✓", goal: "⚽", card: "▪", sub: "⇄", lineup: "📋", skip: "—" } as any)[t] || "•"; }
+function eventTagChar(t: string) { return ({ goal: "⚽", red_card: "🟥", yellow_card: "🟨", sub: "⇄", stats: "📊" } as any)[t] || "•"; }
+function eventTagStyle(t: string) { const map: any = { goal: { color: "#e8a838" }, red_card: { color: "#ff6b6b" }, yellow_card: { color: "#e8c838" }, sub: { color: "#4fc3c7" }, stats: { color: "#7fb4e8" } }; return map[t] || { color: "#8b95a5" }; }
+function feedIconChar(t: string) { return ({ enter: "→", reassess: "↻", settle: "✓", goal: "⚽", card: "▪", sub: "⇄", lineup: "📋", stats: "📊", skip: "—" } as any)[t] || "•"; }
 function feedIconStyle(t: string) {
-  const map: any = { enter: { color: "#70b56a", borderColor: "#70b56a55" }, reassess: { color: "#5b9bd5", borderColor: "#5b9bd555" }, settle: { color: "#c98bdb", borderColor: "#c98bdb55" }, goal: { color: "#e8a838", borderColor: "#e8a83855" }, card: { color: "#e07a5f", borderColor: "#e07a5f55" }, sub: { color: "#4fc3c7", borderColor: "#4fc3c755" }, lineup: { color: "#e8a838", borderColor: "#e8a83855" }, skip: { color: "#8b95a5", borderColor: "#2c3543" } };
+  const map: any = { enter: { color: "#70b56a", borderColor: "#70b56a55" }, reassess: { color: "#5b9bd5", borderColor: "#5b9bd555" }, settle: { color: "#c98bdb", borderColor: "#c98bdb55" }, goal: { color: "#e8a838", borderColor: "#e8a83855" }, card: { color: "#e07a5f", borderColor: "#e07a5f55" }, sub: { color: "#4fc3c7", borderColor: "#4fc3c755" }, lineup: { color: "#e8a838", borderColor: "#e8a83855" }, stats: { color: "#7fb4e8", borderColor: "#7fb4e855" }, skip: { color: "#8b95a5", borderColor: "#2c3543" } };
   return map[t] || {};
 }
 
@@ -1294,33 +1370,58 @@ function MetricsScreen({ catalog, quality, stats }: any) {
   );
 }
 
-function PortfolioScreen({ positions, onGoMatches }: any) {
+function PortfolioScreen({ open, closed, onGoMatches }: any) {
+  const [view, setView] = useState("open"); // «Актуальные» — по умолчанию
   const [groupBy, setGroupBy] = useState("strat");
-  const totalStake = positions.reduce((a: number, p: any) => a + p.stake, 0);
-  const totalLive = positions.reduce((a: number, p: any) => a + p.live, 0);
-  const winners = positions.filter((p: any) => p.live >= 0).length;
+  const positions = view === "open" ? open : closed;
+
+  // Open-tab aggregates (mark-to-market) vs closed-tab aggregates (realized).
+  const totalStake = open.reduce((a: number, p: any) => a + p.stake, 0);
+  const totalLive = open.reduce((a: number, p: any) => a + p.live, 0);
+  const openWinners = open.filter((p: any) => p.live >= 0).length;
+  const realizedTotal = closed.reduce((a: number, p: any) => a + p.pnl, 0);
+  const closedWinners = closed.filter((p: any) => p.pnl >= 0).length;
+
   const groups: any = {};
   for (const p of positions) {
     const key = groupBy === "strat" ? p.strat : p.compName;
-    (groups[key] = groups[key] || { items: [], color: p.stratColor, stake: 0, live: 0 }).items.push(p);
-    groups[key].stake += p.stake; groups[key].live += p.live;
+    const g = (groups[key] = groups[key] || { items: [], color: p.stratColor, stake: 0, live: 0, pnl: 0 });
+    g.items.push(p); g.stake += p.stake || 0; g.live += p.live || 0; g.pnl += p.pnl || 0;
   }
+  const closedLabel = (p: any) => p.settledBy === "void" ? "возврат ставки" : p.result === "won" ? "✓ выигрыш" : "✕ проигрыш";
+
   return (
     <main style={S.main}>
       <div style={S.pfHeader}>
-        <div><div style={S.pfTitle}>Портфель — открытые позиции</div><div style={S.pfSub}>Всё, что сейчас в игре. Mark-to-market.</div></div>
+        <div><div style={S.pfTitle}>Портфель</div><div style={S.pfSub}>{view === "open" ? "Открытые позиции — всё, что сейчас в игре. Mark-to-market." : "Завершённые позиции — реализованный P&L по закрытым ставкам."}</div></div>
       </div>
-      <div style={S.pfAgg}>
-        <div style={S.pfAggCell}><div style={S.pfAggLbl}>Открытых позиций</div><div style={S.pfAggVal}>{positions.length}</div></div>
-        <div style={S.pfAggDiv} />
-        <div style={S.pfAggCell}><div style={S.pfAggLbl}>В игре</div><div style={S.pfAggVal}>{fmtMoney(totalStake)}</div></div>
-        <div style={S.pfAggDiv} />
-        <div style={S.pfAggCell}><div style={S.pfAggLbl}>Unrealized P&L</div><div style={{ ...S.pfAggVal, color: totalLive >= 0 ? "#5fd08a" : "#ff6b6b" }}>{totalLive >= 0 ? "+" : ""}{fmtMoney(totalLive)}</div></div>
-        <div style={S.pfAggDiv} />
-        <div style={S.pfAggCell}><div style={S.pfAggLbl}>В плюсе / всего</div><div style={S.pfAggVal}>{winners}/{positions.length}</div></div>
+      <div style={S.pfViewTabs}>
+        <button style={{ ...S.pfViewTab, ...(view === "open" ? S.pfViewTabOn : {}) }} onClick={() => setView("open")}>Актуальные{open.length ? ` · ${open.length}` : ""}</button>
+        <button style={{ ...S.pfViewTab, ...(view === "closed" ? S.pfViewTabOn : {}) }} onClick={() => setView("closed")}>Завершённые{closed.length ? ` · ${closed.length}` : ""}</button>
       </div>
+
+      {view === "open" ? (
+        <div style={S.pfAgg}>
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>Открытых позиций</div><div style={S.pfAggVal}>{open.length}</div></div>
+          <div style={S.pfAggDiv} />
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>В игре</div><div style={S.pfAggVal}>{fmtMoney(totalStake)}</div></div>
+          <div style={S.pfAggDiv} />
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>Unrealized P&L</div><div style={{ ...S.pfAggVal, color: totalLive >= 0 ? "#5fd08a" : "#ff6b6b" }}>{totalLive >= 0 ? "+" : ""}{fmtMoney(totalLive)}</div></div>
+          <div style={S.pfAggDiv} />
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>В плюсе / всего</div><div style={S.pfAggVal}>{openWinners}/{open.length}</div></div>
+        </div>
+      ) : (
+        <div style={S.pfAgg}>
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>Завершённых позиций</div><div style={S.pfAggVal}>{closed.length}</div></div>
+          <div style={S.pfAggDiv} />
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>Реализованный P&L</div><div style={{ ...S.pfAggVal, color: realizedTotal >= 0 ? "#5fd08a" : "#ff6b6b" }}>{realizedTotal >= 0 ? "+" : ""}{fmtMoney(realizedTotal)}</div></div>
+          <div style={S.pfAggDiv} />
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>В плюсе / всего</div><div style={S.pfAggVal}>{closedWinners}/{closed.length}</div></div>
+        </div>
+      )}
+
       {positions.length === 0 ? (
-        <div style={S.pfEmpty}>Сейчас нет открытых позиций. Появятся, когда стратегии войдут в live. <button style={S.pfEmptyBtn} onClick={onGoMatches}>К матчам →</button></div>
+        <div style={S.pfEmpty}>{view === "open" ? <>Сейчас нет открытых позиций. Появятся, когда стратегии войдут в live. <button style={S.pfEmptyBtn} onClick={onGoMatches}>К матчам →</button></> : "Завершённых позиций пока нет — они появятся после первых расчётов и закрытий."}</div>
       ) : (
         <>
           <div style={S.pfGroupToggle}>
@@ -1333,17 +1434,22 @@ function PortfolioScreen({ positions, onGoMatches }: any) {
               <div style={S.pfGroupHead}>
                 {groupBy === "strat" && <span style={{ ...S.dot, background: g.color }} />}
                 <span style={S.pfGroupName}>{key}</span>
-                <span style={S.pfGroupStake}>{fmtMoney(g.stake)} в игре</span>
-                <span style={{ ...S.pfGroupLive, color: g.live >= 0 ? "#5fd08a" : "#ff6b6b" }}>{g.live >= 0 ? "▲" : "▼"}{fmtMoney(g.live)}</span>
+                {view === "open" ? <>
+                  <span style={S.pfGroupStake}>{fmtMoney(g.stake)} в игре</span>
+                  <span style={{ ...S.pfGroupLive, color: g.live >= 0 ? "#5fd08a" : "#ff6b6b" }}>{g.live >= 0 ? "▲" : "▼"}{fmtMoney(g.live)}</span>
+                </> : <>
+                  <span style={S.pfGroupStake}>{g.items.length} поз.</span>
+                  <span style={{ ...S.pfGroupLive, color: g.pnl >= 0 ? "#5fd08a" : "#ff6b6b" }}>{g.pnl >= 0 ? "▲+" : "▼"}{fmtMoney(Math.abs(g.pnl))}</span>
+                </>}
               </div>
               <div style={S.pfPosList}>
-                {g.items.map((p: any, i: number) => (
+                {g.items.map((p: any, i: number) => view === "open" ? (
                   <div key={i} style={S.pfPos}>
                     <div style={S.pfPosLeft}>
                       <div style={S.pfPosMarket}>{p.market}</div>
                       <div style={S.pfPosMeta}>
                         {groupBy === "strat" ? p.compName : <span style={{ color: p.stratColor }}>{p.strat}</span>}
-                        {" · "}{p.match} · {p.minute}'
+                        {" · "}{p.match} · {p.minute}
                         {p.entered && <span style={S.pfPosEntered}> · вход {p.entered}</span>}
                       </div>
                     </div>
@@ -1352,6 +1458,23 @@ function PortfolioScreen({ positions, onGoMatches }: any) {
                       <div style={S.pfPosLiveWrap}>
                         <span style={S.pfPosNow}>{p.currentPrice}¢</span>
                         <span style={{ ...S.pfPosLive, color: p.live >= 0 ? "#5fd08a" : "#ff6b6b" }}>{p.live >= 0 ? "▲" : "▼"}{fmtMoney(p.live)}</span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div key={i} style={S.pfPos}>
+                    <div style={S.pfPosLeft}>
+                      <div style={S.pfPosMarket}>{p.market}</div>
+                      <div style={S.pfPosMeta}>
+                        {groupBy === "strat" ? p.compName : <span style={{ color: p.stratColor }}>{p.strat}</span>}
+                        {" · "}{p.match}{p.finalScore ? ` · ${p.finalScore}` : ""}
+                        {p.closedPct < 100 && <span style={S.pfPosEntered}> · фиксация {p.closedPct}%</span>}
+                      </div>
+                    </div>
+                    <div style={S.pfPosRight}>
+                      <div style={S.pfPosStake}>{fmtMoney(p.stake)} · {closedLabel(p)}</div>
+                      <div style={S.pfPosLiveWrap}>
+                        <span style={{ ...S.pfPosLive, color: p.pnl >= 0 ? "#5fd08a" : "#ff6b6b" }}>{p.pnl >= 0 ? "▲+" : "▼"}{fmtMoney(Math.abs(p.pnl))}</span>
                       </div>
                     </div>
                   </div>
@@ -1731,6 +1854,7 @@ const S: Record<string, React.CSSProperties> = {
   timing: { fontSize: 12, color: MUTE, marginTop: 2 },
   stateBadge: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", padding: "5px 10px", borderRadius: 20, whiteSpace: "nowrap" },
   pulse: { width: 6, height: 6, borderRadius: "50%", background: "#ff6b6b", animation: "pulse 1.3s infinite" },
+  liveDot: { display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: "#5fd08a", boxShadow: "0 0 5px #5fd08a", marginLeft: 6, verticalAlign: "middle", animation: "pulse 1.3s infinite" },
   tabBar: { display: "flex", gap: 2, background: INK, borderRadius: 8, padding: 3, marginBottom: 12, flexWrap: "wrap" },
   tabBtn: { flex: 1, background: "transparent", border: "none", color: MUTE, padding: "7px 10px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", borderRadius: 6, minWidth: 90 },
   tabBtnOn: { background: PANEL2, color: TEXT },
@@ -1745,6 +1869,7 @@ const S: Record<string, React.CSSProperties> = {
   oddsRefreshWrap: { display: "flex", alignItems: "center", gap: 4, flexShrink: 0 },
   oddsFlashSlot: { width: 10, display: "inline-flex", justifyContent: "center", alignItems: "center" },
   oddsFlash: { color: "#5fd08a", fontSize: 10, lineHeight: 1 },
+  oddsFlashErr: { color: "#ff6b6b", fontSize: 10, lineHeight: 1 },
   oddsUpdated: { fontSize: 9.5, color: MUTE, marginBottom: 8, fontFamily: "'JetBrains Mono', monospace" },
   oddsScroll: { maxHeight: 360, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, paddingRight: 2 },
   oddsRow: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "7px 9px" },
@@ -1769,6 +1894,7 @@ const S: Record<string, React.CSSProperties> = {
   reassessItem: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: "10px 12px" },
   reassessItemHead: { display: "flex", alignItems: "center", gap: 10, marginBottom: 5 },
   reassessMin: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace", color: "#e8a838", fontWeight: 700 },
+  reassessAt: { fontSize: 10.5, fontFamily: "'JetBrains Mono', monospace", color: MUTE },
   reassessConf: { fontSize: 10.5, color: MUTE },
   reassessText: { fontSize: 13, lineHeight: 1.55, color: "#d3d8e0" },
   assessTop: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 },
@@ -1835,7 +1961,8 @@ const S: Record<string, React.CSSProperties> = {
   logStratBtn: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 20, padding: "4px 12px", fontSize: 12, cursor: "pointer" },
   logList: { display: "flex", flexDirection: "column", gap: 7 },
   noPos: { fontSize: 12, color: MUTE, fontStyle: "italic", padding: "8px 0" },
-  logEntry: { display: "grid", gridTemplateColumns: "48px 72px 1fr", gap: 8, fontSize: 12, alignItems: "baseline" },
+  logEntry: { display: "grid", gridTemplateColumns: "44px 46px 68px 1fr", gap: 8, fontSize: 12, alignItems: "baseline" },
+  logAt: { fontFamily: "'JetBrains Mono', monospace", color: "#e8a838", fontSize: 11, fontWeight: 600 },
   logMin: { fontFamily: "'JetBrains Mono', monospace", color: MUTE, fontSize: 11 },
   logType: { fontSize: 10, fontWeight: 700, textTransform: "uppercase" },
   logText: { color: "#c3c9d3", lineHeight: 1.4 },
@@ -2012,6 +2139,9 @@ const S: Record<string, React.CSSProperties> = {
   pfHeader: { marginBottom: 4 },
   pfTitle: { fontSize: 17, fontWeight: 700 },
   pfSub: { fontSize: 12, color: MUTE, marginTop: 3 },
+  pfViewTabs: { display: "flex", gap: 6, margin: "10px 0" },
+  pfViewTab: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 8, padding: "7px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" },
+  pfViewTabOn: { background: PANEL2, color: TEXT, borderColor: "#e8a83866" },
   pfAgg: { display: "flex", alignItems: "center", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "12px 8px", flexWrap: "wrap", gap: 8 },
   pfAggCell: { flex: 1, textAlign: "center", minWidth: 110 },
   pfAggLbl: { fontSize: 10, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em" },

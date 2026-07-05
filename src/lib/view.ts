@@ -8,7 +8,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { providerEnabled, effectiveEnv } from "./llm.js";
 import { jobActive } from "./analysis.js";
-import { warsawLabel } from "./time.js";
+import { warsawLabel, warsawClock } from "./time.js";
 import { resolveFootballMarket } from "./settlement.js";
 import type { StrategyParams } from "./types.js";
 
@@ -39,8 +39,8 @@ export interface MatchView {
   assessmentHistory: { stage: string; label: string; at: string | null; confidence: string | null; short: string | null; text: string | null; verdict: string | null }[];
   markets: MarketView[];
   bets: Record<string, { rationale: string | null; items: BetItemView[] }>;
-  reassessByStrat: Record<string, { min: string | null; text: string; conf: string | null }[]>;
-  logByStrat: Record<string, { min: string | null; text: string; type: string }[]>;
+  reassessByStrat: Record<string, { min: string | null; at: string | null; text: string; conf: string | null }[]>;
+  logByStrat: Record<string, { min: string | null; at: string | null; text: string; type: string }[]>;
   settledBets: Record<string, { market: string; stake: number; result: string; payout: number; settledBy: string | null; closedPct: number }[]>;
   result: Record<string, number>;
   /** real lineups (ESPN), if enriched — shown under the СОСТАВ toggle */
@@ -192,12 +192,18 @@ export function buildAppData(db: Database, env = process.env): AppData {
           });
         }
       }
+      // repo returns these ORDER BY created_at (oldest→newest); the UI wants the
+      // NEWEST on top, so reverse each strategy's list after collecting. Each row
+      // also carries a wall-clock timestamp (`at`, Warsaw HH:MM) beside the
+      // match-minute label. (SQL order is left ascending — the engine relies on it.)
       const reassessByStrat: MatchView["reassessByStrat"] = {};
       for (const r of R.reassessmentsForMatch(db, m.id))
-        (reassessByStrat[r.strategy_id] ||= []).push({ min: r.minute, text: r.body, conf: r.confidence });
+        (reassessByStrat[r.strategy_id] ||= []).push({ min: r.minute, at: warsawClock(r.created_at), text: r.body, conf: r.confidence });
+      for (const k in reassessByStrat) reassessByStrat[k].reverse();
       const logByStrat: MatchView["logByStrat"] = {};
       for (const l of R.tradeLogForMatch(db, m.id))
-        (logByStrat[l.strategy_id] ||= []).push({ min: l.minute, text: l.text, type: l.type });
+        (logByStrat[l.strategy_id] ||= []).push({ min: l.minute, at: warsawClock(l.created_at), text: l.text, type: l.type });
+      for (const k in logByStrat) logByStrat[k].reverse();
 
       // real lineups + events from ESPN enrichment (if any)
       const live = R.getMatchLive(db, m.id);
@@ -271,9 +277,9 @@ function view(a: { confidence: string | null; short: string | null; body: string
   return { confidence: a.confidence, short: a.short, text: a.body, verdict: a.verdict, status: a.status };
 }
 
-const EVENT_LABEL: Record<string, string> = { goal: "⚽ гол", red_card: "🟥 красная", yellow_card: "🟨 жёлтая", sub: "🔁 замена" };
+const EVENT_LABEL: Record<string, string> = { goal: "⚽ гол", red_card: "🟥 красная", yellow_card: "🟨 жёлтая", sub: "🔁 замена", stats: "📊 статистика" };
 // The feed filters group all match events under "События матча" (type "goal").
-const FEED_EVENT_TYPE: Record<string, string> = { goal: "goal", red_card: "card", yellow_card: "card", sub: "sub" };
+const FEED_EVENT_TYPE: Record<string, string> = { goal: "goal", red_card: "card", yellow_card: "card", sub: "sub", stats: "stats" };
 
 /** Detailed per-strategy stats — open positions marked to the FRESHEST market
  *  price (not the price stored on the bet), so +/- reflects the current line. */

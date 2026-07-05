@@ -188,6 +188,15 @@ test("polymarket: titleMatchScore matches on surnames", () => {
   assert.equal(titleMatchScore("ATP Final: Alcaraz vs Sinner", "Carlos Alcaraz", "Jannik Sinner"), 2);
   // and a shared-word near-miss no longer false-positives (was a substring bug)
   assert.ok(titleMatchScore("Real Sociedad vs Barcelona B", "Real Madrid", "Barcelona") < 2);
+  // same-city / shared-suffix clubs must NOT collide on the bare key: "Real
+  // Madrid" and "Atlético Madrid" both reduce to "madrid", "Man United"/"Man
+  // City" both to "manchester" — the qualifier has to agree too.
+  assert.equal(titleMatchScore("Atlético Madrid vs Sevilla", "Real Madrid", "Sevilla"), 1); // Madrid mismatch → only Sevilla
+  assert.equal(titleMatchScore("Real Madrid vs Sevilla", "Real Madrid", "Sevilla"), 2);     // exact → both
+  assert.equal(titleMatchScore("Manchester City vs Arsenal", "Manchester United", "Arsenal"), 1); // United ≠ City
+  assert.equal(titleMatchScore("Manchester United vs Arsenal", "Manchester United", "Arsenal"), 2);
+  // suffix-only distinction still resolves the right side
+  assert.equal(titleMatchScore("Manchester United vs Manchester City", "Manchester City", "Newcastle United"), 1); // City present, Newcastle absent
 });
 
 test("polymarket: findMatchEvent / bySlug / listSportEvents via mocked Gamma", async () => {

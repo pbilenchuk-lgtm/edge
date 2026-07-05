@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, strategistReassess, advanceClocks, runLiveCycle } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats } from "../src/lib/lifecycle.js";
 import { analyzeMatch } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
@@ -102,6 +102,43 @@ test("strategistReassess skips a pre-lineup match (no reassessment before lineup
   R.insertBet(db, { id: "pm-open", match_id: pm, strategy_id: strat.id, market_label: "Over 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: null, ai_prob: 0.6, stake: 50, rationale: null, entered_minute: "предматч", result: null, payout: null, settled_by: null, created_at: "t" });
   await strategistReassess(db, { fetchImpl: mockLLM({ picks: [], exits: [], note: "x" }), env: { ANTHROPIC_API_KEY: "k" } }, { max: 50 });
   assert.equal(R.reassessmentsForMatch(db, pm).length, 0, "no pre-lineup reassessment even with an open position");
+});
+
+test("strategistReassess skips a time-flipped lineup match that is not yet live (no pre-match churn)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const pm = R.uid();
+  // lineup_out flipped by the 1h-before-kickoff timer (advanceClocks), NOT by a
+  // real teamsheet, and the ball has NOT kicked off. Holds an open position.
+  // This is the exact leak that churned not-yet-started matches — must stay quiet.
+  R.insertMatch(db, { id: pm, competition_id: comp.id, home: "A", away: "B", state: "lineup", lineup_out: true, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: pm });
+  R.insertMarket(db, { id: R.uid(), match_id: pm, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "lm-open", match_id: pm, strategy_id: strat.id, market_label: "Over 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: null, ai_prob: 0.6, stake: 50, rationale: null, entered_minute: "предматч", result: null, payout: null, settled_by: null, created_at: "t" });
+  await strategistReassess(db, { fetchImpl: mockLLM({ picks: [], exits: [], note: "x" }), env: { ANTHROPIC_API_KEY: "k" } }, { max: 50, newEventMatchIds: new Set([pm]) });
+  assert.equal(R.reassessmentsForMatch(db, pm).length, 0, "no reassessment on a not-yet-live lineup match");
+});
+
+test("evaluateExits holds an open position pre-match (lineup_out, not live) — no churn", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  // Pre-match: lineups out by the timer, edge would read as "gone" (aiProb 0.4,
+  // price 62) — but the match is NOT live, so nothing should be closed.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "lineup", lineup_out: true, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 62, ai_prob: 0.4, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  const bid = R.uid();
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 62, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  const exits = evaluateExits(db, { now: () => "t" });
+  assert.equal(exits.length, 0, "no pre-match exit");
+  assert.equal(R.getBet(db, bid)!.status, "open", "position held until kickoff");
+  // once live, the same edge-gone rule fires
+  R.updateMatch(db, mid, { state: "live", minute: 10 });
+  assert.equal(evaluateExits(db, { now: () => "t" }).length, 1, "closes once live");
 });
 test("strategistReassess supports partial fixation (fraction)", async () => {
   const db = openDb(":memory:");
@@ -324,4 +361,49 @@ test("matchByMarketTokens finds a fixture by a shared CLOB token", () => {
   const hit = R.matchByMarketTokens(db, ["nope", tok as string]);
   assert.equal(hit?.id, "m-live");
   assert.equal(R.matchByMarketTokens(db, ["does-not-exist"]), null);
+});
+
+test("formatMatchStats renders a compact home–away line, null when empty", () => {
+  const json = JSON.stringify({
+    home: { team: "Real", items: [{ label: "владение", value: "58%" }, { label: "удары", value: "7" }] },
+    away: { team: "City", items: [{ label: "владение", value: "42%" }, { label: "удары", value: "4" }, { label: "угловые", value: "2" }] },
+  });
+  assert.equal(formatMatchStats(json), "владение 58%–42% · удары 7–4 · угловые —–2");
+  assert.equal(formatMatchStats(null), null);
+  assert.equal(formatMatchStats("{bad json"), null);
+  assert.equal(formatMatchStats(JSON.stringify({ home: { team: "A", items: [] }, away: { team: "B", items: [] } })), null);
+});
+
+test("recordMatchStats writes a stats event for a live match, then rate-limits to 5 min", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Real", away: "City", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "E1", league: "eng.1", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { team: "Real", items: [{ label: "владение", value: "58%" }] }, away: { team: "City", items: [{ label: "владение", value: "42%" }] } }), updated_at: "t" });
+
+  const n1 = recordMatchStats(db, { now: () => "2026-07-05T18:00:00Z" });
+  assert.equal(n1, 1, "first snapshot written");
+  const evts = R.eventsForMatch(db, mid).filter((e) => e.type === "stats");
+  assert.equal(evts.length, 1);
+  assert.match(evts[0].text, /владение 58%–42%/);
+
+  // 3 min later — within the 5-min interval → no new snapshot
+  assert.equal(recordMatchStats(db, { now: () => "2026-07-05T18:03:00Z" }), 0, "rate-limited within 5 min");
+  // 6 min later — a fresh snapshot lands
+  assert.equal(recordMatchStats(db, { now: () => "2026-07-05T18:06:00Z" }), 1, "new snapshot after the interval");
+  assert.equal(R.eventsForMatch(db, mid).filter((e) => e.type === "stats").length, 2);
+});
+
+test("recordMatchStats ignores non-live matches and matches without stats", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const up = R.uid(), noStats = R.uid();
+  // upcoming with stats → skipped (not live)
+  R.insertMatch(db, { id: up, competition_id: comp.id, home: "A", away: "B", state: "upcoming", lineup_out: true, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: up });
+  R.upsertMatchLive(db, { match_id: up, espn_event_id: "E", league: "x", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { team: "A", items: [{ label: "владение", value: "50%" }] }, away: { team: "B", items: [] } }), updated_at: "t" });
+  // live but no stats row → skipped
+  R.insertMatch(db, { id: noStats, competition_id: comp.id, home: "C", away: "D", state: "live", lineup_out: true, kickoff_at: null, minute: 10, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: noStats });
+  assert.equal(recordMatchStats(db, { now: () => "2026-07-05T18:00:00Z" }), 0);
 });

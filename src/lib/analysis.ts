@@ -147,12 +147,11 @@ export async function analyzeMatch(
     // never re-propose on a market it's already in — otherwise the post-lineup
     // re-analysis would double up and breach the per-match budget cap (§9.3).
     const held = new Set(openPos.map((b) => norm(b.market_label)));
-    let exposure = openPos.reduce((n, b) => n + (b.stake ?? 0), 0);
-    // Realized P&L this strategy already booked on this match (settled bets) —
-    // feeds the bankroll cap so a loss can't be re-staked in full.
-    const realizedPnl = R.betsForMatch(db, matchId, strat.id)
-      .filter((b) => b.status === "settled_won" || b.status === "settled_lost")
-      .reduce((n, b) => n + ((b.payout ?? 0) - (b.stake ?? 0)), 0);
+    // §9.3 budget cap is per-COMPETITION: seed exposure + realized from ALL of
+    // the strategy's matches in this comp (not just this one), so total committed
+    // stake across concurrent matches can't exceed the strategy's share.
+    let exposure = strategyCompExposure(db, match.competition_id, strat.id);
+    const realizedPnl = strategyCompRealized(db, match.competition_id, strat.id);
     let entries = 0, skipped = 0;
     // best edges first
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
@@ -247,6 +246,26 @@ export function sameMarketLabel(a: string, b: string): boolean {
  * (negative = drawdown): realized P&L on settled bets + mark-to-market on open
  * bets, across every match of the competition. Feeds the stop-loss gate.
  */
+/** Open + still-proposed stake ($) this strategy has committed across the WHOLE
+ *  competition. The §9.3 budget cap is per-COMPETITION, not per-match — seeding
+ *  the sizer with only the current match's exposure let a strategy stake its full
+ *  share on each of N concurrent matches (≈N× the budget). */
+export function strategyCompExposure(db: Database, competitionId: string, strategyId: string): number {
+  let sum = 0;
+  for (const mt of R.listMatches(db, competitionId))
+    for (const b of R.betsForMatch(db, mt.id, strategyId))
+      if (b.status === "open" || b.status === "proposed") sum += b.stake ?? 0;
+  return sum;
+}
+/** Realized P&L ($) this strategy booked across the WHOLE competition (bankroll
+ *  = budget + realized, so a loss elsewhere shrinks what's re-stakeable here). */
+export function strategyCompRealized(db: Database, competitionId: string, strategyId: string): number {
+  let sum = 0;
+  for (const mt of R.listMatches(db, competitionId))
+    for (const b of R.betsForMatch(db, mt.id, strategyId))
+      if (b.status === "settled_won" || b.status === "settled_lost") sum += (b.payout ?? 0) - (b.stake ?? 0);
+  return sum;
+}
 export function strategyDrawdown(db: Database, competitionId: string, strategyId: string, budget: number): number {
   if (budget <= 0) return 0;
   let pnl = 0;

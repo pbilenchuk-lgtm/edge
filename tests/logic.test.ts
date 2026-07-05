@@ -241,6 +241,34 @@ test("settlement: signed handicap respects side and sign", () => {
   assert.equal(resolveFootballMarket("Croatia -1.5", 0, 3, teams) !== false, true);
 });
 
+test("settlement: double chance / draw-no-bet no longer settle as a straight draw", () => {
+  // 2:0 home win. Double chance backs two of the three 1X2 outcomes.
+  assert.equal(resolveFootballMarket("Home or Draw", 2, 0), true);   // home win → 1X wins
+  assert.equal(resolveFootballMarket("Away or Draw", 2, 0), false);  // home win → X2 loses
+  assert.equal(resolveFootballMarket("1X", 2, 0), true);
+  assert.equal(resolveFootballMarket("X2", 2, 0), false);
+  assert.equal(resolveFootballMarket("Home or Away", 2, 0), true);   // 12 → not a draw
+  assert.equal(resolveFootballMarket("Home or Away", 1, 1), false);  // 12 → draw loses
+  // A draw makes the "…or Draw" side win.
+  assert.equal(resolveFootballMarket("Home or Draw", 1, 1), true);
+  assert.equal(resolveFootballMarket("Away or Draw", 1, 1), true);
+  // Draw No Bet: named side wins/loses; a DRAW is a push → refund (null), not a loss.
+  assert.equal(resolveFootballMarket("Home DNB", 2, 1), true);   // home won
+  assert.equal(resolveFootballMarket("Away Draw No Bet", 2, 1), false); // away lost
+  assert.equal(resolveFootballMarket("Home DNB", 1, 1), null);   // push → refund
+});
+
+test("settlement: exact whole-number line is a push (refund), not a loss", () => {
+  // Totals landing exactly on an integer line → null (void/refund), not lost.
+  assert.equal(resolveFootballMarket("Over 2", 1, 1), null);   // total 2 == line
+  assert.equal(resolveFootballMarket("Under 2", 1, 1), null);
+  assert.equal(resolveFootballMarket("Over 2", 2, 1), true);   // total 3 > 2, no push
+  // Whole-number handicap landing exactly on the line → push.
+  const t = { home: "A", away: "B" };
+  assert.equal(resolveFootballMarket("Home -1", 1, 0, t), null); // margin 1 − 1 = 0 → push
+  assert.equal(resolveFootballMarket("Home -1", 2, 0, t), true); // margin 2 − 1 = 1 > 0
+});
+
 test("thresholds: numeric minConfidence still gates (не отключается)", () => {
   // The extractor may emit minConfidence as a number; validateParams (the real
   // pipeline) must normalize it to a band so the gate isn't silently disabled.

@@ -150,8 +150,12 @@ export async function refreshMatchOdds(
     for (const b of R.betsForMatch(db, matchId)) {
       if (b.status === "open" && b.market_label === m.label) R.updateBet(db, b.id, { current_price: price });
     }
-    // price_move reassessment trigger
-    if (Math.abs(price - m.price) >= cfg.priceMoveThreshold) {
+    // price_move reassessment trigger — LIVE only (ТЗ §3.3). Pre-match a
+    // discovered match sits in `lineup`/time-flipped `lineup_out` with no game,
+    // and illiquid Polymarket markets drift ≥threshold constantly, which fired a
+    // flood of "движение цены на старте без игрового триггера" reassessments on a
+    // not-yet-started match. Mark-to-market above still runs; only the trigger waits.
+    if (match.state === "live" && Math.abs(price - m.price) >= cfg.priceMoveThreshold) {
       for (const sid of strategiesWithOpenBets(db, matchId)) {
         if (R.betsForMatch(db, matchId, sid).some((b) => b.status === "open" && b.market_label === m.label)) {
           triggers.push(await triggerReassessment(db, { match, strategyId: sid, trigger: "price_move", minute: match.minute }, deps));
@@ -250,11 +254,14 @@ export function settleMatch(
       skipped++; affected.add(b.strategy_id);
       continue;
     }
-    // Closing line for CLV = the KICKOFF snapshot. With no kickoff captured,
-    // fall back to the ENTRY price (neutral CLV = 0), NOT the latest/current
-    // snapshot — at settle time that is the post-resolution (~0/100) finish
-    // price and would degrade CLV into P&L.
-    const closing = kickoff[b.market_label] ?? b.entry_price ?? null;
+    // Closing line for CLV = the KICKOFF snapshot — but ONLY for PRE-match bets.
+    // CLV measures beating the closing (kickoff) line, which is defined relative
+    // to a bet placed BEFORE kickoff. For an IN-MATCH entry the kickoff price
+    // predates the bet, so benchmarking against it is meaningless and biased the
+    // metric negative — give those a NEUTRAL CLV (closing = entry). With no
+    // kickoff captured, fall back to entry too (never the post-resolution price).
+    const preMatch = b.entered_minute == null || /предматч/i.test(b.entered_minute);
+    const closing = preMatch ? (kickoff[b.market_label] ?? b.entry_price ?? null) : (b.entry_price ?? null);
     const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, closing);
     R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price });
     R.insertTradeLog(db, {

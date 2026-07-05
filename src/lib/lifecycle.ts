@@ -19,7 +19,7 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets } from "./engine.js";
 import { SPORT_TAG_IDS } from "./polymarket.js";
-import { analyzeMatch, jobActive, matchContext, strategyDrawdown, sameMarketLabel } from "./analysis.js";
+import { analyzeMatch, jobActive, matchContext, strategyDrawdown, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision, sizeBet } from "./thresholds.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -209,6 +209,12 @@ export function evaluateExits(db: Database, deps: EngineDeps = {}): ExitItem[] {
   const out: ExitItem[] = [];
   const touched = new Set<string>();
   for (const { match: m } of activeMatches(db)) {
+    // Price-driven exits (take-profit / stop / edge-gone) are LIVE management —
+    // per ТЗ §3.3 mark-to-market and price triggers belong to the live phase. A
+    // position opened on lineup is HELD untouched until kickoff; letting exits run
+    // pre-match closed positions on pure Polymarket drift (the «вход… → выход…
+    // предматч» churn). Settlement of finished matches is handled elsewhere.
+    if (m.state !== "live") continue;
     const markets = R.latestMarkets(db, m.id);
     for (const b of R.betsForMatch(db, m.id)) {
       if (b.status !== "open") continue;
@@ -278,11 +284,15 @@ export async function strategistReassess(
     if (calls >= max) break;
     const c = comps.get(comp);
     if (!c || c.budget <= 0) continue;
-    // Reassessment is IN-MATCH management that reacts to real events — never run
-    // it pre-match / pre-lineup, where there is nothing to react to and it only
-    // emits "реальных событий нет, ничего не фиксирую" noise. Allow it once the
-    // match is LIVE, or (for lineup sports) once the lineups are out.
-    if (!(m.state === "live" || (LINEUP_SPORTS.has(sport) && m.lineup_out))) continue;
+    // Reassessment is IN-MATCH management that reacts to real events (goal / red
+    // card / price move) — per ТЗ §3.3 it belongs to the LIVE phase. Never run it
+    // pre-match: for leagues we can't enrich, `lineup_out` is a pure time-flip
+    // (advanceClocks, ~1h before kickoff) with NO real teamsheet, so allowing the
+    // lineup_out branch churned not-yet-started matches on pre-match price noise
+    // ("движение цены на старте без игрового триггера; статичное 0:0"). Entry on
+    // lineup still happens (autoAnalyze post_lineup + autoEnter); we just hold
+    // those positions untouched until the ball is actually rolling.
+    if (m.state !== "live") continue;
     const open = R.betsForMatch(db, m.id).filter((b) => b.status === "open");
     // Reassess only where there's live risk (open positions) or a fresh trigger.
     // In triggeredOnly mode (fast loop) a trigger is REQUIRED — quiet positions
@@ -362,12 +372,12 @@ export async function strategistReassess(
       const budget = stratBudget(c.budget, share.pct);
       const drawdown = strategyDrawdown(db, comp, sid, budget);
       const held = new Set(R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").map((b) => norm(b.market_label)));
-      // Seed exposure from BOTH open and still-proposed stakes — autoEnter will
-      // fill the proposals, so a new entry must be sized against them too (§9.3).
-      let exposure = R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").reduce((n, b) => n + (b.stake ?? 0), 0);
-      const realizedPnl = R.betsForMatch(db, m.id, sid)
-        .filter((b) => b.status === "settled_won" || b.status === "settled_lost")
-        .reduce((n, b) => n + ((b.payout ?? 0) - (b.stake ?? 0)), 0);
+      // Seed exposure + realized from ALL the strategy's matches in this comp
+      // (open AND still-proposed — autoEnter will fill the proposals), so the
+      // §9.3 cap is per-COMPETITION, not per-match: concurrent matches can't each
+      // stake the full share.
+      let exposure = strategyCompExposure(db, comp, sid);
+      const realizedPnl = strategyCompRealized(db, comp, sid);
       for (const pick of dec.picks) {
         const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
         if (!mk || mk.ai_prob == null || mk.price == null) continue; // need a probability to size
@@ -440,6 +450,7 @@ export async function runAutoCycle(
   for (const e of enrich.newEvents) if (!labelFor.has(e.matchId)) labelFor.set(e.matchId, LIVE_TRIGGER_TYPES.has(e.type) ? (e.type as ReassessTrigger) : "price_move");
   const triggers = new Set(enrich.newEvents.map((e) => e.matchId));
   stepSync("advanceClocks", () => advanceClocks(db, deps), undefined); // flip lineup_out ~1h before kickoff
+  stepSync("stats", () => recordMatchStats(db, deps), 0); // 5-min match-stats snapshot into the events feed
   stepSync("settleStale", () => settleStaleOpenBets(db, deps), 0); // re-settle a finish that raced ahead of the score sync
   stepSync("captureLiveOpens", () => captureLiveOpens(db, deps), undefined); // kickoff-price baseline
   // Analyze BEFORE reassessment: analyzeMatch wipes a match's proposed bets to
@@ -453,6 +464,10 @@ export async function runAutoCycle(
   const exited = [...stepSync("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
   const entered = stepSync("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
   stepSync("prune", () => R.pruneMarketSnapshots(db), 0); // keep the snapshot history bounded (persistent DB)
+  // Bound the matches table: drop finished/stale matches that carry NO bets (the
+  // Polymarket discovery flood). Never touches a match with betting history, so
+  // metrics/P&L are preserved. Keeps buildAppData's per-poll scan bounded (§502).
+  stepSync("pruneMatches", () => R.pruneStaleMatches(db, { staleBeforeMs: (Date.parse(nowFn(deps)()) || Date.now()) - 3 * 86400_000 }), 0);
   return {
     synced: synced.length, imported: synced.filter((r) => r.created).length, discovered,
     oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),
@@ -471,17 +486,63 @@ const LIVE_TRIGGER_TYPES = new Set(["goal", "red_card"]);
 // exit) and fresh analytics land on a steady heartbeat, not only on goals.
 export const REASSESS_INTERVAL_MIN = 5;
 
-/** Live matches due for a periodic reassessment — those not reassessed in the
+// Match-stats snapshots land on the SAME cadence as the periodic reassessment
+// (user: «статистику каждые 5 минут, так же как и переоценку»).
+export const STATS_INTERVAL_MIN = REASSESS_INTERVAL_MIN;
+
+/** Format the stored ESPN team-stats JSON into one compact «home–away» line, e.g.
+ *  "владение 58%–42% · удары 7–4 · в створ 3–1". Returns null if there's nothing. */
+export function formatMatchStats(statsJson: string | null | undefined): string | null {
+  if (!statsJson) return null;
+  let s: any;
+  try { s = JSON.parse(statsJson); } catch { return null; }
+  const home = s?.home, away = s?.away;
+  const hi = new Map<string, string>(((home?.items ?? []) as any[]).map((x) => [x.label, x.value]));
+  const ai = new Map<string, string>(((away?.items ?? []) as any[]).map((x) => [x.label, x.value]));
+  // Preserve the order stats appear in for the home side, then any away-only labels.
+  const labels = [...hi.keys(), ...[...ai.keys()].filter((l) => !hi.has(l))];
+  const parts = labels.map((l) => `${l} ${hi.get(l) ?? "—"}–${ai.get(l) ?? "—"}`);
+  if (!parts.length) return null;
+  return parts.join(" · ");
+}
+
+/**
+ * Emit a match-stats snapshot into the events feed for each LIVE match that has
+ * ESPN stats, at most one per STATS_INTERVAL_MIN (wall-clock) — the possession /
+ * shots / chances readout of «what's happening now», beside goals & cards. Cheap,
+ * LLM-free, and deduped by a fresh event_key so it layers a new row each cadence.
+ */
+export function recordMatchStats(db: Database, deps: EngineDeps = {}): number {
+  const now = nowFn(deps)();
+  const nowMs = Date.parse(now) || Date.now();
+  let written = 0;
+  for (const { match: m } of activeMatches(db)) {
+    if (m.state !== "live") continue;
+    const live = R.getMatchLive(db, m.id);
+    const text = formatMatchStats(live?.stats);
+    if (!text) continue;
+    // Cadence gate: skip if a stats snapshot landed within the last interval.
+    const prior = R.eventsForMatch(db, m.id).filter((e) => e.type === "stats");
+    const last = prior.length ? Date.parse(prior[prior.length - 1].created_at) : NaN;
+    if (!isNaN(last) && nowMs - last < STATS_INTERVAL_MIN * 60_000) continue;
+    if (R.insertMatchEvent(db, { id: R.uid(), match_id: m.id, event_key: `stats-${now}`, minute: m.minute, type: "stats", team: null, text, created_at: now })) written++;
+  }
+  return written;
+}
+
+/** LIVE matches due for a periodic reassessment — those not reassessed in the
  *  last REASSESS_INTERVAL_MIN minutes (or never). Fires on ANY funded live match
  *  with tradeable markets, regardless of whether a position is open: reassessment
  *  is both fresh analytics AND a chance to open/exit, so it must not wait for an
- *  on-pitch event (user: «переоценку надо делать каждые 5 минут независимо»). */
+ *  on-pitch event (user: «переоценку надо делать каждые 5 минут независимо»).
+ *  Gated to state==="live" only: pre-match (`lineup`/time-flipped `lineup_out`)
+ *  has no game to react to, and the heartbeat there just churned reassessments. */
 function periodicReassessMatches(db: Database, deps: EngineDeps): Set<string> {
   const nowMs = Date.parse(nowFn(deps)()) || Date.now();
   const budgetByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.budget]));
   const due = new Set<string>();
   for (const { comp, match: m } of activeMatches(db)) {
-    if (m.state !== "live" && m.state !== "lineup" && !m.lineup_out) continue;
+    if (m.state !== "live") continue;
     if ((budgetByComp.get(comp) ?? 0) <= 0) continue;        // unfunded → skip (economical)
     if (!R.latestMarkets(db, m.id).length) continue;         // nothing to price/trade
     const notes = R.reassessmentsForMatch(db, m.id);
@@ -523,6 +584,7 @@ export async function runLiveCycle(
   stepSyncLive("advanceClocks", () => advanceClocks(db, deps), undefined);
   const enrich = provider ? await stepLive("enrich", () => enrichFromEspn(db, provider, deps), { enriched: 0, newEvents: [] }) : { enriched: 0, newEvents: [] };
   stepSyncLive("settleStale", () => settleStaleOpenBets(db, deps), 0); // re-settle a finish that raced ahead of the score
+  stepSyncLive("stats", () => recordMatchStats(db, deps), 0); // 5-min match-stats snapshot into the events feed
   stepSyncLive("captureLiveOpens", () => captureLiveOpens(db, deps), undefined); // snapshot kickoff prices the first time a match is live
   // Reassessment fires on TWO conditions, unioned: (1) a high-impact on-pitch
   // event (goal / red card) — labelled by its type; (2) the periodic 5-min

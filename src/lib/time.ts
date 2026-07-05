@@ -21,6 +21,14 @@ export function warsawLabel(iso: string | null | undefined): string | null {
   return `${day} ${date}, ${time}`; // "пн 07.07, 20:45"
 }
 
+/** "20:45" — compact HH:MM in Warsaw for log / reassessment timestamps. Passes
+ *  non-ISO strings through as null (so the UI cleanly omits a non-timestamp). */
+export function warsawClock(iso: string | null | undefined): string | null {
+  if (!isIso(iso)) return null;
+  const d = new Date(iso);
+  return new Intl.DateTimeFormat("ru-RU", { timeZone: WARSAW, hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
+}
+
 /** Hours from `nowMs` until the kickoff (negative if already started); null if unknown. */
 export function hoursUntil(iso: string | null | undefined, nowMs: number): number | null {
   if (!isIso(iso)) return null;
