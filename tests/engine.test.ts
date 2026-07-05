@@ -432,3 +432,34 @@ test("settleMatch: CLV closing = kickoff for pre-match bets, entry (neutral) for
   assert.equal(R.getBet(db, pre)!.closing_price, 40, "pre-match bet benchmarked to kickoff (40)");
   assert.equal(R.getBet(db, inm)!.closing_price, 70, "in-match bet neutral (closing = entry 70)");
 });
+
+test("espnLeagueForSeries: covered leagues resolve, uncovered (tennis/minor) return null", async () => {
+  const { espnLeagueForSeries } = await import("../src/lib/engine.js");
+  assert.equal(espnLeagueForSeries("FIFA World Cup", "soccer-fifwc"), "fifa.world");
+  assert.equal(espnLeagueForSeries("UEFA Champions League", "soccer-ucl"), "uefa.champions");
+  assert.equal(espnLeagueForSeries("Allsvenskan", "soccer-allsvenskan"), "swe.1"); // via name inference
+  assert.equal(espnLeagueForSeries("Morocco Botola", "soccer-botola"), null);      // ESPN doesn't cover → skip
+  assert.equal(espnLeagueForSeries(null, "atp-alcaraz-sinner"), null);             // tennis → no mapping → skip
+  assert.equal(espnLeagueForSeries(null, null), null);
+});
+
+test("pruneUncoveredMatches drops no-bet matches in leagues with no ESPN feed, keeps covered / bet-bearing", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const strat = R.listStrategies(db, "football")[0];
+  // covered comp (has an ESPN league) + uncovered pm-* comp (no league)
+  R.upsertCompetition(db, { id: "pm-soccer-ucl", sport_id: "football", name: "ЛЧ", budget: 0, external_league: "uefa.champions", created_at: "t" });
+  R.upsertCompetition(db, { id: "pm-tennis-x", sport_id: "tennis", name: "ITF", budget: 0, external_league: null, created_at: "t" });
+  const covered = R.uid(), uncoveredNoBet = R.uid(), uncoveredWithBet = R.uid();
+  const mk = (id: string, comp: string) => R.insertMatch(db, { id, competition_id: comp, home: "A"+id, away: "B"+id, state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+  mk(covered, "pm-soccer-ucl");         // covered → keep
+  mk(uncoveredNoBet, "pm-tennis-x");    // uncovered, no bet → prune
+  mk(uncoveredWithBet, "pm-tennis-x");  // uncovered but HAS a bet → keep
+  R.insertBet(db, { id: R.uid(), match_id: uncoveredWithBet, strategy_id: strat.id, market_label: "П1", status: "open", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: null, ai_prob: 0.6, stake: 40, rationale: null, entered_minute: "10'", result: null, payout: null, created_at: "t" });
+
+  const removed = R.pruneUncoveredMatches(db);
+  assert.equal(removed, 1, "only the uncovered no-bet match pruned");
+  assert.ok(R.getMatch(db, covered), "covered-league match kept");
+  assert.equal(R.getMatch(db, uncoveredNoBet), null, "uncovered no-bet match removed");
+  assert.ok(R.getMatch(db, uncoveredWithBet), "uncovered match with a bet kept");
+});

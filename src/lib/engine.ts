@@ -498,6 +498,14 @@ const slugify = (s: string) => s.toLowerCase().normalize("NFD").replace(/[^a-z0-
  * to the per-sport "…· прочее" bucket. Never clobbers an existing comp's budget;
  * backfills the ESPN league so its matches get lineups/events.
  */
+/** The ESPN league a discovered match's series maps to, or null if ESPN doesn't
+ *  cover it (→ no live scores/events, so we don't import it). */
+export function espnLeagueForSeries(series: string | null, seriesSlug: string | null): string | null {
+  const slug = seriesSlug ?? (series ? slugify(series) : null);
+  if (!slug && !series) return null;
+  return (slug ? SERIES_ESPN_LEAGUE[slug] : null) ?? inferEspnLeague(series) ?? inferEspnLeague(slug) ?? null;
+}
+
 function ensureCategoryComp(db: Database, sport: string, series: string | null, seriesSlug: string | null, now: string): string {
   if (!series && !seriesSlug) {
     const id = `pm-${sport}`;
@@ -507,7 +515,7 @@ function ensureCategoryComp(db: Database, sport: string, series: string | null, 
   }
   const slug = seriesSlug ?? slugify(series!);
   const id = `pm-${slug}`;
-  const league = SERIES_ESPN_LEAGUE[slug] ?? inferEspnLeague(series) ?? inferEspnLeague(slug) ?? null;
+  const league = espnLeagueForSeries(series, seriesSlug);
   const existing = R.listCompetitions(db).find((c) => c.id === id);
   if (!existing) {
     R.upsertCompetition(db, { id, sport_id: sport, name: SERIES_RU[slug] ?? series ?? slug, budget: 0, external_league: league, created_at: now });
@@ -535,6 +543,11 @@ export async function importPolymarketMatches(
   const discovered = await discoverSportMatches(poly, sport, now, { fetchImpl: deps.fetchImpl }, { limit: opts.limit ?? 200, windowDays: 7, nowMs });
   const out: DiscoverItem[] = [];
   for (const d of discovered) {
+    // Only import matches from leagues ESPN actually covers (real live scores /
+    // events) — user: «подтягиваем только то, для чего есть live-обзор». Tennis
+    // and minor/uncovered leagues (no ESPN feed) are skipped entirely, so every
+    // imported match has a real in-play view, not an empty «События матча».
+    if (!espnLeagueForSeries(d.series, d.seriesSlug)) continue;
     // Route into the tournament category this match belongs to (Polymarket series).
     const compId = ensureCategoryComp(db, sport, d.series, d.seriesSlug, now);
     // Order-INSENSITIVE ref (teams sorted): Polymarket may list a fixture as

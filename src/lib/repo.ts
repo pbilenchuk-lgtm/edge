@@ -403,14 +403,36 @@ export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number }
       if (!isNaN(t) && t < opts.staleBeforeMs) doomed.push(r.id);
     }
   }
-  if (!doomed.length) return 0;
+  return deleteMatches(db, doomed);
+}
+
+/**
+ * Drop already-imported discovered matches from leagues with NO ESPN live feed —
+ * uncovered `pm-*` competitions (external_league IS NULL) — that carry no bets.
+ * The discovery filter (espnLeagueForSeries) stops importing these; this clears
+ * the ones imported before it. Never touches a match with betting history or a
+ * competition that has a real ESPN league. Returns the count removed.
+ */
+export function pruneUncoveredMatches(db: Database): number {
+  const rows = db.prepare(
+    `SELECT m.id AS id FROM matches m
+       JOIN competitions c ON c.id = m.competition_id
+       WHERE c.external_league IS NULL AND c.id LIKE 'pm-%'
+         AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.match_id = m.id)`,
+  ).all() as { id: string }[];
+  return deleteMatches(db, rows.map((r) => r.id));
+}
+
+/** Delete matches + all their child rows (no ON DELETE CASCADE), atomically. */
+function deleteMatches(db: Database, ids: string[]): number {
+  if (!ids.length) return 0;
   const delChild = MATCH_CHILD_TABLES.map((t) => db.prepare(`DELETE FROM ${t} WHERE match_id = ?`));
   const delMatch = db.prepare(`DELETE FROM matches WHERE id = ?`);
   // node:sqlite has no .transaction() helper — wrap in an explicit BEGIN/COMMIT
   // so a mid-prune throw can't leave a match half-deleted (orphaned children).
   db.exec("BEGIN");
   try {
-    for (const id of doomed) {
+    for (const id of ids) {
       for (const stmt of delChild) stmt.run(id);
       delMatch.run(id);
     }
@@ -419,7 +441,7 @@ export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number }
     db.exec("ROLLBACK");
     throw e;
   }
-  return doomed.length;
+  return ids.length;
 }
 /** Latest snapshot per market label (or only closing prices). */
 export function latestMarkets(db: Database, matchId: string, closingOnly = false): Market[] {
