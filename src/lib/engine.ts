@@ -447,9 +447,15 @@ export async function importPolymarketMatches(
     // "A vs B" one run and "B vs A" the next, which with an orientation-sensitive
     // key produced a duplicate row. Sorting the two sides collapses both to one.
     const ref = `pm:${sport}:${[d.home, d.away].map((s) => s.toLowerCase().replace(/\s+/g, "")).sort().join("-")}`;
-    // Dedup by pm: ref first, then by teams (the fixture may already exist under
-    // an ESPN id if syncCompetitions imported it) — never duplicate the game.
-    let match = R.matchByExternalRef(db, ref) ?? findTwinMatch(db, compId, d.home, d.away);
+    // Dedup, most-reliable first: (1) the order-insensitive pm: ref, (2) SHARED
+    // CLOB tokens — the same fixture keeps its market tokens even if Polymarket
+    // rewords the title, so this catches spelling drift the ref/name checks miss,
+    // (3) team-name twin (the fixture may already exist under an ESPN id from
+    // syncCompetitions). Never duplicate the game.
+    const tokenRefs = d.markets.map((s) => s.external_ref).filter((r): r is string => !!r);
+    let match = R.matchByExternalRef(db, ref)
+      ?? R.matchByMarketTokens(db, tokenRefs)
+      ?? findTwinMatch(db, compId, d.home, d.away);
     let created = false;
     if (!match) {
       const startMs = d.kickoff ? Date.parse(d.kickoff) : NaN;
