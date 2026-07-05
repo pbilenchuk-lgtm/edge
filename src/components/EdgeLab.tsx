@@ -192,7 +192,9 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [sportId, setSportId] = useState("football");
   const sportComps = COMPETITIONS.filter((c) => c.sport === sportId);
   const [compId, setCompId] = useState(sportComps[0]?.id);
-  const comp = COMPETITIONS.find((c) => c.id === compId) || sportComps[0];
+  // Resolve within the CURRENT sport only — otherwise switching to a sport with
+  // no comps would keep the old sport's compId and render a foreign comp's data.
+  const comp = sportComps.find((c) => c.id === compId) || sportComps[0];
   const [compModal, setCompModal] = useState<string | null>(null);
   const [shareModal, setShareModal] = useState<string | null>(null);
 
@@ -207,13 +209,19 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const totalRealized = Object.values(matchDb).reduce((a: number, m: any) =>
     a + Object.values(m?.result || {}).reduce((x: number, v: any) => x + (v as number), 0), 0);
 
-  const setBudget = (cid: string, amt: number) => {
+  // Optimistic + confirmed: apply locally, persist, and if the POST fails (cold
+  // start / rejected) toast so a silent revert on the next live reload isn't a
+  // mystery. reloadApp reads server state, so a failed save visibly reverts —
+  // the toast tells the user why.
+  const setBudget = async (cid: string, amt: number) => {
     setCompBudget((p) => ({ ...p, [cid]: amt })); setCompModal(null);
-    mutate({ type: "setBudget", compId: cid, amount: amt });
+    const r = await mutate({ type: "setBudget", compId: cid, amount: amt }).catch(() => ({ ok: false }));
+    if (r && r.ok === false) toast("err", r.error || "Не удалось сохранить бюджет — изменение откатится");
   };
-  const saveShares = (cid: string, newShares: any) => {
+  const saveShares = async (cid: string, newShares: any) => {
     setShares((p) => ({ ...p, [cid]: newShares })); setShareModal(null);
-    mutate({ type: "setShares", compId: cid, shares: newShares });
+    const r = await mutate({ type: "setShares", compId: cid, shares: newShares }).catch(() => ({ ok: false }));
+    if (r && r.ok === false) toast("err", r.error || "Не удалось сохранить доли — изменение откатится");
   };
 
   // Refresh a match's odds via the SERVER action (engine.refreshMatchOdds): the
@@ -550,6 +558,11 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   // ONLY when a price actually changed. The dot slot is always reserved, so the
   // layout never shifts.
   const priceSig = (match.markets || []).map((mk: any) => `${mk.id}:${mk.price}`).join("|");
+  // Freshest quote per market label — so a bet row marks to the same price the
+  // bank strip / portfolio use (client odds refresh updates markets[].price but
+  // not the bet's currentPrice), keeping the views consistent between reloads.
+  const curByLabel: Record<string, number> = {};
+  for (const mk of (match.markets || [])) if (!(mk.label in curByLabel)) curByLabel[mk.label] = mk.price;
   const [flashKey, setFlashKey] = useState(0);
   const prevSig = useRef(priceSig);
   useEffect(() => {
@@ -681,11 +694,12 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                       {items.length === 0 ? <div style={S.noBets}>ставок нет — край недостаточен, стратегия пропускает матч</div> : (
                         <div style={S.betList}>
                           {items.map((b: any, i: number) => {
-                            const impl = b.price != null ? b.price / 100 : impliedProb(b.currentPrice ?? b.entryPrice);
+                            const curPrice = curByLabel[b.market] ?? b.currentPrice ?? b.entryPrice; // freshest quote
+                            const impl = b.price != null ? b.price / 100 : impliedProb(curPrice);
                             const edge = b.aiProb != null ? (b.aiProb - impl) * 100 : null; // no model prob → no edge, don't show "NaN%"
                             const stake = b.stake != null ? b.stake : Math.round(budget * (b.pct || 0));
                             const isOpen = b.status === "open";
-                            const live = isOpen && b.currentPrice != null && b.entryPrice != null ? b.stake * (b.currentPrice / b.entryPrice) - b.stake : null;
+                            const live = isOpen && curPrice != null && b.entryPrice != null && b.entryPrice > 0 ? b.stake * (curPrice / b.entryPrice) - b.stake : null;
                             const entryDisp = b.entryPrice != null ? `${b.entryPrice}¢` : (b.price != null ? `${b.price}¢` : "");
                             return (
                               <div key={i} style={S.betRow}>
@@ -1098,13 +1112,13 @@ function MetricsScreen({ catalog, quality, stats }: any) {
             {q ? <>
             <div style={{ ...S.calibLabel, marginTop: 12 }}>Метрики качества эджа {q.samples < 20 && <span style={{ color: "#e8a838" }}>· мало данных ({q.samples})</span>}</div>
             <div style={S.metricNums}>
-              <div style={S.metricNumCell}><div style={S.metricNumLbl}>Brier</div><div style={{ ...S.metricNumVal, color: q.brier <= 0.19 ? "#5fd08a" : q.brier <= 0.22 ? "#e8a838" : "#ff6b6b" }}>{q.brier?.toFixed(3)}</div></div>
-              <div style={S.metricNumCell}><div style={S.metricNumLbl}>CLV</div><div style={{ ...S.metricNumVal, color: q.clv > 0 ? "#5fd08a" : "#ff6b6b" }}>{q.clv >= 0 ? "+" : ""}{q.clv?.toFixed(1)}%</div></div>
-              <div style={S.metricNumCell}><div style={S.metricNumLbl}>вердикт</div><div style={{ ...S.metricVerdict, color: q.clv > 1 && q.brier < 0.2 ? "#5fd08a" : q.clv < 0 ? "#ff6b6b" : "#e8a838" }}>{q.clv > 1 && q.brier < 0.2 ? "эдж реален" : q.clv < 0 ? "эджа нет" : "неясно"}</div></div>
+              <div style={S.metricNumCell}><div style={S.metricNumLbl}>Brier</div><div style={{ ...S.metricNumVal, color: q.brier == null ? MUTE : q.brier <= 0.19 ? "#5fd08a" : q.brier <= 0.22 ? "#e8a838" : "#ff6b6b" }}>{q.brier != null ? q.brier.toFixed(3) : "—"}</div></div>
+              <div style={S.metricNumCell}><div style={S.metricNumLbl}>CLV</div><div style={{ ...S.metricNumVal, color: q.clv == null ? MUTE : q.clv > 0 ? "#5fd08a" : "#ff6b6b" }}>{q.clv != null ? `${q.clv >= 0 ? "+" : ""}${q.clv.toFixed(1)}%` : "—"}</div></div>
+              <div style={S.metricNumCell}><div style={S.metricNumLbl}>вердикт</div><div style={{ ...S.metricVerdict, color: (q.clv ?? 0) > 1 && (q.brier ?? 1) < 0.2 ? "#5fd08a" : (q.clv ?? 0) < 0 ? "#ff6b6b" : "#e8a838" }}>{q.brier == null || q.clv == null ? "нет данных" : q.clv > 1 && q.brier < 0.2 ? "эдж реален" : q.clv < 0 ? "эджа нет" : "неясно"}</div></div>
             </div>
             <div style={S.calibLabel}>Калибровка (предсказано → факт)</div>
             <div style={S.calibRows}>
-              {q.calib.map((c: any, i: number) => {
+              {(q.calib || []).map((c: any, i: number) => {
                 const diff = c.actual - c.predicted;
                 return (
                   <div key={i} style={S.calibRow}>

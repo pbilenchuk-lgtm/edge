@@ -48,15 +48,14 @@ export function getDb(path = dbPath()): Database {
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
   initSchema(db);
   // Reconcile analyze jobs orphaned by a crash/restart: the background promise
-  // that would finish them does not survive a process restart. Only fail rows
-  // older than the stale window (ISO timestamps, matching the rest of the
-  // schema) so that under a shared DB we never kill another instance's genuinely
-  // in-flight run; anything younger self-heals via analysisStatus/jobActive.
+  // that would finish them dies with the process. The deploy runs a SINGLE
+  // instance (disk-pinned), so ANY 'running' row at boot is orphaned — fail them
+  // all immediately, otherwise a job that started <10 min before the restart
+  // shows a stuck "ИИ работает…" (jobActive's window) and can't be re-kicked.
   try {
-    const cutoff = new Date(Date.now() - 5 * 60_000).toISOString();
     db.prepare(
-      "UPDATE analysis_jobs SET status='failed', error='прервано рестартом сервера', finished_at=? WHERE status='running' AND started_at < ?",
-    ).run(new Date().toISOString(), cutoff);
+      "UPDATE analysis_jobs SET status='failed', error='прервано рестартом сервера', finished_at=? WHERE status='running'",
+    ).run(new Date().toISOString());
   } catch { /* table may not exist on a very old DB; schema just created it */ }
   _db = db;
   return db;
@@ -105,7 +104,10 @@ let shutdownHooked = false;
 export function installShutdownHandler(): void {
   if (shutdownHooked) return;
   shutdownHooked = true;
-  const onStop = () => { closeDb(); process.exit(0); };
+  // Just checkpoint + close; DON'T process.exit() — let Next own termination so
+  // in-flight requests still drain. (close() is synchronous, so the WAL is
+  // flushed before the process actually exits.)
+  const onStop = () => closeDb();
   process.once("SIGTERM", onStop);
   process.once("SIGINT", onStop);
 }

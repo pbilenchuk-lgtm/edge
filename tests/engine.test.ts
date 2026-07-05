@@ -183,6 +183,24 @@ test("upsertImportedMatch merges into a same-fixture twin instead of duplicating
   assert.equal(R.getMatch(db, pmMatch.id)!.external_ref, "760501");
 });
 
+test("upsertImportedMatch aligns a REVERSED twin's orientation to ESPN (no mirrored settlement)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const compId = R.uid();
+  R.upsertCompetition(db, { id: compId, sport_id: "football", name: "WC", budget: 0, external_league: "fifa.world", created_at: "t" });
+  // Polymarket-discovered twin stored REVERSED vs ESPN (home=Ghana, away=Colombia)
+  const twin = { id: R.uid(), competition_id: compId, home: "Ghana", away: "Colombia", state: "upcoming" as const, lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "pm:football:colombia-ghana" };
+  R.insertMatch(db, twin);
+  // ESPN reports Colombia (home) vs Ghana (away)
+  const r = upsertImportedMatch(db, compId, { externalRef: "760501", home: "Colombia", away: "Ghana", state: "live", minute: 30, scoreHome: 1, scoreAway: 0, final: false });
+  assert.equal(r.created, false, "still merged into the twin");
+  const m = R.getMatch(db, twin.id)!;
+  assert.equal(m.home, "Colombia", "twin home flipped to ESPN's home");
+  assert.equal(m.away, "Ghana", "twin away flipped to ESPN's away");
+  assert.equal(r.match.home, "Colombia");
+  // so a later syncMatchStatus writing scoreHome=1 lands on Colombia, not Ghana
+});
+
 test("recomputeMetrics counts only resolution-settled bets, not early/partial cash-outs", () => {
   const db = openDb(":memory:");
   seedDatabase(db);

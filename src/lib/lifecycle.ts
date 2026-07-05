@@ -194,7 +194,10 @@ export function evaluateExits(db: Database, deps: EngineDeps = {}): ExitItem[] {
       if (!mk || mk.price == null || b.entry_price == null) continue;
       const strat = R.getStrategy(db, b.strategy_id);
       if (!strat) continue;
-      const d = exitDecision({ params: strat.params, aiProb: b.ai_prob ?? mk.price / 100, entryPriceCents: b.entry_price, currentPriceCents: mk.price });
+      // When the model prob is unknown, DON'T let it read as "edge gone" (which
+      // would force-close on the first tick) — pass 1 so only take-profit / hard
+      // stop can fire. (Defensive: entries always store a non-null ai_prob.)
+      const d = exitDecision({ params: strat.params, aiProb: b.ai_prob ?? 1, entryPriceCents: b.entry_price, currentPriceCents: mk.price });
       if (!d.exit) continue;
       const pnl = closeBetEarly(db, b, mk.price, d.reason, minuteLabel(m), now);
       R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${mk.price}¢ · ${d.reason} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
@@ -304,17 +307,19 @@ export async function strategistReassess(
       touched.add(sid);
 
       // (a) EXITS — full or partial fixation on this strategy's open positions.
-      const exited = new Set<string>();
+      const exitedIds = new Set<string>();
       for (const ex of dec.exits) {
-        const key = norm(ex.market);
-        if (exited.has(key)) continue; // one close per market — a duplicate exit would size off a stale stake
         // Resolve the strategist's (possibly paraphrased) exit label to a real
         // open position — exact first, then the safe fuzzy match, so an exit the
         // model asked for isn't silently dropped and the position left open.
-        const b = myOpen.find((x) => norm(x.market_label) === key) ?? myOpen.find((x) => sameMarketLabel(x.market_label, ex.market));
+        const b = myOpen.find((x) => norm(x.market_label) === norm(ex.market)) ?? myOpen.find((x) => sameMarketLabel(x.market_label, ex.market));
         const mk = b && markets.find((x) => x.label === b.market_label);
         if (!b || !mk || mk.price == null || b.entry_price == null) continue;
-        exited.add(key);
+        // Dedup on the RESOLVED bet id, not the label: two paraphrased exits
+        // ("Under 2.5" / "Under 2.5 goals") map to the same position and the
+        // second would size off the already-shrunk stake → over-fixation.
+        if (exitedIds.has(b.id)) continue;
+        exitedIds.add(b.id);
         const { pnl, partial } = closeBetPortion(db, b, ex.fraction, mk.price, minuteLabel(m), now);
         const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag}) @ ${mk.price}¢ · стратег: ${ex.reason} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });

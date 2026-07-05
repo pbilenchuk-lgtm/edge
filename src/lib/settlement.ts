@@ -75,8 +75,14 @@ export function resolveFootballMarket(
     const line = parseFloat(ou[2]);
     const over = ou[1] !== "under"; // "over" and "o/u" back the Over side
     const side = labelSide(l, teams);
-    const prefixed = /\S+\s+(?:over|under|o\/u)\b/.test(l); // a word before the total
-    if (prefixed && side == null) return null;              // team total, side unknown
+    // What sits before the total? A generic word ("Total/Goals Over 2.5") or
+    // nothing ("Over 2.5") → the AGGREGATE (settle off the combined score). A
+    // NAMED prefix ("Colombia Over 2.5") is a team total: settle off that side
+    // if we can identify it, else it's unresolvable (null) — don't wrongly
+    // settle it off the aggregate.
+    const prefix = l.slice(0, ou.index ?? 0).trim();
+    const genericPrefix = prefix.split(/\s+/).filter(Boolean).every((t) => TOTAL_WORDS.has(t));
+    if (side == null && !genericPrefix) return null; // a named (team) total we can't disambiguate
     const scored = side === "home" ? scoreHome : side === "away" ? scoreAway : total;
     return over ? scored > line : scored < line;
   }
@@ -110,6 +116,10 @@ export function resolveFootballMarket(
   return null; // extra-time, penalties, unknown => external result
 }
 
+// Words that can precede a total without naming a team — "Total/Goals Over 2.5"
+// is the aggregate, "Colombia Over 2.5" is a team total.
+const TOTAL_WORDS = new Set(["total", "totals", "goals", "goal", "match", "aggregate", "combined", "full", "time", "ft", "the", "points", "score"]);
+
 /** Detect which side (home/away) a market label refers to, by keyword or name. */
 function labelSide(l: string, teams?: { home: string; away: string }): "home" | "away" | null {
   const home = /\bhome\b|хозяева/.test(l), away = /\baway\b|гости/.test(l);
@@ -124,10 +134,16 @@ function labelSide(l: string, teams?: { home: string; away: string }): "home" | 
   return null;
 }
 
-/** Most distinctive (trailing) token of a team name, lowercased. */
+// Generic club suffixes that don't identify a team on their own — "Manchester
+// United" vs "Newcastle United" must key on "manchester", not "united", or the
+// moneyline is unresolvable and gets wrongly voided.
+const NAME_STOPWORDS = new Set(["fc", "afc", "sc", "cf", "ac", "as", "cd", "sv", "fk", "if", "bk", "club", "united", "city", "town", "county", "calcio", "sporting", "real", "athletic", "atletico"]);
+/** Most distinctive token of a team name (skips generic suffixes), lowercased. */
 function nameKey(name: string): string {
   const toks = name.toLowerCase().split(/\s+/).filter((w) => w.length >= 3);
-  return toks.length ? toks[toks.length - 1] : "";
+  const distinctive = toks.filter((w) => !NAME_STOPWORDS.has(w));
+  const pool = distinctive.length ? distinctive : toks;
+  return pool.length ? pool[pool.length - 1] : "";
 }
 
 function round2(n: number): number {
