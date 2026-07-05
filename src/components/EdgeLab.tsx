@@ -820,25 +820,9 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
               </div>
               );
             })()}
-            {tab === "strat" && (() => {
-              const hasAnalysis = !!(match.preLineup || match.postLineup);
-              const noQuotes = !match.markets?.length;
-              const canRun = match.state !== "finished";
-              return (
+            {tab === "strat" && (
               <div style={S.stratListGrid} className="el-strat-grid">
-                {/* Ручной прогон стратегий прямо здесь — не дожидаясь авто-цикла.
-                    Доступен всегда до конца матча (в т.ч. предматч/состав). */}
-                {canRun && compStrats.length > 0 && (
-                  <div style={S.stratRunRow}>
-                    <button
-                      style={{ ...S.analysisRunBtn, opacity: (analyzing || noQuotes) ? 0.6 : 1 }}
-                      disabled={analyzing || noQuotes}
-                      title={noQuotes ? "Нет котировок — сначала «Подтянуть матчи»" : "ИИ оценит матч и подберёт ставки стратегий"}
-                      onClick={runAnalyze}
-                    >{analyzing ? <><span style={S.spinner} /> ИИ прогоняет стратегии…</> : hasAnalysis ? "↻ Переоценить (ИИ)" : "✨ Подобрать стратегии (ИИ)"}</button>
-                  </div>
-                )}
-                {analyzing && compStrats.length === 0 && <div style={S.runningRow}><span style={S.spinner} /> ИИ прогоняет стратегии…</div>}
+                {analyzing && <div style={S.runningRow}><span style={S.spinner} /> ИИ прогоняет стратегии…</div>}
                 {analyzeErr && <div style={S.analysisPending}>{analyzeErr}</div>}
                 {compStrats.length === 0 && <div style={S.noStrat}>Стратегия не активирована на «{comp.name}». Задай бюджет турниру (кнопка <b>$</b> на плашке) и распредели долю стратегии («⚙ Распределить доли %» над матчами) — тогда она начнёт играть и появится здесь.</div>}
                 {compStrats.map((st: any) => {
@@ -850,14 +834,27 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                       <div style={S.stratBlockHead}>
                         <span style={{ ...S.dot, background: st.color }} /><span style={S.stratName}>{st.name}</span>
                         <span style={S.stratBudgetChip}>{shares[comp.id][st.id]}% · {fmtMoney0(budget)}</span>
-                        {match.state === "live" && (
+                        {/* Always-on per-strategy run icon. Live → full reassessment
+                            (revisit positions); pre-match/lineup → analyze the match
+                            (podбор ставок). Hidden only once the match is finished. */}
+                        {match.state !== "finished" && (() => {
+                          const live = match.state === "live";
+                          const noQuotes = !match.markets?.length;
+                          const busy = reassessing[st.id] || (!live && analyzing);
+                          return (
                           <button
-                            style={{ ...S.stratReassessBtn, opacity: reassessing[st.id] ? 0.5 : 1 }}
-                            disabled={reassessing[st.id]}
-                            title={`Переоценить «${st.name}» по этому матчу (ИИ пересмотрит позиции: вход/частичный или полный выход)`}
-                            onClick={async () => { setReassessing((p) => ({ ...p, [st.id]: true })); try { await onReassess(match.id, st.id); } finally { setReassessing((p) => ({ ...p, [st.id]: false })); } }}
-                          >{reassessing[st.id] ? "…" : "↻"}</button>
-                        )}
+                            style={{ ...S.stratReassessBtn, opacity: (busy || (!live && noQuotes)) ? 0.5 : 1 }}
+                            disabled={busy || (!live && noQuotes)}
+                            title={live
+                              ? `Переоценить «${st.name}» по этому матчу (ИИ пересмотрит позиции: вход/частичный или полный выход)`
+                              : noQuotes ? "Нет котировок — сначала «Подтянуть матчи»" : `Прогнать ИИ по матчу — подобрать ставки стратегий`}
+                            onClick={async () => {
+                              if (live) { setReassessing((p) => ({ ...p, [st.id]: true })); try { await onReassess(match.id, st.id); } finally { setReassessing((p) => ({ ...p, [st.id]: false })); } }
+                              else { await runAnalyze(); }
+                            }}
+                          >{busy ? "…" : "↻"}</button>
+                          );
+                        })()}
                       </div>
                       {items.length === 0 ? <div style={S.noBets}>ставок нет — край недостаточен, стратегия пропускает матч</div> : (
                         <div style={S.betList}>
@@ -889,8 +886,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                   );
                 })}
               </div>
-              );
-            })()}
+            )}
             {tab === "reassess" && (
               <div>
                 <div style={S.reassessTop}>
@@ -1952,7 +1948,6 @@ const S: Record<string, React.CSSProperties> = {
   analysisEmptyMuted: { fontSize: 12, color: MUTE, fontStyle: "italic" },
   analysisRunBtn: { background: "#1e2836", border: `1px solid #5b9bd566`, color: "#7fb4e8", borderRadius: 10, padding: "10px 22px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 8 },
   analysisRerunRow: { display: "flex", justifyContent: "flex-end" },
-  stratRunRow: { display: "flex", justifyContent: "flex-start", marginBottom: 2 },
   analysisRerunBtn: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 8, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 },
   runningRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#7fb4e8", fontWeight: 600, padding: "10px 12px", background: "#1a2230", border: `1px solid #5b9bd533`, borderRadius: 10 },
   spinner: { display: "inline-block", width: 12, height: 12, border: "2px solid #5b9bd555", borderTopColor: "#7fb4e8", borderRadius: "50%", animation: "elSpin 0.7s linear infinite", flexShrink: 0 },
