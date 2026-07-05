@@ -134,21 +134,26 @@ function collectPortfolio(competitions: any[], matchDb: any, catalog: any[], com
   for (const comp of competitions) {
     for (const mid of comp.matches) {
       const m = matchDb[mid];
-      if (!m || m.state !== "live") continue;
+      // Any NON-finished match with open positions — not just live: a bet placed
+      // on lineup (pre-match entry) is real exposure and must show in «Актуальные»
+      // (was live-only, so pre-match opens counted in the comp card but not here).
+      if (!m || m.state === "finished") continue;
       const cur: Record<string, number> = {};
       for (const mk of (m.markets || [])) if (!(mk.label in cur)) cur[mk.label] = mk.price;
+      const when = m.state === "live" ? (m.minute != null ? `${m.minute}'` : "LIVE") : "предматч";
       for (const st of catalog) {
         if (st.sport !== comp.sport) continue;
         if ((shares[comp.id]?.[st.id] || 0) <= 0 || (compBudget[comp.id] || 0) <= 0) continue;
         for (const b of betItems(m.bets?.[st.id])) {
           if (b.status !== "open") continue;
+          const stake = b.stake ?? 0;
           const price = b.entryPrice != null ? (cur[b.market] ?? b.currentPrice ?? b.entryPrice) : null; // freshest quote
-          const live = price != null && b.entryPrice != null && b.entryPrice > 0 ? b.stake * (price / b.entryPrice) - b.stake : 0;
+          const live = price != null && b.entryPrice != null && b.entryPrice > 0 ? stake * (price / b.entryPrice) - stake : 0;
           positions.push({
             sport: comp.sport, compName: comp.name, compId: comp.id,
-            match: `${m.home}–${m.away}`, minute: m.minute,
+            match: `${m.home}–${m.away}`, minute: when,
             strat: st.name, stratColor: st.color, stratId: st.id,
-            market: b.market, stake: b.stake, entryPrice: b.entryPrice, currentPrice: price ?? b.currentPrice,
+            market: b.market, stake, entryPrice: b.entryPrice, currentPrice: price ?? b.currentPrice,
             live, entered: b.entered,
           });
         }
@@ -1444,7 +1449,7 @@ function PortfolioScreen({ open, closed, onGoMatches }: any) {
                       <div style={S.pfPosMarket}>{p.market}</div>
                       <div style={S.pfPosMeta}>
                         {groupBy === "strat" ? p.compName : <span style={{ color: p.stratColor }}>{p.strat}</span>}
-                        {" · "}{p.match} · {p.minute}'
+                        {" · "}{p.match} · {p.minute}
                         {p.entered && <span style={S.pfPosEntered}> · вход {p.entered}</span>}
                       </div>
                     </div>
