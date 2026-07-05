@@ -263,6 +263,13 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   // grows/shrinks so funds visibly "go somewhere" after a position resolves.
   const effectiveBalance = TOTAL_BALANCE + totalRealized;
 
+  // Live-now indicators: derive from matchDb (the live-updated source), not the
+  // static COMPETITIONS snapshot, so a match kicking off mid-session lights up
+  // its tournament chip and sport tab. compId→sport via the catalog of comps.
+  const compSport: Record<string, string> = Object.fromEntries(COMPETITIONS.map((c) => [c.id, c.sport]));
+  const liveCompIds = new Set(Object.values(matchDb).filter((m: any) => m.state === "live").map((m: any) => m.competitionId));
+  const liveSports = new Set([...liveCompIds].map((cid) => compSport[cid as string]).filter(Boolean));
+
   // Optimistic + confirmed: apply locally, persist, and if the POST fails (cold
   // start / rejected) toast so a silent revert on the next live reload isn't a
   // mystery. reloadApp reads server state, so a failed save visibly reverts —
@@ -459,7 +466,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 
       {(screen === "matches" || screen === "strategies") && (
         <nav style={S.sportTabs}>
-          {SPORTS.map((s) => <button key={s.id} onClick={() => onSport(s.id)} style={{ ...S.sportTab, ...(sportId === s.id ? S.sportTabOn : {}) }}>{s.label}</button>)}
+          {SPORTS.map((s) => <button key={s.id} onClick={() => onSport(s.id)} style={{ ...S.sportTab, ...(sportId === s.id ? S.sportTabOn : {}) }}>{s.label}{liveSports.has(s.id) && <span style={S.liveDot} title="сейчас идёт матч" />}</button>)}
         </nav>
       )}
 
@@ -487,7 +494,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
               return (
                 <div key={c.id} style={{ ...S.compCard, ...(c.id === comp?.id ? S.compOn : {}) }}>
                   <button style={S.compMain} onClick={() => setCompId(c.id)}>
-                    <div style={S.compName}>{c.name}</div>
+                    <div style={S.compName}>{c.name}{liveCompIds.has(c.id) && <span style={S.liveDot} title="сейчас идёт матч" />}</div>
                     {budget > 0 ? <>
                       <div style={S.compBudget}>{fmtMoney0(budget)} <span style={S.compBudgetLbl}>бюджет</span></div>
                       {hasBets
@@ -1820,6 +1827,7 @@ const S: Record<string, React.CSSProperties> = {
   timing: { fontSize: 12, color: MUTE, marginTop: 2 },
   stateBadge: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", padding: "5px 10px", borderRadius: 20, whiteSpace: "nowrap" },
   pulse: { width: 6, height: 6, borderRadius: "50%", background: "#ff6b6b", animation: "pulse 1.3s infinite" },
+  liveDot: { display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: "#5fd08a", boxShadow: "0 0 5px #5fd08a", marginLeft: 6, verticalAlign: "middle", animation: "pulse 1.3s infinite" },
   tabBar: { display: "flex", gap: 2, background: INK, borderRadius: 8, padding: 3, marginBottom: 12, flexWrap: "wrap" },
   tabBtn: { flex: 1, background: "transparent", border: "none", color: MUTE, padding: "7px 10px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", borderRadius: 6, minWidth: 90 },
   tabBtnOn: { background: PANEL2, color: TEXT },
