@@ -157,6 +157,33 @@ function collectPortfolio(competitions: any[], matchDb: any, catalog: any[], com
   }
   return positions;
 }
+// Closed positions (settled bets) across ALL matches — the «Завершённые» tab of
+// the portfolio. Includes real-outcome settlements and early/partial cash-outs
+// (settledBy). Not gated on the strategy's CURRENT share/budget so history stays
+// visible even after a strategy is de-funded. Realized P&L = payout − stake.
+function collectClosed(competitions: any[], matchDb: any, catalog: any[]) {
+  const positions: any[] = [];
+  for (const comp of competitions) {
+    for (const mid of comp.matches) {
+      const m = matchDb[mid];
+      if (!m) continue;
+      for (const st of catalog) {
+        if (st.sport !== comp.sport) continue;
+        for (const b of (m.settledBets?.[st.id] || [])) {
+          const pnl = (b.payout ?? 0) - (b.stake ?? 0);
+          positions.push({
+            sport: comp.sport, compName: comp.name, compId: comp.id,
+            match: `${m.home}–${m.away}`, finalScore: m.finalScore, state: m.state,
+            strat: st.name, stratColor: st.color, stratId: st.id,
+            market: b.market, stake: b.stake, payout: b.payout, pnl,
+            result: b.result, settledBy: b.settledBy, closedPct: b.closedPct ?? 100,
+          });
+        }
+      }
+    }
+  }
+  return positions;
+}
 
 // Contain render crashes so one bad screen / match card can't blank the whole
 // app with Next's generic "Application error: a client-side exception has
@@ -206,6 +233,10 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [matchDb, setMatchDb] = useState(initial.matchDb);
   const [providers, setProviders] = useState(initial.providers);
   const PROVIDERS = providers;
+  // Per-match odds-refresh failure signal: a monotonically-bumped counter the
+  // MatchCard watches to flash a RED dot (vs the green "prices changed" flash)
+  // when a refresh didn't go through (network / server error).
+  const [oddsErr, setOddsErr] = useState<Record<string, number>>({});
 
   const [sportId, setSportId] = useState("football");
   const sportComps = COMPETITIONS.filter((c) => c.sport === sportId);
@@ -252,11 +283,15 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   // so it works even when the client copy of a market lacks a tokenId (which was
   // why the manual ↻ silently returned "нет котировок"). `silent` skips toasts
   // for the background auto-refresh loop.
+  const bumpOddsErr = (matchId: string) => setOddsErr((p) => ({ ...p, [matchId]: (p[matchId] ?? 0) + 1 }));
   const refreshOddsCore = async (matchId: string, silent = false): Promise<void> => {
     let res: any;
     try {
       res = await engine("refreshOdds", matchId);
-    } catch { if (!silent) toast("err", "Котировки не обновились — сеть недоступна"); return; }
+    } catch { bumpOddsErr(matchId); if (!silent) toast("err", "Котировки не обновились — сеть недоступна"); return; }
+    // engine() returns {ok:false} on a network/cold-start failure instead of
+    // throwing — treat that as a failed refresh too (red dot in the card).
+    if (!res || res.ok === false) { bumpOddsErr(matchId); if (!silent) toast("err", res?.error || "Котировки не обновились — сервер не ответил"); return; }
     const byId: Record<string, any> = {};
     for (const mk of res?.markets || []) byId[mk.id] = mk;
     setMatchDb((prev) => {
@@ -492,7 +527,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
             {comp?.matches.length === 0 && <div style={S.empty}>В этом турнире пока нет матчей.</div>}
             {comp?.matches.map((mid) => matchDb[mid] && (
               <ErrorBoundary key={mid} label={`${matchDb[mid].home}–${matchDb[mid].away}`}>
-                <MatchCard match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} onResumeAnalyze={pollAnalyze} />
+                <MatchCard match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} onResumeAnalyze={pollAnalyze} oddsErrKey={oddsErr[mid] || 0} />
               </ErrorBoundary>
             ))}
           </main>
@@ -502,7 +537,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
           competitions={COMPETITIONS} matchDb={matchDb} compBudget={compBudget} shares={shares} providers={PROVIDERS} quality={QUALITY}
           analysis={analysis} setAnalysis={setAnalysis} onGoModels={() => setScreen("models")} />
       ) : screen === "portfolio" ? (
-        <PortfolioScreen positions={collectPortfolio(COMPETITIONS, matchDb, catalog, compBudget, shares)} onGoMatches={() => setScreen("matches")} />
+        <PortfolioScreen open={collectPortfolio(COMPETITIONS, matchDb, catalog, compBudget, shares)} closed={collectClosed(COMPETITIONS, matchDb, catalog)} onGoMatches={() => setScreen("matches")} />
       ) : screen === "feed" ? (
         <FeedScreen feed={EVENT_FEED} />
       ) : screen === "metrics" ? (
@@ -528,7 +563,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   );
 }
 
-function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess, onAnalyze, onResumeAnalyze }: any) {
+function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess, onAnalyze, onResumeAnalyze, oddsErrKey }: any) {
   const meta = STATE_META[match.state];
   const hasLineups = LINEUP_SPORTS.has(comp.sport); // does this sport have team sheets?
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
@@ -591,11 +626,18 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   // not the bet's currentPrice), keeping the views consistent between reloads.
   const curByLabel: Record<string, number> = {};
   for (const mk of (match.markets || [])) if (!(mk.label in curByLabel)) curByLabel[mk.label] = mk.price;
-  const [flashKey, setFlashKey] = useState(0);
+  // One flash slot next to ↻, two meanings: GREEN when a price actually changed,
+  // RED when a refresh failed (oddsErrKey bumped by the parent). `n` keys the
+  // animation restart; `kind` picks the colour.
+  const [flash, setFlash] = useState<{ n: number; kind: "ok" | "err" }>({ n: 0, kind: "ok" });
   const prevSig = useRef(priceSig);
   useEffect(() => {
-    if (prevSig.current !== priceSig) { prevSig.current = priceSig; setFlashKey((n) => n + 1); }
+    if (prevSig.current !== priceSig) { prevSig.current = priceSig; setFlash((f) => ({ n: f.n + 1, kind: "ok" })); }
   }, [priceSig]);
+  const prevErr = useRef(oddsErrKey);
+  useEffect(() => {
+    if (oddsErrKey !== prevErr.current) { prevErr.current = oddsErrKey; setFlash((f) => ({ n: f.n + 1, kind: "err" })); }
+  }, [oddsErrKey]);
 
   const doRefresh = async () => { setRefreshing(true); await onRefreshOdds(match.id); setRefreshing(false); };
   const runAnalyze = async () => {
@@ -784,7 +826,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                   {(match.reassessByStrat?.[logStrat] || []).length === 0 && <div style={S.noPos}>переоценок пока нет</div>}
                   {(match.reassessByStrat?.[logStrat] || []).map((r: any, i: number) => (
                     <div key={i} style={S.reassessItem}>
-                      <div style={S.reassessItemHead}><span style={S.reassessMin}>{r.min}</span>{r.conf && r.conf !== "—" && <span style={S.reassessConf}>уверенность: {r.conf}</span>}</div>
+                      <div style={S.reassessItemHead}>{r.at && <span style={S.reassessAt}>{r.at}</span>}<span style={S.reassessMin}>{r.min}</span>{r.conf && r.conf !== "—" && <span style={S.reassessConf}>уверенность: {r.conf}</span>}</div>
                       <p style={S.reassessText}>{r.text}</p>
                     </div>
                   ))}
@@ -847,7 +889,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                 <div style={S.logStratBar}>{barStrats.map((st: any) => <button key={st.id} onClick={() => setLogStrat(st.id)} style={{ ...S.logStratBtn, ...(logStrat === st.id ? { background: st.color + "22", color: st.color, borderColor: st.color + "66" } : {}) }}>{st.name}</button>)}</div>
                 <div style={S.logList}>
                   {(match.logByStrat?.[logStrat] || []).length === 0 && <div style={S.noPos}>действий пока нет</div>}
-                  {(match.logByStrat?.[logStrat] || []).map((e: any, i: number) => <div key={i} style={S.logEntry}><span style={S.logMin}>{e.min}</span><span style={{ ...S.logType, ...logTypeStyle(e.type) }}>{e.type}</span><span style={S.logText}>{e.text}</span></div>)}
+                  {(match.logByStrat?.[logStrat] || []).map((e: any, i: number) => <div key={i} style={S.logEntry}>{e.at && <span style={S.logAt}>{e.at}</span>}<span style={S.logMin}>{e.min}</span><span style={{ ...S.logType, ...logTypeStyle(e.type) }}>{e.type}</span><span style={S.logText}>{e.text}</span></div>)}
                 </div>
               </div>
             )}
@@ -908,7 +950,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
             <div style={S.oddsColHead}>
               <div><div style={S.oddsColLabel}>Котировки</div><div style={S.oddsColSub}>Polymarket · цена в ¢</div></div>
               <div style={S.oddsRefreshWrap}>
-                <span style={S.oddsFlashSlot}>{flashKey > 0 && <span key={flashKey} className="el-odds-flash" style={S.oddsFlash} title="котировки обновились">&#9679;</span>}</span>
+                <span style={S.oddsFlashSlot}>{flash.n > 0 && <span key={flash.n} className="el-odds-flash" style={flash.kind === "err" ? S.oddsFlashErr : S.oddsFlash} title={flash.kind === "err" ? "не удалось обновить котировки" : "котировки обновились"}>&#9679;</span>}</span>
                 <button style={S.oddsRefresh} title="Обновить котировки" onClick={doRefresh} disabled={refreshing}>{refreshing ? "…" : "↻"}</button>
               </div>
             </div>
@@ -1294,33 +1336,58 @@ function MetricsScreen({ catalog, quality, stats }: any) {
   );
 }
 
-function PortfolioScreen({ positions, onGoMatches }: any) {
+function PortfolioScreen({ open, closed, onGoMatches }: any) {
+  const [view, setView] = useState("open"); // «Актуальные» — по умолчанию
   const [groupBy, setGroupBy] = useState("strat");
-  const totalStake = positions.reduce((a: number, p: any) => a + p.stake, 0);
-  const totalLive = positions.reduce((a: number, p: any) => a + p.live, 0);
-  const winners = positions.filter((p: any) => p.live >= 0).length;
+  const positions = view === "open" ? open : closed;
+
+  // Open-tab aggregates (mark-to-market) vs closed-tab aggregates (realized).
+  const totalStake = open.reduce((a: number, p: any) => a + p.stake, 0);
+  const totalLive = open.reduce((a: number, p: any) => a + p.live, 0);
+  const openWinners = open.filter((p: any) => p.live >= 0).length;
+  const realizedTotal = closed.reduce((a: number, p: any) => a + p.pnl, 0);
+  const closedWinners = closed.filter((p: any) => p.pnl >= 0).length;
+
   const groups: any = {};
   for (const p of positions) {
     const key = groupBy === "strat" ? p.strat : p.compName;
-    (groups[key] = groups[key] || { items: [], color: p.stratColor, stake: 0, live: 0 }).items.push(p);
-    groups[key].stake += p.stake; groups[key].live += p.live;
+    const g = (groups[key] = groups[key] || { items: [], color: p.stratColor, stake: 0, live: 0, pnl: 0 });
+    g.items.push(p); g.stake += p.stake || 0; g.live += p.live || 0; g.pnl += p.pnl || 0;
   }
+  const closedLabel = (p: any) => p.settledBy === "void" ? "возврат ставки" : p.result === "won" ? "✓ выигрыш" : "✕ проигрыш";
+
   return (
     <main style={S.main}>
       <div style={S.pfHeader}>
-        <div><div style={S.pfTitle}>Портфель — открытые позиции</div><div style={S.pfSub}>Всё, что сейчас в игре. Mark-to-market.</div></div>
+        <div><div style={S.pfTitle}>Портфель</div><div style={S.pfSub}>{view === "open" ? "Открытые позиции — всё, что сейчас в игре. Mark-to-market." : "Завершённые позиции — реализованный P&L по закрытым ставкам."}</div></div>
       </div>
-      <div style={S.pfAgg}>
-        <div style={S.pfAggCell}><div style={S.pfAggLbl}>Открытых позиций</div><div style={S.pfAggVal}>{positions.length}</div></div>
-        <div style={S.pfAggDiv} />
-        <div style={S.pfAggCell}><div style={S.pfAggLbl}>В игре</div><div style={S.pfAggVal}>{fmtMoney(totalStake)}</div></div>
-        <div style={S.pfAggDiv} />
-        <div style={S.pfAggCell}><div style={S.pfAggLbl}>Unrealized P&L</div><div style={{ ...S.pfAggVal, color: totalLive >= 0 ? "#5fd08a" : "#ff6b6b" }}>{totalLive >= 0 ? "+" : ""}{fmtMoney(totalLive)}</div></div>
-        <div style={S.pfAggDiv} />
-        <div style={S.pfAggCell}><div style={S.pfAggLbl}>В плюсе / всего</div><div style={S.pfAggVal}>{winners}/{positions.length}</div></div>
+      <div style={S.pfViewTabs}>
+        <button style={{ ...S.pfViewTab, ...(view === "open" ? S.pfViewTabOn : {}) }} onClick={() => setView("open")}>Актуальные{open.length ? ` · ${open.length}` : ""}</button>
+        <button style={{ ...S.pfViewTab, ...(view === "closed" ? S.pfViewTabOn : {}) }} onClick={() => setView("closed")}>Завершённые{closed.length ? ` · ${closed.length}` : ""}</button>
       </div>
+
+      {view === "open" ? (
+        <div style={S.pfAgg}>
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>Открытых позиций</div><div style={S.pfAggVal}>{open.length}</div></div>
+          <div style={S.pfAggDiv} />
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>В игре</div><div style={S.pfAggVal}>{fmtMoney(totalStake)}</div></div>
+          <div style={S.pfAggDiv} />
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>Unrealized P&L</div><div style={{ ...S.pfAggVal, color: totalLive >= 0 ? "#5fd08a" : "#ff6b6b" }}>{totalLive >= 0 ? "+" : ""}{fmtMoney(totalLive)}</div></div>
+          <div style={S.pfAggDiv} />
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>В плюсе / всего</div><div style={S.pfAggVal}>{openWinners}/{open.length}</div></div>
+        </div>
+      ) : (
+        <div style={S.pfAgg}>
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>Завершённых позиций</div><div style={S.pfAggVal}>{closed.length}</div></div>
+          <div style={S.pfAggDiv} />
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>Реализованный P&L</div><div style={{ ...S.pfAggVal, color: realizedTotal >= 0 ? "#5fd08a" : "#ff6b6b" }}>{realizedTotal >= 0 ? "+" : ""}{fmtMoney(realizedTotal)}</div></div>
+          <div style={S.pfAggDiv} />
+          <div style={S.pfAggCell}><div style={S.pfAggLbl}>В плюсе / всего</div><div style={S.pfAggVal}>{closedWinners}/{closed.length}</div></div>
+        </div>
+      )}
+
       {positions.length === 0 ? (
-        <div style={S.pfEmpty}>Сейчас нет открытых позиций. Появятся, когда стратегии войдут в live. <button style={S.pfEmptyBtn} onClick={onGoMatches}>К матчам →</button></div>
+        <div style={S.pfEmpty}>{view === "open" ? <>Сейчас нет открытых позиций. Появятся, когда стратегии войдут в live. <button style={S.pfEmptyBtn} onClick={onGoMatches}>К матчам →</button></> : "Завершённых позиций пока нет — они появятся после первых расчётов и закрытий."}</div>
       ) : (
         <>
           <div style={S.pfGroupToggle}>
@@ -1333,11 +1400,16 @@ function PortfolioScreen({ positions, onGoMatches }: any) {
               <div style={S.pfGroupHead}>
                 {groupBy === "strat" && <span style={{ ...S.dot, background: g.color }} />}
                 <span style={S.pfGroupName}>{key}</span>
-                <span style={S.pfGroupStake}>{fmtMoney(g.stake)} в игре</span>
-                <span style={{ ...S.pfGroupLive, color: g.live >= 0 ? "#5fd08a" : "#ff6b6b" }}>{g.live >= 0 ? "▲" : "▼"}{fmtMoney(g.live)}</span>
+                {view === "open" ? <>
+                  <span style={S.pfGroupStake}>{fmtMoney(g.stake)} в игре</span>
+                  <span style={{ ...S.pfGroupLive, color: g.live >= 0 ? "#5fd08a" : "#ff6b6b" }}>{g.live >= 0 ? "▲" : "▼"}{fmtMoney(g.live)}</span>
+                </> : <>
+                  <span style={S.pfGroupStake}>{g.items.length} поз.</span>
+                  <span style={{ ...S.pfGroupLive, color: g.pnl >= 0 ? "#5fd08a" : "#ff6b6b" }}>{g.pnl >= 0 ? "▲+" : "▼"}{fmtMoney(Math.abs(g.pnl))}</span>
+                </>}
               </div>
               <div style={S.pfPosList}>
-                {g.items.map((p: any, i: number) => (
+                {g.items.map((p: any, i: number) => view === "open" ? (
                   <div key={i} style={S.pfPos}>
                     <div style={S.pfPosLeft}>
                       <div style={S.pfPosMarket}>{p.market}</div>
@@ -1352,6 +1424,23 @@ function PortfolioScreen({ positions, onGoMatches }: any) {
                       <div style={S.pfPosLiveWrap}>
                         <span style={S.pfPosNow}>{p.currentPrice}¢</span>
                         <span style={{ ...S.pfPosLive, color: p.live >= 0 ? "#5fd08a" : "#ff6b6b" }}>{p.live >= 0 ? "▲" : "▼"}{fmtMoney(p.live)}</span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div key={i} style={S.pfPos}>
+                    <div style={S.pfPosLeft}>
+                      <div style={S.pfPosMarket}>{p.market}</div>
+                      <div style={S.pfPosMeta}>
+                        {groupBy === "strat" ? p.compName : <span style={{ color: p.stratColor }}>{p.strat}</span>}
+                        {" · "}{p.match}{p.finalScore ? ` · ${p.finalScore}` : ""}
+                        {p.closedPct < 100 && <span style={S.pfPosEntered}> · фиксация {p.closedPct}%</span>}
+                      </div>
+                    </div>
+                    <div style={S.pfPosRight}>
+                      <div style={S.pfPosStake}>{fmtMoney(p.stake)} · {closedLabel(p)}</div>
+                      <div style={S.pfPosLiveWrap}>
+                        <span style={{ ...S.pfPosLive, color: p.pnl >= 0 ? "#5fd08a" : "#ff6b6b" }}>{p.pnl >= 0 ? "▲+" : "▼"}{fmtMoney(Math.abs(p.pnl))}</span>
                       </div>
                     </div>
                   </div>
@@ -1745,6 +1834,7 @@ const S: Record<string, React.CSSProperties> = {
   oddsRefreshWrap: { display: "flex", alignItems: "center", gap: 4, flexShrink: 0 },
   oddsFlashSlot: { width: 10, display: "inline-flex", justifyContent: "center", alignItems: "center" },
   oddsFlash: { color: "#5fd08a", fontSize: 10, lineHeight: 1 },
+  oddsFlashErr: { color: "#ff6b6b", fontSize: 10, lineHeight: 1 },
   oddsUpdated: { fontSize: 9.5, color: MUTE, marginBottom: 8, fontFamily: "'JetBrains Mono', monospace" },
   oddsScroll: { maxHeight: 360, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, paddingRight: 2 },
   oddsRow: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "7px 9px" },
@@ -1769,6 +1859,7 @@ const S: Record<string, React.CSSProperties> = {
   reassessItem: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: "10px 12px" },
   reassessItemHead: { display: "flex", alignItems: "center", gap: 10, marginBottom: 5 },
   reassessMin: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace", color: "#e8a838", fontWeight: 700 },
+  reassessAt: { fontSize: 10.5, fontFamily: "'JetBrains Mono', monospace", color: MUTE },
   reassessConf: { fontSize: 10.5, color: MUTE },
   reassessText: { fontSize: 13, lineHeight: 1.55, color: "#d3d8e0" },
   assessTop: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 },
@@ -1835,7 +1926,8 @@ const S: Record<string, React.CSSProperties> = {
   logStratBtn: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 20, padding: "4px 12px", fontSize: 12, cursor: "pointer" },
   logList: { display: "flex", flexDirection: "column", gap: 7 },
   noPos: { fontSize: 12, color: MUTE, fontStyle: "italic", padding: "8px 0" },
-  logEntry: { display: "grid", gridTemplateColumns: "48px 72px 1fr", gap: 8, fontSize: 12, alignItems: "baseline" },
+  logEntry: { display: "grid", gridTemplateColumns: "44px 46px 68px 1fr", gap: 8, fontSize: 12, alignItems: "baseline" },
+  logAt: { fontFamily: "'JetBrains Mono', monospace", color: "#e8a838", fontSize: 11, fontWeight: 600 },
   logMin: { fontFamily: "'JetBrains Mono', monospace", color: MUTE, fontSize: 11 },
   logType: { fontSize: 10, fontWeight: 700, textTransform: "uppercase" },
   logText: { color: "#c3c9d3", lineHeight: 1.4 },
@@ -2012,6 +2104,9 @@ const S: Record<string, React.CSSProperties> = {
   pfHeader: { marginBottom: 4 },
   pfTitle: { fontSize: 17, fontWeight: 700 },
   pfSub: { fontSize: 12, color: MUTE, marginTop: 3 },
+  pfViewTabs: { display: "flex", gap: 6, margin: "10px 0" },
+  pfViewTab: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 8, padding: "7px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" },
+  pfViewTabOn: { background: PANEL2, color: TEXT, borderColor: "#e8a83866" },
   pfAgg: { display: "flex", alignItems: "center", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "12px 8px", flexWrap: "wrap", gap: 8 },
   pfAggCell: { flex: 1, textAlign: "center", minWidth: 110 },
   pfAggLbl: { fontSize: 10, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em" },
