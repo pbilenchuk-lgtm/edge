@@ -92,3 +92,20 @@ export function resetDbSingleton(): void {
   _db?.close();
   _db = null;
 }
+
+/** Close the connection cleanly — in WAL mode `close()` checkpoints the -wal
+ *  back into the main db file, so the last writes aren't stranded when Render
+ *  sends SIGTERM on a redeploy (now that the file lives on a persistent disk). */
+export function closeDb(): void {
+  try { _db?.close(); } catch { /* already closed */ }
+  _db = null;
+}
+let shutdownHooked = false;
+/** Register SIGTERM/SIGINT handlers once so a graceful stop checkpoints WAL. */
+export function installShutdownHandler(): void {
+  if (shutdownHooked) return;
+  shutdownHooked = true;
+  const onStop = () => { closeDb(); process.exit(0); };
+  process.once("SIGTERM", onStop);
+  process.once("SIGINT", onStop);
+}
