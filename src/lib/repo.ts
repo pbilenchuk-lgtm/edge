@@ -410,6 +410,11 @@ export function openOddsFor(db: Database, matchId: string): Record<string, numbe
 }
 
 export function setMarketAiProb(db: Database, marketId: string, prob: number): void {
+  // Reject a non-finite / out-of-range probability at the boundary: a NaN slips
+  // through every `!= null` filter and every `<`/`<=` sizing gate (NaN compares
+  // false), producing a NaN stake. Leave ai_prob null instead so the market is
+  // simply skipped downstream.
+  if (!Number.isFinite(prob) || prob < 0 || prob > 1) return;
   db.prepare(`UPDATE markets SET ai_prob=? WHERE id=?`).run(prob, marketId);
 }
 
@@ -439,6 +444,9 @@ export function betsForMatch(db: Database, matchId: string, strategyId?: string)
 }
 export function openBets(db: Database): Bet[] {
   return db.prepare(`SELECT * FROM bets WHERE status='open'`).all() as Bet[];
+}
+export function getBet(db: Database, id: string): Bet | null {
+  return (db.prepare(`SELECT * FROM bets WHERE id=?`).get(id) as Bet | undefined) ?? null;
 }
 /** Remove not-yet-executed proposals (before re-deciding after a fresh assessment). */
 export function clearProposedBets(db: Database, matchId: string): void {

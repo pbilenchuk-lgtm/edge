@@ -13,7 +13,7 @@
 
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
-import type { Bet, Match } from "./types.js";
+import type { Bet, Match, MatchState } from "./types.js";
 import type { SportsMatchStatus } from "./sports.js";
 import { reassessNarrative, effectiveEnv } from "./llm.js";
 import { settleBet, resolveFootballMarket } from "./settlement.js";
@@ -41,6 +41,10 @@ export interface EngineDeps {
 }
 
 const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
+
+/** Monotonic match-state ordering — provider writes must never regress below the
+ *  stored state (a stale poll can't flip live→upcoming or finished→live). */
+const STATE_RANK: Record<MatchState, number> = { upcoming: 0, lineup: 1, live: 2, finished: 3 };
 
 // ------------------------------------------------------------
 // Reassessment triggers (rate-limited)
@@ -216,8 +220,6 @@ export function settleMatch(
   // real benchmark — the finish-time market price is post-resolution (~0/100)
   // and would make CLV just P&L again. Fall back to the last price if no kickoff.
   const kickoff = R.openOddsFor(db, match.id);
-  const closingByLabel: Record<string, number> = {};
-  for (const m of R.latestMarkets(db, match.id)) if (!(m.label in closingByLabel)) closingByLabel[m.label] = m.price;
 
   let settled = 0, skipped = 0;
   const affected = new Set<string>();
@@ -248,7 +250,11 @@ export function settleMatch(
       skipped++; affected.add(b.strategy_id);
       continue;
     }
-    const closing = kickoff[b.market_label] ?? closingByLabel[b.market_label] ?? b.current_price ?? b.entry_price ?? null;
+    // Closing line for CLV = the KICKOFF snapshot. With no kickoff captured,
+    // fall back to the ENTRY price (neutral CLV = 0), NOT the latest/current
+    // snapshot — at settle time that is the post-resolution (~0/100) finish
+    // price and would degrade CLV into P&L.
+    const closing = kickoff[b.market_label] ?? b.entry_price ?? null;
     const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, closing);
     R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price });
     R.insertTradeLog(db, {
@@ -260,6 +266,26 @@ export function settleMatch(
   }
   for (const sid of affected) recomputeMetrics(db, sid, deps);
   return { settled, skipped, affectedStrategies: [...affected] };
+}
+
+/**
+ * Safety-net sweep: a finish that races ahead of the score sync makes settleMatch
+ * leave those bets OPEN (see the skip branch above), and no state-transition edge
+ * ever fires settleMatch again once the match row is already `finished`. So sweep
+ * every finished match that still has open bets and a known score, and settle it.
+ * Cheap (one query + one getMatch per affected match) and idempotent.
+ */
+export function settleStaleOpenBets(db: Database, deps: EngineDeps = {}): number {
+  const matchIds = new Set<string>();
+  for (const b of R.openBets(db)) matchIds.add(b.match_id);
+  let settled = 0;
+  for (const mid of matchIds) {
+    const m = R.getMatch(db, mid);
+    if (m && m.state === "finished" && m.score_home != null && m.score_away != null) {
+      settled += settleMatch(db, m, deps).settled;
+    }
+  }
+  return settled;
 }
 
 function resolveOutcome(bet: Bet, match: Match, overrides: Record<string, boolean>): boolean | null {
@@ -289,12 +315,19 @@ export async function syncMatchStatus(
   const newTotal = (status.scoreHome ?? 0) + (status.scoreAway ?? 0);
   const from = match.state;
 
+  // Never let a glitchy/stale provider poll REGRESS state (live→upcoming,
+  // finished→live) — that would drop a live match out of the loop or, worse,
+  // flip a finished match back to live and skip its re-settlement. And never
+  // wipe a KNOWN score back to null. Mirrors advanceClocks' monotonic guard.
+  const nextState = STATE_RANK[status.state] >= STATE_RANK[from] ? status.state : from;
+  const scoreHome = status.scoreHome ?? match.score_home;
+  const scoreAway = status.scoreAway ?? match.score_away;
   const patch: Partial<Match> = {
-    state: status.state, minute: status.minute, clock: status.clock ?? null,
-    score_home: status.scoreHome, score_away: status.scoreAway,
+    state: nextState, minute: status.minute, clock: status.clock ?? null,
+    score_home: scoreHome, score_away: scoreAway,
   };
-  if (status.state === "finished") {
-    patch.final_score = `${status.scoreHome ?? 0}:${status.scoreAway ?? 0}`;
+  if (nextState === "finished") {
+    patch.final_score = `${scoreHome ?? 0}:${scoreAway ?? 0}`;
   }
   R.updateMatch(db, match.id, patch);
   const updated = { ...match, ...patch } as Match;
@@ -314,7 +347,7 @@ export async function syncMatchStatus(
   }
 
   let settlement;
-  if (status.state === "finished" && from !== "finished") {
+  if (nextState === "finished" && from !== "finished") {
     settlement = settleMatch(db, updated, deps, settlementOverrides);
   }
 
@@ -555,7 +588,10 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       // so if enrich flips a match to finished first, syncMatchStatus would skip
       // it forever and its open bets would never resolve. Settle here instead.
       const becameFinished = (s.final || s.state === "finished") && m.state !== "finished";
-      R.updateMatch(db, m.id, { state: s.state, minute: s.minute, score_home: scoreHome, score_away: scoreAway, clock: s.clock ?? null, ...(s.final ? { final_score: `${scoreHome ?? 0}:${scoreAway ?? 0}` } : {}) });
+      // Never regress state or wipe a known score on a stale/glitchy poll.
+      const nextState = STATE_RANK[s.state] >= STATE_RANK[m.state] ? s.state : m.state;
+      const sh = scoreHome ?? m.score_home, sa = scoreAway ?? m.score_away;
+      R.updateMatch(db, m.id, { state: nextState, minute: s.minute, score_home: sh, score_away: sa, clock: s.clock ?? null, ...(s.final ? { final_score: `${sh ?? 0}:${sa ?? 0}` } : {}) });
       if (becameFinished) { const fresh = R.getMatch(db, m.id); if (fresh) settleMatch(db, fresh, deps); }
       const detail = await provider.matchDetail!("football", league, s.externalRef);
       if (detail) {

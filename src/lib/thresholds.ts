@@ -212,6 +212,13 @@ export function sizeBet(input: SizeInput): SizeDecision {
 
   if (budget <= 0) return skip("нет бюджета на турнире");
 
+  // A non-finite / out-of-range model probability makes every `<`/`<=` gate
+  // below evaluate false (NaN comparisons are false), so it would fail OPEN and
+  // return a NaN stake. Reject it up front.
+  if (!Number.isFinite(aiProb) || aiProb < 0 || aiProb > 1 || !Number.isFinite(edge)) {
+    return skip("некорректная вероятность модели");
+  }
+
   // Portfolio stop-loss (§ risk control): once the strategy's drawdown on this
   // competition reaches the stop, halt ALL new entries until it recovers.
   if (params.stop != null && input.drawdown != null && input.drawdown <= params.stop) {

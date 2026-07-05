@@ -17,7 +17,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
-import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn } from "./engine.js";
+import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets } from "./engine.js";
 import { SPORT_TAG_IDS } from "./polymarket.js";
 import { analyzeMatch, jobActive, matchContext, strategyDrawdown, sameMarketLabel } from "./analysis.js";
 import { exitDecision, sizeBet } from "./thresholds.js";
@@ -148,8 +148,14 @@ export interface ExitItem { matchId: string; strategyId: string; market: string;
 
 /** Close a single open bet fully at the current price (cash out the position). */
 function closeBetEarly(db: Database, bet: { id: string; stake: number | null; entry_price: number | null }, currentPriceCents: number, reason: string, minute: string, now: string): number {
-  const stake = bet.stake ?? 0;
-  const entry = bet.entry_price ?? 0;
+  // Re-read under the current DB state: two concurrent reassess flows (double
+  // click / two tabs / a manual reassess overlapping the scheduler) snapshot the
+  // same open bet BEFORE the LLM await, then both try to close it. Fresh-read so
+  // a bet already settled is a no-op (no double-settle) and we use the fresh stake.
+  const fresh = R.getBet(db, bet.id);
+  if (!fresh || fresh.status !== "open") return 0;
+  const stake = fresh.stake ?? 0;
+  const entry = fresh.entry_price ?? 0;
   const payout = entry > 0 ? round2(stake * (currentPriceCents / entry)) : 0;
   const pnl = round2(payout - stake);
   // "early" cash-out: booked by P&L sign, NOT by real outcome — excluded from
@@ -166,6 +172,12 @@ function closeBetEarly(db: Database, bet: { id: string; stake: number | null; en
  */
 function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceCents: number, minute: string, now: string): { pnl: number; partial: boolean } {
   if (fraction >= 1) return { pnl: closeBetEarly(db, bet, currentPriceCents, "", minute, now), partial: false };
+  // Re-read: another flow may have already (partially) closed this position
+  // during our LLM await. Skip if no longer open; size the slice off the FRESH
+  // stake so two concurrent partial closes can't over-close (phantom exposure).
+  const fresh = R.getBet(db, bet.id);
+  if (!fresh || fresh.status !== "open") return { pnl: 0, partial: false };
+  bet = fresh;
   const stake = bet.stake ?? 0, entry = bet.entry_price ?? 0;
   const closed = round2(stake * fraction);
   if (closed <= 0 || entry <= 0) return { pnl: closeBetEarly(db, bet, currentPriceCents, "", minute, now), partial: false };
@@ -413,6 +425,7 @@ export async function runAutoCycle(
   for (const e of enrich.newEvents) if (!labelFor.has(e.matchId)) labelFor.set(e.matchId, LIVE_TRIGGER_TYPES.has(e.type) ? (e.type as ReassessTrigger) : "price_move");
   const triggers = new Set(enrich.newEvents.map((e) => e.matchId));
   stepSync("advanceClocks", () => advanceClocks(db, deps), undefined); // flip lineup_out ~1h before kickoff
+  stepSync("settleStale", () => settleStaleOpenBets(db, deps), 0); // re-settle a finish that raced ahead of the score sync
   stepSync("captureLiveOpens", () => captureLiveOpens(db, deps), undefined); // kickoff-price baseline
   // Analyze BEFORE reassessment: analyzeMatch wipes a match's proposed bets to
   // replace them with the fresh stage's, which would otherwise delete brand-new
@@ -480,13 +493,22 @@ export interface LiveCycleResult { live: number; oddsUpdated: number; enriched: 
 export async function runLiveCycle(
   db: Database, provider: SportsProvider | null, deps: EngineDeps = {},
 ): Promise<LiveCycleResult> {
+  const stepLive = async <T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
+    try { return await fn(); } catch (e) { console.error(`[liveCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
+  };
+  const stepSyncLive = <T>(label: string, fn: () => T, fallback: T): T => {
+    try { return fn(); } catch (e) { console.error(`[liveCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
+  };
   const inPlay = activeMatches(db).filter(({ match: m }) => m.state === "live" || m.state === "lineup" || m.lineup_out);
-  if (!inPlay.length) return { live: 0, oddsUpdated: 0, enriched: 0, triggers: 0, exits: 0, entries: 0 };
+  if (!inPlay.length) { stepSyncLive("settleStale", () => settleStaleOpenBets(db, deps), 0); return { live: 0, oddsUpdated: 0, enriched: 0, triggers: 0, exits: 0, entries: 0 }; }
 
-  const odds = await refreshActiveOdds(db, deps, { onlyLive: true });
-  advanceClocks(db, deps);
-  const enrich = provider ? await enrichFromEspn(db, provider, deps) : { enriched: 0, newEvents: [] };
-  captureLiveOpens(db, deps); // snapshot kickoff prices the first time a match is live
+  // Each stage isolated: a transient throw in one (a DB/JSON error inside enrich,
+  // a settleMatch throw) must NOT abort the deterministic exits / autoEnter below.
+  const odds = await stepLive("odds", () => refreshActiveOdds(db, deps, { onlyLive: true }), [] as Awaited<ReturnType<typeof refreshActiveOdds>>);
+  stepSyncLive("advanceClocks", () => advanceClocks(db, deps), undefined);
+  const enrich = provider ? await stepLive("enrich", () => enrichFromEspn(db, provider, deps), { enriched: 0, newEvents: [] }) : { enriched: 0, newEvents: [] };
+  stepSyncLive("settleStale", () => settleStaleOpenBets(db, deps), 0); // re-settle a finish that raced ahead of the score
+  stepSyncLive("captureLiveOpens", () => captureLiveOpens(db, deps), undefined); // snapshot kickoff prices the first time a match is live
   // Reassessment fires on TWO conditions, unioned: (1) a high-impact on-pitch
   // event (goal / red card) — labelled by its type; (2) the periodic 5-min
   // heartbeat on any match with open risk — labelled "time". Both hand the
@@ -497,9 +519,9 @@ export async function runLiveCycle(
   for (const id of periodicReassessMatches(db, deps)) if (!labelFor.has(id)) labelFor.set(id, "time");
   const reassessIds = new Set(labelFor.keys());
 
-  const detExits = evaluateExits(db, deps); // cheap TP/stop, reacts to price every tick
-  const reassess = await strategistReassess(db, deps, { newEventMatchIds: reassessIds, triggeredOnly: true, labelFor });
-  autoEnter(db, deps); // fill any positions the strategist just opened
+  const detExits = stepSyncLive("exits", () => evaluateExits(db, deps), [] as ExitItem[]); // cheap TP/stop, reacts to price every tick
+  const reassess = await stepLive("reassess", () => strategistReassess(db, deps, { newEventMatchIds: reassessIds, triggeredOnly: true, labelFor }), { exits: [], entries: [] } as ReassessResult);
+  stepSyncLive("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fill any positions the strategist just opened
 
   return {
     live: inPlay.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),

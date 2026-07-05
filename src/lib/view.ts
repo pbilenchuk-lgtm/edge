@@ -348,9 +348,14 @@ function computeQualityExtras(db: Database, strategyId: string, base: number): {
         if (!matchT || b.created_at < matchT) matchT = b.created_at;
         const ph = isLive(b.entered_minute) ? agg.live : agg.pre;
         ph.pnl += pnl;
-        const slice = b.settled_by === "partial" || b.settled_by === "void";
-        if (!slice) { ph.bets++; if (b.result === "won") ph.wins++; }
-        if (b.closing_price != null && entry) { ph.clvSum += b.closing_price - entry; ph.clvN++; }
+        // Only resolution-settled bets (settled_by == null) feed the prediction
+        // tallies: an early/partial cash-out's `result` is booked by P&L sign
+        // (not the real outcome) and its `closing_price` is the exit price (not
+        // the kickoff/closing line), so counting them would let trading P&L
+        // masquerade as win-rate / CLV — consistent with recomputeMetrics.
+        const resolution = b.settled_by == null;
+        if (resolution) { ph.bets++; if (b.result === "won") ph.wins++; }
+        if (resolution && b.closing_price != null && entry) { ph.clvSum += b.closing_price - entry; ph.clvN++; }
         // management value: on a FINISHED match, compare the actual close to
         // holding the position to resolution.
         if (m.state === "finished" && m.score_home != null && m.score_away != null) {

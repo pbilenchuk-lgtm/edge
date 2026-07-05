@@ -99,6 +99,16 @@ test("confidenceRank ordering", () => {
 });
 
 // ---------------- sizing — code, not LLM (§9.6) ----------------
+test("sizeBet: a non-finite / out-of-range model probability is rejected (no NaN stake)", () => {
+  const params: StrategyParams = { flatSize: 0.05, minEdge: 3 };
+  for (const bad of [NaN, Infinity, -0.1, 1.5]) {
+    const d = sizeBet({ params, aiProb: bad, priceCents: 50, budget: 100 });
+    assert.equal(d.enter, false, `aiProb=${bad} must not enter`);
+    assert.equal(d.stake, 0, `aiProb=${bad} must size 0, not NaN`);
+    assert.ok(Number.isFinite(d.stake), "stake is finite");
+  }
+});
+
 test("sizeBet: tiered ladder picks the right tier and caps", () => {
   const params: StrategyParams = { tiers: [[10, 0.2], [7, 0.15], [5, 0.1], [3, 0.05]], maxPerBet: 0.2, minEdge: 3 };
   const d = sizeBet({ params, aiProb: 0.55, priceCents: 46.8, budget: 750, confidence: "высокая" });

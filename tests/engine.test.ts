@@ -6,7 +6,7 @@ import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { parseEspnEvent, parseEspnSummary, MockSportsProvider } from "../src/lib/sports.js";
 import {
-  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch,
+  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch, settleStaleOpenBets,
 } from "../src/lib/engine.js";
 import { matchContext } from "../src/lib/analysis.js";
 import type { SportsMatchStatus, SportsProvider, MatchDetail } from "../src/lib/sports.js";
@@ -214,6 +214,20 @@ test("recomputeMetrics counts only resolution-settled bets, not early/partial ca
   mk("partial", 0.9, "won"); // partial fixation → excluded
   recomputeMetrics(db, strat.id);
   assert.equal(R.getQuality(db, strat.id)!.samples, 2, "only the two resolution-settled bets feed metrics");
+});
+
+test("settleStaleOpenBets settles a finished-with-score match whose bet was left open", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const m = R.getMatch(db, "m-finished")!;
+  assert.equal(m.state, "finished");
+  assert.ok(m.score_home != null && m.score_away != null, "m-finished has a known score");
+  const strat = R.listStrategies(db, "football")[0];
+  // a bet the finish-before-score path left open (settleMatch's skip branch)
+  R.insertBet(db, { id: "stale-1", match_id: "m-finished", strategy_id: strat.id, market_label: "Over 0.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: null, ai_prob: 0.7, stake: 100, rationale: null, entered_minute: "предматч", result: null, payout: null, settled_by: null, created_at: "t" });
+  const settled = settleStaleOpenBets(db);
+  assert.ok(settled >= 1, "the sweep settled the stale open bet");
+  assert.notEqual(R.getBet(db, "stale-1")!.status, "open", "bet is no longer open");
 });
 
 test("upsertImportedMatch does not merge fixtures that only share a club suffix", () => {
