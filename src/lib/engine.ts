@@ -500,6 +500,20 @@ const slugify = (s: string) => s.toLowerCase().normalize("NFD").replace(/[^a-z0-
  */
 /** The ESPN league a discovered match's series maps to, or null if ESPN doesn't
  *  cover it (→ no live scores/events, so we don't import it). */
+/** The stable series slug for a discovered match (Polymarket seriesSlug, else a
+ *  slug of the series name). "" when it has no series. */
+export function seriesSlugOf(series: string | null, seriesSlug: string | null): string {
+  return (seriesSlug ?? (series ? slugify(series) : "")).toLowerCase();
+}
+
+/** Per-sport series allow-list (slugs) — null = no restriction. Tennis keeps
+ *  only ATP by default; override via TENNIS_SERIES (comma-separated slugs). */
+export function seriesAllowFor(sport: string, env: Record<string, string | undefined> = process.env): Set<string> | null {
+  if (sport !== "tennis") return null;
+  const slugs = (env.TENNIS_SERIES ?? "atp").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  return new Set(slugs);
+}
+
 export function espnLeagueForSeries(series: string | null, seriesSlug: string | null): string | null {
   const slug = seriesSlug ?? (series ? slugify(series) : null);
   if (!slug && !series) return null;
@@ -545,6 +559,7 @@ export async function importPolymarketMatches(
   const now = nowFn(deps)();
   const nowMs = Date.parse(now) || Date.now();
   const discovered = await discoverSportMatches(poly, sport, now, { fetchImpl: deps.fetchImpl }, { limit: opts.limit ?? 200, windowDays: 7, nowMs });
+  const allow = seriesAllowFor(sport, deps.env); // e.g. tennis → only ATP tour
   const out: DiscoverItem[] = [];
   for (const d of discovered) {
     // Import by LIQUIDITY, not by ESPN coverage — user: «меня не интересуют
@@ -553,6 +568,9 @@ export async function importPolymarketMatches(
     // матча» then falls back to market-price snapshots); a thin one isn't, ESPN
     // feed or not. 0 disables the floor.
     if (poly.minLiquidity > 0 && d.liquidity < poly.minLiquidity) continue;
+    // Per-sport series allow-list: tennis keeps only ATP (WTA/doubles/juniors
+    // have no liquidity — user). Other sports: no restriction.
+    if (allow && !allow.has(seriesSlugOf(d.series, d.seriesSlug))) continue;
     // Route into the tournament category this match belongs to (Polymarket series).
     const compId = ensureCategoryComp(db, sport, d.series, d.seriesSlug, now);
     // Order-INSENSITIVE ref (teams sorted): Polymarket may list a fixture as

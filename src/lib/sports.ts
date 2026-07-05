@@ -190,7 +190,7 @@ const cricketRuns = (x: unknown): number | null => {
  *  the rest are v1 `/<sport>/livescores`. */
 const STATPAL_FEED: Record<string, string> = {
   tennis: "v1/tennis/livescores", esports: "v1/esports/livescores",
-  cricket: "v1/cricket/livescores", football: "v2/soccer/matches/live",
+  football: "v2/soccer/matches/live", // cricket dropped — no Polymarket liquidity
 };
 
 export class StatpalSportsProvider implements SportsProvider {
@@ -459,5 +459,5 @@ export function loadSportsProvider(
   // StatPal serves tennis/esports/cricket (no ESPN feed) AND football — for
   // football it supplements ESPN, covering every league ESPN doesn't map
   // (Morocco, minor leagues), so liquid discovered matches all get live data.
-  return new CompositeSportsProvider(statpal, espn, new Set(["tennis", "esports", "cricket", "football"]));
+  return new CompositeSportsProvider(statpal, espn, new Set(["tennis", "esports", "football"]));
 }

@@ -426,6 +426,48 @@ function deleteMatches(db: Database, ids: string[]): number {
   }
   return ids.length;
 }
+
+/** Delete a competition and everything under it (matches + their children,
+ *  strategy shares, comp-scoped analytics prompts, the comp row). */
+export function deleteCompetition(db: Database, id: string): void {
+  const matchIds = (db.prepare(`SELECT id FROM matches WHERE competition_id=?`).all(id) as { id: string }[]).map((r) => r.id);
+  deleteMatches(db, matchIds);
+  db.prepare(`DELETE FROM strategy_shares WHERE competition_id=?`).run(id);
+  db.prepare(`DELETE FROM analytics_prompts WHERE scope='competition' AND scope_id=?`).run(id);
+  db.prepare(`DELETE FROM competitions WHERE id=?`).run(id);
+}
+
+/**
+ * Remove discovered (`pm-*`) categories we no longer track — a sport dropped
+ * from keepSports (e.g. cricket) or a tennis series outside the allow-list
+ * (non-ATP). NEVER touches a competition that carries any bet (preserves P&L),
+ * nor a seeded (non-`pm-`) competition. Then drops now-empty sport rows for
+ * untracked sports so their tab disappears. Returns competitions removed.
+ */
+export function pruneRemovedCategories(db: Database, opts: { keepSports: Set<string>; tennisSeriesAllow: Set<string> }): number {
+  let removed = 0;
+  for (const c of listCompetitions(db)) {
+    if (!c.id.startsWith("pm-")) continue; // only discovered catch-alls
+    let doomed = false;
+    if (!opts.keepSports.has(c.sport_id)) doomed = true;                 // untracked sport (cricket)
+    else if (c.sport_id === "tennis") {
+      const slug = c.id.slice(3);                                        // pm-<slug>
+      if (slug === "tennis" || !opts.tennisSeriesAllow.has(slug)) doomed = true; // non-ATP / seriesless
+    }
+    if (!doomed) continue;
+    const hasBet = db.prepare(`SELECT 1 FROM bets b JOIN matches m ON b.match_id=m.id WHERE m.competition_id=? LIMIT 1`).get(c.id);
+    if (hasBet) continue;                                                // keep betting history
+    deleteCompetition(db, c.id);
+    removed++;
+  }
+  for (const s of db.prepare(`SELECT id FROM sports`).all() as { id: string }[]) {
+    if (opts.keepSports.has(s.id)) continue;
+    if (!db.prepare(`SELECT 1 FROM competitions WHERE sport_id=? LIMIT 1`).get(s.id))
+      db.prepare(`DELETE FROM sports WHERE id=?`).run(s.id);
+  }
+  return removed;
+}
+
 /** Latest snapshot per market label (or only closing prices). */
 export function latestMarkets(db: Database, matchId: string, closingOnly = false): Market[] {
   const rows = db.prepare(

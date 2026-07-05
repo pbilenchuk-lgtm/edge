@@ -53,12 +53,12 @@ export interface PolymarketConfig {
  */
 export const SPORT_TAG_IDS: Record<string, number[]> = {
   football: [100350],          // soccer (NOT tag 10 = American football)
-  tennis: [864],
+  tennis: [864],               // filtered to liquid tours at import (see SPORT_SERIES_ALLOW)
   basketball: [28],            // deep, liquid — NBA/EuroLeague/etc.
   hockey: [900],               // ice hockey
-  cricket: [103813],           // Major League Cricket (no single cricket hub tag)
   tabletennis: [103774, 105330], // WTT + Olympic table tennis
   esports: [65, 102366, 100635], // League of Legends, Dota 2, CS
+  // cricket removed — no liquidity on Polymarket (user).
 };
 
 /** Human labels (RU) for the sports above — seeds the `sports` table + UI. */
@@ -67,7 +67,6 @@ export const SPORT_LABELS: Record<string, string> = {
   tennis: "Теннис",
   basketball: "Баскетбол",
   hockey: "Хоккей",
-  cricket: "Крикет",
   tabletennis: "Настольный теннис",
   esports: "Киберспорт",
 };

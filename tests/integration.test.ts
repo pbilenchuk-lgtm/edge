@@ -98,6 +98,8 @@ const EVENT_FIXTURE = [{
   id: "42", slug: "atp-doig-gonzal-2026-07-04",
   title: "Wimbledon Juniors, Boys: Connor Doig vs Eudald Gonzalez",
   startDate: "2026-07-03T16:00:39Z",
+  series: [{ title: "ATP", slug: "atp" }], // ATP tour → passes the tennis series gate
+
   markets: [
     { groupItemTitle: "", question: "Connor Doig vs Eudald Gonzalez",
       outcomes: '["Connor Doig","Eudald Gonzalez"]', outcomePrices: '["0.62","0.38"]',

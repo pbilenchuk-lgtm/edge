@@ -467,6 +467,43 @@ test("settleMatch: CLV closing = kickoff for pre-match bets, entry (neutral) for
   assert.equal(R.getBet(db, inm)!.closing_price, 70, "in-match bet neutral (closing = entry 70)");
 });
 
+test("seriesAllowFor: tennis defaults to ATP only, overridable, other sports unrestricted", async () => {
+  const { seriesAllowFor } = await import("../src/lib/engine.js");
+  assert.deepEqual([...seriesAllowFor("tennis", {})!], ["atp"]);
+  assert.deepEqual([...seriesAllowFor("tennis", { TENNIS_SERIES: "atp, wta" })!].sort(), ["atp", "wta"]);
+  assert.equal(seriesAllowFor("football", {}), null);
+});
+
+test("pruneRemovedCategories drops cricket + non-ATP tennis (no-bet), keeps ATP + bet-bearing", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertSport(db, "cricket", "Крикет");
+  const strat = R.listStrategies(db, "football")[0];
+  const mk = (comp: string, sport: string) => {
+    R.upsertSport(db, sport, sport);
+    R.upsertCompetition(db, { id: comp, sport_id: sport, name: comp, budget: 0, external_league: null, created_at: "t" });
+    const id = R.uid();
+    R.insertMatch(db, { id, competition_id: comp, home: "A"+id, away: "B"+id, state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+    return id;
+  };
+  mk("pm-atp", "tennis");                 // keep (ATP)
+  mk("pm-wta", "tennis");                 // drop (non-ATP)
+  mk("pm-atp-doubles", "tennis");         // drop (non-ATP)
+  mk("pm-major-league-cricket", "cricket"); // drop (untracked sport)
+  const betMatch = mk("pm-itf", "tennis");  // non-ATP but HAS a bet → keep
+  R.insertBet(db, { id: R.uid(), match_id: betMatch, strategy_id: strat.id, market_label: "П1", status: "settled_won", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: 55, ai_prob: 0.6, stake: 40, rationale: null, entered_minute: "10'", result: "won", payout: 72, created_at: "t" });
+
+  const removed = R.pruneRemovedCategories(db, { keepSports: new Set(["football", "tennis", "basketball", "esports"]), tennisSeriesAllow: new Set(["atp"]) });
+  assert.equal(removed, 3, "wta, atp-doubles, cricket removed");
+  assert.ok(R.listCompetitions(db).some((c) => c.id === "pm-atp"), "ATP kept");
+  assert.ok(R.listCompetitions(db).some((c) => c.id === "pm-itf"), "bet-bearing tennis kept");
+  assert.ok(!R.listCompetitions(db).some((c) => c.id === "pm-wta"), "WTA gone");
+  assert.ok(!R.listCompetitions(db).some((c) => c.id === "pm-major-league-cricket"), "cricket gone");
+  assert.equal(db.prepare("SELECT 1 FROM sports WHERE id='cricket'").get(), undefined, "empty cricket sport row dropped");
+  assert.ok(db.prepare("SELECT 1 FROM sports WHERE id='tennis'").get(), "tennis sport row kept (still has comps)");
+});
+
 test("espnLeagueForSeries: covered leagues resolve, uncovered (tennis/minor) return null", async () => {
   const { espnLeagueForSeries } = await import("../src/lib/engine.js");
   assert.equal(espnLeagueForSeries("FIFA World Cup", "soccer-fifwc"), "fifa.world");

@@ -17,8 +17,8 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
-import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets } from "./engine.js";
-import { SPORT_TAG_IDS } from "./polymarket.js";
+import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor } from "./engine.js";
+import { SPORT_TAG_IDS, SPORT_LABELS } from "./polymarket.js";
 import { analyzeMatch, jobActive, matchContext, strategyDrawdown, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision, sizeBet } from "./thresholds.js";
 import { stratBudget } from "./money.js";
@@ -498,6 +498,13 @@ export async function runAutoCycle(
   // Polymarket discovery flood). Never touches a match with betting history, so
   // metrics/P&L are preserved. Keeps buildAppData's per-poll scan bounded (§502).
   stepSync("pruneMatches", () => R.pruneStaleMatches(db, { staleBeforeMs: (Date.parse(nowFn(deps)()) || Date.now()) - 3 * 86400_000 }), 0);
+  // Drop categories we no longer track: untracked sports (cricket) + non-ATP
+  // tennis. No-bet only, never a seeded comp. Discovery already stops importing
+  // them; this clears the ones imported before the rule changed.
+  stepSync("pruneCategories", () => R.pruneRemovedCategories(db, {
+    keepSports: new Set(Object.keys(SPORT_LABELS)),
+    tennisSeriesAllow: seriesAllowFor("tennis", deps.env) ?? new Set(),
+  }), 0);
   return {
     synced: synced.length, imported: synced.filter((r) => r.created).length, discovered,
     oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),
