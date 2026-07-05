@@ -376,6 +376,51 @@ export function pruneMarketSnapshots(db: Database, keepPerLabel = 8): number {
   ).run(keepPerLabel);
   return res.changes;
 }
+
+// Child tables that reference matches(id) (no ON DELETE CASCADE — delete explicitly).
+const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "markets", "bets", "reassessments", "trade_log", "analysis_jobs", "match_live", "match_events", "market_open"];
+
+/**
+ * Prune bloat matches to keep the DB (and every `buildAppData` scan) bounded.
+ * ONLY deletes matches that carry NO bets — so no strategy's betting history,
+ * settled P&L, or metric samples are ever touched (matches with any bet are
+ * always kept). Targets: finished matches nobody bet on, and stale discovered
+ * imports (kickoff older than `staleBeforeMs`) that never resolved. This is what
+ * bounds the Polymarket catch-all discovery flood (up to ~200 matches/sport/day
+ * into unfunded `pm-*` comps). Returns the number of matches removed.
+ */
+export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number } = {}): number {
+  const rows = db.prepare(
+    `SELECT m.id AS id, m.state AS state, m.kickoff_at AS kickoff_at FROM matches m
+       WHERE NOT EXISTS (SELECT 1 FROM bets b WHERE b.match_id = m.id)`,
+  ).all() as { id: string; state: string; kickoff_at: string | null }[];
+  const doomed: string[] = [];
+  for (const r of rows) {
+    if (r.state === "finished") { doomed.push(r.id); continue; }
+    // Stale import: a real ISO kickoff already well in the past, never resolved.
+    if (opts.staleBeforeMs != null && r.kickoff_at && /^\d{4}-\d\d-\d\dT/.test(r.kickoff_at)) {
+      const t = Date.parse(r.kickoff_at);
+      if (!isNaN(t) && t < opts.staleBeforeMs) doomed.push(r.id);
+    }
+  }
+  if (!doomed.length) return 0;
+  const delChild = MATCH_CHILD_TABLES.map((t) => db.prepare(`DELETE FROM ${t} WHERE match_id = ?`));
+  const delMatch = db.prepare(`DELETE FROM matches WHERE id = ?`);
+  // node:sqlite has no .transaction() helper — wrap in an explicit BEGIN/COMMIT
+  // so a mid-prune throw can't leave a match half-deleted (orphaned children).
+  db.exec("BEGIN");
+  try {
+    for (const id of doomed) {
+      for (const stmt of delChild) stmt.run(id);
+      delMatch.run(id);
+    }
+    db.exec("COMMIT");
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  }
+  return doomed.length;
+}
 /** Latest snapshot per market label (or only closing prices). */
 export function latestMarkets(db: Database, matchId: string, closingOnly = false): Market[] {
   const rows = db.prepare(

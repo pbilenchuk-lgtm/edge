@@ -367,3 +367,35 @@ test("recomputeMetrics writes quality from settled bets", async () => {
   const q = R.getQuality(db, "edge");
   assert.ok(q && q.samples >= 2);
 });
+
+test("pruneStaleMatches drops no-bet finished/stale matches but keeps any match with bets", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mk = (id: string, state: string, kickoff: string | null) => R.insertMatch(db, { id, competition_id: comp.id, home: "A"+id, away: "B"+id, state: state as any, lineup_out: false, kickoff_at: kickoff, minute: null, score_home: state === "finished" ? 1 : null, score_away: state === "finished" ? 0 : null, final_score: state === "finished" ? "1:0" : null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+
+  mk("fin-nobet", "finished", null);                       // finished, no bets → prune
+  mk("fin-withbet", "finished", null);                     // finished WITH a bet → keep
+  mk("live-nobet", "live", null);                          // live, no bets → keep
+  mk("upcoming-fresh", "upcoming", "2999-01-01T00:00:00Z"); // future → keep
+  mk("upcoming-stale", "upcoming", "2000-01-01T00:00:00Z"); // long past, no bets → prune
+
+  // give fin-withbet a settled bet + a child row on fin-nobet to prove cascade
+  R.insertBet(db, { id: "b-keep", match_id: "fin-withbet", strategy_id: strat.id, market_label: "Over 1.5", status: "settled_won", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: 55, ai_prob: 0.6, stake: 100, rationale: null, entered_minute: "3'", result: "won", payout: 120, settled_by: null, created_at: "t" });
+  R.insertMarket(db, { id: R.uid(), match_id: "fin-nobet", label: "Over 2.5", price: 50, ai_prob: null, liquidity: null, external_ref: "tk", snapshot_at: "t", is_closing: false });
+  R.insertReassessment(db, { id: R.uid(), match_id: "fin-nobet", strategy_id: strat.id, minute: "10'", body: "x", confidence: null, trigger: "time", created_at: "t" });
+
+  const removed = R.pruneStaleMatches(db, { staleBeforeMs: Date.parse("2020-01-01T00:00:00Z") });
+  assert.equal(removed, 2, "finished-no-bet + stale-upcoming pruned");
+  assert.equal(R.getMatch(db, "fin-nobet"), null);
+  assert.equal(R.getMatch(db, "upcoming-stale"), null);
+  assert.ok(R.getMatch(db, "fin-withbet"), "match with betting history kept");
+  assert.ok(R.getMatch(db, "live-nobet"), "live match kept");
+  assert.ok(R.getMatch(db, "upcoming-fresh"), "future match kept");
+  // children of the pruned match are gone (no FK-orphan / no leftover rows)
+  assert.equal(R.latestMarkets(db, "fin-nobet").length, 0);
+  assert.equal(R.reassessmentsForMatch(db, "fin-nobet").length, 0);
+  // the kept bet survives
+  assert.ok(R.getBet(db, "b-keep"));
+});

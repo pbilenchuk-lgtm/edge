@@ -17,6 +17,7 @@ import * as R from "./repo.js";
 import { loadSportsProvider, loadSportsConfig } from "./sports.js";
 import { loadPolymarketConfig } from "./polymarket.js";
 import { runAutoCycle, runLiveCycle } from "./lifecycle.js";
+import { tryAcquireEngine, releaseEngine } from "./engineLock.js";
 
 let started = false;
 
@@ -29,14 +30,14 @@ export function startScheduler(env: Record<string, string | undefined> = process
   const liveSec = Math.max(15, Number(env.LIVE_TICK_SEC ?? 20));
   const linkOdds = loadPolymarketConfig(env).enabled;
   let lastDiscover = 0;
-  // One shared mutex: the slow full cycle and the fast live loop both touch
+  // One shared lock (engineLock): the slow full cycle, the fast live loop, AND
+  // the manual HTTP triggers (discover/tick/refreshAllOdds) all touch
   // exits/reassessment/entries, so they must never run concurrently (a duplicate
-  // entry could otherwise slip past the in-DB dedup across the LLM await).
-  let busy = false;
+  // entry could otherwise slip past the in-DB dedup across the LLM await, and the
+  // resource doubling is a 502 contributor on a small instance).
 
   const run = async () => {
-    if (busy) return; // don't overlap with a live pass or a previous slow pass
-    busy = true;
+    if (!tryAcquireEngine()) return; // don't overlap with a live/manual/slow pass
     // Everything that can throw goes INSIDE the try so `finally` always clears
     // `busy` — a throw from getDb()/Date before the try would wedge the cron
     // (busy stuck true) for the whole process lifetime.
@@ -57,15 +58,14 @@ export function startScheduler(env: Record<string, string | undefined> = process
       console.error("[scheduler] error:", msg);
       try { if (db) R.insertCronLog(db, { id: R.uid(), at, kind: discover ? "discover" : "tick", ok: 0, summary: `ошибка: ${msg}`, created_at: at }); } catch {}
     } finally {
-      busy = false;
+      releaseEngine();
     }
   };
 
   // Fast live loop — only does work while a match is in play; logs to the cron
   // journal only when something actually happened (so it doesn't flood it).
   const liveRun = async () => {
-    if (busy) return;                   // yield to a running full/live pass
-    busy = true;
+    if (!tryAcquireEngine()) return;    // yield to a running full/live/manual pass
     const at = new Date(Date.now()).toISOString();
     let db: ReturnType<typeof getDb> | null = null;
     try {
@@ -82,7 +82,7 @@ export function startScheduler(env: Record<string, string | undefined> = process
       console.error("[scheduler:live] error:", msg);
       try { if (db) R.insertCronLog(db, { id: R.uid(), at, kind: "live", ok: 0, summary: `ошибка: ${msg}`, created_at: at }); } catch {}
     } finally {
-      busy = false;
+      releaseEngine();
     }
   };
 

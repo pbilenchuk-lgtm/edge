@@ -464,6 +464,10 @@ export async function runAutoCycle(
   const exited = [...stepSync("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
   const entered = stepSync("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
   stepSync("prune", () => R.pruneMarketSnapshots(db), 0); // keep the snapshot history bounded (persistent DB)
+  // Bound the matches table: drop finished/stale matches that carry NO bets (the
+  // Polymarket discovery flood). Never touches a match with betting history, so
+  // metrics/P&L are preserved. Keeps buildAppData's per-poll scan bounded (§502).
+  stepSync("pruneMatches", () => R.pruneStaleMatches(db, { staleBeforeMs: (Date.parse(nowFn(deps)()) || Date.now()) - 3 * 86400_000 }), 0);
   return {
     synced: synced.length, imported: synced.filter((r) => r.created).length, discovered,
     oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),

@@ -405,13 +405,16 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [discovering, setDiscovering] = useState(false);
   const doDiscover = async () => {
     setDiscovering(true);
-    toast("info", "Подтягиваю матчи с Polymarket…");
+    // The server runs discovery in the BACKGROUND (202) so the request can't time
+    // out (→ 502). Kick it, then surface the new matches on a few delayed reloads
+    // as they land — competitions/matches now sync in reloadApp.
     try {
       const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "discover" }) }).then((x) => x.json());
-      if (r.ok) { await reloadApp(); toast("ok", `Подтянуто: +${r.discovered} матчей · составы: ${r.enriched} · котировки обновлены: ${r.oddsUpdated}`); }
-      else toast("err", r.error || "Не удалось подтянуть матчи");
-    } catch { toast("err", "Сеть недоступна — Polymarket/ESPN не ответили"); }
-    setDiscovering(false);
+      if (!r.ok) { toast("err", r.error || "Не удалось запустить подтягивание"); setDiscovering(false); return; }
+      toast("info", r.running ? "Подтягивание уже идёт — матчи скоро появятся" : "Подтягиваю матчи в фоне — появятся через несколько секунд…");
+    } catch { toast("err", "Сеть недоступна — Polymarket/ESPN не ответили"); setDiscovering(false); return; }
+    for (const d of [4000, 10000, 20000]) setTimeout(() => reloadApp().catch(() => {}), d);
+    setTimeout(() => { setDiscovering(false); toast("ok", "Готово — новые матчи подтянуты"); }, 22000);
   };
   // Poll the durable job until it settles, then reload. Used both after a fresh
   // kick and to RESUME a run already in flight (e.g. after navigating back — the

@@ -14,6 +14,7 @@ export async function POST(req: Request) {
     const R = await import("@/lib/repo");
     const engine = await import("@/lib/engine");
     const { loadSportsProvider, loadSportsConfig } = await import("@/lib/sports");
+    const { tryAcquireEngine, releaseEngine } = await import("@/lib/engineLock");
 
     const db = getDb();
     let body: any;
@@ -57,48 +58,61 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true, updated: res.updated, markets });
       }
       case "refreshAllOdds": {
-        const items = await engine.refreshActiveOdds(db, {});
-        return NextResponse.json({ ok: true, matches: items.length, updated: items.reduce((n, r) => n + r.updated, 0), items });
+        // Heavy: re-quotes every non-finished match. Run in the BACKGROUND behind
+        // the shared engine lock so it can't hold the HTTP request open past
+        // Render's gateway timeout (→ 502) or overlap with the cron.
+        if (!tryAcquireEngine()) return NextResponse.json({ ok: true, running: true }, { status: 202 });
+        void (async () => { try { await engine.refreshActiveOdds(db, {}); } catch (e) { console.error("[refreshAllOdds]", e); } finally { releaseEngine(); } })();
+        return NextResponse.json({ ok: true, started: true }, { status: 202 });
       }
       case "tick": {
         // Full automated lifecycle pass (same as `npm run tick:once`):
-        // sync + odds + exits + auto-analyze + paper-enter.
-        const { runAutoCycle } = await import("@/lib/lifecycle");
-        const { loadPolymarketConfig } = await import("@/lib/polymarket");
-        const provider = loadSportsProvider(loadSportsConfig());
-        const res = await runAutoCycle(db, provider, {}, { linkOdds: loadPolymarketConfig().enabled });
-        return NextResponse.json({
-          ok: true,
-          synced: res.synced, imported: res.imported, discovered: res.discovered,
-          oddsMatches: res.oddsMatches, oddsUpdated: res.oddsUpdated,
-          analyzed: res.analyzed.length, entered: res.entered.length, exited: res.exited.length,
-        });
+        // sync + odds + exits + auto-analyze + paper-enter. Multi-minute → run in
+        // the BACKGROUND behind the shared lock, return at once (avoids a 502).
+        if (!tryAcquireEngine()) return NextResponse.json({ ok: true, running: true }, { status: 202 });
+        void (async () => {
+          try {
+            const { runAutoCycle } = await import("@/lib/lifecycle");
+            const { loadPolymarketConfig } = await import("@/lib/polymarket");
+            const provider = loadSportsProvider(loadSportsConfig());
+            await runAutoCycle(db, provider, {}, { linkOdds: loadPolymarketConfig().enabled });
+          } catch (e) { console.error("[tick]", e); } finally { releaseEngine(); }
+        })();
+        return NextResponse.json({ ok: true, started: true }, { status: 202 });
       }
       case "discover": {
-        // Fast "pull matches" for the UI button: parse Polymarket (many matches,
-        // ~7 days out), import ESPN-linked matches + real lineups/events, refresh
-        // odds. NO LLM — analysis stays pointwise (button "Оценить матч" / cron).
-        const { importPolymarketMatches, syncCompetitions, enrichFromEspn } = engine;
-        const { SPORT_TAG_IDS, loadPolymarketConfig } = await import("@/lib/polymarket");
-        const provider = loadSportsProvider(loadSportsConfig());
-        let discovered = 0;
-        if (loadPolymarketConfig().enabled) {
-          for (const sport of Object.keys(SPORT_TAG_IDS)) {
-            const items = await importPolymarketMatches(db, sport, {}, { limit: 200 });
-            discovered += items.length;
-          }
-        }
-        let enriched = 0;
-        if (provider) {
-          await syncCompetitions(db, provider, {}, { linkOdds: loadPolymarketConfig().enabled });
-          const e = await enrichFromEspn(db, provider, {});
-          enriched = e.enriched;
-        }
-        const odds = await engine.refreshActiveOdds(db, {});
-        const oddsUpdated = odds.reduce((n, r) => n + r.updated, 0);
-        const at = new Date().toISOString();
-        try { R.insertCronLog(db, { id: R.uid(), at, kind: "manual", ok: 1, summary: `подтянуть матчи: +${discovered} матчей · составы ${enriched} · котировки ${oddsUpdated}`, created_at: at }); } catch {}
-        return NextResponse.json({ ok: true, discovered, enriched, oddsMatches: odds.length, oddsUpdated });
+        // "Pull matches" UI button: parse Polymarket (~7 days out), import
+        // ESPN-linked matches + lineups/events, refresh odds. NO LLM. This is
+        // MULTI-MINUTE work, so it runs in the BACKGROUND behind the shared engine
+        // lock and returns 202 immediately — holding it in the request timed out
+        // past Render's gateway (→ 502). The client surfaces the new matches on
+        // its next reload (competitions now sync in reloadApp).
+        if (!tryAcquireEngine()) return NextResponse.json({ ok: true, running: true }, { status: 202 });
+        void (async () => {
+          try {
+            const { importPolymarketMatches, syncCompetitions, enrichFromEspn } = engine;
+            const { SPORT_TAG_IDS, loadPolymarketConfig } = await import("@/lib/polymarket");
+            const provider = loadSportsProvider(loadSportsConfig());
+            let discovered = 0;
+            if (loadPolymarketConfig().enabled) {
+              for (const sport of Object.keys(SPORT_TAG_IDS)) {
+                const items = await importPolymarketMatches(db, sport, {}, { limit: 200 });
+                discovered += items.length;
+              }
+            }
+            let enriched = 0;
+            if (provider) {
+              await syncCompetitions(db, provider, {}, { linkOdds: loadPolymarketConfig().enabled });
+              const e = await enrichFromEspn(db, provider, {});
+              enriched = e.enriched;
+            }
+            const odds = await engine.refreshActiveOdds(db, {});
+            const oddsUpdated = odds.reduce((n, r) => n + r.updated, 0);
+            const at = new Date().toISOString();
+            try { R.insertCronLog(db, { id: R.uid(), at, kind: "manual", ok: 1, summary: `подтянуть матчи: +${discovered} матчей · составы ${enriched} · котировки ${oddsUpdated}`, created_at: at }); } catch {}
+          } catch (e) { console.error("[discover]", e); } finally { releaseEngine(); }
+        })();
+        return NextResponse.json({ ok: true, started: true }, { status: 202 });
       }
       case "sync": {
         const cfg = loadSportsConfig();
