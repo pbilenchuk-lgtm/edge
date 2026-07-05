@@ -215,8 +215,11 @@ class ErrorBoundary extends React.Component<{ label?: string; children: React.Re
 }
 
 export default function EdgeLab({ initial }: { initial: AppData }) {
-  const SPORTS = initial.sports;
-  const COMPETITIONS = initial.competitions;
+  // State (not const) so a background discover/sync — new matches, new
+  // tournaments — surfaces on the next 3s reload instead of only after a full
+  // page reload (the live-dot + comp chips read these).
+  const [SPORTS, setSports] = useState(initial.sports);
+  const [COMPETITIONS, setCompetitions] = useState(initial.competitions);
   const [TOTAL_BALANCE, setTotalBalance] = useState(initial.treasuryTotal);
   // These update on reloadApp too (not just at first load) so the Metrics/Feed
   // screens reflect live settlement/stats instead of the initial snapshot.
@@ -342,6 +345,12 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     if (!app || app.error) return;
     if (app.matchDb) setMatchDb(app.matchDb);
     if (app.catalog) setCatalog(app.catalog);
+    // Sync the catalog of sports/competitions too, so newly discovered matches
+    // and tournaments appear (and their live-dot lights) without a page reload.
+    if (app.competitions) setCompetitions(app.competitions);
+    if (app.sports) setSports(app.sports);
+    if (app.analysis) setAnalysis(app.analysis);
+    if (app.providers) setProviders(app.providers);
     // Keep the allocation maps in sync with the server too — otherwise a
     // strategy the cron funded/activated stays excluded from `compStrats`, and
     // all its per-strategy tab content (log / reassess / settle) renders empty.
@@ -365,12 +374,22 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   useEffect(() => {
     if (!liveMatchIds.length) return;
     let stop = false;
+    let timer: any;
+    // Recursive setTimeout, NOT setInterval: schedule the next tick only AFTER the
+    // current one fully resolves. On a slow network (or a cold-starting free
+    // instance) a fixed 3s interval would pile up overlapping refresh+reload
+    // calls, and an older/slower reloadApp could land last and overwrite fresh
+    // state with stale data. This keeps at most one tick in flight.
     const tick = async () => {
-      await Promise.all(liveMatchIds.map((id) => refreshOddsCore(id, true).catch(() => {})));
-      if (!stop) await reloadApp().catch(() => {});
+      try {
+        await Promise.all(liveMatchIds.map((id) => refreshOddsCore(id, true).catch(() => {})));
+        if (!stop) await reloadApp().catch(() => {});
+      } finally {
+        if (!stop) timer = setTimeout(tick, 3000);
+      }
     };
-    const iv = setInterval(tick, 3000);
-    return () => { stop = true; clearInterval(iv); };
+    timer = setTimeout(tick, 3000);
+    return () => { stop = true; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveKey]);
 
@@ -540,7 +559,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
           </main>
         </>
       ) : screen === "strategies" ? (
-        <StrategyScreen sportId={sportId} sportLabel={SPORTS.find((s) => s.id === sportId)!.label} catalog={catalog} setCatalog={setCatalog}
+        <StrategyScreen sportId={sportId} sportLabel={SPORTS.find((s) => s.id === sportId)?.label ?? sportId} catalog={catalog} setCatalog={setCatalog}
           competitions={COMPETITIONS} matchDb={matchDb} compBudget={compBudget} shares={shares} providers={PROVIDERS} quality={QUALITY}
           analysis={analysis} setAnalysis={setAnalysis} onGoModels={() => setScreen("models")} />
       ) : screen === "portfolio" ? (
@@ -571,7 +590,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 }
 
 function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess, onAnalyze, onResumeAnalyze, oddsErrKey }: any) {
-  const meta = STATE_META[match.state];
+  const meta = STATE_META[match.state] ?? { label: String(match.state ?? "—").toUpperCase(), color: "#8b95a5", bg: "#232a35" };
   const hasLineups = LINEUP_SPORTS.has(comp.sport); // does this sport have team sheets?
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
   // Strategies to surface in the per-strategy bars (log / reassess / settle): the

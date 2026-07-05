@@ -84,6 +84,7 @@ export function resolveFootballMarket(
     const genericPrefix = prefix.split(/\s+/).filter(Boolean).every((t) => TOTAL_WORDS.has(t));
     if (side == null && !genericPrefix) return null; // a named (team) total we can't disambiguate
     const scored = side === "home" ? scoreHome : side === "away" ? scoreAway : total;
+    if (scored === line) return null; // exact push on a whole-number line → refund stake (void)
     return over ? scored > line : scored < line;
   }
 
@@ -105,9 +106,26 @@ export function resolveFootballMarket(
     const sign = hcap[1] === "-" ? -1 : 1;
     const line = sign * parseFloat(hcap[2]);
     const margin = (side ?? "home") === "away" ? scoreAway - scoreHome : scoreHome - scoreAway;
-    return margin + line > 0;
+    const adjusted = margin + line;
+    if (adjusted === 0) return null; // whole-number handicap lands exactly on the line → push (refund)
+    return adjusted > 0;
   }
 
+  // Draw No Bet — back the named side; a DRAW is a PUSH (stake refunded via the
+  // void path), NOT a loss. Was caught by the bare /draw/ test below and settled
+  // as a straight draw → a winning side booked as a total loss.
+  if (/\bno bet\b|\bdnb\b/.test(l)) {
+    if (scoreHome === scoreAway) return null;   // push → refund
+    return (side ?? "home") === "away" ? scoreAway > scoreHome : scoreHome > scoreAway;
+  }
+  // Double chance — two of the three 1X2 outcomes backed:
+  //   "Home or Draw" / "1X"  → not an away win   (scoreHome ≥ scoreAway)
+  //   "Away or Draw" / "X2"  → not a home win     (scoreAway ≥ scoreHome)
+  //   "Home or Away" / "12"  → not a draw
+  if (/\bhome or away\b|\b12\b/.test(l)) return scoreHome !== scoreAway;
+  if (/\bor draw\b|double chance|двойной шанс|\b1x\b|\bx2\b/.test(l)) {
+    return (/\bx2\b/.test(l) || side === "away") ? scoreAway >= scoreHome : scoreHome >= scoreAway;
+  }
   // Moneyline / match winner: "Portugal", "Home", "Draw to win", "1x2".
   if (/\bdraw\b|ничья|\btie\b/.test(l)) return scoreHome === scoreAway;
   if (side === "home") return scoreHome > scoreAway;
