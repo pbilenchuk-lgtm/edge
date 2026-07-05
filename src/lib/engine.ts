@@ -55,7 +55,13 @@ export function canReassess(
   // suppress a real on-pitch trigger's narrative (they use separate cadences).
   const prior = R.reassessmentsForMatch(db, matchId)
     .filter((r) => r.strategy_id === strategyId && r.trigger !== "time" && r.trigger !== "manual");
-  if (!prior.length || minute == null) return true;
+  if (!prior.length) return true;
+  if (minute == null) {
+    // No match clock (pre-clock / a league ESPN gives no minute for): rate-limit
+    // on WALL-CLOCK instead, or every price tick would fire a fresh narrative.
+    const last = Date.parse(prior[prior.length - 1].created_at);
+    return isNaN(last) || Date.now() - last >= gapMinutes * 60_000;
+  }
   // Compare against the last reassessment that HAS a parseable match-minute;
   // skip null-minute ones (e.g. manual triggers) so they don't reset the gap.
   for (let i = prior.length - 1; i >= 0; i--) {
@@ -219,11 +225,17 @@ export function settleMatch(
     if (b.status !== "open") continue;
     const won = resolveOutcome(b, match, overrides);
     if (won == null) {
-      // The match is FINISHED but this market can't be auto-resolved (Advance /
-      // penalties / an unknown label, no override supplied). Leaving it open
-      // locks the stake in strategyDrawdown forever — the match is never active
-      // again. Void it: refund the stake, zero P&L, tagged 'void' so it's
-      // excluded from win/lose accuracy. Honest fallback when we lack the result.
+      // Distinguish "no score yet" from "unresolvable market label". If the
+      // final score isn't in yet (a finish that raced ahead of the score sync),
+      // DON'T void — that would erase a real winner/loser. Leave it open; it
+      // settles once the score lands. Only genuinely unresolvable markets
+      // (Advance / penalties / unknown label, score KNOWN) fall through to void.
+      if (match.score_home == null || match.score_away == null) { skipped++; continue; }
+      // The match is FINISHED with a known score but this market can't be
+      // auto-resolved (Advance / penalties / an unknown label, no override).
+      // Leaving it open locks the stake in strategyDrawdown forever — the match
+      // is never active again. Void it: refund the stake, zero P&L, tagged
+      // 'void' so it's excluded from win/lose accuracy.
       R.updateBet(db, b.id, {
         status: "settled_lost", result: null, payout: b.stake ?? 0,
         closing_price: b.current_price ?? b.entry_price ?? null, settled_by: "void",
@@ -331,9 +343,20 @@ export function upsertImportedMatch(
   if (existing) return { match: existing, created: false };
   const twin = findTwinMatch(db, competitionId, status.home, status.away);
   if (twin) {
-    // adopt the ESPN ref so syncMatchStatus can drive/settle this fixture
-    if (twin.external_ref !== status.externalRef) R.updateMatch(db, twin.id, { external_ref: status.externalRef });
-    return { match: { ...twin, external_ref: status.externalRef }, created: false };
+    // Adopt the ESPN ref so syncMatchStatus can drive/settle this fixture. AND
+    // align home/away to ESPN's orientation: the twin (from a Polymarket title)
+    // may be reversed, and syncMatchStatus writes scoreHome/scoreAway UNFLIPPED,
+    // so a reversed twin would settle bets against mirrored scores (wrong
+    // winner). Flip stored scores too if the twin already had any.
+    const flipped = nameMatch(twin.home, status.away); // twin.home is ESPN's away side
+    const patch: Partial<Match> = {};
+    if (twin.external_ref !== status.externalRef) patch.external_ref = status.externalRef;
+    if (flipped) {
+      patch.home = status.home; patch.away = status.away;
+      if (twin.score_home != null || twin.score_away != null) { patch.score_home = twin.score_away; patch.score_away = twin.score_home; }
+    }
+    if (Object.keys(patch).length) R.updateMatch(db, twin.id, patch);
+    return { match: { ...twin, ...patch }, created: false };
   }
   const match: Match = {
     id: R.uid(), competition_id: competitionId, home: status.home, away: status.away,

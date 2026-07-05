@@ -198,6 +198,13 @@ test("settlement: football market resolution from score 2:1", () => {
   assert.equal(resolveFootballMarket("Colombia Over 0.5", 1, 2, cg), true);  // Colombia 1 > 0.5
   assert.equal(resolveFootballMarket("Ghana Over 1.5", 1, 2, cg), true);     // Ghana 2 > 1.5
   assert.equal(resolveFootballMarket("Over 2.5", 1, 2, cg), true);           // aggregate 3 > 2.5
+  // generic-word prefixes are the AGGREGATE, not an unresolvable team total
+  assert.equal(resolveFootballMarket("Total Over 2.5", 2, 1), true);  // total 3 > 2.5
+  assert.equal(resolveFootballMarket("Goals Over 3.5", 2, 1), false); // total 3 < 3.5
+  // moneyline for clubs sharing a suffix resolves on the distinctive token
+  const mancup = { home: "Manchester United", away: "Newcastle United" };
+  assert.equal(resolveFootballMarket("Manchester United", 2, 1, mancup), true);  // home won
+  assert.equal(resolveFootballMarket("Newcastle United", 2, 1, mancup), false);  // away lost
 });
 
 test("settlement: moneyline resolves from score (no longer stuck open)", () => {
