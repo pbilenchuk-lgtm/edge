@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, strategistReassess, advanceClocks, runLiveCycle } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats } from "../src/lib/lifecycle.js";
 import { analyzeMatch } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
@@ -361,4 +361,49 @@ test("matchByMarketTokens finds a fixture by a shared CLOB token", () => {
   const hit = R.matchByMarketTokens(db, ["nope", tok as string]);
   assert.equal(hit?.id, "m-live");
   assert.equal(R.matchByMarketTokens(db, ["does-not-exist"]), null);
+});
+
+test("formatMatchStats renders a compact home–away line, null when empty", () => {
+  const json = JSON.stringify({
+    home: { team: "Real", items: [{ label: "владение", value: "58%" }, { label: "удары", value: "7" }] },
+    away: { team: "City", items: [{ label: "владение", value: "42%" }, { label: "удары", value: "4" }, { label: "угловые", value: "2" }] },
+  });
+  assert.equal(formatMatchStats(json), "владение 58%–42% · удары 7–4 · угловые —–2");
+  assert.equal(formatMatchStats(null), null);
+  assert.equal(formatMatchStats("{bad json"), null);
+  assert.equal(formatMatchStats(JSON.stringify({ home: { team: "A", items: [] }, away: { team: "B", items: [] } })), null);
+});
+
+test("recordMatchStats writes a stats event for a live match, then rate-limits to 5 min", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Real", away: "City", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "E1", league: "eng.1", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { team: "Real", items: [{ label: "владение", value: "58%" }] }, away: { team: "City", items: [{ label: "владение", value: "42%" }] } }), updated_at: "t" });
+
+  const n1 = recordMatchStats(db, { now: () => "2026-07-05T18:00:00Z" });
+  assert.equal(n1, 1, "first snapshot written");
+  const evts = R.eventsForMatch(db, mid).filter((e) => e.type === "stats");
+  assert.equal(evts.length, 1);
+  assert.match(evts[0].text, /владение 58%–42%/);
+
+  // 3 min later — within the 5-min interval → no new snapshot
+  assert.equal(recordMatchStats(db, { now: () => "2026-07-05T18:03:00Z" }), 0, "rate-limited within 5 min");
+  // 6 min later — a fresh snapshot lands
+  assert.equal(recordMatchStats(db, { now: () => "2026-07-05T18:06:00Z" }), 1, "new snapshot after the interval");
+  assert.equal(R.eventsForMatch(db, mid).filter((e) => e.type === "stats").length, 2);
+});
+
+test("recordMatchStats ignores non-live matches and matches without stats", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const up = R.uid(), noStats = R.uid();
+  // upcoming with stats → skipped (not live)
+  R.insertMatch(db, { id: up, competition_id: comp.id, home: "A", away: "B", state: "upcoming", lineup_out: true, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: up });
+  R.upsertMatchLive(db, { match_id: up, espn_event_id: "E", league: "x", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { team: "A", items: [{ label: "владение", value: "50%" }] }, away: { team: "B", items: [] } }), updated_at: "t" });
+  // live but no stats row → skipped
+  R.insertMatch(db, { id: noStats, competition_id: comp.id, home: "C", away: "D", state: "live", lineup_out: true, kickoff_at: null, minute: 10, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: noStats });
+  assert.equal(recordMatchStats(db, { now: () => "2026-07-05T18:00:00Z" }), 0);
 });

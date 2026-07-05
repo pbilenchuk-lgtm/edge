@@ -277,9 +277,9 @@ function view(a: { confidence: string | null; short: string | null; body: string
   return { confidence: a.confidence, short: a.short, text: a.body, verdict: a.verdict, status: a.status };
 }
 
-const EVENT_LABEL: Record<string, string> = { goal: "⚽ гол", red_card: "🟥 красная", yellow_card: "🟨 жёлтая", sub: "🔁 замена" };
+const EVENT_LABEL: Record<string, string> = { goal: "⚽ гол", red_card: "🟥 красная", yellow_card: "🟨 жёлтая", sub: "🔁 замена", stats: "📊 статистика" };
 // The feed filters group all match events under "События матча" (type "goal").
-const FEED_EVENT_TYPE: Record<string, string> = { goal: "goal", red_card: "card", yellow_card: "card", sub: "sub" };
+const FEED_EVENT_TYPE: Record<string, string> = { goal: "goal", red_card: "card", yellow_card: "card", sub: "sub", stats: "stats" };
 
 /** Detailed per-strategy stats — open positions marked to the FRESHEST market
  *  price (not the price stored on the bet), so +/- reflects the current line. */

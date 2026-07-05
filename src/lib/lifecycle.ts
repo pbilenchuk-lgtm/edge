@@ -450,6 +450,7 @@ export async function runAutoCycle(
   for (const e of enrich.newEvents) if (!labelFor.has(e.matchId)) labelFor.set(e.matchId, LIVE_TRIGGER_TYPES.has(e.type) ? (e.type as ReassessTrigger) : "price_move");
   const triggers = new Set(enrich.newEvents.map((e) => e.matchId));
   stepSync("advanceClocks", () => advanceClocks(db, deps), undefined); // flip lineup_out ~1h before kickoff
+  stepSync("stats", () => recordMatchStats(db, deps), 0); // 5-min match-stats snapshot into the events feed
   stepSync("settleStale", () => settleStaleOpenBets(db, deps), 0); // re-settle a finish that raced ahead of the score sync
   stepSync("captureLiveOpens", () => captureLiveOpens(db, deps), undefined); // kickoff-price baseline
   // Analyze BEFORE reassessment: analyzeMatch wipes a match's proposed bets to
@@ -480,6 +481,50 @@ const LIVE_TRIGGER_TYPES = new Set(["goal", "red_card"]);
 // regardless of on-pitch events — so positions are re-evaluated (full/partial
 // exit) and fresh analytics land on a steady heartbeat, not only on goals.
 export const REASSESS_INTERVAL_MIN = 5;
+
+// Match-stats snapshots land on the SAME cadence as the periodic reassessment
+// (user: «статистику каждые 5 минут, так же как и переоценку»).
+export const STATS_INTERVAL_MIN = REASSESS_INTERVAL_MIN;
+
+/** Format the stored ESPN team-stats JSON into one compact «home–away» line, e.g.
+ *  "владение 58%–42% · удары 7–4 · в створ 3–1". Returns null if there's nothing. */
+export function formatMatchStats(statsJson: string | null | undefined): string | null {
+  if (!statsJson) return null;
+  let s: any;
+  try { s = JSON.parse(statsJson); } catch { return null; }
+  const home = s?.home, away = s?.away;
+  const hi = new Map<string, string>(((home?.items ?? []) as any[]).map((x) => [x.label, x.value]));
+  const ai = new Map<string, string>(((away?.items ?? []) as any[]).map((x) => [x.label, x.value]));
+  // Preserve the order stats appear in for the home side, then any away-only labels.
+  const labels = [...hi.keys(), ...[...ai.keys()].filter((l) => !hi.has(l))];
+  const parts = labels.map((l) => `${l} ${hi.get(l) ?? "—"}–${ai.get(l) ?? "—"}`);
+  if (!parts.length) return null;
+  return parts.join(" · ");
+}
+
+/**
+ * Emit a match-stats snapshot into the events feed for each LIVE match that has
+ * ESPN stats, at most one per STATS_INTERVAL_MIN (wall-clock) — the possession /
+ * shots / chances readout of «what's happening now», beside goals & cards. Cheap,
+ * LLM-free, and deduped by a fresh event_key so it layers a new row each cadence.
+ */
+export function recordMatchStats(db: Database, deps: EngineDeps = {}): number {
+  const now = nowFn(deps)();
+  const nowMs = Date.parse(now) || Date.now();
+  let written = 0;
+  for (const { match: m } of activeMatches(db)) {
+    if (m.state !== "live") continue;
+    const live = R.getMatchLive(db, m.id);
+    const text = formatMatchStats(live?.stats);
+    if (!text) continue;
+    // Cadence gate: skip if a stats snapshot landed within the last interval.
+    const prior = R.eventsForMatch(db, m.id).filter((e) => e.type === "stats");
+    const last = prior.length ? Date.parse(prior[prior.length - 1].created_at) : NaN;
+    if (!isNaN(last) && nowMs - last < STATS_INTERVAL_MIN * 60_000) continue;
+    if (R.insertMatchEvent(db, { id: R.uid(), match_id: m.id, event_key: `stats-${now}`, minute: m.minute, type: "stats", team: null, text, created_at: now })) written++;
+  }
+  return written;
+}
 
 /** LIVE matches due for a periodic reassessment — those not reassessed in the
  *  last REASSESS_INTERVAL_MIN minutes (or never). Fires on ANY funded live match
@@ -535,6 +580,7 @@ export async function runLiveCycle(
   stepSyncLive("advanceClocks", () => advanceClocks(db, deps), undefined);
   const enrich = provider ? await stepLive("enrich", () => enrichFromEspn(db, provider, deps), { enriched: 0, newEvents: [] }) : { enriched: 0, newEvents: [] };
   stepSyncLive("settleStale", () => settleStaleOpenBets(db, deps), 0); // re-settle a finish that raced ahead of the score
+  stepSyncLive("stats", () => recordMatchStats(db, deps), 0); // 5-min match-stats snapshot into the events feed
   stepSyncLive("captureLiveOpens", () => captureLiveOpens(db, deps), undefined); // snapshot kickoff prices the first time a match is live
   // Reassessment fires on TWO conditions, unioned: (1) a high-impact on-pitch
   // event (goal / red card) — labelled by its type; (2) the periodic 5-min

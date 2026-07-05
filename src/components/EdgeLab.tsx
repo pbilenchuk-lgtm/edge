@@ -1140,7 +1140,7 @@ function improveStats(q: any, overall: any) {
 function FeedScreen({ feed }: any) {
   const [filter, setFilter] = useState("all");
   const types = [["all", "Всё"], ["enter", "Входы"], ["reassess", "Переоценки"], ["settle", "Расчёты"], ["goal", "События матча"], ["skip", "Пропуски"]];
-  const MATCH_EVENT = new Set(["goal", "lineup", "card", "sub"]);
+  const MATCH_EVENT = new Set(["goal", "lineup", "card", "sub", "stats"]);
   const shown = filter === "all" ? feed : feed.filter((e: any) => e.type === filter || (filter === "goal" && MATCH_EVENT.has(e.type)));
   return (
     <main style={S.main}>
@@ -1170,11 +1170,11 @@ function FeedScreen({ feed }: any) {
     </main>
   );
 }
-function eventTagChar(t: string) { return ({ goal: "⚽", red_card: "🟥", yellow_card: "🟨", sub: "⇄" } as any)[t] || "•"; }
-function eventTagStyle(t: string) { const map: any = { goal: { color: "#e8a838" }, red_card: { color: "#ff6b6b" }, yellow_card: { color: "#e8c838" }, sub: { color: "#4fc3c7" } }; return map[t] || { color: "#8b95a5" }; }
-function feedIconChar(t: string) { return ({ enter: "→", reassess: "↻", settle: "✓", goal: "⚽", card: "▪", sub: "⇄", lineup: "📋", skip: "—" } as any)[t] || "•"; }
+function eventTagChar(t: string) { return ({ goal: "⚽", red_card: "🟥", yellow_card: "🟨", sub: "⇄", stats: "📊" } as any)[t] || "•"; }
+function eventTagStyle(t: string) { const map: any = { goal: { color: "#e8a838" }, red_card: { color: "#ff6b6b" }, yellow_card: { color: "#e8c838" }, sub: { color: "#4fc3c7" }, stats: { color: "#7fb4e8" } }; return map[t] || { color: "#8b95a5" }; }
+function feedIconChar(t: string) { return ({ enter: "→", reassess: "↻", settle: "✓", goal: "⚽", card: "▪", sub: "⇄", lineup: "📋", stats: "📊", skip: "—" } as any)[t] || "•"; }
 function feedIconStyle(t: string) {
-  const map: any = { enter: { color: "#70b56a", borderColor: "#70b56a55" }, reassess: { color: "#5b9bd5", borderColor: "#5b9bd555" }, settle: { color: "#c98bdb", borderColor: "#c98bdb55" }, goal: { color: "#e8a838", borderColor: "#e8a83855" }, card: { color: "#e07a5f", borderColor: "#e07a5f55" }, sub: { color: "#4fc3c7", borderColor: "#4fc3c755" }, lineup: { color: "#e8a838", borderColor: "#e8a83855" }, skip: { color: "#8b95a5", borderColor: "#2c3543" } };
+  const map: any = { enter: { color: "#70b56a", borderColor: "#70b56a55" }, reassess: { color: "#5b9bd5", borderColor: "#5b9bd555" }, settle: { color: "#c98bdb", borderColor: "#c98bdb55" }, goal: { color: "#e8a838", borderColor: "#e8a83855" }, card: { color: "#e07a5f", borderColor: "#e07a5f55" }, sub: { color: "#4fc3c7", borderColor: "#4fc3c755" }, lineup: { color: "#e8a838", borderColor: "#e8a83855" }, stats: { color: "#7fb4e8", borderColor: "#7fb4e855" }, skip: { color: "#8b95a5", borderColor: "#2c3543" } };
   return map[t] || {};
 }
 
