@@ -1161,9 +1161,10 @@ function MetricsScreen({ catalog, quality, stats }: any) {
             </> : null}
 
             {/* Результативность по фазам входа */}
-            {q?.phases && q.phases.some((p: any) => p.bets > 0) && (
+            {st.predictions > 0 && (
               <div style={S.phaseBlock}>
                 <div style={S.phaseBlockLabel}>Результативность по фазам входа <span style={S.phaseHint}>где стратегия реально зарабатывает</span></div>
+                {q?.phases && q.phases.some((p: any) => p.bets > 0) ? (
                 <div style={S.phaseRows}>
                   {q.phases.map((ph: any) => {
                     const empty = ph.bets === 0;
@@ -1177,15 +1178,16 @@ function MetricsScreen({ catalog, quality, stats }: any) {
                     );
                   })}
                 </div>
+                ) : <div style={S.mgmtNeutral}>Нет рассчитанных ставок — появится, когда стратегия сыграет и матчи завершатся.</div>}
               </div>
             )}
 
             {/* Ценность активного управления */}
-            {q?.mgmt && (
+            {st.predictions > 0 && (
               <div style={S.phaseBlock}>
-                <div style={S.phaseBlockLabel}>Ценность активного управления <span style={S.phaseHint}>edge в управлении позицией, а не в прогнозе</span></div>
-                {q.mgmt.managed === 0 ? (
-                  <div style={S.mgmtNeutral}>Стратегия не управляет по ходу — держит до финала. Нечего сравнивать.</div>
+                <div style={S.phaseBlockLabel}>Ценность активного управления <span style={S.phaseHint}>эдж в управлении позицией, а не в прогнозе</span></div>
+                {!q?.mgmt || q.mgmt.managed === 0 ? (
+                  <div style={S.mgmtNeutral}>{q?.mgmt ? "Стратегия не управляет по ходу — держит до финала. Нечего сравнивать." : "Нет данных — стратегия ещё не фиксировала и не выходила из позиций досрочно."}</div>
                 ) : (() => {
                   const delta = q.mgmt.actualPnl - q.mgmt.heldToEndPnl;
                   return (
@@ -1207,9 +1209,10 @@ function MetricsScreen({ catalog, quality, stats }: any) {
             )}
 
             {/* CLV по фазам */}
-            {q?.phases && q.phases.some((p: any) => p.clv != null) && (
+            {st.predictions > 0 && (
               <div style={S.phaseBlock}>
                 <div style={S.phaseBlockLabel}>CLV по фазам <span style={S.phaseHint}>двигался ли рынок в твою сторону после входа</span></div>
+                {q?.phases && q.phases.some((p: any) => p.clv != null) ? (
                 <div style={S.clvRows}>
                   {q.phases.filter((p: any) => p.clv != null).map((ph: any) => (
                     <div key={ph.id} style={S.clvRow}>
@@ -1222,14 +1225,17 @@ function MetricsScreen({ catalog, quality, stats }: any) {
                     </div>
                   ))}
                 </div>
+                ) : <div style={S.mgmtNeutral}>Нет закрытых котировок — CLV появится после завершения матчей.</div>}
               </div>
             )}
 
             {/* Кривая банка */}
-            {q?.equity && q.equity.length > 1 && (
+            {st.predictions > 0 && (
               <div style={S.phaseBlock}>
                 <div style={S.phaseBlockLabel}>Кривая банка <span style={S.phaseHint}>стоимость по матчам</span></div>
-                <EquitySpark data={q.equity} />
+                {q?.equity && q.equity.length > 1 ? (
+                  <EquitySpark data={q.equity} />
+                ) : <div style={S.mgmtNeutral}>Недостаточно завершённых матчей для кривой.</div>}
               </div>
             )}
           </section>
