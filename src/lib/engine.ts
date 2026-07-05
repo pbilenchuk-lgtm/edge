@@ -452,6 +452,37 @@ const SERIES_ESPN_LEAGUE: Record<string, string> = {
   "soccer-bundesliga": "ger.1",
   "soccer-ligue1": "fra.1",
 };
+// Fallback when the exact Polymarket series slug isn't in the table above:
+// infer the ESPN league code from the series NAME/slug, so a newly-listed
+// league (Nordic, etc.) still gets ESPN live scores + events instead of going
+// dark in-match (enrichFromEspn only touches comps that have an external_league,
+// and it still gates every enrich on a team-name match, so a loose guess here is
+// safe — worst case it finds nothing). Extend as more leagues are traded.
+const LEAGUE_NAME_ESPN: [RegExp, string][] = [
+  [/allsvenskan/i, "swe.1"], [/superettan/i, "swe.2"],
+  [/eliteserien/i, "nor.1"],
+  [/eredivisie/i, "ned.1"], [/eerste divisie/i, "ned.2"],
+  [/(primeira liga|liga portugal)/i, "por.1"],
+  [/s[üu]per\s*lig/i, "tur.1"],
+  [/(scottish premiership|scottish prem)/i, "sco.1"],
+  [/(jupiler|belgian pro league|pro league)/i, "bel.1"],
+  [/(swiss super|super league.*switzerland)/i, "sui.1"],
+  [/(danish superliga|superligaen)/i, "den.1"],
+  [/(major league soccer|\bmls\b)/i, "usa.1"],
+  [/(brasileir|s[ée]rie a.*brazil)/i, "bra.1"],
+  [/liga mx/i, "mex.1"],
+  [/(efl championship|\bchampionship\b)/i, "eng.2"],
+  [/saudi pro league/i, "ksa.1"],
+  [/j1 league/i, "jpn.1"],
+  [/a-?league/i, "aus.1"],
+  [/(greek super league|super league greece)/i, "gre.1"],
+  [/(austrian bundesliga|bundesliga.*austria)/i, "aut.1"],
+];
+const inferEspnLeague = (name: string | null): string | null => {
+  if (!name) return null;
+  for (const [re, code] of LEAGUE_NAME_ESPN) if (re.test(name)) return code;
+  return null;
+};
 const slugify = (s: string) => s.toLowerCase().normalize("NFD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
 /**
@@ -469,7 +500,7 @@ function ensureCategoryComp(db: Database, sport: string, series: string | null, 
   }
   const slug = seriesSlug ?? slugify(series!);
   const id = `pm-${slug}`;
-  const league = SERIES_ESPN_LEAGUE[slug] ?? null;
+  const league = SERIES_ESPN_LEAGUE[slug] ?? inferEspnLeague(series) ?? inferEspnLeague(slug) ?? null;
   const existing = R.listCompetitions(db).find((c) => c.id === id);
   if (!existing) {
     R.upsertCompetition(db, { id, sport_id: sport, name: SERIES_RU[slug] ?? series ?? slug, budget: 0, external_league: league, created_at: now });

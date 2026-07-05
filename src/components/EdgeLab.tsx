@@ -74,7 +74,7 @@ function describeParam(k: string, v: any): { label: string; value: string } {
   }
 }
 function stratEquityOnComp(matchDb: any, comp: any, stratId: string, budget: number) {
-  let realized = 0, unreal = 0;
+  let realized = 0, unreal = 0, staked = 0;
   for (const mid of comp.matches) {
     const m = matchDb[mid];
     if (!m) continue;
@@ -89,12 +89,13 @@ function stratEquityOnComp(matchDb: any, comp: any, stratId: string, budget: num
     for (const mk of (m.markets || [])) if (!(mk.label in cur)) cur[mk.label] = mk.price;
     for (const b of betItems(m.bets?.[stratId])) {
       if (b.status === "open" && b.entryPrice != null && b.entryPrice > 0) {
+        staked += b.stake;
         const price = cur[b.market] ?? b.currentPrice ?? b.entryPrice;
         unreal += b.stake * (price / b.entryPrice) - b.stake;
       }
     }
   }
-  return { equity: budget + realized + unreal, realized, unreal };
+  return { equity: budget + realized + unreal, realized, unreal, staked };
 }
 function stratOverall(competitions: any[], matchDb: any, stratId: string, sportId: string, compBudget: any, shares: any) {
   const comps = competitions.filter((c) => c.sport === sportId);
@@ -415,8 +416,13 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
               // delta is PURE P&L (realized + open mark-to-market) across the comp's
               // strategies — 0 until something is actually bet, so a freshly-funded
               // tournament shows "бюджет свободен", not a phantom -100%.
-              const delta = cStrats.reduce((a, s) => { const e = stratEquityOnComp(matchDb, c, s.id, stratBudget(compBudget, c.id, shares, s.id)); return a + e.realized + e.unreal; }, 0);
+              const agg = cStrats.reduce((acc, s) => { const e = stratEquityOnComp(matchDb, c, s.id, stratBudget(compBudget, c.id, shares, s.id)); return { delta: acc.delta + e.realized + e.unreal, staked: acc.staked + e.staked }; }, { delta: 0, staked: 0 });
+              const delta = agg.delta;
               const eq = budget + delta;
+              // "Bets exist" is money IN PLAY or already realized — NOT "delta != 0".
+              // A fresh $75 bet whose price hasn't moved has delta 0 but is very
+              // much a bet, so it must not read as "ставок нет".
+              const hasBets = agg.staked > 0.005 || Math.round(delta * 100) !== 0;
               // ROI denominator = the ACTIVE (allocated) strategy budgets, not the
               // whole comp budget — so the comp-card % reconciles with the sum of
               // the per-strategy rows below instead of being diluted by idle budget.
@@ -427,8 +433,8 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
                     <div style={S.compName}>{c.name}</div>
                     {budget > 0 ? <>
                       <div style={S.compBudget}>{fmtMoney0(budget)} <span style={S.compBudgetLbl}>бюджет</span></div>
-                      {Math.round(delta * 100) !== 0
-                        ? <div style={{ ...S.compDelta, color: delta >= 0 ? "#5fd08a" : "#ff6b6b" }}>{delta >= 0 ? "▲ +" : "▼ "}{fmtMoney(delta)} ({delta >= 0 ? "+" : ""}{(activeBudget > 0 ? (delta / activeBudget) * 100 : 0).toFixed(1)}%) <span style={S.compRoi}>· сейчас {fmtMoney0(eq)}</span></div>
+                      {hasBets
+                        ? <div style={{ ...S.compDelta, color: delta >= 0 ? "#5fd08a" : "#ff6b6b" }}>{delta >= 0 ? "▲ +" : "▼ "}{fmtMoney(delta)} ({delta >= 0 ? "+" : ""}{(activeBudget > 0 ? (delta / activeBudget) * 100 : 0).toFixed(1)}%) <span style={S.compRoi}>· {agg.staked > 0.005 ? `${fmtMoney0(agg.staked)} в игре` : `сейчас ${fmtMoney0(eq)}`}</span></div>
                         : <div style={S.compFlat}>ставок нет · бюджет свободен</div>}
                     </> : <div style={S.compUnalloc}>{c.matches.length ? "нет бюджета" : "нет матчей"}</div>}
                   </button>
@@ -778,12 +784,14 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                           const up = pnl >= 0;
                           const pnlPct = b.stake ? (pnl / b.stake) * 100 : 0;
                           const closedPct = b.closedPct ?? 100;
+                          const orig = closedPct > 0 ? (b.stake ?? 0) / (closedPct / 100) : (b.stake ?? 0); // full position size
                           return (
                             <div key={i} style={S.settleBet}>
                               <span style={S.settleMarket}>{b.market}</span>
-                              <span style={S.settleStake} title="Сколько $ и какая доля позиции закрыта">{fmtMoney(b.stake)} · {closedPct}% позиции</span>
-                              <span style={{ ...S.settleResult, color: up ? "#5fd08a" : "#ff6b6b" }}>{closedPct >= 100 ? "закрыта" : "фиксация"}</span>
-                              <span style={{ ...S.settlePayout, color: up ? "#5fd08a" : "#ff6b6b" }} title="Реализованный P&L по закрытой доле">{up ? "+" : "−"}{fmtMoney(Math.abs(pnl))} ({up ? "+" : ""}{pnlPct.toFixed(0)}%)</span>
+                              <span style={S.settleStake} title="Какая доля позиции закрыта и её размер в $">
+                                {closedPct >= 100 ? "закрыта полностью" : `фиксация ${closedPct}%`} · {fmtMoney(b.stake)}{closedPct < 100 && orig > 0 ? ` из ${fmtMoney(orig)}` : ""}
+                              </span>
+                              <span style={{ ...S.settlePayout, color: up ? "#5fd08a" : "#ff6b6b" }} title="Реализованный P&L по закрытой доле (не итог матча)">{up ? "+" : "−"}{fmtMoney(Math.abs(pnl))} ({up ? "+" : ""}{pnlPct.toFixed(0)}%)</span>
                             </div>
                           );
                         })}
