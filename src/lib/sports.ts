@@ -180,6 +180,11 @@ const intOrNull = (x: unknown): number | null => {
   const n = Number(x);
   return Number.isFinite(n) ? Math.trunc(n) : null;
 };
+/** Leading integer of a cricket score string ("366" → 366, "108/9" → 108). */
+const cricketRuns = (x: unknown): number | null => {
+  const m = String(x ?? "").match(/\d+/);
+  return m ? parseInt(m[0], 10) : null;
+};
 
 /** StatPal live-feed path per ТЗ sport. Soccer is v2 with a different shape;
  *  the rest are v1 `/<sport>/livescores`. */
@@ -288,7 +293,9 @@ export function parseStatpalCricket(json: any): SportsMatchStatus[] {
         home: String((m as any).home?.name ?? "?"), away: String((m as any).away?.name ?? "?"),
         state: finished ? "finished" : upcoming ? "upcoming" : "live",
         minute: null,
-        scoreHome: intOrNull((m as any).home?.totalscore), scoreAway: intOrNull((m as any).away?.totalscore),
+        // cricket totalscore is "runs" (Tests) or "runs/wickets" (T20, e.g.
+        // "108/9") — take the leading integer (runs) as the numeric score.
+        scoreHome: cricketRuns((m as any).home?.totalscore), scoreAway: cricketRuns((m as any).away?.totalscore),
         final: finished,
         detail: (c as any).name ? String((c as any).name) : post || undefined,
         clock: null,

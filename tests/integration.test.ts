@@ -412,12 +412,17 @@ test("parseStatpalCricket: winner/comment => finished; match as object; runs as 
       comment: { post: "India A won by 10 wickets" } } },
     { id: "c2", name: "T20", match: { id: "k2", status: "Not Started",
       home: { name: "X", totalscore: "" }, away: { name: "Y", totalscore: "" } } },
+    // live T20: score is "runs/wickets" — take the runs
+    { id: "c3", name: "MLC", match: { id: "k3", status: "In Progress",
+      home: { name: "Seattle Orcas", totalscore: "108/9" }, away: { name: "Texas Super Kings", totalscore: "" } } },
   ] } };
   const rows = parseStatpalCricket(json);
   const k1 = rows.find((r) => r.externalRef === "k1")!;
   assert.equal(k1.state, "finished", "winner flag / 'won by' => finished despite 'Stumps' status");
   assert.equal(k1.scoreHome, 366); assert.equal(k1.scoreAway, 543);
   assert.equal(rows.find((r) => r.externalRef === "k2")!.state, "upcoming");
+  const k3 = rows.find((r) => r.externalRef === "k3")!;
+  assert.equal(k3.state, "live"); assert.equal(k3.scoreHome, 108, "runs parsed from '108/9'");
 });
 
 test("parseStatpalSoccer: minute-status=live, FT=finished, clock-time=upcoming (Morocco covered)", () => {
