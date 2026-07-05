@@ -9,6 +9,7 @@ import * as R from "./repo.js";
 import { providerEnabled, effectiveEnv } from "./llm.js";
 import { jobActive } from "./analysis.js";
 import { warsawLabel } from "./time.js";
+import { resolveFootballMarket } from "./settlement.js";
 import type { StrategyParams } from "./types.js";
 
 export interface MarketView {
@@ -55,6 +56,12 @@ export interface StrategyView {
 export interface QualityView {
   brier: number | null; clv: number | null; samples: number;
   calib: { bucket: string; predicted: number; actual: number }[];
+  /** realised results split by ENTRY phase (pre-match vs in-match) */
+  phases?: { id: string; label: string; bets: number; wins: number; pnl: number; clv: number | null }[];
+  /** value of active management: actual realised vs holding every close to resolution */
+  mgmt?: { actualPnl: number; heldToEndPnl: number; managed: number };
+  /** bank value per match (chronological), for the equity sparkline */
+  equity?: number[];
 }
 export interface FeedItem {
   t: string; type: string; sport: string; match: string; strat?: string;
@@ -213,11 +220,20 @@ export function buildAppData(db: Database, env = process.env): AppData {
     }
   }
 
-  // quality
+  // quality: stored predictive metrics (Brier/CLV/calibration) + derived
+  // per-phase / management / equity extras computed from the bet history.
   const quality: Record<string, QualityView> = {};
+  const budgetOf: Record<string, number> = {};
+  for (const c of comps) for (const sh of R.sharesForComp(db, c.id)) budgetOf[sh.strategy_id] = (budgetOf[sh.strategy_id] ?? 0) + Math.floor((c.budget * sh.pct) / 100);
   for (const s of strategies) {
     const q = R.getQuality(db, s.id);
-    if (q) quality[s.id] = { brier: q.brier, clv: q.clv, samples: q.samples, calib: q.calibration };
+    const extras = computeQualityExtras(db, s.id, budgetOf[s.id] ?? 0);
+    if (q || extras.phases.some((p) => p.bets > 0) || extras.equity) {
+      quality[s.id] = {
+        brier: q?.brier ?? null, clv: q?.clv ?? null, samples: q?.samples ?? 0, calib: q?.calibration ?? [],
+        phases: extras.phases, mgmt: extras.mgmt, equity: extras.equity,
+      };
+    }
   }
 
   // event feed (built from trade log + reassessments + settlements)
@@ -306,6 +322,62 @@ function computeStrategyStats(db: Database, strategies: { id: string }[]): Recor
   }
   for (const s of strategies) out[s.id].matches = seenMatch[s.id].size;
   return out;
+}
+
+/** Derived quality extras from the bet history: results split by ENTRY phase
+ *  (pre-match vs in-match — the old "post-event" bucket is folded into
+ *  in-match), the value of active management (actual realised vs holding every
+ *  early close to resolution), and a per-match equity curve. */
+function computeQualityExtras(db: Database, strategyId: string, base: number): {
+  phases: { id: string; label: string; bets: number; wins: number; pnl: number; clv: number | null }[];
+  mgmt: { actualPnl: number; heldToEndPnl: number; managed: number };
+  equity: number[] | undefined;
+} {
+  const isLive = (entered: string | null) => !!entered && /\d/.test(entered); // a minute → in-match entry
+  const agg = { pre: { bets: 0, wins: 0, pnl: 0, clvSum: 0, clvN: 0 }, live: { bets: 0, wins: 0, pnl: 0, clvSum: 0, clvN: 0 } };
+  let actualSum = 0, heldSum = 0, managed = 0;
+  const perMatch: { t: string; pnl: number }[] = [];
+  for (const c of R.listCompetitions(db)) {
+    for (const m of R.listMatches(db, c.id)) {
+      let matchPnl = 0, matchT: string | null = null;
+      for (const b of R.betsForMatch(db, m.id, strategyId)) {
+        if (b.status !== "settled_won" && b.status !== "settled_lost") continue;
+        const stake = b.stake ?? 0, entry = b.entry_price ?? 0;
+        const pnl = (b.payout ?? 0) - stake;
+        matchPnl += pnl;
+        if (!matchT || b.created_at < matchT) matchT = b.created_at;
+        const ph = isLive(b.entered_minute) ? agg.live : agg.pre;
+        ph.pnl += pnl;
+        const slice = b.settled_by === "partial" || b.settled_by === "void";
+        if (!slice) { ph.bets++; if (b.result === "won") ph.wins++; }
+        if (b.closing_price != null && entry) { ph.clvSum += b.closing_price - entry; ph.clvN++; }
+        // management value: on a FINISHED match, compare the actual close to
+        // holding the position to resolution.
+        if (m.state === "finished" && m.score_home != null && m.score_away != null) {
+          actualSum += pnl;
+          const early = b.settled_by === "early" || b.settled_by === "partial";
+          if (early) {
+            const won = resolveFootballMarket(b.market_label, m.score_home, m.score_away, { home: m.home, away: m.away });
+            if (won != null) { heldSum += (won ? (entry > 0 ? stake / (entry / 100) : 0) : 0) - stake; managed++; }
+            else heldSum += pnl; // can't derive the held outcome → treat as neutral
+          } else heldSum += pnl; // resolution / void: it WAS held to the end
+        }
+      }
+      if (matchT) perMatch.push({ t: matchT, pnl: matchPnl });
+    }
+  }
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const mk = (id: string, label: string, a: typeof agg.pre) => ({ id, label, bets: a.bets, wins: a.wins, pnl: r2(a.pnl), clv: a.clvN ? r2(a.clvSum / a.clvN) : null });
+  const phases = [mk("pre", "До матча", agg.pre), mk("live", "В течение матча", agg.live)];
+  const mgmt = { actualPnl: r2(actualSum), heldToEndPnl: r2(heldSum), managed };
+  let equity: number[] | undefined;
+  if (base > 0 && perMatch.length) {
+    perMatch.sort((x, y) => (x.t < y.t ? -1 : x.t > y.t ? 1 : 0));
+    let eq = base; const pts = [r2(base)];
+    for (const x of perMatch) { eq += x.pnl; pts.push(r2(eq)); }
+    if (pts.length > 1) equity = pts;
+  }
+  return { phases, mgmt, equity };
 }
 
 function buildFeed(
