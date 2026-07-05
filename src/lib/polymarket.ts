@@ -364,8 +364,14 @@ export function titleMatchScore(title: string, home: string, away: string): numb
   );
 }
 function matchesTitle(name: string, titleWords: Set<string>): boolean {
-  const key = nameKey(name);
-  return key.length >= 2 && titleWords.has(key);
+  const { key, qualifiers } = nameKeyTokens(name);
+  if (key.length < 2 || !titleWords.has(key)) return false;
+  // Same-city / shared-suffix clubs collide on the bare key ("Real"/"Atlético"
+  // Madrid → "madrid"; Manchester "United"/"City" → "manchester"), which linked
+  // the WRONG fixture — bets then priced against another game's markets. When the
+  // name carries a distinguishing qualifier, the title MUST carry it too.
+  if (qualifiers.length && !qualifiers.some((q) => titleWords.has(q))) return false;
+  return true;
 }
 
 /**
@@ -555,17 +561,21 @@ function norm(s: string): string {
 // LAST token blindly made "Manchester United" key on "united" and false-match
 // "Newcastle United"; skipping these keys on "manchester" instead. (Mirrors
 // engine.ts TEAM_STOPWORDS; kept local to avoid an engine→polymarket cycle.)
-const NAME_STOPWORDS = new Set(["fc", "afc", "sc", "cf", "ac", "as", "cd", "sv", "fk", "if", "bk", "club", "united", "city", "town", "county", "calcio", "sporting", "real", "athletic", "atletico"]);
-function nameKey(name: string): string {
+// Pure connectors — no identity, ignored entirely ("FC", "AC", "CF"…).
+const NAME_CONNECTORS = new Set(["fc", "afc", "sc", "cf", "ac", "as", "cd", "sv", "fk", "if", "bk", "club", "calcio"]);
+// Shared qualifiers/suffixes: several clubs share a city or word ("Real"/
+// "Atlético" Madrid, Manchester "United"/"City"). These aren't the KEY (they'd
+// collide) but they DISAMBIGUATE — required in the title when the name has one.
+const NAME_QUALIFIERS = new Set(["united", "city", "town", "county", "sporting", "real", "athletic", "atletico", "racing", "deportivo", "inter"]);
+/** Split a team name into its KEY (the identifying surname/city token used for
+ *  the primary match) and any shared QUALIFIER tokens that must also agree. */
+function nameKeyTokens(name: string): { key: string; qualifiers: string[] } {
   const all = norm(name).split(/\s+/).filter(Boolean);
   const long = all.filter((w) => w.length >= 3);
-  const pool = long.length ? long : all; // fall back to short tokens if that's all there is
-  // Prefer the last DISTINCTIVE (non-suffix) token — the surname / the club's
-  // identifying word — over a generic trailing "united"/"city". Fall back to the
-  // last token when every token is generic.
-  const distinctive = pool.filter((w) => !NAME_STOPWORDS.has(w));
-  const pick = distinctive.length ? distinctive : pool;
-  return pick.length ? pick[pick.length - 1] : "";
+  const pool = (long.length ? long : all).filter((w) => !NAME_CONNECTORS.has(w));
+  const core = pool.filter((w) => !NAME_QUALIFIERS.has(w));
+  const pick = core.length ? core : pool;
+  return { key: pick.length ? pick[pick.length - 1] : "", qualifiers: pool.filter((w) => NAME_QUALIFIERS.has(w)) };
 }
 async function withTimeout(
   ms: number,
