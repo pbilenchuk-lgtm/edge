@@ -72,6 +72,10 @@ export interface SportsConfig {
   /** ESPN leagues to poll per sport (football comes from linked competitions).
    *  These have stable slugs; tennis/table-tennis/esports aren't on ESPN. */
   sportLeagues: Record<string, string[]>;
+  /** StatPal (paid, self-serve) — covers the sports ESPN can't: per-match tennis,
+   *  esports, cricket. Empty key → StatPal off, ESPN-only. */
+  statpalKey: string;
+  statpalBase: string;
 }
 
 /** Parse a comma-separated env override into a league slug list. */
@@ -90,10 +94,12 @@ export function loadSportsConfig(env: Record<string, string | undefined> = proce
       basketball: leaguesEnv(env.ESPN_BASKETBALL_LEAGUES, ["nba", "wnba"]),
       hockey: leaguesEnv(env.ESPN_HOCKEY_LEAGUES, ["nhl"]),
       baseball: leaguesEnv(env.ESPN_BASEBALL_LEAGUES, ["mlb"]),
-      // ESPN cricket needs numeric series ids (no stable slug) — off by default,
-      // set ESPN_CRICKET_LEAGUES=8039,... when a covered series is live.
+      // ESPN cricket needs numeric series ids (no stable slug); StatPal covers
+      // cricket properly, so ESPN cricket is off unless explicitly configured.
       cricket: leaguesEnv(env.ESPN_CRICKET_LEAGUES, []),
     },
+    statpalKey: env.STATPAL_KEY ?? "",
+    statpalBase: env.STATPAL_BASE ?? "https://statpal.io/api",
   };
 }
 
@@ -158,6 +164,147 @@ export class EspnSportsProvider implements SportsProvider {
     } finally {
       clearTimeout(timer);
     }
+  }
+}
+
+// ------------------------------------------------------------
+// StatPal provider — per-match tennis / esports / cricket (not on ESPN).
+// Self-serve JSON API; feeds are XML-derived, so a single child collapses to an
+// OBJECT instead of a 1-element array — `asArr` normalizes that everywhere.
+// Live-only endpoints (in-play + finished today); upcoming matches come from
+// Polymarket discovery and get their live score/state here once they start.
+// ------------------------------------------------------------
+const asArr = <T>(x: T | T[] | null | undefined): T[] => (Array.isArray(x) ? x : x == null ? [] : [x]);
+const intOrNull = (x: unknown): number | null => {
+  if (x == null || x === "") return null;
+  const n = Number(x);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+};
+
+/** Which StatPal `/v1/<sport>/livescores` endpoint backs each ТЗ sport. */
+const STATPAL_ENDPOINT: Record<string, string> = { tennis: "v1/tennis", esports: "v1/esports", cricket: "v1/cricket" };
+
+export class StatpalSportsProvider implements SportsProvider {
+  readonly name = "statpal";
+  constructor(private cfg: SportsConfig, private fetchImpl: typeof fetch = fetch) {}
+
+  leaguesFor(sport: string): string[] {
+    return STATPAL_ENDPOINT[sport] ? [""] : []; // one feed per sport (no league slug)
+  }
+
+  async scoreboard(sport: string, _league: string): Promise<SportsMatchStatus[]> {
+    const ep = STATPAL_ENDPOINT[sport];
+    if (!ep) return [];
+    const json = await this.get(`${ep}/livescores`);
+    if (!json) return [];
+    try {
+      if (sport === "tennis") return parseStatpalTennis(json);
+      if (sport === "esports") return parseStatpalEsports(json);
+      if (sport === "cricket") return parseStatpalCricket(json);
+    } catch { /* malformed feed → nothing, keep last DB state */ }
+    return [];
+  }
+
+  private async get(path: string): Promise<any | null> {
+    const url = `${this.cfg.statpalBase}/${path}?access_key=${encodeURIComponent(this.cfg.statpalKey)}`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs);
+    try {
+      const res = await this.fetchImpl(url, { signal: ctrl.signal });
+      if (!res.ok) return null;
+      return (await res.json()) as any;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+const isTime = (s: string) => /^\d{1,2}:\d{2}$/.test(s.trim());
+
+export function parseStatpalTennis(json: any): SportsMatchStatus[] {
+  const out: SportsMatchStatus[] = [];
+  for (const t of asArr(json?.livescores?.tournament)) {
+    for (const m of asArr((t as any).match)) {
+      const ps = asArr((m as any).player);
+      if (ps.length < 2) continue;
+      const [h, a] = ps as any[];
+      const st = String((m as any).status ?? "");
+      const finished = /finish|retired|walk\s?over|\bw\.?o\b|\bdef\b|abandon/i.test(st);
+      const upcoming = /not started|scheduled/i.test(st) || isTime(st);
+      out.push({
+        externalRef: String((m as any).id),
+        home: String(h.name ?? "?"), away: String(a.name ?? "?"),
+        state: finished ? "finished" : upcoming ? "upcoming" : "live",
+        minute: null,
+        scoreHome: intOrNull(h.totalscore), scoreAway: intOrNull(a.totalscore),
+        final: finished,
+        detail: (t as any).name ? String((t as any).name) : String((m as any).status ?? ""),
+        clock: null,
+      });
+    }
+  }
+  return out;
+}
+
+export function parseStatpalEsports(json: any): SportsMatchStatus[] {
+  const out: SportsMatchStatus[] = [];
+  for (const m of asArr(json?.scores?.match)) {
+    const st = String((m as any).status ?? "").toLowerCase();
+    const finished = /finish|walk\s?over/.test(st);
+    const upcoming = /not started|scheduled/.test(st);
+    out.push({
+      externalRef: String((m as any).id),
+      home: String((m as any).home?.name ?? "?"), away: String((m as any).away?.name ?? "?"),
+      state: finished ? "finished" : upcoming ? "upcoming" : "live",
+      minute: null,
+      scoreHome: intOrNull((m as any).home?.score), scoreAway: intOrNull((m as any).away?.score),
+      final: finished,
+      detail: String((m as any).type ?? (m as any).league ?? ""),
+      clock: null,
+    });
+  }
+  return out;
+}
+
+export function parseStatpalCricket(json: any): SportsMatchStatus[] {
+  const out: SportsMatchStatus[] = [];
+  for (const c of asArr(json?.scores?.category)) {
+    for (const m of asArr((c as any).match)) {
+      const st = String((m as any).status ?? "");
+      const homeWin = String((m as any).home?.winner) === "True";
+      const awayWin = String((m as any).away?.winner) === "True";
+      const post = String((m as any).comment?.post ?? "");
+      const finished = homeWin || awayWin || /finish|abandon|no result/i.test(st) || /won by|match drawn|\bdraw\b/i.test(post);
+      const upcoming = /not started|scheduled/i.test(st);
+      out.push({
+        externalRef: String((m as any).id),
+        home: String((m as any).home?.name ?? "?"), away: String((m as any).away?.name ?? "?"),
+        state: finished ? "finished" : upcoming ? "upcoming" : "live",
+        minute: null,
+        scoreHome: intOrNull((m as any).home?.totalscore), scoreAway: intOrNull((m as any).away?.totalscore),
+        final: finished,
+        detail: (c as any).name ? String((c as any).name) : post || undefined,
+        clock: null,
+      });
+    }
+  }
+  return out;
+}
+
+/** Route each sport to the provider that covers it best; everything else to a
+ *  fallback (ESPN). Lets the enrichment loop stay single-provider while tennis/
+ *  esports/cricket come from StatPal and the majors from ESPN. */
+export class CompositeSportsProvider implements SportsProvider {
+  readonly name = "composite";
+  constructor(private routes: Record<string, SportsProvider>, private fallback: SportsProvider) {}
+  private pick(sport: string): SportsProvider { return this.routes[sport] ?? this.fallback; }
+  leaguesFor(sport: string): string[] { const p = this.pick(sport); return p.leaguesFor ? p.leaguesFor(sport) : []; }
+  scoreboard(sport: string, league: string): Promise<SportsMatchStatus[]> { return this.pick(sport).scoreboard(sport, league); }
+  matchDetail(sport: string, league: string, eventId: string): Promise<MatchDetail | null> {
+    const p = this.pick(sport);
+    return p.matchDetail ? p.matchDetail(sport, league, eventId) : Promise.resolve(null);
   }
 }
 
@@ -256,5 +403,11 @@ export function loadSportsProvider(
   cfg = loadSportsConfig(),
   fetchImpl: typeof fetch = fetch,
 ): SportsProvider | null {
-  return cfg.enabled ? new EspnSportsProvider(cfg, fetchImpl) : null;
+  // A StatPal key implies intent to enrich even if SPORTS_ENABLED wasn't set.
+  if (!cfg.enabled && !cfg.statpalKey) return null;
+  const espn = new EspnSportsProvider(cfg, fetchImpl);
+  if (!cfg.statpalKey) return espn;
+  const statpal = new StatpalSportsProvider(cfg, fetchImpl);
+  // ESPN for the majors (free, verified); StatPal for the sports it can't do.
+  return new CompositeSportsProvider({ tennis: statpal, esports: statpal, cricket: statpal }, espn);
 }

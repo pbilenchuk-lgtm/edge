@@ -16,6 +16,7 @@ import {
 } from "../src/lib/llm.js";
 import { extractThresholds } from "../src/lib/thresholds.js";
 import { analyzeMatch } from "../src/lib/analysis.js";
+import { parseStatpalTennis, parseStatpalEsports, parseStatpalCricket, StatpalSportsProvider, CompositeSportsProvider, loadSportsConfig as loadSportsCfg, EspnSportsProvider } from "../src/lib/sports.js";
 
 // Mock an Anthropic response carrying a JSON assessment for assessMatchLLM.
 function mockLLM(assessment: unknown) {
@@ -362,4 +363,69 @@ test("analyzeMatch: portfolio stop-loss halts a strategy's entries", async () =>
   await analyzeMatch(db, "m-lineup", deps);
   const after = R.betsForMatch(db, "m-lineup").filter((b) => b.status === "proposed" && b.strategy_id === strat);
   assert.equal(after.length, 0, "stopped-out strategy proposes nothing");
+});
+
+// ---------------- StatPal provider (tennis / esports / cricket) ----------------
+test("parseStatpalTennis: sets score, finished vs live, object-collapsed arrays", () => {
+  const json = { livescores: { sport: "tennis", tournament: [
+    { id: "1", name: "ATP Wimbledon", match: [
+      { id: "m1", status: "Finished", player: [
+        { name: "R. Safiullin", totalscore: "1", winner: "False" },
+        { name: "N. Djokovic", totalscore: "3", winner: "True" },
+      ] },
+      // in-play match: status isn't finished/scheduled -> live
+      { id: "m2", status: "Set 3", player: [
+        { name: "C. Alcaraz", totalscore: "1" }, { name: "J. Sinner", totalscore: "1" },
+      ] },
+    ] },
+    // XML collapse: a tournament with ONE match arrives as an OBJECT, not array
+    { id: "2", name: "WTA", match: { id: "m3", status: "12:30", player: [
+      { name: "A", totalscore: "0" }, { name: "B", totalscore: "0" },
+    ] } },
+  ] } };
+  const rows = parseStatpalTennis(json);
+  assert.equal(rows.length, 3);
+  const m1 = rows.find((r) => r.externalRef === "m1")!;
+  assert.equal(m1.state, "finished"); assert.equal(m1.final, true);
+  assert.equal(m1.scoreHome, 1); assert.equal(m1.scoreAway, 3);
+  assert.equal(rows.find((r) => r.externalRef === "m2")!.state, "live");
+  assert.equal(rows.find((r) => r.externalRef === "m3")!.state, "upcoming"); // "12:30" = scheduled time
+});
+
+test("parseStatpalEsports: Started=live, Not Started=upcoming, Finished=final", () => {
+  const json = { scores: { sport: "esports", match: [
+    { id: "e1", status: "Started", type: "League Of Legends", home: { name: "T1", score: "1" }, away: { name: "GenG", score: "0" } },
+    { id: "e2", status: "Not Started", type: "Dota 2", home: { name: "OG", score: "0" }, away: { name: "VP", score: "0" } },
+    { id: "e3", status: "Finished", type: "CS GO", home: { name: "NAVI", score: "2" }, away: { name: "FaZe", score: "1" } },
+  ] } };
+  const rows = parseStatpalEsports(json);
+  assert.deepEqual(rows.map((r) => r.state), ["live", "upcoming", "finished"]);
+  assert.equal(rows[0].scoreHome, 1); assert.equal(rows[2].final, true);
+  assert.equal(rows[0].home, "T1"); assert.equal(rows[0].detail, "League Of Legends");
+});
+
+test("parseStatpalCricket: winner/comment => finished; match as object; runs as score", () => {
+  const json = { scores: { sport: "cricket", category: [
+    { id: "c", name: "MLC", match: { id: "k1", status: "Stumps",
+      home: { name: "Sri Lanka A", totalscore: "366", winner: "False" },
+      away: { name: "India A", totalscore: "543", winner: "True" },
+      comment: { post: "India A won by 10 wickets" } } },
+    { id: "c2", name: "T20", match: { id: "k2", status: "Not Started",
+      home: { name: "X", totalscore: "" }, away: { name: "Y", totalscore: "" } } },
+  ] } };
+  const rows = parseStatpalCricket(json);
+  const k1 = rows.find((r) => r.externalRef === "k1")!;
+  assert.equal(k1.state, "finished", "winner flag / 'won by' => finished despite 'Stumps' status");
+  assert.equal(k1.scoreHome, 366); assert.equal(k1.scoreAway, 543);
+  assert.equal(rows.find((r) => r.externalRef === "k2")!.state, "upcoming");
+});
+
+test("CompositeSportsProvider routes per sport (statpal gaps, espn majors)", () => {
+  const cfg = loadSportsCfg({ SPORTS_ENABLED: "true", STATPAL_KEY: "k" });
+  const statpal = new StatpalSportsProvider(cfg);
+  const espn = new EspnSportsProvider(cfg);
+  const comp = new CompositeSportsProvider({ tennis: statpal, esports: statpal, cricket: statpal }, espn);
+  assert.deepEqual(comp.leaguesFor("tennis"), [""]);        // -> statpal single feed
+  assert.deepEqual(comp.leaguesFor("basketball"), ["nba", "wnba"]); // -> espn league slugs
+  assert.deepEqual(comp.leaguesFor("football"), []);        // -> espn (from linked comps)
 });
