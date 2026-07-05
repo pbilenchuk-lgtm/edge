@@ -224,23 +224,34 @@ export function normalizeEvent(raw: any): PolyEvent {
   };
 }
 
-async function gammaEvents(
+/** Low-level fetch that DISTINGUISHES a transient failure (ok:false) from a
+ *  genuinely empty page (ok:true, events:[]) — the pagination cache needs the
+ *  difference so a mid-pagination timeout isn't cached as a complete result. */
+async function gammaEventsRaw(
   cfg: PolymarketConfig,
   qs: string,
   deps: FetchDeps,
-): Promise<PolyEvent[]> {
-  if (!cfg.enabled) return [];
+): Promise<{ ok: boolean; events: PolyEvent[] }> {
+  if (!cfg.enabled) return { ok: true, events: [] };
   const doFetch = deps.fetchImpl ?? fetch;
   try {
     const res = await withTimeout(cfg.timeoutMs, (signal) =>
       doFetch(`${cfg.gammaBase}/events?${qs}`, { signal }),
     );
-    if (!res.ok) return [];
+    if (!res.ok) return { ok: false, events: [] };
     const rows = (await res.json()) as any[];
-    return Array.isArray(rows) ? rows.map(normalizeEvent) : [];
+    return { ok: true, events: Array.isArray(rows) ? rows.map(normalizeEvent) : [] };
   } catch {
-    return [];
+    return { ok: false, events: [] };
   }
+}
+
+async function gammaEvents(
+  cfg: PolymarketConfig,
+  qs: string,
+  deps: FetchDeps,
+): Promise<PolyEvent[]> {
+  return (await gammaEventsRaw(cfg, qs, deps)).events;
 }
 
 /** Near-term events for a sport (newest first). Empty on failure/disabled. */
@@ -326,16 +337,18 @@ async function fetchSportEvents(cfg: PolymarketConfig, tag: number, limit: numbe
     if (c && Date.now() - c.at < SPORT_CACHE_TTL_MS) return c.events;
   }
   const all: PolyEvent[] = [];
+  let ok = true;
   for (let off = 0; off < limit; off += GAMMA_PAGE) {
-    const page = await gammaEvents(cfg, `tag_id=${tag}&closed=false&limit=${GAMMA_PAGE}&offset=${off}&order=startDate&ascending=false`, deps);
-    all.push(...page);
-    if (page.length < GAMMA_PAGE) break; // last page
+    const page = await gammaEventsRaw(cfg, `tag_id=${tag}&closed=false&limit=${GAMMA_PAGE}&offset=${off}&order=startDate&ascending=false`, deps);
+    if (!page.ok) { ok = false; break; } // transient error mid-pagination → result is PARTIAL
+    all.push(...page.events);
+    if (page.events.length < GAMMA_PAGE) break; // genuinely the last page
   }
-  // Never cache an EMPTY result: gammaEvents returns [] on both "no events" and
-  // a transient error/timeout, and caching that would blank discovery for the
-  // whole 2-min TTL even after the network recovers. A genuinely empty sport
-  // just refetches next tick (cheap, rare).
-  if (live && all.length) sportEventCache.set(tag, { at: Date.now(), events: all });
+  // Cache ONLY a complete, non-empty fetch. A transient error mid-pagination
+  // (ok=false, partial `all`) or a fully-empty result is never cached — otherwise
+  // a timeout on page N would truncate discovery for the whole 2-min TTL even
+  // after the network recovers, dropping matches that live on later pages.
+  if (live && ok && all.length) sportEventCache.set(tag, { at: Date.now(), events: all });
   return all;
 }
 

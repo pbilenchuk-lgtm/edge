@@ -215,6 +215,12 @@ test("settlement: football market resolution from score 2:1", () => {
   const mancup = { home: "Manchester United", away: "Newcastle United" };
   assert.equal(resolveFootballMarket("Manchester United", 2, 1, mancup), true);  // home won
   assert.equal(resolveFootballMarket("Newcastle United", 2, 1, mancup), false);  // away lost
+  // a 2-way "A vs B" winner label names BOTH teams → back the FIRST-named side
+  // (was voided as unresolvable). Draw is handled separately and still wins.
+  const pf = { home: "Portugal", away: "France" };
+  assert.equal(resolveFootballMarket("Portugal vs France", 2, 1, pf), true);   // Portugal (home) won
+  assert.equal(resolveFootballMarket("France vs Portugal", 2, 1, pf), false);  // France (away) named first, lost
+  assert.equal(resolveFootballMarket("Draw (Portugal vs France)", 1, 1, pf), true); // draw still resolves as draw
 });
 
 test("settlement: moneyline resolves from score (no longer stuck open)", () => {

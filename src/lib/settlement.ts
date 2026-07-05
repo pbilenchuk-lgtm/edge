@@ -128,8 +128,15 @@ function labelSide(l: string, teams?: { home: string; away: string }): "home" | 
   if (teams) {
     const h = nameKey(teams.home), a = nameKey(teams.away);
     const has = (k: string) => k.length >= 3 && l.includes(k);
-    if (has(h) && !has(a)) return "home";
-    if (has(a) && !has(h)) return "away";
+    const hasH = has(h), hasA = has(a);
+    if (hasH && !hasA) return "home";
+    if (hasA && !hasH) return "away";
+    // Both teams named on a NON-draw label (e.g. a 2-way "A vs B" winner market,
+    // or a same-city derby where both share a distinctive token): the priced
+    // outcome leads the label, so the backed side is the FIRST-named team.
+    // Was returning null here → a real winner got voided. (Draw is already
+    // handled by the caller before this runs.)
+    if (hasH && hasA) return l.indexOf(h) <= l.indexOf(a) ? "home" : "away";
   }
   return null;
 }
