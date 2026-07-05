@@ -195,6 +195,9 @@ CREATE TABLE IF NOT EXISTS quality_metrics (
   brier       REAL,
   clv         REAL,
   calibration TEXT NOT NULL DEFAULT '[]',  -- jsonb: [{bucket, predicted, actual}]
+  phases      TEXT NOT NULL DEFAULT '[]',  -- jsonb: [{id,label,bets,wins,pnl,clv}] (pre/live)
+  mgmt        TEXT,                        -- jsonb: {actualPnl,heldToEndPnl,managed} | null
+  equity      TEXT NOT NULL DEFAULT '[]',  -- jsonb: cumulative realized P&L per settled match
   updated_at  TEXT NOT NULL
 );
 

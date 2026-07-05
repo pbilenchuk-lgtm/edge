@@ -488,16 +488,27 @@ export function setAnalyticsModel(db: Database, sportId: string, model: string):
 // ---------- quality metrics ----------
 export function upsertQuality(db: Database, q: QualityMetrics): void {
   db.prepare(
-    `INSERT INTO quality_metrics(strategy_id,samples,brier,clv,calibration,updated_at)
-     VALUES(?,?,?,?,?,?)
+    `INSERT INTO quality_metrics(strategy_id,samples,brier,clv,calibration,phases,mgmt,equity,updated_at)
+     VALUES(?,?,?,?,?,?,?,?,?)
      ON CONFLICT(strategy_id) DO UPDATE SET
        samples=excluded.samples, brier=excluded.brier, clv=excluded.clv,
-       calibration=excluded.calibration, updated_at=excluded.updated_at`,
-  ).run(q.strategy_id, q.samples, q.brier, q.clv, JSON.stringify(q.calibration), q.updated_at);
+       calibration=excluded.calibration, phases=excluded.phases, mgmt=excluded.mgmt,
+       equity=excluded.equity, updated_at=excluded.updated_at`,
+  ).run(
+    q.strategy_id, q.samples, q.brier, q.clv, JSON.stringify(q.calibration),
+    JSON.stringify(q.phases ?? []), q.mgmt ? JSON.stringify(q.mgmt) : null,
+    JSON.stringify(q.equity ?? []), q.updated_at,
+  );
 }
 export function getQuality(db: Database, strategyId: string): QualityMetrics | null {
-  const r = db.prepare(`SELECT * FROM quality_metrics WHERE strategy_id=?`).get(strategyId);
-  return r ? { ...r, calibration: safeJson(r.calibration, []) } : null;
+  const r = db.prepare(`SELECT * FROM quality_metrics WHERE strategy_id=?`).get(strategyId) as any;
+  return r ? {
+    ...r,
+    calibration: safeJson(r.calibration, []),
+    phases: safeJson(r.phases, []),
+    mgmt: r.mgmt ? safeJson(r.mgmt, null) : null,
+    equity: safeJson(r.equity, []),
+  } : null;
 }
 
 function safeJson<T>(s: unknown, fallback: T): T {

@@ -12,6 +12,7 @@ import {
 import { payout, settleBet, resolveFootballMarket } from "../src/lib/settlement.js";
 import {
   brierScore, clvValue, calibration, computeMetrics, verdict, MIN_SAMPLES,
+  phaseBreakdown, managementValue, equityCurve,
 } from "../src/lib/metrics.js";
 import { checkInvariants } from "../src/lib/invariants.js";
 import { warsawLabel, hoursUntil, isIso } from "../src/lib/time.js";
@@ -277,6 +278,40 @@ test("metrics: verdict branches", () => {
   assert.equal(verdict(0.25, -2, false), "эджа нет");
   assert.equal(verdict(0.25, 0.5, false), "неясно");
   assert.equal(verdict(0.1, 5, true), "мало данных");
+});
+
+test("metrics: phase breakdown splits pre/live, CLV only over bets with a close", () => {
+  const samples = [
+    { aiProb: 0.7, outcome: 1 as const, entryPrice: 60, closingPrice: 66, phase: "pre" as const, pnl: 40 },
+    { aiProb: 0.5, outcome: 0 as const, entryPrice: 50, closingPrice: null, phase: "pre" as const, pnl: -20 },
+    { aiProb: 0.8, outcome: 1 as const, entryPrice: 55, closingPrice: 70, phase: "live" as const, pnl: 60 },
+  ];
+  const [pre, live] = phaseBreakdown(samples);
+  assert.equal(pre.id, "pre");
+  assert.equal(pre.bets, 2);
+  assert.equal(pre.wins, 1);
+  assert.equal(pre.pnl, 20); // 40 + (-20)
+  assert.equal(pre.clv, 6); // only the sample with a closing price: 66-60
+  assert.equal(live.bets, 1);
+  assert.equal(live.clv, 15); // 70-55
+  // a phase with no bets yields a zeroed row with null CLV
+  const [empty] = phaseBreakdown([{ aiProb: 0.6, outcome: 1 as const, entryPrice: 50, closingPrice: 60, phase: "live" as const, pnl: 10 }]);
+  assert.equal(empty.bets, 0);
+  assert.equal(empty.clv, null);
+});
+
+test("metrics: management value sums actual vs held-to-end, null when nothing managed", () => {
+  assert.equal(managementValue([]), null);
+  const m = managementValue([
+    { actual: 100, heldToEnd: 60 },
+    { actual: -10, heldToEnd: 20 },
+  ]);
+  assert.deepEqual(m, { actualPnl: 90, heldToEndPnl: 80, managed: 2 });
+});
+
+test("metrics: equity curve is cumulative P&L starting at 0", () => {
+  assert.deepEqual(equityCurve([]), [0]);
+  assert.deepEqual(equityCurve([10, -5, 40]), [0, 10, 5, 45]);
 });
 
 // ---------------- invariants (§9) ----------------

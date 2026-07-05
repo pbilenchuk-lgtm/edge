@@ -12,7 +12,7 @@
 // Verdict / low-data flag mirror the reference UI.
 // ============================================================
 
-import type { CalibrationBucket } from "./types.js";
+import type { CalibrationBucket, PhaseMetric, MgmtMetric } from "./types.js";
 
 export const MIN_SAMPLES = 20; // §9.8: below this, metrics are noise — flag it.
 
@@ -21,6 +21,8 @@ export interface MetricSample {
   outcome: 0 | 1; // did the backed outcome happen?
   entryPrice: number; // cents
   closingPrice: number | null; // cents (null => excluded from CLV)
+  phase?: "pre" | "live"; // entry phase — for the per-phase breakdown
+  pnl?: number; // realized P&L ($) — for the per-phase P&L
 }
 
 export interface MetricsResult {
@@ -88,6 +90,64 @@ export function computeMetrics(samples: MetricSample[]): MetricsResult {
     lowData,
     verdict: verdict(brier, clv, lowData),
   };
+}
+
+const PHASE_LABELS: Record<"pre" | "live", string> = {
+  pre: "До матча",
+  live: "В течение матча",
+};
+
+/**
+ * Performance split by entry phase (pre-match vs in-match). Post-event is
+ * folded into live — only the two phases remain. Same population as the
+ * predictive metrics: resolution-settled bets, one row per phase.
+ */
+export function phaseBreakdown(samples: MetricSample[]): PhaseMetric[] {
+  return (["pre", "live"] as const).map((id) => {
+    const xs = samples.filter((s) => s.phase === id);
+    const withClose = xs.filter((s) => s.closingPrice != null);
+    const clv = withClose.length
+      ? round2(
+          withClose.reduce((a, s) => a + ((s.closingPrice as number) - s.entryPrice), 0) /
+            withClose.length,
+        )
+      : null;
+    return {
+      id,
+      label: PHASE_LABELS[id],
+      bets: xs.length,
+      wins: xs.reduce((a, s) => a + s.outcome, 0),
+      pnl: round2(xs.reduce((a, s) => a + (s.pnl ?? 0), 0)),
+      clv,
+    };
+  });
+}
+
+/**
+ * Value of active management: realized P&L of managed (early/partial) exits vs
+ * what the same slices would have returned held to settlement. `pairs` are only
+ * the managed positions whose held-to-end outcome is knowable (match finished).
+ */
+export function managementValue(
+  pairs: { actual: number; heldToEnd: number }[],
+): MgmtMetric | null {
+  if (!pairs.length) return null;
+  return {
+    actualPnl: round2(pairs.reduce((a, p) => a + p.actual, 0)),
+    heldToEndPnl: round2(pairs.reduce((a, p) => a + p.heldToEnd, 0)),
+    managed: pairs.length,
+  };
+}
+
+/** Cumulative realized P&L across settled matches (chronological), starting at 0. */
+export function equityCurve(matchPnls: number[]): number[] {
+  const out = [0];
+  let acc = 0;
+  for (const p of matchPnls) {
+    acc = round2(acc + p);
+    out.push(acc);
+  }
+  return out;
 }
 
 /** ТЗ §4.4: «эдж реален / неясно / эджа нет», with a low-data guard. */

@@ -183,16 +183,30 @@ export function seedDatabase(db: Database): void {
   addBets(db, "m-tennis", "tn1", [prop("П1 Алькарас", oddsToCents(1.75), 0.60, 8, "Малый край на покрытии — точечный вход 8%.")]);
 
   // --- quality_metrics (§2.14): demo values from the reference mockup ---
-  const quality: Record<string, { brier: number; clv: number; samples: number; calib: Array<[string, number, number]> }> = {
-    edge: { brier: 0.182, clv: 3.4, samples: 24, calib: [["50-60%", 55, 53], ["60-70%", 65, 67], ["70-80%", 75, 72], ["80%+", 85, 88]] },
-    flat: { brier: 0.213, clv: 0.8, samples: 24, calib: [["50-60%", 55, 51], ["60-70%", 65, 64], ["70-80%", 75, 70], ["80%+", 85, 79]] },
-    kelly: { brier: 0.195, clv: 2.1, samples: 18, calib: [["50-60%", 55, 56], ["60-70%", 65, 63], ["70-80%", 75, 74], ["80%+", 85, 83]] },
-    tn1: { brier: 0.24, clv: -0.5, samples: 6, calib: [["50-60%", 55, 52], ["60-70%", 65, 61]] },
+  // phases: [bets, wins, pnl, clv] for "До матча" then "В течение матча"
+  //         (post-event folded into live). mgmt: [actualPnl, heldToEndPnl, managed] | null.
+  type PhaseTuple = [number, number, number, number | null];
+  const quality: Record<string, {
+    brier: number; clv: number; samples: number; calib: Array<[string, number, number]>;
+    pre: PhaseTuple; live: PhaseTuple; mgmt: [number, number, number] | null; equity: number[];
+  }> = {
+    edge: { brier: 0.182, clv: 3.4, samples: 24, calib: [["50-60%", 55, 53], ["60-70%", 65, 67], ["70-80%", 75, 72], ["80%+", 85, 88]],
+      pre: [24, 13, 42.5, 1.8], live: [18, 14, 184.5, 4.7], mgmt: [227.0, 158.0, 14], equity: [0, 10, -5, 40, 120, 90, 160, 145, 210, 227] },
+    flat: { brier: 0.213, clv: 0.8, samples: 24, calib: [["50-60%", 55, 51], ["60-70%", 65, 64], ["70-80%", 75, 70], ["80%+", 85, 79]],
+      pre: [24, 14, 41.0, 0.8], live: [0, 0, 0, null], mgmt: null, equity: [0, 2, -2, 5, 10, 8, 15, 20, 35, 41] },
+    kelly: { brier: 0.195, clv: 2.1, samples: 18, calib: [["50-60%", 55, 56], ["60-70%", 65, 63], ["70-80%", 75, 74], ["80%+", 85, 83]],
+      pre: [18, 11, 58.0, 1.5], live: [8, 5, 34.5, 2.9], mgmt: [92.5, 101.0, 6], equity: [0, 10, 5, 20, 15, 30, 45, 40, 55, 92] },
+    tn1: { brier: 0.24, clv: -0.5, samples: 6, calib: [["50-60%", 55, 52], ["60-70%", 65, 61]],
+      pre: [6, 3, -4.0, -0.5], live: [2, 1, 6.0, 0.4], mgmt: null, equity: [0, -2, 2, -4, 5, 2] },
   };
+  const phaseRow = (id: "pre" | "live", label: string, [bets, wins, pnl, clv]: PhaseTuple) => ({ id, label, bets, wins, pnl, clv });
   for (const [sid, q] of Object.entries(quality))
     R.upsertQuality(db, {
       strategy_id: sid, samples: q.samples, brier: q.brier, clv: q.clv,
       calibration: q.calib.map(([bucket, predicted, actual]) => ({ bucket, predicted, actual })),
+      phases: [phaseRow("pre", "До матча", q.pre), phaseRow("live", "В течение матча", q.live)],
+      mgmt: q.mgmt ? { actualPnl: q.mgmt[0], heldToEndPnl: q.mgmt[1], managed: q.mgmt[2] } : null,
+      equity: q.equity,
       updated_at: T,
     });
 }

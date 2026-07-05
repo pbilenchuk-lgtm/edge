@@ -16,8 +16,8 @@ import * as R from "./repo.js";
 import type { Bet, Match } from "./types.js";
 import type { SportsMatchStatus } from "./sports.js";
 import { reassessNarrative, effectiveEnv } from "./llm.js";
-import { settleBet, resolveFootballMarket } from "./settlement.js";
-import { computeMetrics, type MetricSample } from "./metrics.js";
+import { settleBet, resolveFootballMarket, payout } from "./settlement.js";
+import { computeMetrics, phaseBreakdown, managementValue, equityCurve, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, type PolymarketConfig } from "./polymarket.js";
 import type { SportsProvider } from "./sports.js";
 
@@ -192,18 +192,58 @@ export async function refreshActiveOdds(db: Database, deps: EngineDeps = {}, opt
 // Settlement + metrics (on finish)
 // ------------------------------------------------------------
 
+/** Pre-match fills carry no minute ("предматч" or legacy null); anything with a
+ *  minute was entered live. Post-event is folded into live — no separate phase. */
+function entryPhase(enteredMinute: string | null): "pre" | "live" {
+  return enteredMinute == null || enteredMinute === "предматч" ? "pre" : "live";
+}
+
 export function recomputeMetrics(db: Database, strategyId: string, deps: EngineDeps = {}): void {
-  // Only bets settled by the REAL match outcome measure prediction quality.
-  // Early/partial cash-outs are booked by P&L sign and would bias Brier/CLV.
-  const bets = R.settledBetsForStrategy(db, strategyId).filter((b) => b.settled_by == null);
-  const samples: MetricSample[] = bets.map((b) => ({
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const all = R.settledBetsForStrategy(db, strategyId);
+
+  // Predictive metrics + phase breakdown: only bets settled by the REAL match
+  // outcome. Early/partial cash-outs are booked by P&L sign and would bias them.
+  const resolution = all.filter((b) => b.settled_by == null);
+  const samples: MetricSample[] = resolution.map((b) => ({
     aiProb: b.ai_prob ?? 0, outcome: (b.result === "won" ? 1 : 0) as 0 | 1,
     entryPrice: b.entry_price ?? 0, closingPrice: b.closing_price,
+    phase: entryPhase(b.entered_minute), pnl: r2((b.payout ?? 0) - (b.stake ?? 0)),
   }));
   const m = computeMetrics(samples);
+  const phases = phaseBreakdown(samples);
+
+  // Active-management value: managed (early/partial) exits vs held-to-end. Only
+  // comparable once the match is finished and the market is auto-resolvable.
+  const pairs: { actual: number; heldToEnd: number }[] = [];
+  for (const b of all) {
+    if (b.settled_by !== "early" && b.settled_by !== "partial") continue;
+    const match = R.getMatch(db, b.match_id);
+    if (!match || match.state !== "finished") continue;
+    const won = resolveOutcome(b, match, {});
+    if (won == null) continue;
+    pairs.push({
+      actual: r2((b.payout ?? 0) - (b.stake ?? 0)),
+      heldToEnd: r2(payout(b.entry_price ?? 0, b.stake ?? 0, won) - (b.stake ?? 0)),
+    });
+  }
+  const mgmt = managementValue(pairs);
+
+  // Equity: cumulative realized P&L per settled match, in chronological order.
+  const byMatch = new Map<string, { t: string; pnl: number }>();
+  for (const b of all) {
+    const pnl = (b.payout ?? 0) - (b.stake ?? 0);
+    const cur = byMatch.get(b.match_id);
+    if (cur) { cur.pnl += pnl; if (b.created_at < cur.t) cur.t = b.created_at; }
+    else byMatch.set(b.match_id, { t: b.created_at, pnl });
+  }
+  const equity = equityCurve(
+    [...byMatch.values()].sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0)).map((x) => r2(x.pnl)),
+  );
+
   R.upsertQuality(db, {
     strategy_id: strategyId, samples: m.samples, brier: m.brier, clv: m.clv,
-    calibration: m.calibration, updated_at: nowFn(deps)(),
+    calibration: m.calibration, phases, mgmt, equity, updated_at: nowFn(deps)(),
   });
 }
 

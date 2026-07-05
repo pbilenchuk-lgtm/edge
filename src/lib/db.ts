@@ -81,6 +81,9 @@ export function initSchema(db: Database): void {
     "ALTER TABLE bets ADD COLUMN settled_by TEXT",
     "ALTER TABLE matches ADD COLUMN clock TEXT",
     "ALTER TABLE match_live ADD COLUMN stats TEXT",
+    "ALTER TABLE quality_metrics ADD COLUMN phases TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE quality_metrics ADD COLUMN mgmt TEXT",
+    "ALTER TABLE quality_metrics ADD COLUMN equity TEXT NOT NULL DEFAULT '[]'",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }

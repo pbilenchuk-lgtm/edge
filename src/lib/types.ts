@@ -203,11 +203,33 @@ export interface CalibrationBucket {
   actual: number;
 }
 
+/** Performance of a strategy split by entry phase. Post-event is folded into
+ *  live — only pre-match vs in-match remain. */
+export interface PhaseMetric {
+  id: "pre" | "live";
+  label: string;
+  bets: number;
+  wins: number;
+  pnl: number;
+  clv: number | null; // mean CLV in cents for bets with a closing price
+}
+
+/** Value of active management: realized P&L of managed (early/partial) exits
+ *  vs what the same slices would have returned held to settlement. */
+export interface MgmtMetric {
+  actualPnl: number;
+  heldToEndPnl: number;
+  managed: number; // count of managed positions comparable to a held-to-end outcome
+}
+
 export interface QualityMetrics {
   strategy_id: string;
   samples: number;
   brier: number | null;
   clv: number | null;
   calibration: CalibrationBucket[];
+  phases: PhaseMetric[];
+  mgmt: MgmtMetric | null;
+  equity: number[]; // cumulative realized P&L per settled match (starts at 0)
   updated_at: string;
 }

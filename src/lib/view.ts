@@ -9,7 +9,7 @@ import * as R from "./repo.js";
 import { providerEnabled, effectiveEnv } from "./llm.js";
 import { jobActive } from "./analysis.js";
 import { warsawLabel } from "./time.js";
-import type { StrategyParams } from "./types.js";
+import type { StrategyParams, PhaseMetric, MgmtMetric } from "./types.js";
 
 export interface MarketView {
   id: string; label: string; price: number; aiProb: number | null;
@@ -55,6 +55,9 @@ export interface StrategyView {
 export interface QualityView {
   brier: number | null; clv: number | null; samples: number;
   calib: { bucket: string; predicted: number; actual: number }[];
+  phases: PhaseMetric[];
+  mgmt: MgmtMetric | null;
+  equity: number[];
 }
 export interface FeedItem {
   t: string; type: string; sport: string; match: string; strat?: string;
@@ -217,7 +220,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
   const quality: Record<string, QualityView> = {};
   for (const s of strategies) {
     const q = R.getQuality(db, s.id);
-    if (q) quality[s.id] = { brier: q.brier, clv: q.clv, samples: q.samples, calib: q.calibration };
+    if (q) quality[s.id] = { brier: q.brier, clv: q.clv, samples: q.samples, calib: q.calibration, phases: q.phases, mgmt: q.mgmt, equity: q.equity };
   }
 
   // event feed (built from trade log + reassessments + settlements)
