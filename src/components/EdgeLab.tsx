@@ -1134,8 +1134,8 @@ function MetricsScreen({ catalog, quality, stats }: any) {
               <div style={S.statCell}><div style={S.statLbl}>В матче +/−</div><div style={S.statVal}><span style={{ color: "#5fd08a" }}>{st.inMatchPlus}</span> / <span style={{ color: "#ff6b6b" }}>{st.inMatchMinus}</span> <span style={{ color: MUTE, fontSize: 10 }}>из {st.inMatch}</span></div></div>
             </div>
             {st.predictions === 0 && <div style={S.metricWarn}>Ставок ещё нет — статистика появится, когда стратегия начнёт играть.</div>}
+            <div style={{ ...S.calibLabel, marginTop: 12 }}>Метрики качества эджа {q && q.samples < 20 && <span style={{ color: "#e8a838" }}>· мало данных ({q.samples})</span>}</div>
             {q ? <>
-            <div style={{ ...S.calibLabel, marginTop: 12 }}>Метрики качества эджа {q.samples < 20 && <span style={{ color: "#e8a838" }}>· мало данных ({q.samples})</span>}</div>
             <div style={S.metricNums}>
               <div style={S.metricNumCell}><div style={S.metricNumLbl}>Brier</div><div style={{ ...S.metricNumVal, color: q.brier == null ? MUTE : q.brier <= 0.19 ? "#5fd08a" : q.brier <= 0.22 ? "#e8a838" : "#ff6b6b" }}>{q.brier != null ? q.brier.toFixed(3) : "—"}</div></div>
               <div style={S.metricNumCell}><div style={S.metricNumLbl}>CLV</div><div style={{ ...S.metricNumVal, color: q.clv == null ? MUTE : q.clv > 0 ? "#5fd08a" : "#ff6b6b" }}>{q.clv != null ? `${q.clv >= 0 ? "+" : ""}${q.clv.toFixed(1)}%` : "—"}</div></div>
@@ -1158,10 +1158,10 @@ function MetricsScreen({ catalog, quality, stats }: any) {
               })}
             </div>
             {q.samples < 20 && <div style={S.metricWarn}>Выборка мала ({q.samples}) — не доверяй метрикам качества до 20+ рассчитанных ставок.</div>}
-            </> : null}
+            </> : <div style={S.mgmtNeutral}>Нет рассчитанных ставок — метрики появятся после расчёта по завершённым матчам.</div>}
 
             {/* Результативность по фазам входа */}
-            {st.predictions > 0 && (
+            {(
               <div style={S.phaseBlock}>
                 <div style={S.phaseBlockLabel}>Результативность по фазам входа <span style={S.phaseHint}>где стратегия реально зарабатывает</span></div>
                 {q?.phases && q.phases.some((p: any) => p.bets > 0) ? (
@@ -1183,7 +1183,7 @@ function MetricsScreen({ catalog, quality, stats }: any) {
             )}
 
             {/* Ценность активного управления */}
-            {st.predictions > 0 && (
+            {(
               <div style={S.phaseBlock}>
                 <div style={S.phaseBlockLabel}>Ценность активного управления <span style={S.phaseHint}>эдж в управлении позицией, а не в прогнозе</span></div>
                 {!q?.mgmt || q.mgmt.managed === 0 ? (
@@ -1209,7 +1209,7 @@ function MetricsScreen({ catalog, quality, stats }: any) {
             )}
 
             {/* CLV по фазам */}
-            {st.predictions > 0 && (
+            {(
               <div style={S.phaseBlock}>
                 <div style={S.phaseBlockLabel}>CLV по фазам <span style={S.phaseHint}>двигался ли рынок в твою сторону после входа</span></div>
                 {q?.phases && q.phases.some((p: any) => p.clv != null) ? (
@@ -1230,7 +1230,7 @@ function MetricsScreen({ catalog, quality, stats }: any) {
             )}
 
             {/* Кривая банка */}
-            {st.predictions > 0 && (
+            {(
               <div style={S.phaseBlock}>
                 <div style={S.phaseBlockLabel}>Кривая банка <span style={S.phaseHint}>стоимость по матчам</span></div>
                 {q?.equity && q.equity.length > 1 ? (
