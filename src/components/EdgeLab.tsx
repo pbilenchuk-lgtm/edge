@@ -820,11 +820,25 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
               </div>
               );
             })()}
-            {tab === "strat" && (
+            {tab === "strat" && (() => {
+              const hasAnalysis = !!(match.preLineup || match.postLineup);
+              const noQuotes = !match.markets?.length;
+              const canRun = match.state !== "finished";
+              return (
               <div style={S.stratListGrid} className="el-strat-grid">
-                {/* Прогон запускается из вкладки «Анализ» / кнопкой ↻ у каждой
-                    стратегии (live). Здесь — только лёгкий индикатор, пока идёт. */}
-                {analyzing && <div style={S.runningRow}><span style={S.spinner} /> ИИ прогоняет стратегии…</div>}
+                {/* Ручной прогон стратегий прямо здесь — не дожидаясь авто-цикла.
+                    Доступен всегда до конца матча (в т.ч. предматч/состав). */}
+                {canRun && compStrats.length > 0 && (
+                  <div style={S.stratRunRow}>
+                    <button
+                      style={{ ...S.analysisRunBtn, opacity: (analyzing || noQuotes) ? 0.6 : 1 }}
+                      disabled={analyzing || noQuotes}
+                      title={noQuotes ? "Нет котировок — сначала «Подтянуть матчи»" : "ИИ оценит матч и подберёт ставки стратегий"}
+                      onClick={runAnalyze}
+                    >{analyzing ? <><span style={S.spinner} /> ИИ прогоняет стратегии…</> : hasAnalysis ? "↻ Переоценить (ИИ)" : "✨ Подобрать стратегии (ИИ)"}</button>
+                  </div>
+                )}
+                {analyzing && compStrats.length === 0 && <div style={S.runningRow}><span style={S.spinner} /> ИИ прогоняет стратегии…</div>}
                 {analyzeErr && <div style={S.analysisPending}>{analyzeErr}</div>}
                 {compStrats.length === 0 && <div style={S.noStrat}>Стратегия не активирована на «{comp.name}». Задай бюджет турниру (кнопка <b>$</b> на плашке) и распредели долю стратегии («⚙ Распределить доли %» над матчами) — тогда она начнёт играть и появится здесь.</div>}
                 {compStrats.map((st: any) => {
@@ -875,7 +889,8 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                   );
                 })}
               </div>
-            )}
+              );
+            })()}
             {tab === "reassess" && (
               <div>
                 <div style={S.reassessTop}>
@@ -1937,6 +1952,7 @@ const S: Record<string, React.CSSProperties> = {
   analysisEmptyMuted: { fontSize: 12, color: MUTE, fontStyle: "italic" },
   analysisRunBtn: { background: "#1e2836", border: `1px solid #5b9bd566`, color: "#7fb4e8", borderRadius: 10, padding: "10px 22px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 8 },
   analysisRerunRow: { display: "flex", justifyContent: "flex-end" },
+  stratRunRow: { display: "flex", justifyContent: "flex-start", marginBottom: 2 },
   analysisRerunBtn: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 8, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 },
   runningRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#7fb4e8", fontWeight: 600, padding: "10px 12px", background: "#1a2230", border: `1px solid #5b9bd533`, borderRadius: 10 },
   spinner: { display: "inline-block", width: 12, height: 12, border: "2px solid #5b9bd555", borderTopColor: "#7fb4e8", borderRadius: "50%", animation: "elSpin 0.7s linear infinite", flexShrink: 0 },
