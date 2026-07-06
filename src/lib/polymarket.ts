@@ -51,23 +51,27 @@ export interface PolymarketConfig {
  * union the relevant league tags. Discovery queries every tag and dedups events
  * by id, so overlaps are harmless.
  */
+// Only sports our LIVE-DATA provider actually covers belong here — trading a
+// match we can't follow in-play is a blind position (no in-match management =
+// capital bleed), so discovery is deliberately scoped to what StatPal serves
+// live: soccer, tennis (ATP), esports. Basketball/hockey/table-tennis were
+// dropped — StatPal has no feed for them (404) and ESPN covers only NBA/WNBA/NHL,
+// not the FIBA/international fixtures Polymarket lists. Re-add a sport here ONLY
+// once a live feed for it exists (see SPORT_LABELS + StatPal STATPAL_FEED).
 export const SPORT_TAG_IDS: Record<string, number[]> = {
-  football: [100350],          // soccer (NOT tag 10 = American football)
-  tennis: [864],               // filtered to liquid tours at import (see SPORT_SERIES_ALLOW)
-  basketball: [28],            // deep, liquid — NBA/EuroLeague/etc.
-  hockey: [900],               // ice hockey
-  tabletennis: [103774, 105330], // WTT + Olympic table tennis
-  esports: [65, 102366, 100635], // League of Legends, Dota 2, CS
+  football: [100350],          // soccer (NOT tag 10 = American football) — StatPal soccer + ESPN
+  tennis: [864],               // filtered to liquid tours at import (see SPORT_SERIES_ALLOW) — StatPal tennis
+  esports: [65, 102366, 100635], // League of Legends, Dota 2, CS — StatPal esports
+  // basketball/hockey/tabletennis removed — no live feed (would bleed capital, user).
   // cricket removed — no liquidity on Polymarket (user).
 };
 
-/** Human labels (RU) for the sports above — seeds the `sports` table + UI. */
+/** Human labels (RU) for the sports above — seeds the `sports` table + UI.
+ *  Keys MUST match SPORT_TAG_IDS (this set is `keepSports` for category pruning,
+ *  so a sport dropped above is auto-pruned from comps/matches/sports). */
 export const SPORT_LABELS: Record<string, string> = {
   football: "Футбол",
   tennis: "Теннис",
-  basketball: "Баскетбол",
-  hockey: "Хоккей",
-  tabletennis: "Настольный теннис",
   esports: "Киберспорт",
 };
 
