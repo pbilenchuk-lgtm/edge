@@ -543,7 +543,8 @@ export function isNoiseMarket(label: string): boolean {
     /1st half|first half|half[- ]?time|halftime|2nd half|second half/.test(l) ||
     /exact|correct score/.test(l) ||
     /\d\s*[-–]\s*\d/.test(l) || // correct-score "Team A 3 - 3 Team B" (handicaps like "-1.5" don't match)
-    /first (team )?to score|to score first|anytime (goal ?)?scorer/.test(l)
+    /first (team )?to score|to score first|anytime (goal ?)?scorer/.test(l) ||
+    /\bneither\b|any other|other score|winning margin|margin of victory|score ?cast/.test(l) // correct-score residuals
   );
 }
 

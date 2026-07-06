@@ -9,7 +9,7 @@ import * as R from "./repo.js";
 import { providerEnabled, effectiveEnv } from "./llm.js";
 import { jobActive } from "./analysis.js";
 import { warsawLabel, warsawClock, isIso } from "./time.js";
-import { SPORT_LABELS } from "./polymarket.js";
+import { SPORT_LABELS, isNoiseMarket } from "./polymarket.js";
 import { resolveFootballMarket } from "./settlement.js";
 import type { StrategyParams, Match, Bet } from "./types.js";
 
@@ -185,7 +185,10 @@ export function buildAppData(db: Database, env = process.env): AppData {
       const prices: Record<string, number> = {}; // freshest quote per label (for stats)
       for (const mk of latest) if (!(mk.label in prices)) prices[mk.label] = mk.price;
       pricesByMatch.set(m.id, prices);
-      const markets = latest.map((mk) => ({
+      // Hide noise markets (correct-score residuals: "Neither", "Any Other
+      // Score", winning margin…) even if a match was imported before they were
+      // filtered — so existing matches clean up without a DB migration.
+      const markets = latest.filter((mk) => !isNoiseMarket(mk.label)).map((mk) => ({
         id: mk.id, label: mk.label, price: mk.price, aiProb: mk.ai_prob, liq: mk.liquidity, tokenId: mk.external_ref,
         openCents: mk.label in kickoff ? kickoff[mk.label] : null,
       }));
@@ -250,7 +253,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
         analyzing: jobActive(R.getAnalysisJob(db, m.id), nowMs),
         preLineup: pre ? view(pre) : null, postLineup: post ? view(post) : null,
         assessmentHistory,
-        markets, bets, reassessByStrat, logByStrat, settledBets, result, lineups, events,
+        markets: orderMarkets(markets), bets, reassessByStrat, logByStrat, settledBets, result, lineups, events,
       };
     }
   }
@@ -300,6 +303,25 @@ export function buildAppData(db: Database, env = process.env): AppData {
   // node:sqlite rows have a null prototype; React Server Components can't pass
   // those to a client component. A JSON round-trip yields plain objects.
   return JSON.parse(JSON.stringify(payload));
+}
+
+/** Order a match's markets so PAIRED SIDES sit together — the two sides of a
+ *  yes/no or team market group adjacently (primary side first, "— No"/Under
+ *  after), groups ordered by liquidity. Also shows a bare yes-market side as
+ *  "— Yes" when its "— No" sibling exists, so an old BTTS reads symmetrically. */
+export function orderMarkets(mkts: MatchView["markets"]): MatchView["markets"] {
+  const orig = new Set(mkts.map((m) => m.label));
+  const disp = mkts.map((m) => (!/\s—\s/.test(m.label) && orig.has(`${m.label} — No`)) ? { ...m, label: `${m.label} — Yes` } : m);
+  const baseOf = (l: string) => l.replace(/\s+—\s+[^—]+$/, "");                 // strip trailing "— side"
+  const sideRank = (l: string) => /\s—\s*(no|under)\b/i.test(l) ? 1 : 0;        // primary side first
+  const liqOf = (m: MatchView["markets"][number]) => Number(m.liq ?? 0) || 0;
+  const groupLiq = new Map<string, number>();
+  for (const m of disp) { const b = baseOf(m.label); groupLiq.set(b, Math.max(groupLiq.get(b) ?? -1, liqOf(m))); }
+  return disp.slice().sort((a, b) => {
+    const ba = baseOf(a.label), bb = baseOf(b.label);
+    if (ba !== bb) return (groupLiq.get(bb)! - groupLiq.get(ba)!) || (ba < bb ? -1 : 1); // liquid groups first
+    return (sideRank(a.label) - sideRank(b.label)) || (a.label < b.label ? -1 : 1);      // sides adjacent, primary first
+  });
 }
 
 function view(a: { confidence: string | null; short: string | null; body: string | null; verdict: string | null; status: string }): AssessmentView {

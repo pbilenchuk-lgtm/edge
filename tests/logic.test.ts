@@ -366,3 +366,25 @@ test("engineLock: owner token guards release — a stale holder can't free a re-
   assert.ok(engineIsBusy(), "stale release can't wipe the new holder's lock");
   releaseEngine(b);
 });
+
+test("orderMarkets: paired sides sit together, bare Yes normalized, groups by liquidity", async () => {
+  const { orderMarkets } = await import("../src/lib/view.js");
+  const mk = (label: string, liq: string | null) => ({ id: label, label, price: 50, aiProb: null, liq, tokenId: label, openCents: null });
+  // scrambled input: BTTS (bare Yes + — No), a team yes/no, an unrelated single
+  const input = [
+    mk("Both Teams to Score — No", "800"),
+    mk("Over 2.5", "900"),
+    mk("Team A — No", "300"),
+    mk("Both Teams to Score", "800"),   // bare Yes
+    mk("Team A", "300"),                // bare Yes for Team A
+  ] as any;
+  const out = orderMarkets(input).map((m: any) => m.label);
+  // bare BTTS Yes shown as "— Yes" and adjacent to its No
+  const yi = out.indexOf("Both Teams to Score — Yes"), ni = out.indexOf("Both Teams to Score — No");
+  assert.ok(yi >= 0 && ni === yi + 1, "BTTS Yes immediately followed by No");
+  // team sides adjacent, Yes before No
+  const tyi = out.indexOf("Team A — Yes"), tni = out.indexOf("Team A — No");
+  assert.ok(tyi >= 0 && tni === tyi + 1, "Team A Yes then No adjacent");
+  // most-liquid group (Over 2.5, liq 900) comes before the 800/300 groups
+  assert.ok(out.indexOf("Over 2.5") < yi, "liquid single-market group ordered first");
+});
