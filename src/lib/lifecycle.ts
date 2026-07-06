@@ -367,22 +367,12 @@ export async function strategistReassess(
         context: ctx,
       }, strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
       if (!dec.ok) continue;
-
-      // Record the reassessment as a narrative note (Переоценки tab) — this is
-      // BOTH the analytics readout ("что вижу сейчас") AND the timestamp the
-      // periodic 5-min cadence keys off. Written every time the strategist runs,
-      // even when it decides to hold (no exits/entries), so the tab shows the
-      // ongoing in-match thinking and the cadence advances.
-      const actioned: string[] = [];
-      if (dec.exits.length) actioned.push(`закрыть ${dec.exits.length}`);
-      if (dec.picks.length) actioned.push(`войти ${dec.picks.length}`);
-      const noteBody = dec.note?.trim() || (actioned.length ? `Действия: ${actioned.join(", ")}.` : "Держу текущие позиции без изменений.");
-      R.insertReassessment(db, {
-        id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m),
-        body: noteBody, confidence: assess?.confidence ?? null,
-        trigger: labelFor.get(m.id) ?? "time", created_at: now,
-      });
       touched.add(sid);
+      // Track what ACTUALLY happened, so the reassessment note (written AFTER the
+      // exits/entries below) states reality — not the LLM's intent. Otherwise the
+      // note musing "держу BTTS No" showed even when no such position was ever
+      // opened (picks gated / abstained), reading like positions that don't exist.
+      const enteredMarkets: string[] = [], exitedMarkets: string[] = [], unfilled: string[] = [];
 
       // (a) EXITS — full or partial fixation on this strategy's open positions.
       const exitedIds = new Set<string>();
@@ -402,6 +392,7 @@ export async function strategistReassess(
         const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag}) @ ${mk.price}¢ · стратег: ${ex.reason} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
         out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}`, pnl });
+        exitedMarkets.push(`${b.market_label} (${tag})`);
         touched.add(sid);
       }
 
@@ -409,34 +400,53 @@ export async function strategistReassess(
       // live share can enter; code sizes/gates. Dedup against markets this
       // strategy already holds/proposed so we never double up on the same bet.
       const share = shares.find((s) => s.strategy_id === sid);
-      if (!share || share.pct <= 0 || !dec.picks.length) continue;
-      const budget = stratBudget(c.budget, share.pct);
-      const drawdown = strategyDrawdown(db, comp, sid, budget);
-      const held = new Set(R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").map((b) => norm(b.market_label)));
-      // Seed exposure + realized from ALL the strategy's matches in this comp
-      // (open AND still-proposed — autoEnter will fill the proposals), so the
-      // §9.3 cap is per-COMPETITION, not per-match: concurrent matches can't each
-      // stake the full share.
-      let exposure = strategyCompExposure(db, comp, sid);
-      const realizedPnl = strategyCompRealized(db, comp, sid);
-      for (const pick of dec.picks) {
-        const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
-        if (!mk || mk.ai_prob == null || mk.price == null) continue; // need a probability to size
-        if (held.has(norm(mk.label))) continue;                       // already in this market
-        const d = sizeBet({ params: strat.params, aiProb: mk.ai_prob, priceCents: mk.price, budget, exposure, realizedPnl, confidence: pick.conviction as Confidence, drawdown });
-        if (!d.enter) continue;
-        exposure += d.stake;
-        held.add(norm(mk.label));
-        R.insertBet(db, {
-          id: R.uid(), match_id: m.id, strategy_id: sid, market_label: mk.label,
-          status: "proposed", proposed_price: mk.price, entry_price: null, current_price: null,
-          closing_price: null, ai_prob: mk.ai_prob, stake: d.stake,
-          rationale: `переоценка: «${mk.label}» край ${d.edge.toFixed(1)}%. ${pick.reason || d.reason}.`,
-          entered_minute: null, result: null, payout: null, created_at: now,
-        });
-        out.entries.push({ matchId: m.id, strategyId: sid, market: mk.label, stake: d.stake });
-        touched.add(sid);
+      if (share && share.pct > 0 && dec.picks.length) {
+        const budget = stratBudget(c.budget, share.pct);
+        const drawdown = strategyDrawdown(db, comp, sid, budget);
+        const held = new Set(R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").map((b) => norm(b.market_label)));
+        // Seed exposure + realized from ALL the strategy's matches in this comp
+        // (open AND still-proposed — autoEnter will fill the proposals), so the
+        // §9.3 cap is per-COMPETITION, not per-match: concurrent matches can't each
+        // stake the full share.
+        let exposure = strategyCompExposure(db, comp, sid);
+        const realizedPnl = strategyCompRealized(db, comp, sid);
+        for (const pick of dec.picks) {
+          const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
+          // A pick the strategist named but that doesn't map to a real market (or
+          // has no AI prob) — surface it instead of silently dropping, so a note
+          // that "wanted" a bet doesn't read as a phantom position.
+          if (!mk || mk.ai_prob == null || mk.price == null) { unfilled.push(`«${pick.label}» — нет рынка/оценки`); continue; }
+          if (held.has(norm(mk.label))) continue;                       // already in this market
+          const d = sizeBet({ params: strat.params, aiProb: mk.ai_prob, priceCents: mk.price, budget, exposure, realizedPnl, confidence: pick.conviction as Confidence, drawdown });
+          if (!d.enter) { unfilled.push(`«${mk.label}» — ${d.reason}`); continue; }
+          exposure += d.stake;
+          held.add(norm(mk.label));
+          R.insertBet(db, {
+            id: R.uid(), match_id: m.id, strategy_id: sid, market_label: mk.label,
+            status: "proposed", proposed_price: mk.price, entry_price: null, current_price: null,
+            closing_price: null, ai_prob: mk.ai_prob, stake: d.stake,
+            rationale: `переоценка: «${mk.label}» край ${d.edge.toFixed(1)}%. ${pick.reason || d.reason}.`,
+            entered_minute: null, result: null, payout: null, created_at: now,
+          });
+          out.entries.push({ matchId: m.id, strategyId: sid, market: mk.label, stake: d.stake });
+          enteredMarkets.push(mk.label);
+          touched.add(sid);
+        }
       }
+
+      // Reassessment note (Переоценки tab) — written AFTER acting, LEADING with
+      // the FACTUAL result so it can't imply positions that weren't opened.
+      const facts: string[] = [];
+      if (enteredMarkets.length) facts.push(`вошёл: ${enteredMarkets.join(", ")}`);
+      if (exitedMarkets.length) facts.push(`вышел: ${exitedMarkets.join(", ")}`);
+      if (!enteredMarkets.length && !exitedMarkets.length) facts.push(myOpen.length ? `держу ${myOpen.length} поз.` : "позиций нет, вход не сделан");
+      if (unfilled.length) facts.push(`не вошёл: ${unfilled.slice(0, 3).join("; ")}`);
+      const noteBody = `${facts.join(" · ")}.${dec.note?.trim() ? " " + dec.note.trim() : ""}`;
+      R.insertReassessment(db, {
+        id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m),
+        body: noteBody, confidence: assess?.confidence ?? null,
+        trigger: labelFor.get(m.id) ?? "time", created_at: now,
+      });
     }
   }
   for (const sid of touched) recomputeMetrics(db, sid, deps);
