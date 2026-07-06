@@ -624,10 +624,16 @@ export async function importPolymarketMatches(
         match.kickoff_at = d.kickoff;
       }
     }
-    if (!R.latestMarkets(db, match.id).length) {
-      for (const s of d.markets) {
-        R.insertMarket(db, { id: R.uid(), match_id: match.id, label: s.label, price: s.price, ai_prob: null, liquidity: s.liquidity, external_ref: s.external_ref, snapshot_at: now, is_closing: false });
-      }
+    // Attach any market side we don't already have (by CLOB token) — not
+    // all-or-nothing: an existing match must still pick up NEW sides Polymarket
+    // now exposes (e.g. the "No" leg of a yes/no market added after first import).
+    const existing = R.latestMarkets(db, match.id);
+    const haveTokens = new Set(existing.map((mk) => mk.external_ref).filter(Boolean));
+    const haveLabels = new Set(existing.map((mk) => mk.label));
+    for (const s of d.markets) {
+      // dedup by token (tokenless → by label) so re-discovery can't duplicate.
+      if (s.external_ref ? haveTokens.has(s.external_ref) : haveLabels.has(s.label)) continue;
+      R.insertMarket(db, { id: R.uid(), match_id: match.id, label: s.label, price: s.price, ai_prob: null, liquidity: s.liquidity, external_ref: s.external_ref, snapshot_at: now, is_closing: false });
     }
     out.push({ sport, match: `${d.home}–${d.away}`, created, markets: d.markets.length });
   }
