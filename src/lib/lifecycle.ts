@@ -168,6 +168,19 @@ export interface AutoEnterItem { matchId: string; strategyId: string; market: st
 // hold pre-match capital until it's out (mirrors the frontend LINEUP_SPORTS).
 const LINEUP_SPORTS = new Set(["football"]);
 
+// A match has LIVE-DATA coverage once our provider has actually matched the
+// fixture: real lineups/stats (a match_live row), a real in-match event
+// (goal/card/… — NOT our own "stats"/"other" price snapshots), or a
+// provider-driven live minute. No coverage means we can't follow or manage the
+// position in play — opening one would be blind capital that bleeds — so entry is
+// forbidden. A clock-only "live" match (minute null, no provider row) is NOT
+// covered.
+export function hasLiveData(db: Database, m: Match): boolean {
+  if (R.getMatchLive(db, m.id)) return true;
+  if (m.state === "live" && m.minute != null) return true;
+  return R.eventsForMatch(db, m.id).some((e) => e.type !== "stats" && e.type !== "other");
+}
+
 export function autoEnter(db: Database, deps: EngineDeps = {}): AutoEnterItem[] {
   const now = nowFn(deps)();
   const out: AutoEnterItem[] = [];
@@ -178,6 +191,10 @@ export function autoEnter(db: Database, deps: EngineDeps = {}): AutoEnterItem[] 
     // the match is live. This keeps the pre-match read a preview, not an entry.
     const preLineupHold = LINEUP_SPORTS.has(sport) && !m.lineup_out && (m.state === "upcoming" || m.state === "lineup");
     const markets = R.latestMarkets(db, m.id);
+    if (!markets.length) continue; // no quotes → nothing tradeable, no entry
+    // Never open a position on a match we have no LIVE data for — we couldn't
+    // manage/exit it in play, which is exactly how capital bleeds (user rule).
+    const liveData = hasLiveData(db, m);
     const bets = R.betsForMatch(db, m.id);
     // A strategy must never hold two OPEN positions on the SAME market — that's
     // the double-exposure a concurrent analyze/reassess race (or analyze+reassess
@@ -187,6 +204,7 @@ export function autoEnter(db: Database, deps: EngineDeps = {}): AutoEnterItem[] 
     for (const b of bets) {
       if (b.status !== "proposed") continue;
       if (preLineupHold) continue; // preview only — keep it «предлагается» until lineups are out
+      if (!liveData) continue; // no provider live coverage → hold as «предлагается», never fill blind
       const key = `${b.strategy_id}|${b.market_label}`;
       if (openKey.has(key)) { R.updateBet(db, b.id, { status: "not_filled" }); continue; } // already in this market — drop the dup
       const price = markets.find((x) => x.label === b.market_label)?.price ?? b.proposed_price ?? 0;

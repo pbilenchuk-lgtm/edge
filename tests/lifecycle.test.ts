@@ -51,9 +51,31 @@ test("autoEnter holds a football bet until lineups are out (no pre-lineup entry)
   R.insertBet(db, { id: "pl-1", match_id: mid, strategy_id: strat.id, market_label: "Over 2.5", status: "proposed", proposed_price: 55, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.6, stake: 50, rationale: null, entered_minute: null, result: null, payout: null, settled_by: null, created_at: "t" });
   autoEnter(db, { now: () => "t" });
   assert.equal(R.getBet(db, "pl-1")!.status, "proposed", "held as a preview before lineups are out");
+  // Lineups out = the provider confirmed the fixture (live coverage) — required
+  // before any capital is deployed.
   R.updateMatch(db, mid, { lineup_out: true });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "e", league: "l", home_lineup: JSON.stringify({ team: "A", formation: "4-4-2", starters: ["x"] }), away_lineup: null, stats: null, updated_at: "t" });
   autoEnter(db, { now: () => "t" });
   assert.equal(R.getBet(db, "pl-1")!.status, "open", "enters once lineups are out");
+});
+
+test("autoEnter refuses to open a position on a match with no live data (blind = bleed)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  // "live" only by the clock: no provider minute, no match_live, no real events.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: "2026-07-06T18:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "nd-1", match_id: mid, strategy_id: strat.id, market_label: "Over 2.5", status: "proposed", proposed_price: 55, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.6, stake: 50, rationale: null, entered_minute: null, result: null, payout: null, settled_by: null, created_at: "t" });
+
+  autoEnter(db, { now: () => "t" });
+  assert.equal(R.getBet(db, "nd-1")!.status, "proposed", "no live data → held, not filled");
+  // once the provider drives a real minute, coverage exists → it can fill
+  R.updateMatch(db, mid, { minute: 30 });
+  autoEnter(db, { now: () => "t" });
+  assert.equal(R.getBet(db, "nd-1")!.status, "open", "fills once live data is present");
 });
 
 test("evaluateExits closes an open position when the edge is gone", () => {

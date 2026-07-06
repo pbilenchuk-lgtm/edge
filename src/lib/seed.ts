@@ -100,6 +100,9 @@ export function seedDatabase(db: Database): void {
 
   // m-lineup: Португалия–Хорватия (Polymarket cents; proposed bets)
   R.insertMatch(db, base("m-lineup", "wc2026", "Португалия", "Хорватия", "lineup", { lineup_out: true, kickoff_at: "через 55 мин" }));
+  // Lineups out ⇒ the provider matched this fixture (real live coverage) — the
+  // condition autoEnter now requires before deploying capital.
+  R.upsertMatchLive(db, { match_id: "m-lineup", espn_event_id: "seed-lineup", league: "fifa.world", home_lineup: JSON.stringify({ team: "Португалия", formation: "4-3-3", starters: ["Rúben Dias"] }), away_lineup: JSON.stringify({ team: "Хорватия", formation: "4-1-4-1", starters: ["Modrić"] }), stats: null, updated_at: T });
   R.upsertAssessment(db, assess("m-lineup", "pre_lineup", "средняя",
     "Португалия фаворит выхода, зависит от ротации.",
     "До состава: Португалия фаворит по выходу, но многое зависит от ротации основы.", "Ждём состав."));
