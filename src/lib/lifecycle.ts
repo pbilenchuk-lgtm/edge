@@ -17,7 +17,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
-import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor } from "./engine.js";
+import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches } from "./engine.js";
 import { SPORT_TAG_IDS, SPORT_LABELS } from "./polymarket.js";
 import { analyzeMatch, jobActive, matchContext, strategyDrawdown, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision, sizeBet } from "./thresholds.js";
@@ -514,6 +514,10 @@ export async function runAutoCycle(
       discovered += items.length;
     }
   }
+  // Drop duplicate fixtures (a Polymarket row + a market-less provider clone that
+  // slipped past name-matching) BEFORE enrich, so provider data lands on the
+  // surviving tradeable row, not the bare clone.
+  stepSync("dedupe", () => dedupeMatches(db), 0);
   const odds = await step("odds", () => refreshActiveOdds(db, deps), [] as Awaited<ReturnType<typeof refreshActiveOdds>>);
   // Pull real lineups + live events (ESPN) — this feeds matchContext and, via
   // its fresh events, arms the strategist's in-match reassessment triggers.

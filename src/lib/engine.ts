@@ -370,7 +370,12 @@ export async function syncMatchStatus(
  *  team match), so different sources (Polymarket "pm:" ref vs ESPN numeric id)
  *  don't create duplicate rows for one game. */
 function findTwinMatch(db: Database, competitionId: string, home: string, away: string): Match | undefined {
-  return R.listMatches(db, competitionId).find((dm) => sameTeams(dm.home, dm.away, home, away));
+  const twins = R.listMatches(db, competitionId).filter((dm) => sameTeams(dm.home, dm.away, home, away));
+  if (twins.length <= 1) return twins[0];
+  // Prefer the twin that already carries Polymarket markets (the tradeable row),
+  // so provider data attaches to it rather than a bare duplicate — otherwise the
+  // score lands on a market-less clone and the real match shows "нет котировок".
+  return twins.find((dm) => R.latestMarkets(db, dm.id).length) ?? twins[0];
 }
 
 /** Create the match under a competition if it's new (keyed by external_ref, then
@@ -407,6 +412,37 @@ export function upsertImportedMatch(
   };
   R.insertMatch(db, match);
   return { match, created: true };
+}
+
+/**
+ * Remove duplicate fixtures within a competition: the SAME match imported twice
+ * — a Polymarket row (with markets/bets) plus a provider row with live data but
+ * no markets — created while name-matching briefly failed (e.g. "Djurgardens" vs
+ * "Djurgården"). For each set of same-teams twins, keep the richest (markets, then
+ * bets) and delete only the losers that carry NEITHER markets NOR bets, so nothing
+ * tradeable or with history is ever dropped. Provider data re-lands on the survivor
+ * on the next enrich. Returns how many rows were removed.
+ */
+export function dedupeMatches(db: Database): number {
+  const doomed: string[] = [];
+  for (const c of R.listCompetitions(db)) {
+    const matches = R.listMatches(db, c.id).filter((m) => m.state !== "finished");
+    const gone = new Set<string>();
+    const weight = (id: string) => R.latestMarkets(db, id).length * 2 + (R.betsForMatch(db, id).length ? 1 : 0);
+    for (let i = 0; i < matches.length; i++) {
+      const a = matches[i];
+      if (gone.has(a.id)) continue;
+      for (let j = i + 1; j < matches.length; j++) {
+        const b = matches[j];
+        if (gone.has(b.id) || !sameTeams(a.home, a.away, b.home, b.away)) continue;
+        const drop = weight(a.id) >= weight(b.id) ? b : a;
+        if (weight(drop.id) > 0) continue; // never drop a row that holds markets or bets
+        doomed.push(drop.id); gone.add(drop.id);
+        if (drop.id === a.id) break; // a itself was dropped — stop pairing from it
+      }
+    }
+  }
+  return R.deleteMatchesById(db, doomed);
 }
 
 /** Best-effort: attach Polymarket markets to a match that has none. */
@@ -661,12 +697,22 @@ function teamTokens(name: string): Set<string> {
  *  shorter name to appear in the longer (so "West Ham" ⊂ "West Ham United" ok,
  *  but "Manchester United" vs "Newcastle United" / "Manchester City" do NOT),
  *  and at least one shared DISTINCTIVE (non-suffix) token. */
+// Two tokens refer to the same word if equal, or one is the other's stem plus a
+// short inflection (≤3 chars) — Scandinavian/genitive club forms differ only in a
+// trailing suffix ("Djurgården"→"djurgarden" vs "Djurgårdens"→"djurgardens",
+// "Hammarby"/"Hammarbys"). The length guard keeps "Inter" from swallowing
+// "Internacional" and "man" from "manchester".
+function tokenCompat(x: string, y: string): boolean {
+  if (x === y) return true;
+  const [s, g] = x.length <= y.length ? [x, y] : [y, x];
+  return s.length >= 5 && g.length - s.length <= 3 && g.startsWith(s);
+}
 function nameMatch(a: string, b: string): boolean {
-  const ta = teamTokens(a), tb = teamTokens(b);
-  if (!ta.size || !tb.size) return false;
-  const [small, big] = ta.size <= tb.size ? [ta, tb] : [tb, ta];
-  if (![...small].every((t) => big.has(t))) return false;      // shorter ⊆ longer
-  return [...small].some((t) => big.has(t) && !TEAM_STOPWORDS.has(t)); // a real, distinctive token
+  const ta = [...teamTokens(a)], tb = [...teamTokens(b)];
+  if (!ta.length || !tb.length) return false;
+  const [small, big] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+  if (!small.every((t) => big.some((u) => tokenCompat(t, u)))) return false; // shorter ⊆ longer (stem-aware)
+  return small.some((t) => !TEAM_STOPWORDS.has(t) && big.some((u) => !TEAM_STOPWORDS.has(u) && tokenCompat(t, u))); // a real, distinctive token
 }
 function sameTeams(h1: string, a1: string, h2: string, a2: string): boolean {
   return (nameMatch(h1, h2) && nameMatch(a1, a2)) || (nameMatch(h1, a2) && nameMatch(a1, h2));

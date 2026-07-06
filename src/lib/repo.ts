@@ -433,6 +433,11 @@ function deleteMatches(db: Database, ids: string[]): number {
   return ids.length;
 }
 
+/** Public wrapper: delete specific matches (+ children) atomically. */
+export function deleteMatchesById(db: Database, ids: string[]): number {
+  return deleteMatches(db, ids);
+}
+
 /** Delete a competition and everything under it (matches + their children,
  *  strategy shares, comp-scoped analytics prompts, the comp row) in ONE
  *  transaction — so a crash can't leave an empty orphaned competition row. */

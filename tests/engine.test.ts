@@ -182,6 +182,26 @@ test("enrichFromEspn is sport-generic: enriches a basketball match via a provide
   assert.equal(fm.state, "upcoming", "football match of same nations left untouched (sport-scoped)");
 });
 
+test("dedupeMatches drops a market-less provider clone but keeps the tradeable twin (Djurgardens vs Djurgården)", async () => {
+  const { dedupeMatches } = await import("../src/lib/engine.js");
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const mkMatch = (id: string, home: string, away: string) => R.insertMatch(db, { id, competition_id: comp.id, home, away, state: "live", lineup_out: true, kickoff_at: null, minute: 40, score_home: 1, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+  // the Polymarket row (markets + a bet) and a bare provider clone with the
+  // inflected name — they are the SAME fixture and must collapse to one.
+  mkMatch("poly", "BK Hacken", "Djurgardens IF");
+  mkMatch("clone", "BK Häcken", "Djurgården");
+  R.insertMarket(db, { id: R.uid(), match_id: "poly", label: "Over 1.5", price: 90, ai_prob: 0.6, liquidity: "5000", external_ref: "tok", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "b1", match_id: "poly", strategy_id: R.listStrategies(db, "football")[0].id, market_label: "Over 1.5", status: "open", proposed_price: 90, entry_price: 90, current_price: 90, closing_price: null, ai_prob: 0.6, stake: 50, rationale: null, entered_minute: "10'", result: null, payout: null, created_at: "t" });
+
+  const removed = dedupeMatches(db);
+  assert.equal(removed, 1, "the market-less clone is removed");
+  assert.ok(R.getMatch(db, "poly"), "tradeable twin (markets + bet) kept");
+  assert.equal(R.getMatch(db, "clone"), null, "bare clone gone");
+  assert.ok(R.getBet(db, "b1"), "bet preserved");
+});
+
 test("enrichFromEspn reconciles a short-named esports match (e.g. 'T1') the provider reports finished", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
