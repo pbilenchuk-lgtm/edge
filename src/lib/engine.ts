@@ -542,19 +542,19 @@ export function seriesSlugOf(series: string | null, seriesSlug: string | null): 
   return (seriesSlug ?? (series ? slugify(series) : "")).toLowerCase();
 }
 
-/** Per-sport series allow-list (slugs) — null = no restriction. Tennis is scoped
- *  to the tours our live provider (StatPal) actually covers: the Grand Slams +
- *  main ATP/WTA tour. Crucially this INCLUDES the slam series (e.g. "wimbledon") —
- *  Polymarket files slam matches under their own slug, and filtering to bare "atp"
- *  discovered only lower-tier Challengers (which StatPal doesn't carry) while
- *  excluding the covered slam matches. Override via TENNIS_SERIES (comma slugs).
- *  Uncovered matches that still slip through are gated by the entry rule +
- *  uncovered-finish, so this is a discovery hint, not the live-data guarantee. */
+/** Per-sport series allow-list (slugs) — null = NO restriction. Tennis is
+ *  unrestricted by default: show any fixture that's on Polymarket, clears the
+ *  liquidity floor, and has live data — across as many tournament categories as
+ *  that yields (user: «если есть на полимаркете, ликвидность и лайв — показываем,
+ *  хоть в нескольких категориях»). The liquidity gate + coverage machinery (entry
+ *  rule + uncovered-finish) decide what actually trades, so a series whitelist is
+ *  redundant. Set TENNIS_SERIES only to deliberately narrow to specific tours. */
 export function seriesAllowFor(sport: string, env: Record<string, string | undefined> = process.env): Set<string> | null {
   if (sport !== "tennis") return null;
-  const def = "atp,wta,wimbledon,australian-open,roland-garros,french-open,us-open";
-  const slugs = (env.TENNIS_SERIES ?? def).split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
-  return new Set(slugs);
+  const raw = env.TENNIS_SERIES;
+  if (!raw) return null; // default: liquidity + live-data are the gates, not the series
+  const slugs = raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  return slugs.length ? new Set(slugs) : null;
 }
 
 export function espnLeagueForSeries(series: string | null, seriesSlug: string | null): string | null {

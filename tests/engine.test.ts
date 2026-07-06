@@ -520,10 +520,9 @@ test("settleMatch: CLV closing = kickoff for pre-match bets, entry (neutral) for
   assert.equal(R.getBet(db, inm)!.closing_price, 70, "in-match bet neutral (closing = entry 70)");
 });
 
-test("seriesAllowFor: tennis defaults to main tour + slams (incl. wimbledon), overridable, other sports unrestricted", async () => {
+test("seriesAllowFor: tennis unrestricted by default (liquidity + live-data gate), narrowable via env", async () => {
   const { seriesAllowFor } = await import("../src/lib/engine.js");
-  const def = seriesAllowFor("tennis", {})!;
-  assert.ok(def.has("atp") && def.has("wta") && def.has("wimbledon"), "covers the tours StatPal serves, incl. slams");
+  assert.equal(seriesAllowFor("tennis", {}), null, "no series whitelist — show any liquid, covered tennis");
   assert.deepEqual([...seriesAllowFor("tennis", { TENNIS_SERIES: "atp, wta" })!].sort(), ["atp", "wta"]);
   assert.equal(seriesAllowFor("football", {}), null);
 });
