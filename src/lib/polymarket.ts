@@ -501,8 +501,12 @@ export async function discoverSportMatches(
     const liquidity = markets.reduce((n, m) => n + (Number(m.liquidity ?? 0) || 0), 0);
     out.push({ home: g.home, away: g.away, kickoff: g.kickoff, markets, liquidity, series: g.series, seriesSlug: g.seriesSlug });
   }
-  // soonest kickoff first; cap to keep it usable
-  return out.sort((a, b) => (a.kickoff ?? "9") < (b.kickoff ?? "9") ? -1 : 1).slice(0, limit);
+  // MOST-LIQUID first, then cap — liquidity is what matters for betting (user),
+  // so when the cap binds we keep the deepest markets, not merely the soonest.
+  // Tie-break by soonest kickoff so equally-liquid near-term matches rank higher.
+  return out
+    .sort((a, b) => (b.liquidity - a.liquidity) || ((a.kickoff ?? "9") < (b.kickoff ?? "9") ? -1 : 1))
+    .slice(0, limit);
 }
 
 export interface MarketSnapshot { label: string; price: number; external_ref: string | null; liquidity: string | null }

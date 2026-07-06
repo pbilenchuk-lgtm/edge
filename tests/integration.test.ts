@@ -8,7 +8,7 @@ import {
   loadPolymarketConfig, getQuotes, fetchMidpointCents,
   normalizeEvent, eventToMarketSnapshots, titleMatchScore,
   findMatchEvent, fetchEventBySlug, listSportEvents,
-  isNoiseMarket, matchMarketSnapshots, parseMatchTitle,
+  isNoiseMarket, matchMarketSnapshots, parseMatchTitle, discoverSportMatches,
 } from "../src/lib/polymarket.js";
 import {
   resolveModel, apiKeyFor, callLLM, generateStrategyName, heuristicName,
@@ -186,6 +186,20 @@ test("polymarket: a generic 2-way market expands into BOTH sides (own tokens)", 
   const s2 = matchMarketSnapshots([evB], "t", 10);
   assert.equal(s2.length, 1);
   assert.equal(s2[0].label, "Morocco (-1.5)");
+});
+
+test("discoverSportMatches returns the MOST-LIQUID matches first, then caps", async () => {
+  const cfg = loadPolymarketConfig({ POLYMARKET_ENABLED: "true" });
+  const mkEvent = (id: string, home: string, away: string, liq: number) => ({
+    id, slug: id, title: `${home} vs ${away}`, startDate: "2026-07-06T12:00:00Z",
+    markets: [{ groupItemTitle: "", question: `${home} vs ${away}`, outcomes: `["${home}","${away}"]`, outcomePrices: '["0.5","0.5"]', clobTokenIds: `["t${id}a","t${id}b"]`, liquidity: String(liq), conditionId: id }],
+  });
+  const events = [mkEvent("low", "Aaa", "Bbb", 100), mkEvent("hi", "Ccc", "Ddd", 9000), mkEvent("mid", "Eee", "Fff", 1000)];
+  const fetchImpl = (async () => ({ ok: true, json: async () => events })) as unknown as typeof fetch;
+  const out = await discoverSportMatches(cfg, "tennis", "2026-07-06T00:00:00Z", { fetchImpl }, { limit: 2, windowDays: 30, nowMs: Date.parse("2026-07-06T00:00:00Z") });
+  assert.equal(out.length, 2, "capped to 2");
+  assert.equal(out[0].home, "Ccc", "most-liquid (9000) first");
+  assert.equal(out[1].home, "Eee", "second most-liquid (1000); the thin one (100) dropped by the cap");
 });
 
 test("polymarket: titleMatchScore matches on surnames", () => {
