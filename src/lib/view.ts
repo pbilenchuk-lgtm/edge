@@ -236,8 +236,10 @@ export function buildAppData(db: Database, env = process.env): AppData {
       const parseLineup = (j: string | null): LineupView | null => { if (!j) return null; try { const l = JSON.parse(j); return { team: l.team ?? "?", formation: l.formation ?? null, starters: Array.isArray(l.starters) ? l.starters : [] }; } catch { return null; } };
       const lineups = live && (live.home_lineup || live.away_lineup)
         ? { home: parseLineup(live.home_lineup), away: parseLineup(live.away_lineup) } : null;
+      // NEWEST event first (repo returns oldest→newest) — easier to read the
+      // «События матча» tab without scrolling to the bottom for the latest.
       const events = R.eventsForMatch(db, m.id).filter((e) => e.type !== "other")
-        .map((e) => ({ minute: e.minute, type: e.type, team: e.team, text: e.text }));
+        .map((e) => ({ minute: e.minute, type: e.type, team: e.team, text: e.text })).reverse();
       // For a clock-driven live match (no ESPN minute) show how long it's been
       // going, computed from kickoff — so the card reads "LIVE · N'" instead of a
       // bare "LIVE". ESPN-driven matches keep their real match minute.
@@ -312,8 +314,10 @@ export function buildAppData(db: Database, env = process.env): AppData {
 export function orderMarkets(mkts: MatchView["markets"]): MatchView["markets"] {
   const orig = new Set(mkts.map((m) => m.label));
   const disp = mkts.map((m) => (!/\s—\s/.test(m.label) && orig.has(`${m.label} — No`)) ? { ...m, label: `${m.label} — Yes` } : m);
-  const baseOf = (l: string) => l.replace(/\s+—\s+[^—]+$/, "");                 // strip trailing "— side"
-  const sideRank = (l: string) => /\s—\s*(no|under)\b/i.test(l) ? 1 : 0;        // primary side first
+  // group key: strip a trailing "— side" AND fold Over/Under to one line so the
+  // two totals sides share a base ("Over 2.5"/"Under 2.5" → "± 2.5").
+  const baseOf = (l: string) => l.replace(/\s+—\s+[^—]+$/, "").replace(/\b(over|under)\b/gi, "±");
+  const sideRank = (l: string) => /(\s—\s*no\b|\bunder\b)/i.test(l) ? 1 : 0;    // primary side first, No/Under after
   const liqOf = (m: MatchView["markets"][number]) => Number(m.liq ?? 0) || 0;
   const groupLiq = new Map<string, number>();
   for (const m of disp) { const b = baseOf(m.label); groupLiq.set(b, Math.max(groupLiq.get(b) ?? -1, liqOf(m))); }

@@ -586,26 +586,30 @@ export function matchMarketSnapshots(
  */
 function marketSides(m: PolyMarketRow): { label: string; price: number | null; token: string | null }[] {
   const o = m.outcomes;
-  const isEntity = (s: string) => !!s && !/^(over|under|yes|no)\b/i.test(s.trim());
-  const l = m.label.toLowerCase();
-  if (o.length === 2 && isEntity(o[0]) && isEntity(o[1]) && !l.includes(o[0].toLowerCase()) && !l.includes(o[1].toLowerCase())) {
-    const sides = [0, 1].map((i) => ({ label: `${m.label} — ${o[i]}`, price: m.prices[i] ?? null, token: m.tokenIds[i] ?? null }));
-    if (sides.every((s) => s.price != null)) return sides;
-  }
-  // A 2-way YES/NO market (BTTS, Draw, penalty…) is TWO tradeable bets — surface
-  // BOTH sides (own token/price), labelled "<market> — Yes/No". Otherwise only
-  // the priced "Yes" was shown and the "No" side was hidden. Skip DIRECTIONAL
-  // labels (over/under/handicap) whose own text already names the side — those
-  // stay single via clarifyLabel (Polymarket lists their opposite separately).
-  const directional = /\bover\b|\bunder\b|o\/u|[+-]\s*\d/i.test(m.label);
-  if (!directional && o.length === 2 && /^(yes|no)$/i.test((o[0] ?? "").trim()) && /^(yes|no)$/i.test((o[1] ?? "").trim())) {
-    const sides = [0, 1].map((i) => ({
-      label: `${m.label} — ${/^y/i.test(o[i].trim()) ? "Yes" : "No"}`,
-      price: m.prices[i] ?? null, token: m.tokenIds[i] ?? null,
-    }));
-    if (sides.every((s) => s.price != null)) return sides;
+  if (o.length === 2 && o[0] && o[1] && m.prices[0] != null && m.prices[1] != null) {
+    const l = m.label.toLowerCase();
+    // If the label already NAMES one outcome it's a pre-split side (spread
+    // "Morocco (-1.5)", moneyline "Portugal") — Polymarket lists the opposite
+    // separately, so keep it single. Otherwise a 2-way market (Over/Under,
+    // Yes/No, "Team to Advance") is TWO tradeable bets → surface BOTH sides,
+    // each with its own CLOB token/price.
+    const namesOutcome = l.includes(o[0].toLowerCase()) || l.includes(o[1].toLowerCase());
+    // A label that EXPLICITLY names a direction/handicap ("Over 2.5", "Morocco
+    // (-1.5)") is already one side — its opposite is a separate market — so keep
+    // it single. An "O/U 2.5" label (side lives only in the outcomes) expands.
+    const directionalLabel = /\bover\b|\bunder\b|[+-]\s*\d/i.test(m.label);
+    if (!namesOutcome && !directionalLabel) return [0, 1].map((i) => ({ label: sideLabel(m.label, o[i], o[1 - i]), price: m.prices[i]!, token: m.tokenIds[i] ?? null }));
   }
   return [{ label: clarifyLabel(m.label, o), price: m.priceCents, token: m.tokenIds[0] ?? null }];
+}
+
+/** Clear label for ONE side of a 2-way market. Over/Under bakes the side into
+ *  the label ("O/U 2.5" → "Over 2.5" / "Under 2.5"); Yes/No and entity outcomes
+ *  append the side ("Both Teams to Score — Yes", "Team to Advance — Paraguay"). */
+function sideLabel(label: string, outcome: string, other: string): string {
+  const s = outcome.toLowerCase().trim();
+  if (/^(over|under)/.test(s)) return clarifyLabel(label, [outcome, other]);
+  return `${label} — ${s === "yes" ? "Yes" : s === "no" ? "No" : outcome}`;
 }
 
 /**

@@ -125,9 +125,10 @@ test("polymarket: normalizeEvent parses Gamma JSON-string fields to cents", () =
 
 test("polymarket: eventToMarketSnapshots drops priceless markets", () => {
   const snaps = eventToMarketSnapshots(normalizeEvent(EVENT_FIXTURE[0]), "2026-07-03T00:00:00Z");
-  assert.equal(snaps.length, 2); // the priceless one is dropped
-  assert.deepEqual(snaps[0], { label: "Connor Doig vs Eudald Gonzalez", price: 62, external_ref: "tok-a", liquidity: "1234" });
-  assert.equal(snaps[1].label, "Total Sets: Over 2.5"); // O/U clarified to the priced side (outcomes[0])
+  const labels = snaps.map((s) => s.label);
+  assert.equal(snaps.length, 3); // priceless dropped; the O/U total expands to BOTH sides
+  assert.deepEqual(snaps.find((s) => s.label === "Connor Doig vs Eudald Gonzalez"), { label: "Connor Doig vs Eudald Gonzalez", price: 62, external_ref: "tok-a", liquidity: "1234" });
+  assert.ok(labels.includes("Total Sets: Over 2.5") && labels.includes("Total Sets: Under 2.5")); // both sides of the total
 });
 
 test("polymarket: parseMatchTitle extracts competitors across formats", () => {
