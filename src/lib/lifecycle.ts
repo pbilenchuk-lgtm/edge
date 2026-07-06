@@ -34,6 +34,11 @@ export const LINEUP_HOURS = 1;
 // Hours past kickoff after which a clock-only match (ESPN never finished it) is
 // auto-finished — generous enough to cover a long match + stoppage/extra time.
 export const FINISH_HOURS = 4;
+// Hours a clock-only "live" match may run with NO provider live-data coverage
+// before it's finished as uncoverable. Well above the enrich cadence (seconds on
+// the live loop) so a genuinely covered match is never caught mid-gap — only
+// fixtures our provider simply doesn't carry (e.g. tennis Challengers).
+export const NO_COVERAGE_GRACE_H = 0.5;
 // Per-sport wall-clock ceiling (minutes) for a CLOCK-ONLY live match — one with
 // no provider minute at all (we have zero live coverage on it). Past this the
 // elapsed-since-kickoff display stops climbing (so an uncovered match never reads
@@ -89,6 +94,19 @@ export function advanceClocks(db: Database, deps: EngineDeps = {}): void {
   for (const { sport, match: m } of activeMatches(db)) {
     const h = hoursUntil(m.kickoff_at, nowMs);
     if (h == null) continue;
+
+    // Uncovered-finish: a clock-only "live" match (no provider minute) that, after
+    // a grace window, still has NO live-data coverage — our provider doesn't carry
+    // this fixture (e.g. a tennis Challenger StatPal only lists main-tour). We can
+    // neither follow nor trade it, so finish it instead of letting it run a phantom
+    // clock forever. Grace ≫ enrich cadence, so a covered match (which gets a
+    // match_live marker within a tick or two of going live) is never caught here.
+    if (m.state === "live" && m.minute == null && h <= -NO_COVERAGE_GRACE_H
+        && !hasLiveData(db, m)
+        && !R.betsForMatch(db, m.id).some((b) => b.status === "open")) {
+      R.updateMatch(db, m.id, { state: "finished", final_score: m.final_score ?? null });
+      continue;
+    }
 
     // Clock-finish: a clock-only match (no ESPN minute) past its sport's live
     // ceiling that ESPN never finished. Only when it holds NO open bets (unfunded

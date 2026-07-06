@@ -762,14 +762,18 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       R.updateMatch(db, m.id, { state: nextState, minute: s.minute, score_home: sh, score_away: sa, clock: s.clock ?? null, ...(s.final ? { final_score: `${sh ?? 0}:${sa ?? 0}` } : {}) });
       if (becameFinished) { const fresh = R.getMatch(db, m.id); if (fresh) settleMatch(db, fresh, deps); }
       const detail = await provider.matchDetail!(sport, league, s.externalRef);
+      const homeLineup = detail ? (flip ? detail.lineups.away : detail.lineups.home) : null;
+      const awayLineup = detail ? (flip ? detail.lineups.home : detail.lineups.away) : null;
+      // orient stats to the DB match's home/away, same as lineups
+      const statHome = detail?.stats ? (flip ? detail.stats.away : detail.stats.home) : null;
+      const statAway = detail?.stats ? (flip ? detail.stats.home : detail.stats.away) : null;
+      const statsJson = (statHome || statAway) ? JSON.stringify({ home: statHome, away: statAway }) : null;
+      // ALWAYS record a match_live row on a board match — even for tennis/esports
+      // which have no lineup/stat detail. Its existence IS the "provider covers
+      // this fixture / we have live data" signal the entry gate + uncovered-match
+      // pruning rely on; without it a covered tennis match would read as blind.
+      R.upsertMatchLive(db, { match_id: m.id, espn_event_id: s.externalRef, league, home_lineup: homeLineup ? JSON.stringify(homeLineup) : null, away_lineup: awayLineup ? JSON.stringify(awayLineup) : null, stats: statsJson, updated_at: now });
       if (detail) {
-        const homeLineup = flip ? detail.lineups.away : detail.lineups.home;
-        const awayLineup = flip ? detail.lineups.home : detail.lineups.away;
-        // orient stats to the DB match's home/away, same as lineups
-        const statHome = detail.stats ? (flip ? detail.stats.away : detail.stats.home) : null;
-        const statAway = detail.stats ? (flip ? detail.stats.home : detail.stats.away) : null;
-        const statsJson = (statHome || statAway) ? JSON.stringify({ home: statHome, away: statAway }) : null;
-        R.upsertMatchLive(db, { match_id: m.id, espn_event_id: s.externalRef, league, home_lineup: homeLineup ? JSON.stringify(homeLineup) : null, away_lineup: awayLineup ? JSON.stringify(awayLineup) : null, stats: statsJson, updated_at: now });
         if (detail.lineupOut && !m.lineup_out) R.updateMatch(db, m.id, { lineup_out: true, state: s.state === "upcoming" ? "lineup" : s.state });
         for (const e of detail.events) {
           if (e.type === "other") continue;

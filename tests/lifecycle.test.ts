@@ -139,9 +139,27 @@ test("advanceClocks clock-finish is sport-aware — a football clock-live match 
   const done = R.uid(), young = R.uid();
   mk(done, "2026-07-07T15:20:00Z");   // 2h40m ago > 130min football ceiling → finished
   mk(young, "2026-07-07T16:30:00Z");  // 1h30m ago < ceiling → still live
+  // Both are COVERED (provider matched them) so the uncovered-finish path is not
+  // what's under test here — only the sport ceiling for a clock-only covered match.
+  for (const id of [done, young]) R.upsertMatchLive(db, { match_id: id, espn_event_id: id, league: "l", home_lineup: null, away_lineup: null, stats: null, updated_at: now });
   advanceClocks(db, { now: () => now });
   assert.equal(R.getMatch(db, done)!.state, "finished", "past football ceiling → finished (no longer waits 4h)");
   assert.equal(R.getMatch(db, young)!.state, "live", "within ceiling → still live");
+});
+
+test("advanceClocks finishes an uncovered clock-only live match after the grace, keeps a covered one", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "tennis") ?? R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const mk = (id: string, ko: string) => R.insertMatch(db, { id, competition_id: comp.id, home: "P"+id, away: "Q"+id, state: "live" as any, lineup_out: true, kickoff_at: ko, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+  const now = "2026-07-07T18:00:00Z";
+  const uncovered = R.uid(), covered = R.uid();
+  mk(uncovered, "2026-07-07T16:30:00Z"); // 1.5h live, no provider data → uncoverable
+  mk(covered, "2026-07-07T16:30:00Z");   // 1.5h live BUT provider matched it (match_live)
+  R.upsertMatchLive(db, { match_id: covered, espn_event_id: "e", league: "l", home_lineup: null, away_lineup: null, stats: null, updated_at: now });
+  advanceClocks(db, { now: () => now });
+  assert.equal(R.getMatch(db, uncovered)!.state, "finished", "no live data past grace → finished");
+  assert.equal(R.getMatch(db, covered)!.state, "live", "provider-covered fixture kept live");
 });
 
 test("advanceClocks reverts a clock-driven live match out of live when its kickoff moved to the future (postponed)", () => {
