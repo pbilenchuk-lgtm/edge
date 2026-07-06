@@ -34,6 +34,15 @@ export const LINEUP_HOURS = 1;
 // Hours past kickoff after which a clock-only match (ESPN never finished it) is
 // auto-finished — generous enough to cover a long match + stoppage/extra time.
 export const FINISH_HOURS = 4;
+// Per-sport wall-clock ceiling (minutes) for a CLOCK-ONLY live match — one with
+// no provider minute at all (we have zero live coverage on it). Past this the
+// elapsed-since-kickoff display stops climbing (so an uncovered match never reads
+// a nonsense "179'"), and a match carrying no open bets is clock-finished instead
+// of hanging "live" for hours. Sports absent here fall back to FINISH_HOURS.
+export const SPORT_MAX_LIVE_MIN: Record<string, number> = {
+  football: 130, basketball: 160, hockey: 200, tabletennis: 120, esports: 240, tennis: 300,
+};
+export const maxLiveMinutes = (sport: string): number => SPORT_MAX_LIVE_MIN[sport] ?? FINISH_HOURS * 60;
 import type { SportsProvider } from "./sports.js";
 import type { Match, MatchState } from "./types.js";
 
@@ -77,15 +86,15 @@ function activeMatches(db: Database): { comp: string; sport: string; match: Matc
  */
 export function advanceClocks(db: Database, deps: EngineDeps = {}): void {
   const nowMs = Date.parse(nowFn(deps)()) || Date.now();
-  for (const { match: m } of activeMatches(db)) {
+  for (const { sport, match: m } of activeMatches(db)) {
     const h = hoursUntil(m.kickoff_at, nowMs);
     if (h == null) continue;
 
-    // Clock-finish: a clock-only match (no ESPN minute) long past kickoff that
-    // ESPN never finished. Only when it holds NO open bets (unfunded discovered
-    // matches) — never strand a position; the prune then cleans it up. ESPN
-    // matches (minute set) are finished by ESPN, never by the clock.
-    if (m.state === "live" && m.minute == null && h <= -FINISH_HOURS
+    // Clock-finish: a clock-only match (no ESPN minute) past its sport's live
+    // ceiling that ESPN never finished. Only when it holds NO open bets (unfunded
+    // discovered matches) — never strand a position; the prune then cleans it up.
+    // ESPN matches (minute set) are finished by ESPN, never by the clock.
+    if (m.state === "live" && m.minute == null && h <= -(maxLiveMinutes(sport) / 60)
         && !R.betsForMatch(db, m.id).some((b) => b.status === "open")) {
       R.updateMatch(db, m.id, { state: "finished", final_score: m.final_score ?? null });
       continue;

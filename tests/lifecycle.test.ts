@@ -108,6 +108,20 @@ test("advanceClocks flips a time-scheduled match to LIVE at kickoff, and clock-f
   assert.equal(R.getMatch(db, espn)!.state, "live", "ESPN-driven live not clock-finished");
 });
 
+test("advanceClocks clock-finish is sport-aware — a football clock-live match past its ~2h ceiling finishes (was hanging until 4h)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const mk = (id: string, ko: string) => R.insertMatch(db, { id, competition_id: comp.id, home: "A"+id, away: "B"+id, state: "live" as any, lineup_out: true, kickoff_at: ko, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+  const now = "2026-07-07T18:00:00Z";
+  const done = R.uid(), young = R.uid();
+  mk(done, "2026-07-07T15:20:00Z");   // 2h40m ago > 130min football ceiling → finished
+  mk(young, "2026-07-07T16:30:00Z");  // 1h30m ago < ceiling → still live
+  advanceClocks(db, { now: () => now });
+  assert.equal(R.getMatch(db, done)!.state, "finished", "past football ceiling → finished (no longer waits 4h)");
+  assert.equal(R.getMatch(db, young)!.state, "live", "within ceiling → still live");
+});
+
 test("advanceClocks reverts a clock-driven live match out of live when its kickoff moved to the future (postponed)", () => {
   const db = openDb(":memory:");
   seedDatabase(db);

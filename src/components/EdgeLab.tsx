@@ -585,10 +585,13 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
             {(() => {
               const ids = (comp?.matches || []).filter((mid) => matchDb[mid]);
               // «Актуальные» = идут сейчас + будущие (live → lineup → upcoming),
-              // live первыми; «Завершённые» = финал, свежие сверху.
+              // live первыми; внутри группы — по времени начала, ближайшие сверху
+              // (иначе будущие матчи идут в произвольном порядке БД = хаос).
+              // «Завершённые» = финал, свежие сверху.
               const RANK: any = { live: 0, lineup: 1, upcoming: 2 };
+              const koMs = (mid: string) => { const k = matchDb[mid].kickoffAt; const t = k ? Date.parse(k) : NaN; return isNaN(t) ? Infinity : t; };
               const active = ids.filter((mid) => matchDb[mid].state !== "finished")
-                .sort((a, b) => (RANK[matchDb[a].state] ?? 3) - (RANK[matchDb[b].state] ?? 3));
+                .sort((a, b) => (RANK[matchDb[a].state] ?? 3) - (RANK[matchDb[b].state] ?? 3) || koMs(a) - koMs(b));
               const finished = ids.filter((mid) => matchDb[mid].state === "finished").reverse();
               const shown = matchTab === "finished" ? finished : active;
               return (
