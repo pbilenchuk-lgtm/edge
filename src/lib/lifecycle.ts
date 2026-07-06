@@ -412,19 +412,24 @@ export async function strategistReassess(
         const realizedPnl = strategyCompRealized(db, comp, sid);
         for (const pick of dec.picks) {
           const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
-          // A pick the strategist named but that doesn't map to a real market (or
-          // has no AI prob) — surface it instead of silently dropping, so a note
-          // that "wanted" a bet doesn't read as a phantom position.
-          if (!mk || mk.ai_prob == null || mk.price == null) { unfilled.push(`«${pick.label}» — нет рынка/оценки`); continue; }
+          if (!mk || mk.price == null) { unfilled.push(`«${pick.label}» — нет рынка`); continue; }
+          // LIVE re-scoring: size off the strategist's OWN current probability (it
+          // re-estimates from the live score/minute — a 0:2 game's "Over 1.5" is
+          // ~1.0, not the stale pre-match ai_prob). Fall back to the stored prob
+          // only if none given. Refresh the market ai_prob so the UI edge is live
+          // too (the odds refresh carries ai_prob forward).
+          const aiProb = pick.prob != null ? pick.prob : mk.ai_prob;
+          if (aiProb == null) { unfilled.push(`«${mk.label}» — нет оценки`); continue; }
+          if (pick.prob != null) R.setMarketAiProb(db, mk.id, pick.prob);
           if (held.has(norm(mk.label))) continue;                       // already in this market
-          const d = sizeBet({ params: strat.params, aiProb: mk.ai_prob, priceCents: mk.price, budget, exposure, realizedPnl, confidence: pick.conviction as Confidence, drawdown });
+          const d = sizeBet({ params: strat.params, aiProb, priceCents: mk.price, budget, exposure, realizedPnl, confidence: pick.conviction as Confidence, drawdown });
           if (!d.enter) { unfilled.push(`«${mk.label}» — ${d.reason}`); continue; }
           exposure += d.stake;
           held.add(norm(mk.label));
           R.insertBet(db, {
             id: R.uid(), match_id: m.id, strategy_id: sid, market_label: mk.label,
             status: "proposed", proposed_price: mk.price, entry_price: null, current_price: null,
-            closing_price: null, ai_prob: mk.ai_prob, stake: d.stake,
+            closing_price: null, ai_prob: aiProb, stake: d.stake,
             rationale: `переоценка: «${mk.label}» край ${d.edge.toFixed(1)}%. ${pick.reason || d.reason}.`,
             entered_minute: null, result: null, payout: null, created_at: now,
           });

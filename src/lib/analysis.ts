@@ -164,14 +164,18 @@ export async function analyzeMatch(
       if (picksArr && !pick) { skipped++; continue; }
       if (held.has(norm(m.label))) { skipped++; continue; } // already open on this market
       const conf = (pick?.conviction ?? a.confidence) as Confidence;
-      const d = sizeBet({ params: strat.params, aiProb: m.ai_prob as number, priceCents: m.price, budget, exposure, realizedPnl, confidence: conf, drawdown });
+      // Prefer the strategist's own probability (live-aware) when it gave one,
+      // else the analysis prob. Refresh the market so the shown edge matches.
+      const aiProb = pick?.prob != null ? pick.prob : (m.ai_prob as number);
+      if (pick?.prob != null) R.setMarketAiProb(db, m.id, pick.prob);
+      const d = sizeBet({ params: strat.params, aiProb, priceCents: m.price, budget, exposure, realizedPnl, confidence: conf, drawdown });
       if (!d.enter) { skipped++; continue; }
       exposure += d.stake;
       entries++;
       R.insertBet(db, {
         id: R.uid(), match_id: matchId, strategy_id: strat.id, market_label: m.label,
         status: "proposed", proposed_price: m.price, entry_price: null, current_price: null,
-        closing_price: null, ai_prob: m.ai_prob, stake: d.stake,
+        closing_price: null, ai_prob: aiProb, stake: d.stake,
         // When the strategist ran we cite its reason; when it DIDN'T (no key or a
         // failed call) we fell back to the pure edge+threshold rule — mark that
         // honestly so the log doesn't read like a methodology-driven pick.

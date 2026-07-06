@@ -395,7 +395,7 @@ export interface StrategistInput {
   openPositions: { market: string; entryCents: number; currentCents: number }[];
   context?: string; // real lineups + in-match events (ESPN) — the reassessment triggers
 }
-export interface StrategistPick { label: string; conviction: "низкая" | "средняя" | "высокая"; reason: string }
+export interface StrategistPick { label: string; conviction: "низкая" | "средняя" | "высокая"; reason: string; prob?: number }
 export interface StrategistExit { market: string; reason: string; fraction: number } // fraction 0..1 of the position to close
 export interface StrategistDecision { ok: boolean; picks: StrategistPick[]; exits: StrategistExit[]; note: string; source: "llm" | "none"; error?: string }
 
@@ -409,7 +409,7 @@ export interface StrategistDecision { ok: boolean; picks: StrategistPick[]; exit
 export async function strategistDecide(
   input: StrategistInput, model: string, deps: Deps = {},
 ): Promise<StrategistDecision> {
-  const mkList = input.markets.map((m) => `- ${m.label}: рынок ${m.priceCents}¢${m.aiProb != null ? `, оценка ИИ ${(m.aiProb * 100).toFixed(0)}%` : ""}`).join("\n");
+  const mkList = input.markets.map((m) => `- ${m.label}: рынок ${m.priceCents}¢${m.aiProb != null ? `, предматч. оценка ${(m.aiProb * 100).toFixed(0)}%` : ""}`).join("\n");
   const posList = input.openPositions.length
     ? input.openPositions.map((p) => `- ${p.market}: вход ${p.entryCents}¢ → сейчас ${p.currentCents}¢`).join("\n")
     : "(открытых позиций нет)";
@@ -417,7 +417,7 @@ export async function strategistDecide(
   const res = await callLLM({
     model,
     system:
-      "Ты — трейдер на прогнозных рынках, действующий СТРОГО по методологии из промта стратегии (это твой единственный свод правил). На основе оценки матча и цен реши ДЕЙСТВИЯ. Правила вывода: входи в рынок ТОЛЬКО если методология это разрешает и ты можешь назвать конкретную причину, почему цена неверна; не давай конфликтующих ставок на один матч; уважай стадию матча (предматч/лайв) и правила управления позицией; выход может быть ЧАСТИЧНЫМ (fraction — доля позиции 0..1, напр. 0.5 = зафиксировать половину на пике, 1 = закрыть полностью). Верни ТОЛЬКО JSON {picks:[{label, conviction:'низкая'|'средняя'|'высокая', reason}], exits:[{market, fraction, reason}], note}. label/market бери ДОСЛОВНО из списков. Пусто — значит воздержаться. Без пояснений вне JSON.",
+      "Ты — трейдер на прогнозных рынках, действующий СТРОГО по методологии из промта стратегии (это твой единственный свод правил). На основе оценки матча и цен реши ДЕЙСТВИЯ. Правила вывода: входи в рынок ТОЛЬКО если методология это разрешает и ты можешь назвать конкретную причину, почему цена неверна; не давай конфликтующих ставок на один матч; уважай стадию матча (предматч/лайв) и правила управления позицией; выход может быть ЧАСТИЧНЫМ (fraction — доля позиции 0..1, напр. 0.5 = зафиксировать половину на пике, 1 = закрыть полностью). Для КАЖДОГО пика укажи prob — свою АКТУАЛЬНУЮ вероятность (0..1), что этот рынок сыграет ДА, на ТЕКУЩИЙ момент матча (счёт/минута/события). НЕ копируй «предматч. оценку» — в лайве она устаревает (напр. при 0:2 «Over 1.5» уже ~1.0); пересчитай сам. Именно по твоему prob движок считает край и размер, поэтому оцени честно. Верни ТОЛЬКО JSON {picks:[{label, conviction:'низкая'|'средняя'|'высокая', reason, prob}], exits:[{market, fraction, reason}], note}. label/market бери ДОСЛОВНО из списков. Пусто — значит воздержаться. Без пояснений вне JSON.",
     prompt: `СТРАТЕГИЯ «${input.strategyName}» (методология):\n${input.strategyPrompt}\n\nМАТЧ: ${input.match.home} — ${input.match.away} (${input.match.sport}, ${input.match.state}${input.match.state === "live" ? `, ${input.match.minute ?? "?"}'` : ""}, счёт ${score}).\nОценка аналитики: уверенность ${input.assessment.confidence}. ${input.assessment.short} Итог: ${input.assessment.verdict}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы + события матча — твои триггеры переоценки):\n${input.context}\n` : ""}\nРЫНКИ:\n${mkList}\n\nОТКРЫТЫЕ ПОЗИЦИИ:\n${posList}\n\nРеши по методологии: во что входить (picks) и что закрывать/фиксировать (exits, можно частично).`,
     maxTokens: 900,
   }, deps);
@@ -426,7 +426,7 @@ export async function strategistDecide(
     const j = JSON.parse(extractJson(res.text));
     const conv = (c: unknown) => (["низкая", "средняя", "высокая"].includes(c as string) ? c : "средняя") as StrategistPick["conviction"];
     const picks: StrategistPick[] = Array.isArray(j.picks)
-      ? j.picks.filter((p: any) => p && typeof p.label === "string").map((p: any) => ({ label: String(p.label), conviction: conv(p.conviction), reason: String(p.reason ?? "") }))
+      ? j.picks.filter((p: any) => p && typeof p.label === "string").map((p: any) => ({ label: String(p.label), conviction: conv(p.conviction), reason: String(p.reason ?? ""), ...(Number.isFinite(p.prob) ? { prob: clamp01(p.prob) } : {}) }))
       : [];
     const frac = (f: unknown) => (typeof f === "number" && f > 0 && f <= 1 ? f : 1);
     const exits: StrategistExit[] = Array.isArray(j.exits)

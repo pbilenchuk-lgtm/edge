@@ -246,6 +246,29 @@ test("strategistReassess opens a fresh entry on a live trigger (no prior positio
   assert.ok(!res2.entries.some((e) => e.matchId === mid), "no re-entry without a trigger or position");
 });
 
+test("strategistReassess sizes off the strategist's LIVE prob, refreshing the stale market ai_prob", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const mid = R.uid();
+  // 0:2 game: "Over 1.5" already won, but the stored ai_prob is STALE at 0.50
+  // (== price 50¢ → zero edge → would be skipped if we sized off it).
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 0, score_away: 2, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  const mkId = R.uid();
+  R.insertMarket(db, { id: mkId, match_id: mid, label: "Over 1.5", price: 50, ai_prob: 0.5, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+
+  // strategist re-estimates prob 0.98 for the current 0:2 state → big real edge
+  const mock = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [{ label: "Over 1.5", conviction: "высокая", reason: "2 гола уже забиты", prob: 0.98 }], exits: [], note: "" }) }] }) }) as any);
+  const res = await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } }, { newEventMatchIds: new Set([mid]), max: 50 });
+
+  assert.ok(res.entries.some((e) => e.market === "Over 1.5"), "entered off the fresh prob, despite the stale market prob giving no edge");
+  const bet = R.betsForMatch(db, mid, strat.id).find((b) => b.status === "proposed")!;
+  assert.equal(bet.ai_prob, 0.98, "bet stores the strategist's live prob");
+  assert.equal(R.latestMarkets(db, mid).find((m) => m.id === mkId)!.ai_prob, 0.98, "market ai_prob refreshed to the live estimate");
+});
+
 test("runLiveCycle reacts to a live goal, and quiet re-runs don't re-fire the strategist", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
