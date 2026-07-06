@@ -549,6 +549,11 @@ export function betsForMatch(db: Database, matchId: string, strategyId?: string)
 export function openBets(db: Database): Bet[] {
   return db.prepare(`SELECT * FROM bets WHERE status='open'`).all() as Bet[];
 }
+/** Every bet, one query — for buildAppData's bulk aggregation (stats/quality)
+ *  instead of a per-match betsForMatch scan. */
+export function allBets(db: Database): Bet[] {
+  return db.prepare(`SELECT * FROM bets`).all() as Bet[];
+}
 export function getBet(db: Database, id: string): Bet | null {
   return (db.prepare(`SELECT * FROM bets WHERE id=?`).get(id) as Bet | undefined) ?? null;
 }
@@ -579,6 +584,17 @@ export function reassessmentsForMatch(db: Database, matchId: string): Reassessme
 }
 export function tradeLogForMatch(db: Database, matchId: string): TradeLogEntry[] {
   return db.prepare(`SELECT * FROM trade_log WHERE match_id=? ORDER BY created_at`).all(matchId) as TradeLogEntry[];
+}
+// Globally most-recent rows for the event feed — bounded LIMIT instead of
+// scanning every match's log/reassessments/events and slicing afterwards.
+export function recentTradeLog(db: Database, limit: number): TradeLogEntry[] {
+  return db.prepare(`SELECT * FROM trade_log ORDER BY created_at DESC LIMIT ?`).all(limit) as TradeLogEntry[];
+}
+export function recentReassessments(db: Database, limit: number): Reassessment[] {
+  return db.prepare(`SELECT * FROM reassessments ORDER BY created_at DESC LIMIT ?`).all(limit) as Reassessment[];
+}
+export function recentMatchEvents(db: Database, limit: number): MatchEventRow[] {
+  return db.prepare(`SELECT * FROM match_events WHERE type != 'other' ORDER BY created_at DESC LIMIT ?`).all(limit) as MatchEventRow[];
 }
 /** All analytics prompts (for building the base/override maps). */
 export function allAnalyticsPrompts(db: Database): {

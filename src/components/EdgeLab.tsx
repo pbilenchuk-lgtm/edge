@@ -406,7 +406,10 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
         }
         if (!stop) await reloadApp().catch(() => {});
       } finally {
-        if (!stop) timer = setTimeout(tick, 3000);
+        // 6s, not 3s: the server cron already refreshes odds every ~20s, so a
+        // tighter poll just multiplies the per-poll buildAppData rebuild + the
+        // Polymarket odds calls for no real freshness gain.
+        if (!stop) timer = setTimeout(tick, 6000);
       }
     };
     timer = setTimeout(tick, 3000);

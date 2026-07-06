@@ -11,7 +11,7 @@ import { jobActive } from "./analysis.js";
 import { warsawLabel, warsawClock, isIso } from "./time.js";
 import { SPORT_LABELS } from "./polymarket.js";
 import { resolveFootballMarket } from "./settlement.js";
-import type { StrategyParams } from "./types.js";
+import type { StrategyParams, Match, Bet } from "./types.js";
 
 export interface MarketView {
   id: string; label: string; price: number; aiProb: number | null;
@@ -121,13 +121,18 @@ export function buildAppData(db: Database, env = process.env): AppData {
   const comps = R.listCompetitions(db);
   const strategies = R.listStrategies(db);
 
+  // Load each competition's matches ONCE (used by the competitions map, the
+  // match loop, and the stats/quality aggregation) instead of re-querying.
+  const matchesByComp = new Map(comps.map((c) => [c.id, R.listMatches(db, c.id)]));
+  const sharesByComp = new Map(comps.map((c) => [c.id, R.sharesForComp(db, c.id)]));
+
   const compBudget: Record<string, number> = {};
   const shares: Record<string, Record<string, number>> = {};
   const competitions = comps.map((c) => {
     compBudget[c.id] = c.budget;
-    const sh = R.sharesForComp(db, c.id);
+    const sh = sharesByComp.get(c.id)!;
     if (sh.length) shares[c.id] = Object.fromEntries(sh.map((s) => [s.strategy_id, s.pct]));
-    return { id: c.id, sport: c.sport_id, name: c.name, matches: R.listMatches(db, c.id).map((m) => m.id) };
+    return { id: c.id, sport: c.sport_id, name: c.name, matches: (matchesByComp.get(c.id) ?? []).map((m) => m.id) };
   });
 
   const catalog: StrategyView[] = strategies.map((s) => ({
@@ -142,10 +147,23 @@ export function buildAppData(db: Database, env = process.env): AppData {
     else analysis.byComp[p.scope_id] = p.body;
   }
 
+  // ALL bets in one query, grouped — the match loop, stats and quality then read
+  // from these maps instead of a per-match betsForMatch scan (×M each pass).
+  const betsByMatch = new Map<string, Bet[]>();
+  const betsByStrategy = new Map<string, Bet[]>();
+  for (const b of R.allBets(db)) {
+    (betsByMatch.get(b.match_id) ?? betsByMatch.set(b.match_id, []).get(b.match_id)!).push(b);
+    (betsByStrategy.get(b.strategy_id) ?? betsByStrategy.set(b.strategy_id, []).get(b.strategy_id)!).push(b);
+  }
+
   // matches
   const matchDb: Record<string, MatchView> = {};
+  const allMatches: Match[] = [];
+  const matchById = new Map<string, Match>();
+  const pricesByMatch = new Map<string, Record<string, number>>(); // freshest quote per label
   for (const c of comps) {
-    for (const m of R.listMatches(db, c.id)) {
+    for (const m of matchesByComp.get(c.id) ?? []) {
+      allMatches.push(m); matchById.set(m.id, m);
       // Only surface completed assessments; a failed run (§6) is reported to
       // the user via the analyze poll, not as an empty analysis card.
       const assessments = R.assessmentsForMatch(db, m.id).filter((a) => a.status !== "failed");
@@ -163,11 +181,15 @@ export function buildAppData(db: Database, env = process.env): AppData {
         confidence: h.confidence, short: h.short, text: h.body, verdict: h.verdict,
       }));
       const kickoff = R.openOddsFor(db, m.id); // price at kickoff (empty pre-match)
-      const markets = R.latestMarkets(db, m.id).map((mk) => ({
+      const latest = R.latestMarkets(db, m.id);
+      const prices: Record<string, number> = {}; // freshest quote per label (for stats)
+      for (const mk of latest) if (!(mk.label in prices)) prices[mk.label] = mk.price;
+      pricesByMatch.set(m.id, prices);
+      const markets = latest.map((mk) => ({
         id: mk.id, label: mk.label, price: mk.price, aiProb: mk.ai_prob, liq: mk.liquidity, tokenId: mk.external_ref,
         openCents: mk.label in kickoff ? kickoff[mk.label] : null,
       }));
-      const allBets = R.betsForMatch(db, m.id);
+      const allBets = betsByMatch.get(m.id) ?? [];
       const bets: MatchView["bets"] = {};
       const settledBets: MatchView["settledBets"] = {};
       const result: Record<string, number> = {};
@@ -237,10 +259,10 @@ export function buildAppData(db: Database, env = process.env): AppData {
   // per-phase / management / equity extras computed from the bet history.
   const quality: Record<string, QualityView> = {};
   const budgetOf: Record<string, number> = {};
-  for (const c of comps) for (const sh of R.sharesForComp(db, c.id)) budgetOf[sh.strategy_id] = (budgetOf[sh.strategy_id] ?? 0) + Math.floor((c.budget * sh.pct) / 100);
+  for (const c of comps) for (const sh of (sharesByComp.get(c.id) ?? [])) budgetOf[sh.strategy_id] = (budgetOf[sh.strategy_id] ?? 0) + Math.floor((c.budget * sh.pct) / 100);
   for (const s of strategies) {
     const q = R.getQuality(db, s.id);
-    const extras = computeQualityExtras(db, s.id, budgetOf[s.id] ?? 0);
+    const extras = computeQualityExtras(matchById, betsByStrategy.get(s.id) ?? [], budgetOf[s.id] ?? 0);
     if (q || extras.phases.some((p) => p.bets > 0) || extras.equity) {
       quality[s.id] = {
         brier: q?.brier ?? null, clv: q?.clv ?? null, samples: q?.samples ?? 0, calib: q?.calibration ?? [],
@@ -272,7 +294,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
     recent: recentRuns.map((r) => ({ at: r.at, kind: r.kind, ok: r.ok === 1, summary: r.summary })),
   };
 
-  const strategyStats = computeStrategyStats(db, strategies);
+  const strategyStats = computeStrategyStats(strategies, allMatches, betsByMatch, pricesByMatch);
 
   const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats };
   // node:sqlite rows have a null prototype; React Server Components can't pass
@@ -290,18 +312,20 @@ const FEED_EVENT_TYPE: Record<string, string> = { goal: "goal", red_card: "card"
 
 /** Detailed per-strategy stats — open positions marked to the FRESHEST market
  *  price (not the price stored on the bet), so +/- reflects the current line. */
-function computeStrategyStats(db: Database, strategies: { id: string }[]): Record<string, StrategyStats> {
+function computeStrategyStats(
+  strategies: { id: string }[], matches: Match[],
+  betsByMatch: Map<string, Bet[]>, pricesByMatch: Map<string, Record<string, number>>,
+): Record<string, StrategyStats> {
   const out: Record<string, StrategyStats> = {};
   const seenMatch: Record<string, Set<string>> = {};
   for (const s of strategies) {
     out[s.id] = { matches: 0, predictions: 0, won: 0, lost: 0, openPlus: 0, openMinus: 0, openPnl: 0, earned: 0, lostMoney: 0, inMatch: 0, inMatchPlus: 0, inMatchMinus: 0 };
     seenMatch[s.id] = new Set();
   }
-  for (const c of R.listCompetitions(db)) {
-    for (const m of R.listMatches(db, c.id)) {
-      const cur: Record<string, number> = {}; // freshest quote per market label
-      for (const mk of R.latestMarkets(db, m.id)) if (!(mk.label in cur)) cur[mk.label] = mk.price;
-      for (const b of R.betsForMatch(db, m.id)) {
+  {
+    for (const m of matches) {
+      const cur = pricesByMatch.get(m.id) ?? {}; // freshest quote per market label
+      for (const b of betsByMatch.get(m.id) ?? []) {
         const st = out[b.strategy_id];
         if (!st) continue;
         const open = b.status === "open";
@@ -341,7 +365,7 @@ function computeStrategyStats(db: Database, strategies: { id: string }[]): Recor
  *  (pre-match vs in-match — the old "post-event" bucket is folded into
  *  in-match), the value of active management (actual realised vs holding every
  *  early close to resolution), and a per-match equity curve. */
-function computeQualityExtras(db: Database, strategyId: string, base: number): {
+function computeQualityExtras(matchById: Map<string, Match>, bets: Bet[], base: number): {
   phases: { id: string; label: string; bets: number; wins: number; pnl: number; clv: number | null }[];
   mgmt: { actualPnl: number; heldToEndPnl: number; managed: number };
   equity: number[] | undefined;
@@ -350,10 +374,14 @@ function computeQualityExtras(db: Database, strategyId: string, base: number): {
   const agg = { pre: { bets: 0, wins: 0, pnl: 0, clvSum: 0, clvN: 0 }, live: { bets: 0, wins: 0, pnl: 0, clvSum: 0, clvN: 0 } };
   let actualSum = 0, heldSum = 0, managed = 0;
   const perMatch: { t: string; pnl: number }[] = [];
-  for (const c of R.listCompetitions(db)) {
-    for (const m of R.listMatches(db, c.id)) {
+  const byMatch = new Map<string, Bet[]>(); // group this strategy's bets by match
+  for (const b of bets) (byMatch.get(b.match_id) ?? byMatch.set(b.match_id, []).get(b.match_id)!).push(b);
+  {
+    for (const [matchId, mbets] of byMatch) {
+      const m = matchById.get(matchId);
+      if (!m) continue;
       let matchPnl = 0, matchT: string | null = null;
-      for (const b of R.betsForMatch(db, m.id, strategyId)) {
+      for (const b of mbets) {
         if (b.status !== "settled_won" && b.status !== "settled_lost") continue;
         const stake = b.stake ?? 0, entry = b.entry_price ?? 0;
         const pnl = (b.payout ?? 0) - stake;
@@ -405,43 +433,47 @@ function buildFeed(
   matchDb: Record<string, MatchView>,
 ): FeedItem[] {
   const stratById = Object.fromEntries(strategies.map((s) => [s.id, s]));
-  const sportLabel = SPORT_LABELS;
-  // Collect with each source row's created_at so the feed is the 40 MOST RECENT
-  // events across all matches, not the first 40 in iteration order.
+  const sportByComp = Object.fromEntries(comps.map((c) => [c.id, SPORT_LABELS[c.sport_id] ?? c.sport_id]));
+  // Pull the globally most-recent rows per source (bounded LIMIT) and merge —
+  // instead of scanning every match's log/reassessments/events. The final feed
+  // is 40 rows, so ≥40 from each source is provably enough (at most 40 of the
+  // top-40 can come from any single source).
+  const N = 40, POOL = 60;
+  const info = (matchId: string) => {
+    const m = matchDb[matchId];
+    if (!m) return null;
+    return {
+      sp: sportByComp[m.competitionId] ?? m.competitionId,
+      match: `${m.home}–${m.away}`,
+      score: (m.scoreHome != null && m.scoreAway != null) ? `${m.scoreHome}:${m.scoreAway}` : null,
+    };
+  };
   const rows: { at: string; item: FeedItem }[] = [];
-  for (const c of comps) {
-    const sp = sportLabel[c.sport_id] ?? c.sport_id;
-    for (const mt of R.listMatches(db, c.id)) {
-      const m = matchDb[mt.id];
-      const matchName = `${m.home}–${m.away}`;
-      const score = (m.scoreHome != null && m.scoreAway != null) ? `${m.scoreHome}:${m.scoreAway}` : null;
-      for (const e of R.tradeLogForMatch(db, mt.id)) {
-        const st = stratById[e.strategy_id];
-        // enter → «Входы»; exit (cash-out) AND settle → «Расчёты» (both realize
-        // P&L — an exit is a closure, not a reassessment narrative).
-        rows.push({ at: e.created_at, item: {
-          t: e.minute ?? "", at: warsawClock(e.created_at), type: e.type === "enter" ? "enter" : e.type === "skip" ? "skip" : "settle",
-          sport: sp, match: matchName, score, strat: st?.name, color: st?.color ?? undefined, text: e.text,
-        } });
-      }
-      for (const r of R.reassessmentsForMatch(db, mt.id)) {
-        const st = stratById[r.strategy_id];
-        rows.push({ at: r.created_at, item: {
-          t: r.minute ?? "", at: warsawClock(r.created_at), type: "reassess", sport: sp, match: matchName, score,
-          strat: st?.name, color: st?.color ?? undefined, text: r.body.slice(0, 120),
-        } });
-      }
-      // real in-match events pulled from ESPN (goals / cards / subs) + stats snapshots
-      for (const e of R.eventsForMatch(db, mt.id)) {
-        if (e.type === "other") continue;
-        const label = EVENT_LABEL[e.type] ?? "событие";
-        rows.push({ at: e.created_at, item: {
-          t: e.minute != null ? `${e.minute}'` : "", at: warsawClock(e.created_at), type: FEED_EVENT_TYPE[e.type] ?? "goal",
-          sport: sp, match: matchName, score, text: `${label}${e.team ? " · " + e.team : ""} — ${e.text}`,
-        } });
-      }
-    }
+  for (const e of R.recentTradeLog(db, POOL)) {
+    const inf = info(e.match_id); if (!inf) continue;
+    const st = stratById[e.strategy_id];
+    // enter → «Входы»; exit (cash-out) AND settle → «Расчёты» (both realize P&L).
+    rows.push({ at: e.created_at, item: {
+      t: e.minute ?? "", at: warsawClock(e.created_at), type: e.type === "enter" ? "enter" : e.type === "skip" ? "skip" : "settle",
+      sport: inf.sp, match: inf.match, score: inf.score, strat: st?.name, color: st?.color ?? undefined, text: e.text,
+    } });
+  }
+  for (const r of R.recentReassessments(db, POOL)) {
+    const inf = info(r.match_id); if (!inf) continue;
+    const st = stratById[r.strategy_id];
+    rows.push({ at: r.created_at, item: {
+      t: r.minute ?? "", at: warsawClock(r.created_at), type: "reassess", sport: inf.sp, match: inf.match, score: inf.score,
+      strat: st?.name, color: st?.color ?? undefined, text: r.body.slice(0, 120),
+    } });
+  }
+  for (const e of R.recentMatchEvents(db, POOL)) {
+    const inf = info(e.match_id); if (!inf) continue;
+    const label = EVENT_LABEL[e.type] ?? "событие";
+    rows.push({ at: e.created_at, item: {
+      t: e.minute != null ? `${e.minute}'` : "", at: warsawClock(e.created_at), type: FEED_EVENT_TYPE[e.type] ?? "goal",
+      sport: inf.sp, match: inf.match, score: inf.score, text: `${label}${e.team ? " · " + e.team : ""} — ${e.text}`,
+    } });
   }
   rows.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)); // newest first
-  return rows.slice(0, 40).map((r) => r.item);
+  return rows.slice(0, N).map((r) => r.item);
 }
