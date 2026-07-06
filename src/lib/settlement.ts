@@ -66,6 +66,16 @@ export function resolveFootballMarket(
   const total = scoreHome + scoreAway;
   const l = label.toLowerCase();
 
+  // A YES/NO market surfaced as two sides ("<market> — Yes" / "— No"): resolve
+  // the BASE market and negate for the No side. Only the explicit suffix form
+  // (em-dash/colon + Yes|No at the very end), so "Draw No Bet" isn't mistaken.
+  const sideSuffix = l.match(/[—:]\s*(yes|no)\s*$/);
+  if (sideSuffix) {
+    const base = label.slice(0, sideSuffix.index).replace(/[\s—:]+$/, "");
+    const r = resolveFootballMarket(base, scoreHome, scoreAway, teams);
+    return r == null ? null : sideSuffix[1] === "no" ? !r : r;
+  }
+
   // Totals — "Over/Under X", or Polymarket's "O/U X" (backs Over). A team total
   // ("Colombia Over 2.5") names a side → settle against THAT team's goals, not
   // the aggregate. A prefixed total whose side we can't identify (no team info)

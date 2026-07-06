@@ -591,6 +591,19 @@ function marketSides(m: PolyMarketRow): { label: string; price: number | null; t
     const sides = [0, 1].map((i) => ({ label: `${m.label} — ${o[i]}`, price: m.prices[i] ?? null, token: m.tokenIds[i] ?? null }));
     if (sides.every((s) => s.price != null)) return sides;
   }
+  // A 2-way YES/NO market (BTTS, Draw, penalty…) is TWO tradeable bets — surface
+  // BOTH sides (own token/price), labelled "<market> — Yes/No". Otherwise only
+  // the priced "Yes" was shown and the "No" side was hidden. Skip DIRECTIONAL
+  // labels (over/under/handicap) whose own text already names the side — those
+  // stay single via clarifyLabel (Polymarket lists their opposite separately).
+  const directional = /\bover\b|\bunder\b|o\/u|[+-]\s*\d/i.test(m.label);
+  if (!directional && o.length === 2 && /^(yes|no)$/i.test((o[0] ?? "").trim()) && /^(yes|no)$/i.test((o[1] ?? "").trim())) {
+    const sides = [0, 1].map((i) => ({
+      label: `${m.label} — ${/^y/i.test(o[i].trim()) ? "Yes" : "No"}`,
+      price: m.prices[i] ?? null, token: m.tokenIds[i] ?? null,
+    }));
+    if (sides.every((s) => s.price != null)) return sides;
+  }
   return [{ label: clarifyLabel(m.label, o), price: m.priceCents, token: m.tokenIds[0] ?? null }];
 }
 

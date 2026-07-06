@@ -158,7 +158,8 @@ test("polymarket: matchMarketSnapshots aggregates events, drops noise, dedups, c
   const evB = normalizeEvent({ id: "2", slug: "b", title: "A vs B - Corners", markets: [mk("Both Teams to Score", "0.6", "t3", "800"), mk("Total Corners Over 9.5", "0.4", "t4", "999"), mk("Over 2.5", "0.5", "t5", "700")] });
   const snaps = matchMarketSnapshots([evA, evB], "t", 10);
   const labels = snaps.map((s) => s.label);
-  assert.ok(labels.includes("Over 2.5") && labels.includes("Both Teams to Score"));
+  // BTTS is a yes/no question → BOTH sides surfaced; "Over 2.5" is directional → single.
+  assert.ok(labels.includes("Over 2.5") && labels.includes("Both Teams to Score — Yes") && labels.includes("Both Teams to Score — No"));
   assert.ok(!labels.some((l) => /goals|corners/i.test(l)), "noise dropped");
   assert.equal(labels.filter((l) => l === "Over 2.5").length, 1, "deduped across events");
   const capped = matchMarketSnapshots([evA, evB], "t", 1);
@@ -186,6 +187,19 @@ test("polymarket: a generic 2-way market expands into BOTH sides (own tokens)", 
   const s2 = matchMarketSnapshots([evB], "t", 10);
   assert.equal(s2.length, 1);
   assert.equal(s2[0].label, "Morocco (-1.5)");
+});
+
+test("polymarket: a yes/no market (BTTS) surfaces BOTH Yes and No, each with its own token", () => {
+  const ev = normalizeEvent({ id: "1", slug: "a", title: "A vs B", markets: [
+    { groupItemTitle: "Both Teams to Score", question: "BTTS", outcomes: '["Yes","No"]', outcomePrices: '["0.62","0.38"]', clobTokenIds: '["tk-yes","tk-no"]', liquidity: "800", conditionId: "c" },
+  ] });
+  const snaps = matchMarketSnapshots([ev], "t", 10);
+  const yes = snaps.find((s) => s.label === "Both Teams to Score — Yes");
+  const no = snaps.find((s) => s.label === "Both Teams to Score — No");
+  assert.ok(yes && no, "both Yes and No present");
+  assert.equal(yes!.price, 62); assert.equal(no!.price, 38);
+  assert.equal(yes!.external_ref, "tk-yes");
+  assert.equal(no!.external_ref, "tk-no"); // distinct tradeable tokens
 });
 
 test("discoverSportMatches returns the MOST-LIQUID matches first, then caps", async () => {

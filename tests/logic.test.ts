@@ -195,6 +195,11 @@ test("settlement: football market resolution from score 2:1", () => {
   assert.equal(resolveFootballMarket("Over 2.5", 2, 1), true);
   assert.equal(resolveFootballMarket("Over 1.5", 2, 1), true);
   assert.equal(resolveFootballMarket("Both Teams to Score — Yes", 2, 1), true);
+  // the No side of a yes/no market negates its base
+  assert.equal(resolveFootballMarket("Both Teams to Score — No", 2, 1), false); // both scored → BTTS-No loses
+  assert.equal(resolveFootballMarket("Both Teams to Score — No", 2, 0), true);  // away blanked → BTTS-No wins
+  assert.equal(resolveFootballMarket("Draw — No", 2, 1), true);                 // not a draw → Draw-No wins
+  assert.equal(resolveFootballMarket("Draw — No", 1, 1), false);                // a draw → Draw-No loses
   assert.equal(resolveFootballMarket("Team to Advance — Португалия", 2, 1), null); // external
   // Polymarket "O/U 2.5" total (backs Over); team totals stay unsettleable
   assert.equal(resolveFootballMarket("O/U 2.5", 2, 1), true);  // total 3 > 2.5
