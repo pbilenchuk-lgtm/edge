@@ -391,17 +391,22 @@ const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "markets", "bet
  */
 export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number } = {}): number {
   const rows = db.prepare(
-    `SELECT m.id AS id, m.state AS state, m.kickoff_at AS kickoff_at FROM matches m
+    `SELECT m.id AS id, m.state AS state, m.kickoff_at AS kickoff_at, c.budget AS budget FROM matches m
+       JOIN competitions c ON c.id = m.competition_id
        WHERE NOT EXISTS (SELECT 1 FROM bets b WHERE b.match_id = m.id)`,
-  ).all() as { id: string; state: string; kickoff_at: string | null }[];
+  ).all() as { id: string; state: string; kickoff_at: string | null; budget: number }[];
   const doomed: string[] = [];
+  const stale = (k: string | null) => opts.staleBeforeMs != null && k != null && /^\d{4}-\d\d-\d\dT/.test(k) && !isNaN(Date.parse(k)) && Date.parse(k) < opts.staleBeforeMs;
   for (const r of rows) {
-    if (r.state === "finished") { doomed.push(r.id); continue; }
-    // Stale import: a real ISO kickoff already well in the past, never resolved.
-    if (opts.staleBeforeMs != null && r.kickoff_at && /^\d{4}-\d\d-\d\dT/.test(r.kickoff_at)) {
-      const t = Date.parse(r.kickoff_at);
-      if (!isNaN(t) && t < opts.staleBeforeMs) doomed.push(r.id);
+    if (r.state === "finished") {
+      // FUNDED comps (a tournament we actually play): keep a finished no-bet
+      // match for review until it ages past the stale window — losing a match we
+      // just tested the moment it ends is bad. UNFUNDED catch-all comps: prune
+      // immediately (that's the Polymarket discovery flood we must bound).
+      if ((r.budget ?? 0) <= 0 || stale(r.kickoff_at)) doomed.push(r.id);
+      continue;
     }
+    if (stale(r.kickoff_at)) doomed.push(r.id); // stale import that never resolved
   }
   return deleteMatches(db, doomed);
 }
