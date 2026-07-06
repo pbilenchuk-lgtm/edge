@@ -106,9 +106,10 @@ function stratEquityOnComp(matchDb: any, comp: any, stratId: string, budget: num
     for (const mk of (m.markets || [])) if (!(mk.label in cur)) cur[mk.label] = mk.price;
     for (const b of betItems(m.bets?.[stratId])) {
       if (b.status === "open" && b.entryPrice != null && b.entryPrice > 0) {
-        staked += b.stake;
+        const stake = b.stake ?? 0; // null-stake open row must not poison equity with NaN
+        staked += stake;
         const price = cur[b.market] ?? b.currentPrice ?? b.entryPrice;
-        unreal += b.stake * (price / b.entryPrice) - b.stake;
+        unreal += stake * (price / b.entryPrice) - stake;
       }
     }
   }
@@ -324,8 +325,15 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const refreshOdds = (matchId: string) => refreshOddsCore(matchId, false);
 
   const doReassess = async (matchId: string, strategyId: string) => {
-    const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "reassess", matchId, strategyId }) });
-    const j = await r.json();
+    let j: any;
+    try {
+      const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "reassess", matchId, strategyId }) });
+      j = await r.json();
+      if (!r.ok || j?.ok === false) throw new Error(j?.error || `ошибка ${r.status}`);
+    } catch (e: any) {
+      toast("err", e?.message || "переоценка не удалась");
+      return;
+    }
     // Pull fresh state so any exits/entries the reassessment made show at once
     // (the note, positions, log and P&L all change together).
     await reloadApp().catch(() => {});
@@ -843,8 +851,8 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                           const busy = reassessing[st.id] || (!live && analyzing);
                           return (
                           <button
-                            style={{ ...S.stratReassessBtn, opacity: (busy || (!live && noQuotes)) ? 0.5 : 1 }}
-                            disabled={busy || (!live && noQuotes)}
+                            style={{ ...S.stratReassessBtn, opacity: (busy || noQuotes) ? 0.5 : 1 }}
+                            disabled={busy || noQuotes}
                             title={live
                               ? `Переоценить «${st.name}» по этому матчу (ИИ пересмотрит позиции: вход/частичный или полный выход)`
                               : noQuotes ? "Нет котировок — сначала «Подтянуть матчи»" : `Прогнать ИИ по матчу — подобрать ставки стратегий`}

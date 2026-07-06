@@ -408,6 +408,36 @@ test("parseStatpalTennis: sets score, finished vs live, object-collapsed arrays"
   assert.equal(rows.find((r) => r.externalRef === "m3")!.state, "upcoming"); // "12:30" = scheduled time
 });
 
+test("StatPal parsers never default an unrecognized/terminal status to live", () => {
+  // esports: cancelled / postponed / abandoned / empty must NOT be "live"
+  const es = parseStatpalEsports({ scores: { match: [
+    { id: "c", status: "Cancelled", home: { name: "A", score: "0" }, away: { name: "B", score: "0" } },
+    { id: "p", status: "Postponed", home: { name: "A", score: "0" }, away: { name: "B", score: "0" } },
+    { id: "a", status: "Abandoned", home: { name: "A", score: "0" }, away: { name: "B", score: "0" } },
+    { id: "e", status: "", home: { name: "A", score: "0" }, away: { name: "B", score: "0" } },
+    { id: "live", status: "Started", home: { name: "A", score: "1" }, away: { name: "B", score: "0" } },
+  ] } });
+  assert.equal(es.find((r) => r.externalRef === "c")!.state, "finished");
+  assert.equal(es.find((r) => r.externalRef === "p")!.state, "upcoming");
+  assert.equal(es.find((r) => r.externalRef === "a")!.state, "finished");
+  assert.equal(es.find((r) => r.externalRef === "e")!.state, "upcoming");
+  assert.equal(es.find((r) => r.externalRef === "live")!.state, "live", "genuine in-play still live");
+  // soccer: "Canc." must be finished, not a phantom live 0-0
+  const sc = parseStatpalSoccer({ live_matches: { league: [{ name: "X", match: [
+    { main_id: "canc", status: "Canc.", home: { name: "A", goals: "0" }, away: { name: "B", goals: "0" } },
+    { main_id: "min", status: "63", home: { name: "A", goals: "1" }, away: { name: "B", goals: "0" } },
+  ] }] } });
+  assert.equal(sc.find((r) => r.externalRef === "canc")!.state, "finished");
+  assert.equal(sc.find((r) => r.externalRef === "min")!.state, "live");
+});
+
+test("normalizeEvent: an empty outcome price becomes null, not a phantom 0¢", () => {
+  const ev = normalizeEvent({ id: "1", slug: "s", title: "A vs B", markets: [
+    { groupItemTitle: "M", outcomes: '["A","B"]', outcomePrices: '["",""]', clobTokenIds: '["t1","t2"]', liquidity: "500" },
+  ] });
+  assert.equal(ev.markets[0].priceCents, null, "empty string price → null (Number(\"\")===0 trap guarded)");
+});
+
 test("parseStatpalEsports: Started=live, Not Started=upcoming, Finished=final", () => {
   const json = { scores: { sport: "esports", match: [
     { id: "e1", status: "Started", type: "League Of Legends", home: { name: "T1", score: "1" }, away: { name: "GenG", score: "0" } },

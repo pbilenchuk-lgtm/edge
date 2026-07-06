@@ -37,7 +37,8 @@ export function startScheduler(env: Record<string, string | undefined> = process
   // resource doubling is a 502 contributor on a small instance).
 
   const run = async () => {
-    if (!tryAcquireEngine()) return; // don't overlap with a live/manual/slow pass
+    const tok = tryAcquireEngine();
+    if (!tok) return; // don't overlap with a live/manual/slow pass
     // Everything that can throw goes INSIDE the try so `finally` always clears
     // `busy` — a throw from getDb()/Date before the try would wedge the cron
     // (busy stuck true) for the whole process lifetime.
@@ -58,14 +59,15 @@ export function startScheduler(env: Record<string, string | undefined> = process
       console.error("[scheduler] error:", msg);
       try { if (db) R.insertCronLog(db, { id: R.uid(), at, kind: discover ? "discover" : "tick", ok: 0, summary: `ошибка: ${msg}`, created_at: at }); } catch {}
     } finally {
-      releaseEngine();
+      releaseEngine(tok);
     }
   };
 
   // Fast live loop — only does work while a match is in play; logs to the cron
   // journal only when something actually happened (so it doesn't flood it).
   const liveRun = async () => {
-    if (!tryAcquireEngine()) return;    // yield to a running full/live/manual pass
+    const tok = tryAcquireEngine();
+    if (!tok) return;    // yield to a running full/live/manual pass
     const at = new Date(Date.now()).toISOString();
     let db: ReturnType<typeof getDb> | null = null;
     try {
@@ -82,7 +84,7 @@ export function startScheduler(env: Record<string, string | undefined> = process
       console.error("[scheduler:live] error:", msg);
       try { if (db) R.insertCronLog(db, { id: R.uid(), at, kind: "live", ok: 0, summary: `ошибка: ${msg}`, created_at: at }); } catch {}
     } finally {
-      releaseEngine();
+      releaseEngine(tok);
     }
   };
 

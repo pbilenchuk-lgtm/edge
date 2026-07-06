@@ -345,3 +345,19 @@ test("invariants: detects over-allocation and over-shares", () => {
   });
   assert.equal(good.ok, true);
 });
+
+test("engineLock: owner token guards release — a stale holder can't free a re-taken lock", async () => {
+  const { tryAcquireEngine, releaseEngine, engineIsBusy } = await import("../src/lib/engineLock.js");
+  const a = tryAcquireEngine();
+  assert.ok(a, "first acquire succeeds");
+  assert.equal(tryAcquireEngine(), 0, "second acquire is refused while held");
+  assert.ok(engineIsBusy());
+  releaseEngine(12345);                       // wrong token → no-op
+  assert.equal(tryAcquireEngine(), 0, "wrong-token release did NOT free the lock");
+  releaseEngine(a);                           // correct owner → frees
+  const b = tryAcquireEngine();
+  assert.ok(b && b !== a, "freed, and re-acquire yields a fresh token");
+  releaseEngine(a);                           // stale token from the previous holder → no-op
+  assert.ok(engineIsBusy(), "stale release can't wipe the new holder's lock");
+  releaseEngine(b);
+});

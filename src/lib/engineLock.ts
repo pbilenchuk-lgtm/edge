@@ -13,17 +13,26 @@
 
 const MAX_HOLD_MS = 15 * 60_000;
 let heldSince = 0;
+let owner = 0;    // token of the current holder (0 = free) — guards release
+let counter = 0;  // monotonic, NEVER reset, so every acquire gets a unique token
 
-/** Try to take the lock. Returns false if another heavy cycle holds it. */
-export function tryAcquireEngine(): boolean {
+/** Try to take the lock. Returns a non-zero OWNER TOKEN on success, else 0.
+ *  Pass the token to releaseEngine so a holder whose lock was force-expired
+ *  (a cycle that ran past MAX_HOLD) can't wipe the NEW holder's lock. */
+export function tryAcquireEngine(): number {
   const now = Date.now();
-  if (heldSince && now - heldSince < MAX_HOLD_MS) return false;
+  if (heldSince && now - heldSince < MAX_HOLD_MS) return 0;
   heldSince = now;
-  return true;
+  owner = (counter = (counter % 2_000_000_000) + 1); // unique, monotonic, ≠ 0
+  return owner;
 }
 
-export function releaseEngine(): void {
-  heldSince = 0;
+/** Release only if `token` still owns the lock (or unconditionally when omitted,
+ *  for legacy callers). A stale token — the lock was expiry-stolen and re-taken
+ *  by someone else — is a no-op, so a slow cycle finishing late can't release a
+ *  lock it no longer holds. */
+export function releaseEngine(token?: number): void {
+  if (token == null || token === owner) { heldSince = 0; owner = 0; }
 }
 
 export function engineIsBusy(): boolean {

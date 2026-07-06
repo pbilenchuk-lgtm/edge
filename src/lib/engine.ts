@@ -562,8 +562,11 @@ export async function importPolymarketMatches(
   // cap pull MORE leagues out of the SAME fetched event set (no extra requests —
   // user: «отбиваемся от полимаркета»). Both env-tunable.
   const env = deps.env ?? process.env;
-  const windowDays = Number(env.DISCOVER_WINDOW_DAYS ?? 21);
-  const limit = opts.limit ?? Number(env.DISCOVER_MATCH_LIMIT ?? 400);
+  // A typo'd env (e.g. "400 matches") must NOT become NaN — that would slice(0,
+  // NaN) to [] and silently import ZERO matches. Fall back to the default.
+  const numEnv = (v: string | undefined, def: number) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : def; };
+  const windowDays = numEnv(env.DISCOVER_WINDOW_DAYS, 21);
+  const limit = opts.limit != null && Number.isFinite(opts.limit) ? opts.limit : numEnv(env.DISCOVER_MATCH_LIMIT, 400);
   const discovered = await discoverSportMatches(poly, sport, now, { fetchImpl: deps.fetchImpl }, { limit, windowDays, nowMs });
   const allow = seriesAllowFor(sport, deps.env); // e.g. tennis → only ATP tour
   const out: DiscoverItem[] = [];
@@ -608,12 +611,14 @@ export async function importPolymarketMatches(
       };
       R.insertMatch(db, match);
       created = true;
-    } else if (d.kickoff && match.kickoff_at) {
-      // Existing match: Polymarket moved the start time (postponed/rescheduled).
-      // Update kickoff_at so advanceClocks re-derives state from the NEW time —
-      // otherwise a postponed match stays clock-driven "live" at its old slot.
-      // Only for a real ISO kickoff and a meaningful shift (>5 min).
-      const newMs = Date.parse(d.kickoff), oldMs = Date.parse(match.kickoff_at);
+    } else if (d.kickoff) {
+      // Existing match: (a) BACKFILL kickoff_at if it was created with none
+      // (Polymarket hadn't exposed startTime yet) — else it sits in "upcoming"
+      // forever, never clock-driving; (b) UPDATE it when Polymarket moves the
+      // start (postponed/rescheduled), so advanceClocks re-derives from the new
+      // time instead of staying clock-"live" at the old slot. Real ISO + >5min.
+      const newMs = Date.parse(d.kickoff);
+      const oldMs = match.kickoff_at ? Date.parse(match.kickoff_at) : NaN;
       if (!isNaN(newMs) && (isNaN(oldMs) || Math.abs(newMs - oldMs) > 5 * 60_000)) {
         R.updateMatch(db, match.id, { kickoff_at: d.kickoff });
         match.kickoff_at = d.kickoff;

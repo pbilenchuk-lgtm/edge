@@ -61,24 +61,26 @@ export async function POST(req: Request) {
         // Heavy: re-quotes every non-finished match. Run in the BACKGROUND behind
         // the shared engine lock so it can't hold the HTTP request open past
         // Render's gateway timeout (→ 502) or overlap with the cron.
-        if (!tryAcquireEngine()) return NextResponse.json({ ok: true, running: true }, { status: 202 });
-        void (async () => { try { await engine.refreshActiveOdds(db, {}); } catch (e) { console.error("[refreshAllOdds]", e); } finally { releaseEngine(); } })();
-        return NextResponse.json({ ok: true, started: true }, { status: 202 });
+        { const tok = tryAcquireEngine();
+        if (!tok) return NextResponse.json({ ok: true, running: true }, { status: 202 });
+        void (async () => { try { await engine.refreshActiveOdds(db, {}); } catch (e) { console.error("[refreshAllOdds]", e); } finally { releaseEngine(tok); } })();
+        return NextResponse.json({ ok: true, started: true }, { status: 202 }); }
       }
       case "tick": {
         // Full automated lifecycle pass (same as `npm run tick:once`):
         // sync + odds + exits + auto-analyze + paper-enter. Multi-minute → run in
         // the BACKGROUND behind the shared lock, return at once (avoids a 502).
-        if (!tryAcquireEngine()) return NextResponse.json({ ok: true, running: true }, { status: 202 });
+        { const tok = tryAcquireEngine();
+        if (!tok) return NextResponse.json({ ok: true, running: true }, { status: 202 });
         void (async () => {
           try {
             const { runAutoCycle } = await import("@/lib/lifecycle");
             const { loadPolymarketConfig } = await import("@/lib/polymarket");
             const provider = loadSportsProvider(loadSportsConfig());
             await runAutoCycle(db, provider, {}, { linkOdds: loadPolymarketConfig().enabled });
-          } catch (e) { console.error("[tick]", e); } finally { releaseEngine(); }
+          } catch (e) { console.error("[tick]", e); } finally { releaseEngine(tok); }
         })();
-        return NextResponse.json({ ok: true, started: true }, { status: 202 });
+        return NextResponse.json({ ok: true, started: true }, { status: 202 }); }
       }
       case "discover": {
         // "Pull matches" UI button: parse Polymarket (~7 days out), import
@@ -87,7 +89,8 @@ export async function POST(req: Request) {
         // lock and returns 202 immediately — holding it in the request timed out
         // past Render's gateway (→ 502). The client surfaces the new matches on
         // its next reload (competitions now sync in reloadApp).
-        if (!tryAcquireEngine()) return NextResponse.json({ ok: true, running: true }, { status: 202 });
+        { const tok = tryAcquireEngine();
+        if (!tok) return NextResponse.json({ ok: true, running: true }, { status: 202 });
         void (async () => {
           try {
             const { importPolymarketMatches, syncCompetitions, enrichFromEspn } = engine;
@@ -110,9 +113,9 @@ export async function POST(req: Request) {
             const oddsUpdated = odds.reduce((n, r) => n + r.updated, 0);
             const at = new Date().toISOString();
             try { R.insertCronLog(db, { id: R.uid(), at, kind: "manual", ok: 1, summary: `подтянуть матчи: +${discovered} матчей · составы ${enriched} · котировки ${oddsUpdated}`, created_at: at }); } catch {}
-          } catch (e) { console.error("[discover]", e); } finally { releaseEngine(); }
+          } catch (e) { console.error("[discover]", e); } finally { releaseEngine(tok); }
         })();
-        return NextResponse.json({ ok: true, started: true }, { status: 202 });
+        return NextResponse.json({ ok: true, started: true }, { status: 202 }); }
       }
       case "sync": {
         const cfg = loadSportsConfig();

@@ -233,6 +233,22 @@ export class StatpalSportsProvider implements SportsProvider {
 
 const isTime = (s: string) => /^\d{1,2}:\d{2}$/.test(s.trim());
 
+// StatPal status vocab is open-ended and varies per sport, so classify the
+// non-live cases EXPLICITLY and only fall through to "live" for a genuine
+// in-play marker (set number, ball commentary, minute). Otherwise a status we
+// don't recognize — "Canc.", "Postponed", "Abandoned", "" — was silently read
+// as a live 0-0 game that never settles.
+const STATPAL_DONE = /finish|ended|full ?time|\bft\b|aet|aot|\bap\b|\bpen\b|retired|walk\s?over|\bw\.?o\b|abandon|cancel|\bcanc\b|void|awarded|no result/i;
+const STATPAL_PENDING = /not started|scheduled|\bns\b|tbd|postp|delay|suspend|\bsusp\b|interrupt|\bint\b|awaiting|to be/i;
+/** "finished" | "upcoming" for a recognized non-live status, else null (in-play). */
+function statpalNonLive(status: string): "finished" | "upcoming" | null {
+  const s = status.trim();
+  if (!s) return "upcoming";                 // empty → never assume live
+  if (STATPAL_DONE.test(s)) return "finished";
+  if (STATPAL_PENDING.test(s) || isTime(s)) return "upcoming";
+  return null;                               // genuine in-play marker
+}
+
 export function parseStatpalTennis(json: any): SportsMatchStatus[] {
   const out: SportsMatchStatus[] = [];
   for (const t of asArr(json?.livescores?.tournament)) {
@@ -241,12 +257,12 @@ export function parseStatpalTennis(json: any): SportsMatchStatus[] {
       if (ps.length < 2) continue;
       const [h, a] = ps as any[];
       const st = String((m as any).status ?? "");
-      const finished = /finish|retired|walk\s?over|\bw\.?o\b|\bdef\b|abandon/i.test(st);
-      const upcoming = /not started|scheduled/i.test(st) || isTime(st);
+      const nl = statpalNonLive(st);
+      const finished = nl === "finished" || /\bdef\b/i.test(st);
       out.push({
         externalRef: String((m as any).id),
         home: String(h.name ?? "?"), away: String(a.name ?? "?"),
-        state: finished ? "finished" : upcoming ? "upcoming" : "live",
+        state: finished ? "finished" : nl === "upcoming" ? "upcoming" : "live",
         minute: null,
         scoreHome: intOrNull(h.totalscore), scoreAway: intOrNull(a.totalscore),
         final: finished,
@@ -261,13 +277,13 @@ export function parseStatpalTennis(json: any): SportsMatchStatus[] {
 export function parseStatpalEsports(json: any): SportsMatchStatus[] {
   const out: SportsMatchStatus[] = [];
   for (const m of asArr(json?.scores?.match)) {
-    const st = String((m as any).status ?? "").toLowerCase();
-    const finished = /finish|walk\s?over/.test(st);
-    const upcoming = /not started|scheduled/.test(st);
+    const st = String((m as any).status ?? "");
+    const nl = statpalNonLive(st);
+    const finished = nl === "finished";
     out.push({
       externalRef: String((m as any).id),
       home: String((m as any).home?.name ?? "?"), away: String((m as any).away?.name ?? "?"),
-      state: finished ? "finished" : upcoming ? "upcoming" : "live",
+      state: finished ? "finished" : nl === "upcoming" ? "upcoming" : "live",
       minute: null,
       scoreHome: intOrNull((m as any).home?.score), scoreAway: intOrNull((m as any).away?.score),
       final: finished,
@@ -286,12 +302,12 @@ export function parseStatpalCricket(json: any): SportsMatchStatus[] {
       const homeWin = String((m as any).home?.winner) === "True";
       const awayWin = String((m as any).away?.winner) === "True";
       const post = String((m as any).comment?.post ?? "");
-      const finished = homeWin || awayWin || /finish|abandon|no result/i.test(st) || /won by|match drawn|\bdraw\b/i.test(post);
-      const upcoming = /not started|scheduled/i.test(st);
+      const nl = statpalNonLive(st);
+      const finished = nl === "finished" || homeWin || awayWin || /won by|match drawn|\bdraw\b/i.test(post);
       out.push({
         externalRef: String((m as any).id),
         home: String((m as any).home?.name ?? "?"), away: String((m as any).away?.name ?? "?"),
-        state: finished ? "finished" : upcoming ? "upcoming" : "live",
+        state: finished ? "finished" : nl === "upcoming" ? "upcoming" : "live",
         minute: null,
         // cricket totalscore is "runs" (Tests) or "runs/wickets" (T20, e.g.
         // "108/9") — take the leading integer (runs) as the numeric score.
@@ -310,14 +326,14 @@ export function parseStatpalSoccer(json: any): SportsMatchStatus[] {
   for (const lg of asArr(json?.live_matches?.league)) {
     for (const m of asArr((lg as any).match)) {
       const st = String((m as any).status ?? "").trim();
-      const finished = /^(ft|aet|aot|pen\.?|ap|ended|finished|awarded|abandoned|walk\s?over|wo)$/i.test(st);
-      const upcoming = isTime(st) || st === "" || /^(ns|not started|scheduled|postp\.?|tbd|susp\.?)$/i.test(st);
-      const live = !finished && !upcoming;
+      const nl = statpalNonLive(st);
+      const finished = nl === "finished";
+      const live = nl === null;
       const minNum = /^\d{1,3}(\+\d+)?$/.test(st) ? parseInt(st, 10) : intOrNull((m as any).minute);
       out.push({
         externalRef: String((m as any).main_id ?? (m as any).id ?? (m as any).fallback_id_1 ?? ""),
         home: String((m as any).home?.name ?? "?"), away: String((m as any).away?.name ?? "?"),
-        state: finished ? "finished" : upcoming ? "upcoming" : "live",
+        state: finished ? "finished" : nl === "upcoming" ? "upcoming" : "live",
         minute: live ? minNum : null,
         scoreHome: intOrNull((m as any).home?.goals), scoreAway: intOrNull((m as any).away?.goals),
         final: finished,

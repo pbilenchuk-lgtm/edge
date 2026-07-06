@@ -121,6 +121,9 @@ export async function fetchMidpointCents(
   const res = await withTimeout(cfg.timeoutMs, (signal) => doFetch(url, { signal }));
   if (!res.ok) throw new Error(`CLOB ${res.status}`);
   const json = (await res.json()) as { mid?: string | number };
+  // Number("") === 0, so an empty midpoint (dead book) must be rejected BEFORE
+  // the numeric coercion — else it fabricates a confident 0¢ live quote.
+  if (json.mid == null || json.mid === "") throw new Error("CLOB midpoint empty");
   const mid = Number(json.mid);
   if (!isFinite(mid)) throw new Error("CLOB midpoint not numeric");
   return round1(mid * 100);
@@ -218,12 +221,24 @@ export function parseJsonArray(v: unknown): string[] {
   return [];
 }
 
+/** Coerce Gamma's gameStartTime ("YYYY-MM-DD HH:MM:SS+00" and offset variants)
+ *  to a parseable ISO string, or null. Handles a bare "+00" offset, a full
+ *  "+00:00", or no offset at all (→ assume UTC) — the old naive replace only
+ *  handled "+00" and could yield an invalid or local-time-parsed date. */
+function normalizeGst(s: string): string | null {
+  let v = s.trim().replace(" ", "T");
+  if (!/([Zz]|[+-]\d{2}:?\d{2})$/.test(v)) {
+    v += /[+-]\d{2}$/.test(v) ? ":00" : "Z"; // bare "+00" → "+00:00"; none → UTC
+  }
+  return isNaN(Date.parse(v)) ? null : v;
+}
+
 export function normalizeEvent(raw: any): PolyEvent {
   const markets: PolyMarketRow[] = (raw.markets ?? []).map((m: any): PolyMarketRow => {
     const outcomes = parseJsonArray(m.outcomes);
     const prices = parseJsonArray(m.outcomePrices);
     const tokenIds = parseJsonArray(m.clobTokenIds);
-    const cents = prices.map((p) => { const n = Number(p); return isFinite(n) ? round1(n * 100) : null; });
+    const cents = prices.map((p) => { const n = p === "" ? NaN : Number(p); return isFinite(n) ? round1(n * 100) : null; });
     return {
       label: m.groupItemTitle || m.question || "",
       outcomes,
@@ -236,7 +251,7 @@ export function normalizeEvent(raw: any): PolyEvent {
   });
   // kickoff: event startTime, else a market's gameStartTime ("YYYY-MM-DD HH:MM:SS+00").
   const gst = raw.markets?.find?.((m: any) => m.gameStartTime)?.gameStartTime;
-  const startTime = raw.startTime ?? (gst ? String(gst).replace(" ", "T").replace("+00", "Z") : null);
+  const startTime = raw.startTime ?? (gst ? normalizeGst(String(gst)) : null);
   // Gamma `series`: array of { title, slug } (or bare strings). First entry is
   // the tournament (e.g. "FIFA World Cup" / "soccer-fifwc").
   const s0 = Array.isArray(raw.series) ? raw.series[0] : null;

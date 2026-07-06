@@ -406,43 +406,53 @@ export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number }
   return deleteMatches(db, doomed);
 }
 
+/** Delete matches + all their child rows — NO transaction (caller owns one).
+ *  node:sqlite has no nested transactions, so this is the reusable body that
+ *  both deleteMatches and deleteCompetition run inside their own BEGIN/COMMIT. */
+function deleteMatchRows(db: Database, ids: string[]): void {
+  if (!ids.length) return;
+  const delChild = MATCH_CHILD_TABLES.map((t) => db.prepare(`DELETE FROM ${t} WHERE match_id = ?`));
+  const delMatch = db.prepare(`DELETE FROM matches WHERE id = ?`);
+  for (const id of ids) {
+    for (const stmt of delChild) stmt.run(id);
+    delMatch.run(id);
+  }
+}
+
 /** Delete matches + all their child rows (no ON DELETE CASCADE), atomically. */
 function deleteMatches(db: Database, ids: string[]): number {
   if (!ids.length) return 0;
-  const delChild = MATCH_CHILD_TABLES.map((t) => db.prepare(`DELETE FROM ${t} WHERE match_id = ?`));
-  const delMatch = db.prepare(`DELETE FROM matches WHERE id = ?`);
-  // node:sqlite has no .transaction() helper — wrap in an explicit BEGIN/COMMIT
-  // so a mid-prune throw can't leave a match half-deleted (orphaned children).
+  db.exec("BEGIN");
+  try { deleteMatchRows(db, ids); db.exec("COMMIT"); }
+  catch (e) { db.exec("ROLLBACK"); throw e; }
+  return ids.length;
+}
+
+/** Delete a competition and everything under it (matches + their children,
+ *  strategy shares, comp-scoped analytics prompts, the comp row) in ONE
+ *  transaction — so a crash can't leave an empty orphaned competition row. */
+export function deleteCompetition(db: Database, id: string): void {
+  const matchIds = (db.prepare(`SELECT id FROM matches WHERE competition_id=?`).all(id) as { id: string }[]).map((r) => r.id);
   db.exec("BEGIN");
   try {
-    for (const id of ids) {
-      for (const stmt of delChild) stmt.run(id);
-      delMatch.run(id);
-    }
+    deleteMatchRows(db, matchIds);
+    db.prepare(`DELETE FROM strategy_shares WHERE competition_id=?`).run(id);
+    db.prepare(`DELETE FROM analytics_prompts WHERE scope='competition' AND scope_id=?`).run(id);
+    db.prepare(`DELETE FROM competitions WHERE id=?`).run(id);
     db.exec("COMMIT");
   } catch (e) {
     db.exec("ROLLBACK");
     throw e;
   }
-  return ids.length;
-}
-
-/** Delete a competition and everything under it (matches + their children,
- *  strategy shares, comp-scoped analytics prompts, the comp row). */
-export function deleteCompetition(db: Database, id: string): void {
-  const matchIds = (db.prepare(`SELECT id FROM matches WHERE competition_id=?`).all(id) as { id: string }[]).map((r) => r.id);
-  deleteMatches(db, matchIds);
-  db.prepare(`DELETE FROM strategy_shares WHERE competition_id=?`).run(id);
-  db.prepare(`DELETE FROM analytics_prompts WHERE scope='competition' AND scope_id=?`).run(id);
-  db.prepare(`DELETE FROM competitions WHERE id=?`).run(id);
 }
 
 /**
  * Remove discovered (`pm-*`) categories we no longer track — a sport dropped
  * from keepSports (e.g. cricket) or a tennis series outside the allow-list
- * (non-ATP). NEVER touches a competition that carries any bet (preserves P&L),
- * nor a seeded (non-`pm-`) competition. Then drops now-empty sport rows for
- * untracked sports so their tab disappears. Returns competitions removed.
+ * (non-ATP). NEVER touches a competition the user has invested in — one that
+ * carries a bet (preserves P&L), has a budget, or has strategy shares — nor a
+ * seeded (non-`pm-`) competition. Then drops now-empty sport rows for untracked
+ * sports so their tab disappears. Returns competitions removed.
  */
 export function pruneRemovedCategories(db: Database, opts: { keepSports: Set<string>; tennisSeriesAllow: Set<string> }): number {
   let removed = 0;
@@ -455,9 +465,10 @@ export function pruneRemovedCategories(db: Database, opts: { keepSports: Set<str
       const slug = c.id.slice(3);                                        // pm-<slug>
       if (!opts.tennisSeriesAllow.has(slug)) doomed = true;             // non-ATP series
     }
-    if (!doomed) continue;
+    if (!doomed || c.budget > 0) continue;                               // funded → keep
     const hasBet = db.prepare(`SELECT 1 FROM bets b JOIN matches m ON b.match_id=m.id WHERE m.competition_id=? LIMIT 1`).get(c.id);
-    if (hasBet) continue;                                                // keep betting history
+    const hasShares = db.prepare(`SELECT 1 FROM strategy_shares WHERE competition_id=? AND pct>0 LIMIT 1`).get(c.id);
+    if (hasBet || hasShares) continue;                                   // invested → keep (P&L / config)
     deleteCompetition(db, c.id);
     removed++;
   }
