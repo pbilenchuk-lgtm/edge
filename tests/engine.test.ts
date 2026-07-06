@@ -490,12 +490,14 @@ test("pruneRemovedCategories drops cricket + non-ATP tennis (no-bet), keeps ATP 
   mk("pm-atp", "tennis");                 // keep (ATP)
   mk("pm-wta", "tennis");                 // drop (non-ATP)
   mk("pm-atp-doubles", "tennis");         // drop (non-ATP)
+  mk("pm-football", "football");          // drop (seriesless «прочее» catch-all)
   mk("pm-major-league-cricket", "cricket"); // drop (untracked sport)
   const betMatch = mk("pm-itf", "tennis");  // non-ATP but HAS a bet → keep
   R.insertBet(db, { id: R.uid(), match_id: betMatch, strategy_id: strat.id, market_label: "П1", status: "settled_won", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: 55, ai_prob: 0.6, stake: 40, rationale: null, entered_minute: "10'", result: "won", payout: 72, created_at: "t" });
 
   const removed = R.pruneRemovedCategories(db, { keepSports: new Set(["football", "tennis", "basketball", "esports"]), tennisSeriesAllow: new Set(["atp"]) });
-  assert.equal(removed, 3, "wta, atp-doubles, cricket removed");
+  assert.equal(removed, 4, "wta, atp-doubles, pm-football catch-all, cricket removed");
+  assert.ok(!R.listCompetitions(db).some((c) => c.id === "pm-football"), "«прочее» catch-all gone");
   assert.ok(R.listCompetitions(db).some((c) => c.id === "pm-atp"), "ATP kept");
   assert.ok(R.listCompetitions(db).some((c) => c.id === "pm-itf"), "bet-bearing tennis kept");
   assert.ok(!R.listCompetitions(db).some((c) => c.id === "pm-wta"), "WTA gone");

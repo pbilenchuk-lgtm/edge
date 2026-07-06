@@ -571,6 +571,10 @@ export async function importPolymarketMatches(
     // Per-sport series allow-list: tennis keeps only ATP (WTA/doubles/juniors
     // have no liquidity — user). Other sports: no restriction.
     if (allow && !allow.has(seriesSlugOf(d.series, d.seriesSlug))) continue;
+    // Skip matches with NO tournament series — on Polymarket these are novelty /
+    // prop "X vs Y" markets (player H2H, "to play?"), not real fixtures. They
+    // fed the useless «… · прочее» catch-all. Real matches always carry a series.
+    if (!d.series && !d.seriesSlug) continue;
     // Route into the tournament category this match belongs to (Polymarket series).
     const compId = ensureCategoryComp(db, sport, d.series, d.seriesSlug, now);
     // Order-INSENSITIVE ref (teams sorted): Polymarket may list a fixture as

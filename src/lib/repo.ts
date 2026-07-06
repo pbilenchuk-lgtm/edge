@@ -449,10 +449,11 @@ export function pruneRemovedCategories(db: Database, opts: { keepSports: Set<str
   for (const c of listCompetitions(db)) {
     if (!c.id.startsWith("pm-")) continue; // only discovered catch-alls
     let doomed = false;
-    if (!opts.keepSports.has(c.sport_id)) doomed = true;                 // untracked sport (cricket)
+    if (c.id === `pm-${c.sport_id}`) doomed = true;                      // seriesless «… · прочее» catch-all
+    else if (!opts.keepSports.has(c.sport_id)) doomed = true;            // untracked sport (cricket)
     else if (c.sport_id === "tennis") {
       const slug = c.id.slice(3);                                        // pm-<slug>
-      if (slug === "tennis" || !opts.tennisSeriesAllow.has(slug)) doomed = true; // non-ATP / seriesless
+      if (!opts.tennisSeriesAllow.has(slug)) doomed = true;             // non-ATP series
     }
     if (!doomed) continue;
     const hasBet = db.prepare(`SELECT 1 FROM bets b JOIN matches m ON b.match_id=m.id WHERE m.competition_id=? LIMIT 1`).get(c.id);
