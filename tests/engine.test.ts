@@ -182,6 +182,34 @@ test("enrichFromEspn is sport-generic: enriches a basketball match via a provide
   assert.equal(fm.state, "upcoming", "football match of same nations left untouched (sport-scoped)");
 });
 
+test("enrichFromEspn reconciles a short-named esports match (e.g. 'T1') the provider reports finished", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertSport(db, "esports", "Киберспорт");
+  R.upsertCompetition(db, { id: "pm-lol", sport_id: "esports", name: "PM · LoL", budget: 0, external_league: null, created_at: "t" });
+  const eid = R.uid();
+  // 'T1' is a 2-char org name — the exact case that produced an empty token set
+  // and left the fixture stranded "live" forever despite the provider finishing it.
+  R.insertMatch(db, { id: eid, competition_id: "pm-lol", home: "T1", away: "FURIA Esports", state: "live", lineup_out: true, kickoff_at: "2026-07-06T08:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: eid });
+
+  const provider: SportsProvider = {
+    name: "mock",
+    leaguesFor: (sport) => (sport === "esports" ? ["sp:esports"] : []),
+    async scoreboard(sport, league) {
+      if (sport === "esports" && league === "sp:esports")
+        return [{ externalRef: "L1", home: "T1", away: "FURIA Esports", state: "finished", minute: null, scoreHome: 3, scoreAway: 0, final: true }];
+      return [];
+    },
+    async matchDetail() { return { lineupOut: false, lineups: { home: null, away: null }, events: [] }; },
+  };
+
+  const res = await enrichFromEspn(db, provider, {});
+  assert.equal(res.enriched, 1, "the short-named esports match now reconciles with the provider");
+  const em = R.getMatch(db, eid)!;
+  assert.equal(em.state, "finished", "provider 'Finished' status finishes it — no more infinite clock");
+  assert.equal(em.final_score, "3:0");
+});
+
 test("enrichFromEspn aligns scores/lineups when the DB match orientation is reversed", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

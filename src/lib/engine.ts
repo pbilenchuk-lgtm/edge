@@ -651,7 +651,11 @@ export async function importPolymarketMatches(
 // United" must NOT match on "united". Matching needs a distinctive token.
 const TEAM_STOPWORDS = new Set(["fc", "afc", "sc", "cf", "ac", "as", "cd", "sv", "fk", "if", "bk", "club", "united", "city", "town", "county", "calcio", "sporting", "real", "athletic", "atletico"]);
 function teamTokens(name: string): Set<string> {
-  return new Set(name.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 3));
+  // Keep tokens ≥3 chars, OR short ones that carry a digit — esports orgs are
+  // routinely 2-char names ("T1", "G2", "C9"). Dropping those left such a match
+  // with an EMPTY token set, so nameMatch always failed and the fixture could
+  // never reconcile with the provider (it hung "live" forever on the timer).
+  return new Set(name.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 3 || /\d/.test(w)));
 }
 /** Do two team names refer to the same club/nation? Requires every token of the
  *  shorter name to appear in the longer (so "West Ham" ⊂ "West Ham United" ok,
