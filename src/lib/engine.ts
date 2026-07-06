@@ -542,11 +542,18 @@ export function seriesSlugOf(series: string | null, seriesSlug: string | null): 
   return (seriesSlug ?? (series ? slugify(series) : "")).toLowerCase();
 }
 
-/** Per-sport series allow-list (slugs) — null = no restriction. Tennis keeps
- *  only ATP by default; override via TENNIS_SERIES (comma-separated slugs). */
+/** Per-sport series allow-list (slugs) — null = no restriction. Tennis is scoped
+ *  to the tours our live provider (StatPal) actually covers: the Grand Slams +
+ *  main ATP/WTA tour. Crucially this INCLUDES the slam series (e.g. "wimbledon") —
+ *  Polymarket files slam matches under their own slug, and filtering to bare "atp"
+ *  discovered only lower-tier Challengers (which StatPal doesn't carry) while
+ *  excluding the covered slam matches. Override via TENNIS_SERIES (comma slugs).
+ *  Uncovered matches that still slip through are gated by the entry rule +
+ *  uncovered-finish, so this is a discovery hint, not the live-data guarantee. */
 export function seriesAllowFor(sport: string, env: Record<string, string | undefined> = process.env): Set<string> | null {
   if (sport !== "tennis") return null;
-  const slugs = (env.TENNIS_SERIES ?? "atp").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const def = "atp,wta,wimbledon,australian-open,roland-garros,french-open,us-open";
+  const slugs = (env.TENNIS_SERIES ?? def).split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
   return new Set(slugs);
 }
 
