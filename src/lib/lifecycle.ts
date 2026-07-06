@@ -479,7 +479,7 @@ export async function runAutoCycle(
   let discovered = 0;
   if (opts.discover !== false) {
     for (const sport of Object.keys(SPORT_TAG_IDS)) {
-      const items = await step("discover", () => importPolymarketMatches(db, sport, deps, { limit: opts.discoverLimit ?? 200 }), [] as any[]);
+      const items = await step("discover", () => importPolymarketMatches(db, sport, deps, { limit: opts.discoverLimit }), [] as any[]);
       discovered += items.length;
     }
   }

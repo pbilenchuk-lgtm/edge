@@ -558,7 +558,13 @@ export async function importPolymarketMatches(
   if (!poly.enabled) return [];
   const now = nowFn(deps)();
   const nowMs = Date.parse(now) || Date.now();
-  const discovered = await discoverSportMatches(poly, sport, now, { fetchImpl: deps.fetchImpl }, { limit: opts.limit ?? 200, windowDays: 7, nowMs });
+  // Widen coverage without more Polymarket calls: a longer window + higher match
+  // cap pull MORE leagues out of the SAME fetched event set (no extra requests —
+  // user: «отбиваемся от полимаркета»). Both env-tunable.
+  const env = deps.env ?? process.env;
+  const windowDays = Number(env.DISCOVER_WINDOW_DAYS ?? 21);
+  const limit = opts.limit ?? Number(env.DISCOVER_MATCH_LIMIT ?? 400);
+  const discovered = await discoverSportMatches(poly, sport, now, { fetchImpl: deps.fetchImpl }, { limit, windowDays, nowMs });
   const allow = seriesAllowFor(sport, deps.env); // e.g. tennis → only ATP tour
   const out: DiscoverItem[] = [];
   for (const d of discovered) {

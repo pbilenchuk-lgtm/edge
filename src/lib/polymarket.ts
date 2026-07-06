@@ -370,13 +370,20 @@ async function fetchSportEvents(cfg: PolymarketConfig, tags: number[], limit: nu
     if (c && Date.now() - c.at < SPORT_CACHE_TTL_MS) return c.events;
   }
   const byId = new Map<string, PolyEvent>(); // a match tagged with two of a sport's tags appears once
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
   let ok = true;
   outer: for (const tag of tags) {
     for (let off = 0; off < limit; off += GAMMA_PAGE) {
-      const page = await gammaEventsRaw(cfg, `tag_id=${tag}&closed=false&limit=${GAMMA_PAGE}&offset=${off}&order=startDate&ascending=false`, deps);
-      if (!page.ok) { ok = false; break outer; } // transient error mid-pagination → result is PARTIAL
+      const q = `tag_id=${tag}&closed=false&limit=${GAMMA_PAGE}&offset=${off}&order=startDate&ascending=false`;
+      let page = await gammaEventsRaw(cfg, q, deps);
+      // Survive a transient Polymarket rejection (rate-limit) mid-pagination: one
+      // backoff-retry instead of aborting — else discovery drops whole leagues
+      // that live on later pages (user: «отбиваемся от полимаркета»).
+      if (!page.ok && live) { await sleep(600); page = await gammaEventsRaw(cfg, q, deps); }
+      if (!page.ok) { ok = false; break outer; } // still failing → result is PARTIAL
       for (const ev of page.events) byId.set(ev.id, ev);
       if (page.events.length < GAMMA_PAGE) break; // last page of this tag
+      if (live) await sleep(120); // gentle pacing — don't hammer Gamma
     }
   }
   const all = [...byId.values()];

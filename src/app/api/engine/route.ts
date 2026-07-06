@@ -96,7 +96,7 @@ export async function POST(req: Request) {
             let discovered = 0;
             if (loadPolymarketConfig().enabled) {
               for (const sport of Object.keys(SPORT_TAG_IDS)) {
-                const items = await importPolymarketMatches(db, sport, {}, { limit: 200 });
+                const items = await importPolymarketMatches(db, sport, {}, {});
                 discovered += items.length;
               }
             }
