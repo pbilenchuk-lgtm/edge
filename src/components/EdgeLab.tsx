@@ -394,22 +394,27 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     // instance) a fixed 3s interval would pile up overlapping refresh+reload
     // calls, and an older/slower reloadApp could land last and overwrite fresh
     // state with stale data. This keeps at most one tick in flight.
+    // Two DECOUPLED cadences on one 3s tick:
+    //  • quotes — every tick (3s): mark the visible live matches to fresh
+    //    Polymarket prices. refreshOddsCore updates the card prices in place,
+    //    so this alone keeps the odds live without a full payload rebuild.
+    //  • full reload — every Nth tick: re-pull /api/app (events, positions,
+    //    feed, stats). This is the heavy buildAppData scan, so it runs slower
+    //    than the quotes (~15s on Matches, ~6s elsewhere where there's no odds
+    //    loop to keep the screen live).
+    let n = 0;
     const tick = async () => {
+      n++;
       try {
-        // Ping Polymarket for live prices ONLY on the Matches screen (where odds
-        // are shown), capped to avoid a 30+ concurrent-call storm every tick. On
-        // other screens (Лента / Портфель / Метрики) just re-pull server state so
-        // they stay live in real time without the heavy per-match refresh — the
-        // cron already keeps odds fresh server-side.
+        // Ping Polymarket for live prices ONLY on the Matches screen, capped to
+        // avoid a concurrent-call storm.
         if (screen === "matches") {
           await Promise.all(liveMatchIds.slice(0, 12).map((id) => refreshOddsCore(id, true).catch(() => {})));
         }
-        if (!stop) await reloadApp().catch(() => {});
+        const reloadEvery = screen === "matches" ? 5 : 2; // 15s on Matches (odds already live), 6s elsewhere
+        if (!stop && n % reloadEvery === 0) await reloadApp().catch(() => {});
       } finally {
-        // 6s, not 3s: the server cron already refreshes odds every ~20s, so a
-        // tighter poll just multiplies the per-poll buildAppData rebuild + the
-        // Polymarket odds calls for no real freshness gain.
-        if (!stop) timer = setTimeout(tick, 6000);
+        if (!stop) timer = setTimeout(tick, 3000);
       }
     };
     timer = setTimeout(tick, 3000);
