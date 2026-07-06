@@ -389,9 +389,9 @@ const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
 
 export interface StrategistInput {
   strategyName: string; strategyPrompt: string;
-  match: { home: string; away: string; sport: string; state: string; minute: number | null; scoreHome: number | null; scoreAway: number | null };
+  match: { home: string; away: string; sport: string; state: string; minute: number | null; scoreHome: number | null; scoreAway: number | null; minuteApprox?: number | null };
   assessment: { confidence: string; short: string; verdict: string };
-  markets: { label: string; priceCents: number; aiProb: number | null }[];
+  markets: { label: string; priceCents: number; aiProb: number | null; liquidity?: number | null; openCents?: number | null }[];
   openPositions: { market: string; entryCents: number; currentCents: number }[];
   context?: string; // real lineups + in-match events (ESPN) — the reassessment triggers
 }
@@ -409,16 +409,31 @@ export interface StrategistDecision { ok: boolean; picks: StrategistPick[]; exit
 export async function strategistDecide(
   input: StrategistInput, model: string, deps: Deps = {},
 ): Promise<StrategistDecision> {
-  const mkList = input.markets.map((m) => `- ${m.label}: рынок ${m.priceCents}¢${m.aiProb != null ? `, предматч. оценка ${(m.aiProb * 100).toFixed(0)}%` : ""}`).join("\n");
+  const mkList = input.markets.map((m) => {
+    // Movement from the kickoff (open) price — the price_move direction/size the
+    // strategist reasons on; "" when we have no open snapshot to compare.
+    const move = m.openCents != null
+      ? (() => { const d = Math.round(m.priceCents - m.openCents!); return ` (старт ${Math.round(m.openCents!)}¢${d === 0 ? ", без движения" : `, ${d > 0 ? "+" : ""}${d}¢`})`; })()
+      : "";
+    const liq = m.liquidity != null ? `, ликв. $${Math.round(m.liquidity)}` : "";
+    const ai = m.aiProb != null ? `, предматч. оценка ${(m.aiProb * 100).toFixed(0)}%` : "";
+    return `- ${m.label}: ${m.priceCents}¢${move}${liq}${ai}`;
+  }).join("\n");
   const posList = input.openPositions.length
     ? input.openPositions.map((p) => `- ${p.market}: вход ${p.entryCents}¢ → сейчас ${p.currentCents}¢`).join("\n")
-    : "(открытых позиций нет)";
-  const score = input.match.scoreHome != null ? `${input.match.scoreHome}:${input.match.scoreAway}` : "—";
+    : "(открытых позиций нет — можешь только ВХОДИТЬ, не выходить)";
+  const scoreKnown = input.match.scoreHome != null;
+  const score = scoreKnown ? `${input.match.scoreHome}:${input.match.scoreAway}` : "не подтверждён провайдером";
+  // Minute: real provider minute if we have it, else the timer estimate from
+  // kickoff (clearly flagged) — so the strategist is never left without a clock.
+  const liveMin = input.match.state !== "live" ? ""
+    : input.match.minute != null ? `, ${input.match.minute}'`
+    : input.match.minuteApprox != null ? `, ≈${input.match.minuteApprox}' (оценка по таймеру)` : "";
   const res = await callLLM({
     model,
     system:
       "Ты — трейдер на прогнозных рынках, действующий СТРОГО по методологии из промта стратегии (это твой единственный свод правил). На основе оценки матча и цен реши ДЕЙСТВИЯ. Правила вывода: входи в рынок ТОЛЬКО если методология это разрешает и ты можешь назвать конкретную причину, почему цена неверна; не давай конфликтующих ставок на один матч; уважай стадию матча (предматч/лайв) и правила управления позицией; выход может быть ЧАСТИЧНЫМ (fraction — доля позиции 0..1, напр. 0.5 = зафиксировать половину на пике, 1 = закрыть полностью). Для КАЖДОГО пика укажи prob — свою АКТУАЛЬНУЮ вероятность (0..1), что этот рынок сыграет ДА, на ТЕКУЩИЙ момент матча (счёт/минута/события). НЕ копируй «предматч. оценку» — в лайве она устаревает (напр. при 0:2 «Over 1.5» уже ~1.0); пересчитай сам. Именно по твоему prob движок считает край и размер, поэтому оцени честно. Верни ТОЛЬКО JSON {picks:[{label, conviction:'низкая'|'средняя'|'высокая', reason, prob}], exits:[{market, fraction, reason}], note}. label/market бери ДОСЛОВНО из списков. Пусто — значит воздержаться. Без пояснений вне JSON.",
-    prompt: `СТРАТЕГИЯ «${input.strategyName}» (методология):\n${input.strategyPrompt}\n\nМАТЧ: ${input.match.home} — ${input.match.away} (${input.match.sport}, ${input.match.state}${input.match.state === "live" ? `, ${input.match.minute ?? "?"}'` : ""}, счёт ${score}).\nОценка аналитики: уверенность ${input.assessment.confidence}. ${input.assessment.short} Итог: ${input.assessment.verdict}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы + события матча — твои триггеры переоценки):\n${input.context}\n` : ""}\nРЫНКИ:\n${mkList}\n\nОТКРЫТЫЕ ПОЗИЦИИ:\n${posList}\n\nРеши по методологии: во что входить (picks) и что закрывать/фиксировать (exits, можно частично).`,
+    prompt: `СТРАТЕГИЯ «${input.strategyName}» (методология):\n${input.strategyPrompt}\n\nМАТЧ: ${input.match.home} — ${input.match.away} (${input.match.sport}, ${input.match.state}${liveMin}, счёт ${score}).\nОценка аналитики: уверенность ${input.assessment.confidence}. ${input.assessment.short} Итог: ${input.assessment.verdict}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы + статистика + события матча — твои триггеры переоценки):\n${input.context}\n` : ""}\nРЫНКИ (цена в ¢, движение от старта = направление price_move, ликвидность = глубина):\n${mkList}\n\nОТКРЫТЫЕ ПОЗИЦИИ:\n${posList}\n${!scoreKnown && input.match.state === "live" ? `\nВАЖНО: провайдер пока не отдаёт счёт/минуту по этому матчу — опирайся на ДВИЖЕНИЕ ЦЕН (price_move от старта) и ликвидность как основной сигнал, оценивай prob по ним. Не отказывайся от решения только из-за отсутствия счёта.` : ""}\nРеши по методологии: во что входить (picks) и что закрывать/фиксировать (exits, можно частично).`,
     maxTokens: 900,
   }, deps);
   if (!res.ok) return { ok: false, picks: [], exits: [], note: "", source: "none", error: res.error };

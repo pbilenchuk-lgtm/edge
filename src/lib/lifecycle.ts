@@ -350,8 +350,15 @@ export async function strategistReassess(
     if (triggeredOnly ? !triggered.has(m.id) : (!open.length && !triggered.has(m.id))) continue;
     const markets = R.latestMarkets(db, m.id);
     if (!markets.length) continue;
+    const opens = R.openOddsFor(db, m.id); // kickoff price per label → price_move direction/size
+    const nowMs = Date.parse(now) || Date.now();
+    // A live minute for the strategist even when no provider drives one: the timer
+    // estimate from kickoff (capped at the sport ceiling so it never reads absurd).
+    const minuteApprox = m.minute == null && isIsoTs(m.kickoff_at)
+      ? Math.min(maxLiveMinutes(sport), Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at as string)) / 60000)))
+      : null;
     const assess = R.assessmentsForMatch(db, m.id).filter((a) => a.status === "ok").sort((a, b) => (a.created_at >= b.created_at ? -1 : 1))[0];
-    const ctx = matchContext(db, m.id); // real lineups + events
+    const ctx = matchContext(db, m.id); // real lineups + stats + events
 
     // Strategies to run: those with an active share (can enter) plus any that
     // already hold an open position on this match (must be able to exit).
@@ -369,9 +376,9 @@ export async function strategistReassess(
       calls++;
       const dec = await strategistDecide({
         strategyName: strat.name, strategyPrompt: strat.prompt,
-        match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away },
+        match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, minuteApprox },
         assessment: { confidence: assess?.confidence ?? "средняя", short: assess?.short ?? "", verdict: assess?.verdict ?? "" },
-        markets: markets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob })),
+        markets: markets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob, liquidity: mk.liquidity != null ? Number(mk.liquidity) : null, openCents: mk.label in opens ? opens[mk.label] : null })),
         openPositions: myOpen.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
         context: ctx,
       }, strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });

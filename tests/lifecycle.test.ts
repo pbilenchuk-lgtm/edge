@@ -211,6 +211,33 @@ test("strategistReassess supports partial fixation (fraction)", async () => {
   assert.equal(settled!.payout, 80);   // 50 * 80/50
 });
 
+test("strategistReassess hands the model minute estimate, price movement, liquidity and a no-score note", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const mid = R.uid();
+  // Clock-only live match: no provider minute/score, but kicked off 25 min ago.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "BK Hacken", away: "Djurgardens IF", state: "live", lineup_out: true, kickoff_at: "2026-07-06T18:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 94, ai_prob: 0.6, liquidity: "5900", external_ref: "t", snapshot_at: "t", is_closing: false });
+  R.captureOpenOdds(db, mid, "2026-07-06T18:00:00Z"); // open = 94 initially
+  // now move the live price down so there is a delta to report
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 88, ai_prob: 0.6, liquidity: "5900", external_ref: "t", snapshot_at: "t2", is_closing: false });
+
+  let sentPrompt = ""; // accumulate every prompt — the reassess sweeps several seeded matches too
+  const mock = (async (_url: any, init: any) => {
+    const body = JSON.parse(init.body);
+    sentPrompt += "\n" + body.messages.map((m: any) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n");
+    return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [], note: "ok" }) }] }) } as any;
+  }) as unknown as typeof fetch;
+  await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => "2026-07-06T18:25:00Z" }, { newEventMatchIds: new Set([mid]), max: 50 });
+  assert.match(sentPrompt, /≈25' \(оценка по таймеру\)/, "timer minute estimate handed over");
+  assert.match(sentPrompt, /старт 94¢, -6¢/, "price movement from open reported");
+  assert.match(sentPrompt, /ликв\. \$5900/, "liquidity reported");
+  assert.match(sentPrompt, /провайдер пока не отдаёт счёт/, "no-score fallback guidance included");
+});
+
 test("strategistReassess closes a position the strategy prompt says to cut", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
