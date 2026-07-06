@@ -108,6 +108,22 @@ test("advanceClocks flips a time-scheduled match to LIVE at kickoff, and clock-f
   assert.equal(R.getMatch(db, espn)!.state, "live", "ESPN-driven live not clock-finished");
 });
 
+test("advanceClocks reverts a clock-driven live match out of live when its kickoff moved to the future (postponed)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const mk = (id: string, ko: string, minute: number | null) => R.insertMatch(db, { id, competition_id: comp.id, home: "A"+id, away: "B"+id, state: "live", lineup_out: true, kickoff_at: ko, minute, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+  const now = "2026-07-07T18:00:00Z";
+  const postponedSoon = R.uid(), postponedFar = R.uid(), reallyLive = R.uid();
+  mk(postponedSoon, "2026-07-07T18:30:00Z", null);   // kickoff now 30 min ahead → lineup (not live)
+  mk(postponedFar, "2026-07-09T18:00:00Z", null);    // moved 2 days out → upcoming
+  mk(reallyLive, "2026-07-07T18:30:00Z", 12);        // future kickoff BUT provider-confirmed (minute set) → stays live
+  advanceClocks(db, { now: () => now });
+  assert.equal(R.getMatch(db, postponedSoon)!.state, "lineup", "postponed within lineup window → lineup, not live");
+  assert.equal(R.getMatch(db, postponedFar)!.state, "upcoming", "postponed far out → upcoming");
+  assert.equal(R.getMatch(db, reallyLive)!.state, "live", "provider-confirmed live is never clock-reverted");
+});
+
 test("strategistReassess skips a pre-lineup match (no reassessment before lineups/live)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

@@ -598,6 +598,16 @@ export async function importPolymarketMatches(
       };
       R.insertMatch(db, match);
       created = true;
+    } else if (d.kickoff && match.kickoff_at) {
+      // Existing match: Polymarket moved the start time (postponed/rescheduled).
+      // Update kickoff_at so advanceClocks re-derives state from the NEW time —
+      // otherwise a postponed match stays clock-driven "live" at its old slot.
+      // Only for a real ISO kickoff and a meaningful shift (>5 min).
+      const newMs = Date.parse(d.kickoff), oldMs = Date.parse(match.kickoff_at);
+      if (!isNaN(newMs) && (isNaN(oldMs) || Math.abs(newMs - oldMs) > 5 * 60_000)) {
+        R.updateMatch(db, match.id, { kickoff_at: d.kickoff });
+        match.kickoff_at = d.kickoff;
+      }
     }
     if (!R.latestMarkets(db, match.id).length) {
       for (const s of d.markets) {

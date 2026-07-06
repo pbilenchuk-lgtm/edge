@@ -91,6 +91,17 @@ export function advanceClocks(db: Database, deps: EngineDeps = {}): void {
       continue;
     }
 
+    // Postponed / rescheduled: a CLOCK-driven "live" match (no real provider
+    // minute) whose kickoff is now in the FUTURE was moved — it isn't live.
+    // Revert so the clock re-drives it from the new time (discovery refreshes
+    // kickoff_at from Polymarket). Provider-confirmed live (minute set) is never
+    // touched here. Bets stay; only the state/label changes.
+    if (m.state === "live" && m.minute == null && h > 0) {
+      const back: MatchState = h <= LINEUP_HOURS ? "lineup" : "upcoming";
+      R.updateMatch(db, m.id, { state: back, lineup_out: h <= LINEUP_HOURS });
+      continue;
+    }
+
     // Only TIME-schedule the pre-live states; ESPN owns live/finished once it drives.
     if (m.state !== "upcoming" && m.state !== "lineup") continue;
     let nextState: MatchState, lineupOut: boolean;
