@@ -196,6 +196,8 @@ export function buildAppData(db: Database, env = process.env): AppData {
       const allBets = betsByMatch.get(m.id) ?? [];
       const bets: MatchView["bets"] = {};
       const settledBets: MatchView["settledBets"] = {};
+      // Newest close on top — collect with the raw settle timestamp, then sort desc.
+      const settledTmp: Record<string, { view: MatchView["settledBets"][string][number]; at: string }[]> = {};
       const result: Record<string, number> = {};
       for (const b of allBets) {
         if (b.status === "settled_won" || b.status === "settled_lost") {
@@ -204,9 +206,9 @@ export function buildAppData(db: Database, env = process.env): AppData {
           // close / resolution is 100%.
           const pctM = b.settled_by === "partial" ? /(\d+)\s*%/.exec(b.rationale ?? "") : null;
           const closedPct = pctM ? Number(pctM[1]) : 100;
-          (settledBets[b.strategy_id] ||= []).push({
-            market: b.market_label, stake: b.stake ?? 0, result: b.result ?? "lost", payout: b.payout ?? 0,
-            settledBy: b.settled_by ?? null, closedPct, at: warsawClock(b.settled_at),
+          (settledTmp[b.strategy_id] ||= []).push({
+            view: { market: b.market_label, stake: b.stake ?? 0, result: b.result ?? "lost", payout: b.payout ?? 0, settledBy: b.settled_by ?? null, closedPct, at: warsawClock(b.settled_at) },
+            at: b.settled_at ?? "",
           });
           result[b.strategy_id] = (result[b.strategy_id] ?? 0) + ((b.payout ?? 0) - (b.stake ?? 0));
         } else {
@@ -218,6 +220,11 @@ export function buildAppData(db: Database, env = process.env): AppData {
             status: b.status, entered: b.entered_minute,
           });
         }
+      }
+      // «Закрытия»: newest close on top (sort by the raw settle timestamp desc).
+      for (const k in settledTmp) {
+        settledTmp[k].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+        settledBets[k] = settledTmp[k].map((x) => x.view);
       }
       // repo returns these ORDER BY created_at (oldest→newest); the UI wants the
       // NEWEST on top, so reverse each strategy's list after collecting. Each row

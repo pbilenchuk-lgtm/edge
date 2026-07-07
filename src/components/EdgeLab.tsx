@@ -248,7 +248,26 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [oddsErr, setOddsErr] = useState<Record<string, number>>({});
 
   const [sportId, setSportId] = useState("football");
-  const sportComps = COMPETITIONS.filter((c) => c.sport === sportId);
+  // Order categories by urgency: a category with a LIVE match floats to the top,
+  // then the rest by how soon their next match kicks off (closest first). Recomputes
+  // each poll, so a category lights up and rises the moment its match goes live.
+  const catUrgency = (c: any): { live: boolean; nextKo: number } => {
+    let live = false, nextKo = Infinity;
+    for (const mid of (c.matches || [])) {
+      const mm = matchDb[mid]; if (!mm) continue;
+      if (mm.state === "live") live = true;
+      else if (mm.state === "upcoming" || mm.state === "lineup") {
+        const t = mm.kickoffAt ? Date.parse(mm.kickoffAt) : NaN;
+        if (!isNaN(t)) nextKo = Math.min(nextKo, t);
+      }
+    }
+    return { live, nextKo };
+  };
+  const sportComps = COMPETITIONS.filter((c) => c.sport === sportId).slice().sort((a, b) => {
+    const ra = catUrgency(a), rb = catUrgency(b);
+    if (ra.live !== rb.live) return ra.live ? -1 : 1; // live categories first
+    return ra.nextKo - rb.nextKo;                     // then soonest-kickoff first
+  });
   const [compId, setCompId] = useState(sportComps[0]?.id);
   // Resolve within the CURRENT sport only — otherwise switching to a sport with
   // no comps would keep the old sport's compId and render a foreign comp's data.
@@ -1132,7 +1151,24 @@ function ModelSelect({ value, models, onChange, onGoModels }: any) {
 function StrategyScreen({ sportId, sportLabel, catalog, setCatalog, competitions, matchDb, compBudget, shares, providers, quality, analysis, setAnalysis, onGoModels }: any) {
   const [modal, setModal] = useState<any>(null);
   const sportStrats = catalog.filter((s: any) => s.sport === sportId);
-  const sportComps = competitions.filter((c: any) => c.sport === sportId);
+  // Same urgency order as the main bar: live categories first, then soonest kickoff.
+  const catUrgency = (c: any): { live: boolean; nextKo: number } => {
+    let live = false, nextKo = Infinity;
+    for (const mid of (c.matches || [])) {
+      const mm = matchDb[mid]; if (!mm) continue;
+      if (mm.state === "live") live = true;
+      else if (mm.state === "upcoming" || mm.state === "lineup") {
+        const t = mm.kickoffAt ? Date.parse(mm.kickoffAt) : NaN;
+        if (!isNaN(t)) nextKo = Math.min(nextKo, t);
+      }
+    }
+    return { live, nextKo };
+  };
+  const sportComps = competitions.filter((c: any) => c.sport === sportId).slice().sort((a: any, b: any) => {
+    const ra = catUrgency(a), rb = catUrgency(b);
+    if (ra.live !== rb.live) return ra.live ? -1 : 1;
+    return ra.nextKo - rb.nextKo;
+  });
   const [anSel, setAnSel] = useState("base");
   const [saved, setSaved] = useState(true);
   const saveTimer = useRef<any>(null);
