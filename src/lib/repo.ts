@@ -85,6 +85,16 @@ export function upsertAnalyticsPrompt(
   ).run(uid(), scope, scopeId, body, model, nowIso());
 }
 /** Analytics prompt for a match: base (sport) + optional competition override (§2.4). */
+/** A single analytics prompt row (sport base OR competition modifier), or null.
+ *  Used by the two-layer football analysis to keep base and modifier SEPARATE
+ *  (the modifier is its own Layer-2 LLM call, not concatenated text). */
+export function analyticsPromptRow(
+  db: Database, scope: "sport" | "competition", scopeId: string,
+): { body: string; model: string | null } | null {
+  const r = db.prepare(`SELECT body, model FROM analytics_prompts WHERE scope=? AND scope_id=? ORDER BY updated_at DESC LIMIT 1`).get(scope, scopeId) as { body: string; model: string | null } | undefined;
+  return r ? { body: r.body, model: r.model ?? null } : null;
+}
+
 export function analyticsPromptFor(
   db: Database,
   sportId: string,

@@ -392,6 +392,28 @@ test("analyzeMatch (football): structured CORE → Poisson-derived ai_prob on re
   assert.match(asmt.body ?? "", /Сценарии/);
 });
 
+test("analyzeMatch (football): Layer-2 category modifier folds into the analysis", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  // give wc2026 a category MODIFIER prompt → analyzeMatch runs base + Layer 2.
+  R.upsertAnalyticsPrompt(db, "competition", "wc2026", "модификатор ЧМ (специфика сборных/высота)", null);
+  // one static JSON answers BOTH LLM calls: base (core…) + category (core_adjustments…).
+  const mock = mockLLM({
+    match_type: "group", match_type_reason: "ничья есть",
+    core: { xg_home: 1.6, xg_away: 1.2, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 },
+    overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 10, notes: "" }, unknowns: [],
+    core_adjustments: [{ target: "xg_away", op: "multiply", value: 0.8, reason: "Мехико, высота — падение интенсивности" }],
+    new_drivers: [{ factor: "высота Мехико", direction: "оба вниз", magnitude: "small", confidence: 0.5, reason: "2240 м" }],
+    new_scenarios: [], override_adjustments: [], confidence_adjustments: { xg_confidence_delta: -0.1, scenario_confidence_delta: 0, reason: "несыгранность сборных" }, notes: "ЧМ-специфика применена",
+  });
+  const r = await analyzeMatch(db, "m-lineup", { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
+  assert.equal(r.ok, true);
+  const asmt = R.assessmentsForMatch(db, "m-lineup").find((a) => a.status === "ok")!;
+  assert.match(asmt.body ?? "", /Категория.*ЧМ-специфика применена/, "category notes merged into the body");
+  assert.match(asmt.body ?? "", /высота Мехико/, "category driver merged");
+  assert.ok(R.latestMarkets(db, "m-lineup").some((m) => m.ai_prob != null), "derived probs (post-modifier) landed on markets");
+});
+
 test("analyzeMatch: a prior loss no longer halts entries (portfolio stop-loss removed)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

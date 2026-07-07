@@ -469,6 +469,62 @@ function failedFootball(error?: string): FootballAnalysis {
 }
 
 // ------------------------------------------------------------
+// Category modifier — Layer 2. Given the Layer-1 base analysis, the specialist
+// outputs ONLY deltas specific to a category (e.g. World Cup): core adjustments,
+// new drivers/scenarios, override tweaks, confidence shifts. It never recomputes
+// the match and never sees quotes. The deterministic assembler folds it in.
+// ------------------------------------------------------------
+
+export interface CategoryDelta {
+  ok: boolean;
+  coreAdjustments: { target: string; op: "multiply" | "add"; value: number; reason: string }[];
+  newDrivers: { factor: string; direction: string; magnitude: string; confidence: number }[];
+  newScenarios: { trigger: string; prob: number; shifts: unknown; note: string }[];
+  overrideAdjustments: { target: string; adjust: number; reason: string }[];
+  confidenceXgDelta: number;
+  confidenceScenarioDelta: number;
+  notes: string;
+  error?: string;
+}
+
+export async function assessCategoryModifier(
+  modifierPrompt: string, base: FootballAnalysis, home: string, away: string, model: string, deps: Deps = {},
+): Promise<CategoryDelta> {
+  // Show the specialist the Layer-1 output (NO prices) so it corrects, not recomputes.
+  const baseJson = JSON.stringify({ match_type: base.matchType, core: base.core, drivers: base.drivers, scenarios: base.scenarios, calibration: base.calibration, unknowns: base.unknowns });
+  const res = await callLLM({
+    model,
+    system:
+      "Ты — специалист по специфике КАТЕГОРИИ (напр. ЧМ). Тебе дан готовый базовый анализ (Слой 1). Ты НЕ пересчитываешь матч и НЕ выдаёшь готовые вероятности — только ДЕЛЬТЫ, специфичные для категории, каждая с причиной. Котировки не используешь. Верни СТРОГО один JSON — без markdown, без текста вокруг. " +
+      "СХЕМА: {core_adjustments:[{target:'xg_home|xg_away|home_share_1h|away_share_1h|poisson_correction', op:'multiply'|'add', value:float, reason:str}], " +
+      "new_drivers:[{factor,direction,magnitude:'small'|'medium'|'large',confidence:float,reason}], " +
+      "new_scenarios:[{trigger,prob:float,shifts:{},reason}], " +
+      "override_adjustments:[{target:'напр. totals_match.2.5.over', adjust:float, reason}], " +
+      "confidence_adjustments:{xg_confidence_delta:float, scenario_confidence_delta:float, reason:str}, notes:str}. " +
+      "Пусто — если специфики мало. Лучше две обоснованные поправки, чем десять натянутых.",
+    prompt: `${modifierPrompt}\n\n## БАЗОВЫЙ АНАЛИЗ (Слой 1) — корректируй его, не переписывай:\nМатч: ${home} — ${away}.\n${baseJson}\n\nВерни ТОЛЬКО JSON с дельтами по схеме.`,
+    maxTokens: 3000,
+  }, deps);
+  if (!res.ok) return { ok: false, coreAdjustments: [], newDrivers: [], newScenarios: [], overrideAdjustments: [], confidenceXgDelta: 0, confidenceScenarioDelta: 0, notes: "", error: res.error };
+  try {
+    const j = JSON.parse(extractJson(res.text));
+    const reasoned = (x: any) => x && typeof x.reason === "string" && x.reason.trim();
+    return {
+      ok: true,
+      coreAdjustments: Array.isArray(j.core_adjustments) ? j.core_adjustments.filter((o: any) => reasoned(o) && Number.isFinite(o.value) && (o.op === "multiply" || o.op === "add") && typeof o.target === "string").map((o: any) => ({ target: String(o.target), op: o.op, value: num(o.value), reason: String(o.reason) })) : [],
+      newDrivers: Array.isArray(j.new_drivers) ? j.new_drivers.filter((x: any) => x && typeof x.factor === "string").map((x: any) => ({ factor: String(x.factor), direction: String(x.direction ?? ""), magnitude: String(x.magnitude ?? "medium"), confidence: clamp01(num(x.confidence, 0.5)) })) : [],
+      newScenarios: Array.isArray(j.new_scenarios) ? j.new_scenarios.filter((x: any) => x && typeof x.trigger === "string").map((x: any) => ({ trigger: String(x.trigger), prob: clamp01(num(x.prob, 0)), shifts: x.shifts ?? null, note: String(x.shifts?.note ?? x.note ?? "") })) : [],
+      overrideAdjustments: Array.isArray(j.override_adjustments) ? j.override_adjustments.filter((o: any) => reasoned(o) && Number.isFinite(o.adjust) && typeof o.target === "string").map((o: any) => ({ target: String(o.target), adjust: num(o.adjust), reason: String(o.reason) })) : [],
+      confidenceXgDelta: num(j.confidence_adjustments?.xg_confidence_delta, 0),
+      confidenceScenarioDelta: num(j.confidence_adjustments?.scenario_confidence_delta, 0),
+      notes: String(j.notes ?? ""),
+    };
+  } catch {
+    return { ok: false, coreAdjustments: [], newDrivers: [], newScenarios: [], overrideAdjustments: [], confidenceXgDelta: 0, confidenceScenarioDelta: 0, notes: "", error: "невалидный JSON от модификатора" };
+  }
+}
+
+// ------------------------------------------------------------
 // Strategist — turns a strategy PROMPT (any methodology) into market picks
 // (§9.5: strategy reads analytics; §9.6: CODE still sizes the actual stake).
 // This is what makes the strategy universal — the prompt drives the decisions,

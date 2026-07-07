@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { derivePoissonMarkets, applyOverrides } from "../src/lib/poisson.js";
+import { derivePoissonMarkets, applyOverrides, applyCoreAdjustments } from "../src/lib/poisson.js";
 
 const near = (a: number, b: number, eps = 0.01) => Math.abs(a - b) <= eps;
 
@@ -61,6 +61,21 @@ test("applyOverrides: outcome_90 stays normalised after a draw nudge", () => {
   applyOverrides(d, [{ target: "outcome_90.draw", adjust: 0.06, reason: "оба садятся, ничья вероятнее" }]);
   const { home, draw, away } = d.outcome_90;
   assert.ok(near(home + draw + away, 1, 0.001), "1X2 renormalised to 1");
+});
+
+test("applyCoreAdjustments: multiply/add applied with reason, reasonless dropped, clamped", () => {
+  const core = { xg_home: 1.5, xg_away: 1.0, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 };
+  const { core: c, log } = applyCoreAdjustments(core, [
+    { target: "xg_home", op: "multiply", value: 0.9, reason: "Мехико, высота — падение интенсивности" },
+    { target: "xg_away", op: "add", value: 0.2, reason: "аутсайдер вынужден раскрыться" },
+    { target: "xg_home", op: "add", value: 0.5, reason: "" },       // no reason → dropped
+    { target: "poisson_correction", op: "add", value: 5, reason: "x" }, // clamped to 0.1
+  ]);
+  assert.ok(Math.abs(c.xg_home - 1.35) < 1e-9, "1.5 × 0.9");
+  assert.ok(Math.abs(c.xg_away - 1.2) < 1e-9, "1.0 + 0.2");
+  assert.equal(c.poisson_correction, 0.1, "correction clamped to 0.1");
+  assert.equal(log.filter((l) => l.applied).length, 3, "three reasoned adjustments applied");
+  assert.equal(log.filter((l) => !l.applied).length, 1, "the reasonless one logged as dropped");
 });
 
 test("derivePoissonMarkets: poisson_correction ρ>0 lifts the draw vs pure Poisson", () => {

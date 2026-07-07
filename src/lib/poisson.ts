@@ -18,6 +18,7 @@ export interface AnalysisCore {
 }
 
 export interface AnalysisOverride { target: string; adjust: number; reason?: string }
+export interface CoreAdjustment { target: string; op: "multiply" | "add"; value: number; reason?: string }
 
 export interface DerivedMarkets {
   outcome_90: { home: number; draw: number; away: number };
@@ -111,11 +112,13 @@ export function derivePoissonMarkets(core: AnalysisCore): DerivedMarkets {
   const btts = round4(sumWhere(M, (i, j) => i >= 1 && j >= 1));
   const btts2h = round4(sumWhere(M2, (i, j) => i >= 1 && j >= 1));
 
-  // Knockout: a 90-min draw goes to extra time (≈ P(draw)); advance ≈ win + half
-  // the draws (extra-time/penalties are ~coin-flip at this altitude).
+  // Knockout: a 90-min draw goes to extra time (≈ P(draw)); advance ≈ win + the
+  // draw share split toward the stronger side (ET/penalties slightly favour higher
+  // xG), bias_home = xg_home / (xg_home + xg_away).
   const extraTime = round4(draw);
-  const advHome = round4(home + draw * 0.5);
-  const advAway = round4(away + draw * 0.5);
+  const biasHome = lh + la > 0 ? lh / (lh + la) : 0.5;
+  const advHome = round4(home + draw * biasHome);
+  const advAway = round4(away + draw * (1 - biasHome));
 
   const handicap: Record<string, number> = {
     "home_-1.5": round4(sumWhere(M, (i, j) => i - j >= 2)),
@@ -163,6 +166,33 @@ export function applyOverrides(d: DerivedMarkets, overrides: AnalysisOverride[] 
   const s = o90.home + o90.draw + o90.away;
   if (s > 0) { o90.home = round4(o90.home / s); o90.draw = round4(o90.draw / s); o90.away = round4(o90.away / s); }
   return applied;
+}
+
+export interface CoreAdjustLog { target: string; op: string; value: number; reason: string; applied: boolean }
+
+/**
+ * Apply the category layer's core_adjustments to the base core (Step 1 of the
+ * assembler): multiply/add per target, in order, skipping any adjustment without a
+ * non-empty reason or an unknown target (logged as not applied). Sanity-clamps xG
+ * (0.1–5) and half-shares (0.1–0.9). Pure — returns a NEW core plus a debug log.
+ */
+export function applyCoreAdjustments(core: AnalysisCore, adjustments: CoreAdjustment[] | undefined): { core: AnalysisCore; log: CoreAdjustLog[] } {
+  const c: AnalysisCore = { ...core };
+  const log: CoreAdjustLog[] = [];
+  const FIELDS = new Set(["xg_home", "xg_away", "home_share_1h", "away_share_1h", "poisson_correction"]);
+  for (const a of adjustments ?? []) {
+    const ok = a && typeof a.target === "string" && FIELDS.has(a.target) && Number.isFinite(a.value) && (a.op === "multiply" || a.op === "add") && !!a.reason && !!a.reason.trim();
+    if (ok) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cc = c as any;
+      cc[a.target] = a.op === "multiply" ? cc[a.target] * a.value : cc[a.target] + a.value;
+    }
+    log.push({ target: a?.target ?? "", op: a?.op ?? "", value: a?.value ?? 0, reason: a?.reason ?? "", applied: !!ok });
+  }
+  c.xg_home = clamp(c.xg_home, 0.1, 5); c.xg_away = clamp(c.xg_away, 0.1, 5);
+  c.home_share_1h = clamp(c.home_share_1h, 0.1, 0.9); c.away_share_1h = clamp(c.away_share_1h, 0.1, 0.9);
+  c.poisson_correction = clamp(c.poisson_correction, -0.1, 0.1);
+  return { core: c, log };
 }
 
 /** Add `delta` to the probability at a target and clamp to [0,1]. The market tree
