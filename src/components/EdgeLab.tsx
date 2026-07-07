@@ -1336,7 +1336,7 @@ function StrategyScreen({ sportId, sportLabel, catalog, setCatalog, competitions
 // A named risk profile card — the headline thresholds/sizing at a glance.
 function RiskProfileCard({ profile, onEdit, onDelete }: any) {
   const c = profile.config || {};
-  const e = c.entry_thresholds || {}, s = c.sizing || {}, sg = c.safeguards || {};
+  const e = c.entry_thresholds || {}, s = c.sizing || {}, sg = c.safeguards || {}, ex = c.exits || {};
   const pct = (x: number) => x != null ? `${(x * 100).toFixed(x < 0.1 ? 1 : 0)}%` : "—";
   return (
     <div style={S.rpCard}>
@@ -1355,6 +1355,8 @@ function RiskProfileCard({ profile, onEdit, onDelete }: any) {
         <div style={S.rpCell}><span style={S.rpK}>max позиция</span><span style={S.rpV}>{pct(s.max_position_pct)}</span></div>
         <div style={S.rpCell}><span style={S.rpK}>max на матч</span><span style={S.rpV}>{pct(s.max_match_exposure_pct)}</span></div>
         <div style={S.rpCell}><span style={S.rpK}>absurd edge</span><span style={S.rpV}>{pct(sg.absurd_edge_block)}</span></div>
+        <div style={S.rpCell}><span style={S.rpK}>take-profit</span><span style={S.rpV}>{pct(ex.take_profit_pct)}</span></div>
+        <div style={S.rpCell}><span style={S.rpK}>hard-stop</span><span style={S.rpV}>{pct(ex.hard_stop_pct)}</span></div>
       </div>
     </div>
   );
@@ -1382,7 +1384,7 @@ function RiskProfileModal({ profile, onClose, onSave }: any) {
       <label style={S.fieldLabel}>Название</label>
       <input style={{ ...S.input, width: "100%" }} value={name} onChange={(e) => setName(e.target.value)} placeholder="напр. Агрессивный" />
       <label style={S.fieldLabel}>Значения словами (min_edge, kelly_fraction_base, max_position_pct, absurd_edge_block…)</label>
-      <textarea style={S.textarea} value={text} onChange={(e) => setText(e.target.value)} placeholder={"min_edge: 0.05\nmin_calibration: 0.45\nkelly_fraction_base: 0.20\nkelly_fraction_clamp: [0.05, 0.33]\nmax_position_pct: 0.05\nmax_match_exposure_pct: 0.10\nabsurd_edge_block: 0.25"} />
+      <textarea style={S.textarea} value={text} onChange={(e) => setText(e.target.value)} placeholder={"min_edge: 0.05\nmin_calibration: 0.45\nkelly_fraction_base: 0.20\nkelly_fraction_clamp: [0.05, 0.33]\nmax_position_pct: 0.05\nmax_match_exposure_pct: 0.10\nabsurd_edge_block: 0.25\ntake_profit_pct: 0.50\nhard_stop_pct: 0.50"} />
       <button style={S.parseBtn} onClick={extract} disabled={!text.trim() || busy}>{busy ? "движок структурирует…" : "→ Вытащить и захардкодить"}</button>
       {errors.length > 0 && <div style={S.warnBox}>{errors.map((x, i) => <div key={i}>{x}</div>)}</div>}
       {config && (
@@ -1398,6 +1400,8 @@ function RiskProfileModal({ profile, onClose, onSave }: any) {
             <div style={S.rpCell}><span style={S.rpK}>дневной стоп</span><span style={S.rpV}>{pct(config.bankroll_limits?.daily_loss_limit_pct)}</span></div>
             <div style={S.rpCell}><span style={S.rpK}>killswitch</span><span style={S.rpV}>{pct(config.safeguards?.global_drawdown_killswitch_pct)}</span></div>
             <div style={S.rpCell}><span style={S.rpK}>absurd edge</span><span style={S.rpV}>{pct(config.safeguards?.absurd_edge_block)}</span></div>
+            <div style={S.rpCell}><span style={S.rpK}>take-profit</span><span style={S.rpV}>{pct(config.exits?.take_profit_pct)}</span></div>
+            <div style={S.rpCell}><span style={S.rpK}>hard-stop</span><span style={S.rpV}>{pct(config.exits?.hard_stop_pct)}</span></div>
           </div>
         </div>
       )}

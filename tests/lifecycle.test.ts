@@ -130,24 +130,37 @@ test("evaluateExits fills the close against the bid book — exit slippage into 
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "exit" && /выход VWAP.*комиссия/.test(l.text)), "exit execution + fee logged");
 });
 
-test("evaluateExits closes an open position when the edge is gone", async () => {
+test("evaluateExits fires the PROFILE's take-profit; edge-gone alone is left to the strategist", async () => {
   const db = openDb(":memory:");
-  seedDatabase(db);
+  seedDatabase(db); // seeds the 3 risk profiles too
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
   const strat = R.listStrategies(db, "football")[0];
-  const mid = R.uid();
-  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
-  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 62, ai_prob: 0.4, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  const live = (id: string) => R.insertMatch(db, { id, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+  // +60% position on MEDIUM (take_profit 0.50) → deterministic net fixes it.
+  const mid = R.uid(); live(mid);
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 80, ai_prob: 0.9, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
   const bid = R.uid();
-  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 62, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "40'", result: null, payout: null, created_at: "t" });
-
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 80, closing_price: null, ai_prob: 0.9, stake: 100, rationale: "r", entered_minute: "40'", result: null, payout: null, created_at: "t" });
   const exits = await evaluateExits(db, { now: () => "t" });
   assert.equal(exits.length, 1);
-  assert.match(exits[0].reason, /край/);
-  const b = R.betsForMatch(db, mid).find((x) => x.id === bid)!;
-  assert.ok(b.status === "settled_won" || b.status === "settled_lost");
-  assert.equal(b.payout, 124); // 100 * 62/50
-  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "exit"));
+  assert.match(exits[0].reason, /тейк/, "closed on the profile take-profit (+60% ≥ medium 50%)");
+  assert.ok(R.getBet(db, bid)!.status.startsWith("settled"));
+
+  // the SAME +60% held under AGGRESSIVE (take_profit 0.80): net does not fire.
+  const mid2 = R.uid(); live(mid2);
+  R.insertMarket(db, { id: R.uid(), match_id: mid2, label: "Over 2.5", price: 80, ai_prob: 0.9, liquidity: null, external_ref: "t2", snapshot_at: "t", is_closing: false });
+  const bid2 = R.uid();
+  R.insertBet(db, { id: bid2, match_id: mid2, strategy_id: strat.id, risk_profile_id: "aggressive", market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 80, closing_price: null, ai_prob: 0.9, stake: 100, rationale: "r", entered_minute: "40'", result: null, payout: null, created_at: "t" });
+  // edge-gone-only position (aiProb 0.4 < price/100) that is NEITHER at take nor stop → held.
+  const mid3 = R.uid(); live(mid3);
+  R.insertMarket(db, { id: R.uid(), match_id: mid3, label: "Over 2.5", price: 62, ai_prob: 0.4, liquidity: null, external_ref: "t3", snapshot_at: "t", is_closing: false });
+  const bid3 = R.uid();
+  R.insertBet(db, { id: bid3, match_id: mid3, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 62, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "40'", result: null, payout: null, created_at: "t" });
+  const exits2 = await evaluateExits(db, { now: () => "t" });
+  assert.ok(!exits2.some((e) => e.matchId === mid2), "aggressive holds the +60% (take 0.80)");
+  assert.ok(!exits2.some((e) => e.matchId === mid3), "edge-gone alone no longer force-closes — strategist owns it");
+  assert.equal(R.getBet(db, bid2)!.status, "open");
+  assert.equal(R.getBet(db, bid3)!.status, "open");
 });
 
 test("advanceClocks flips lineup_out ~1h before kickoff", () => {
@@ -268,16 +281,16 @@ test("evaluateExits holds an open position pre-match (lineup_out, not live) — 
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
   const strat = R.listStrategies(db, "football")[0];
   const mid = R.uid();
-  // Pre-match: lineups out by the timer, edge would read as "gone" (aiProb 0.4,
-  // price 62) — but the match is NOT live, so nothing should be closed.
+  // Pre-match: lineups out by the timer, a +60% take-profit would fire IF live —
+  // but the match is NOT live, so nothing should be closed.
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "lineup", lineup_out: true, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
-  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 62, ai_prob: 0.4, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 80, ai_prob: 0.9, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
   const bid = R.uid();
-  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 62, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 80, closing_price: null, ai_prob: 0.9, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
   const exits = await evaluateExits(db, { now: () => "t" });
   assert.equal(exits.length, 0, "no pre-match exit");
   assert.equal(R.getBet(db, bid)!.status, "open", "position held until kickoff");
-  // once live, the same edge-gone rule fires
+  // once live, the profile take-profit (+60% ≥ medium 50%) fires
   R.updateMatch(db, mid, { state: "live", minute: 10 });
   assert.equal((await evaluateExits(db, { now: () => "t" })).length, 1, "closes once live");
 });

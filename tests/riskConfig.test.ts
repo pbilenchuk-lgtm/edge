@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadRiskConfig, getRiskConfig, getProfileConfig, seedRiskProfiles, listRiskProfileViews, parseRiskProfile, parseRiskConfigHeuristic, DEFAULT_RISK_CONFIG, RISK_PROFILE_DEFS } from "../src/lib/riskConfig.js";
+import { loadRiskConfig, getRiskConfig, getProfileConfig, seedRiskProfiles, migrateRiskProfileExits, listRiskProfileViews, parseRiskProfile, parseRiskConfigHeuristic, DEFAULT_RISK_CONFIG, RISK_PROFILE_DEFS } from "../src/lib/riskConfig.js";
 import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 
@@ -10,8 +10,9 @@ test("loadRiskConfig: empty input → all defaults, everything listed in _defaul
   assert.equal(r.config!.entry_thresholds.min_edge, 0.04);
   assert.equal(r.config!.sizing.kelly_fraction_base, 0.20);
   assert.deepEqual(r.config!.sizing.kelly_fraction_clamp, [0.05, 0.33]);
-  // 15 scalar ranges + the clamp = 16 default fields
-  assert.equal(r.config!._defaults_used.length, 16, "all fields defaulted");
+  // 17 scalar ranges (incl. 2 exits) + the clamp = 18 default fields
+  assert.equal(r.config!._defaults_used.length, 18, "all fields defaulted");
+  assert.deepEqual(r.config!.exits, { take_profit_pct: 0.5, hard_stop_pct: 0.5 });
 });
 
 test("loadRiskConfig: human values pass through; only unset ones are defaulted", () => {
@@ -115,6 +116,31 @@ test("parseRiskConfigHeuristic: an out-of-range value surfaces as a validation e
   const res = parseRiskProfile("min_edge = 1.5\nkelly_fraction_base = 0.2");
   assert.equal(res.ok, false);
   assert.ok(res.errors!.some((e) => e.includes("min_edge")));
+});
+
+test("profile exits differ: aggressive holds longer, conservative locks in sooner", () => {
+  const db = openDb(":memory:");
+  seedRiskProfiles(db, "t");
+  const agg = getProfileConfig(db, "aggressive"), med = getProfileConfig(db, "medium"), con = getProfileConfig(db, "conservative");
+  assert.ok(agg.exits.take_profit_pct > med.exits.take_profit_pct && med.exits.take_profit_pct > con.exits.take_profit_pct, "take-profit: agg > med > con");
+  assert.ok(agg.exits.hard_stop_pct > con.exits.hard_stop_pct, "aggressive tolerates a wider stop");
+  assert.deepEqual(med.exits, { take_profit_pct: 0.5, hard_stop_pct: 0.5 });
+});
+
+test("migrateRiskProfileExits: adds exits to presets seeded before the group existed, idempotent", () => {
+  const db = openDb(":memory:");
+  // seed a preset WITHOUT the exits group (simulate an old prod row)
+  const aggNoExits = loadRiskConfig({ ...(RISK_PROFILE_DEFS[0].values as any), exits: undefined });
+  const raw = JSON.parse(JSON.stringify(aggNoExits.config));
+  delete raw.exits;
+  R.upsertRiskProfile(db, { id: "aggressive", name: "Агрессивный", content: JSON.stringify(raw), sort: 0, created_at: "t" });
+  assert.ok(!JSON.parse(R.getRiskProfileRow(db, "aggressive")!.content).exits || getProfileConfig(db, "aggressive").exits.take_profit_pct === 0.5, "pre-migration lacks profile-specific exits");
+
+  migrateRiskProfileExits(db);
+  assert.equal(getProfileConfig(db, "aggressive").exits.take_profit_pct, 0.80, "aggressive exits restored");
+  // idempotent
+  migrateRiskProfileExits(db);
+  assert.equal(getProfileConfig(db, "aggressive").exits.take_profit_pct, 0.80);
 });
 
 test("getProfileConfig: unknown id → defaults; every preset def loads clean", () => {

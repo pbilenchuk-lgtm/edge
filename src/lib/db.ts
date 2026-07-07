@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { migrateCanonicalPrompts, migrateStrategyRoster } from "./seed.js";
-import { seedRiskProfiles } from "./riskConfig.js";
+import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
 
 // node:sqlite is experimental and not in @types/node, so require it
 // dynamically and give it a minimal local type.
@@ -67,6 +67,9 @@ export function getDb(path = dbPath()): Database {
   // Seed the named risk presets (aggressive/medium/conservative) onto any DB that
   // doesn't have them yet — idempotent, so a live prod DB gets them without a wipe.
   try { seedRiskProfiles(db, new Date().toISOString()); }
+  catch { /* non-fatal */ }
+  // Add the exits group to presets seeded before it existed (profile-specific take/stop).
+  try { migrateRiskProfileExits(db); }
   catch { /* non-fatal */ }
   // Ensure the three real strategists exist and, on the first boot after this
   // ships, retire the legacy "wc" strategy and assign the trio (medium profile)

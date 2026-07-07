@@ -439,7 +439,12 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // Decide on the LIQUIDATION value (what you'd actually net selling now), not
       // the optimistic mid — consistent with how the position is marked to market.
       const liqCents = poly.enabled ? liquidationCents(mk.price, b.stake ?? 0, Number(mk.liquidity ?? 0) || 0, poly.exec.fallbackK, poly.exec.takerFeeRate) : mk.price;
-      const d = exitDecision({ params: strat.params, aiProb: b.ai_prob ?? 1, entryPriceCents: b.entry_price, currentPriceCents: liqCents });
+      // Deterministic safety-net take-profit / hard-stop come from the position's
+      // RISK PROFILE (aggressive holds longer + wider stop; conservative locks in
+      // sooner), not per-strategy params. edgeExit:false — the strategist manages
+      // edge/thesis exits in live (module 5); this net only catches extreme moves.
+      const ex = getProfileConfig(db, b.risk_profile_id ?? "medium").exits;
+      const d = exitDecision({ params: { takeProfit: ex.take_profit_pct, exitStop: ex.hard_stop_pct, edgeExit: false }, aiProb: b.ai_prob ?? 1, entryPriceCents: b.entry_price, currentPriceCents: liqCents });
       if (!d.exit) continue;
       // Fill the close against the real book (sell into bids) — exit slippage into P&L.
       const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price);

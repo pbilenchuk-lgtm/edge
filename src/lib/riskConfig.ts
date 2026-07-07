@@ -42,6 +42,10 @@ export interface RiskConfig {
     max_quote_age_seconds: number;          // >0 — stale quote → don't trade the market
     prob_sum_tolerance: number;             // 0..1 — group prob-sum drift tolerance vs 1
   };
+  exits: {
+    take_profit_pct: number; // 0..N — deterministic safety-net take-profit (+X% of position value)
+    hard_stop_pct: number;   // 0..1 — deterministic safety-net hard stop (−X%)
+  };
   _defaults_used: string[];
 }
 
@@ -54,6 +58,7 @@ export const DEFAULT_RISK_CONFIG: RiskConfig = {
   sizing: { kelly_fraction_base: 0.20, calibration_ref: 0.6, kelly_fraction_clamp: [0.05, 0.33], max_position_pct: 0.05, max_match_exposure_pct: 0.10 },
   bankroll_limits: { daily_loss_limit_pct: 0.15, max_concurrent_exposure_pct: 0.30, max_concurrent_positions: 8 },
   safeguards: { global_drawdown_killswitch_pct: 0.30, absurd_edge_block: 0.25, max_quote_age_seconds: 30, prob_sum_tolerance: 0.02 },
+  exits: { take_profit_pct: 0.5, hard_stop_pct: 0.5 },
   _defaults_used: [],
 };
 
@@ -82,6 +87,8 @@ const FIELD_RANGES: Record<string, Range> = {
   "safeguards.absurd_edge_block": { lo: 0, hi: 1, loExclusive: true },
   "safeguards.max_quote_age_seconds": { lo: 0, hi: 86400, loExclusive: true },
   "safeguards.prob_sum_tolerance": { lo: 0, hi: 1 },
+  "exits.take_profit_pct": { lo: 0, hi: 10, loExclusive: true },
+  "exits.hard_stop_pct": { lo: 0, hi: 1, loExclusive: true },
 };
 
 function get(o: any, path: string): unknown {
@@ -154,6 +161,7 @@ export const RISK_PROFILE_DEFS: RiskProfileDef[] = [
       sizing: { kelly_fraction_base: 0.33, calibration_ref: 0.6, kelly_fraction_clamp: [0.05, 0.40], max_position_pct: 0.08, max_match_exposure_pct: 0.15 },
       bankroll_limits: { daily_loss_limit_pct: 0.20, max_concurrent_exposure_pct: 0.40, max_concurrent_positions: 12 },
       safeguards: { global_drawdown_killswitch_pct: 0.35, absurd_edge_block: 0.25, max_quote_age_seconds: 30, prob_sum_tolerance: 0.02 },
+      exits: { take_profit_pct: 0.80, hard_stop_pct: 0.60 }, // hold for more, tolerate a wider drawdown
     },
   },
   {
@@ -164,6 +172,7 @@ export const RISK_PROFILE_DEFS: RiskProfileDef[] = [
       sizing: { kelly_fraction_base: 0.20, calibration_ref: 0.6, kelly_fraction_clamp: [0.05, 0.33], max_position_pct: 0.05, max_match_exposure_pct: 0.10 },
       bankroll_limits: { daily_loss_limit_pct: 0.15, max_concurrent_exposure_pct: 0.30, max_concurrent_positions: 8 },
       safeguards: { global_drawdown_killswitch_pct: 0.30, absurd_edge_block: 0.25, max_quote_age_seconds: 30, prob_sum_tolerance: 0.02 },
+      exits: { take_profit_pct: 0.50, hard_stop_pct: 0.50 },
     },
   },
   {
@@ -174,6 +183,7 @@ export const RISK_PROFILE_DEFS: RiskProfileDef[] = [
       sizing: { kelly_fraction_base: 0.12, calibration_ref: 0.6, kelly_fraction_clamp: [0.04, 0.20], max_position_pct: 0.03, max_match_exposure_pct: 0.06 },
       bankroll_limits: { daily_loss_limit_pct: 0.10, max_concurrent_exposure_pct: 0.20, max_concurrent_positions: 5 },
       safeguards: { global_drawdown_killswitch_pct: 0.25, absurd_edge_block: 0.25, max_quote_age_seconds: 30, prob_sum_tolerance: 0.02 },
+      exits: { take_profit_pct: 0.35, hard_stop_pct: 0.40 }, // lock gains sooner, cut losses sooner
     },
   },
 ];
@@ -189,6 +199,23 @@ export function seedRiskProfiles(db: Database, now: string): void {
     const loaded = loadRiskConfig(def.values);
     if (!loaded.ok || !loaded.config) continue;
     R.upsertRiskProfile(db, { id: def.id, name: def.name, content: JSON.stringify(loaded.config), sort: def.sort, created_at: now });
+  }
+}
+
+/** One-time: add the `exits` group to the 3 PRESET profiles already seeded before
+ *  exits existed (they'd otherwise load with the generic 0.5/0.5 default instead
+ *  of their profile-specific take/stop). Idempotent (skips a profile that already
+ *  has `exits`); preserves any user edits to the profile's other fields. */
+export function migrateRiskProfileExits(db: Database): void {
+  for (const def of RISK_PROFILE_DEFS) {
+    const row = R.getRiskProfileRow(db, def.id);
+    if (!row) continue;
+    let cfg: any;
+    try { cfg = JSON.parse(row.content); } catch { continue; }
+    if (cfg && cfg.exits) continue; // already migrated
+    const merged = { ...cfg, exits: (def.values as any).exits };
+    const loaded = loadRiskConfig(merged);
+    if (loaded.ok && loaded.config) R.upsertRiskProfile(db, { id: def.id, name: row.name, content: JSON.stringify(loaded.config), sort: row.sort, created_at: row.created_at });
   }
 }
 
@@ -242,6 +269,8 @@ const RISK_FIELD_PATHS: Record<string, string> = {
   absurd_edge_block: "safeguards.absurd_edge_block",
   max_quote_age_seconds: "safeguards.max_quote_age_seconds",
   prob_sum_tolerance: "safeguards.prob_sum_tolerance",
+  take_profit_pct: "exits.take_profit_pct",
+  hard_stop_pct: "exits.hard_stop_pct",
 };
 /** Extract a raw risk config from free text (validated separately by loadRiskConfig). */
 export function parseRiskConfigHeuristic(text: string): Record<string, unknown> {
