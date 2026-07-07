@@ -39,6 +39,9 @@ export interface MatchView {
   preLineup: AssessmentView | null; postLineup: AssessmentView | null;
   /** past analyses (older runs), newest first — the current pre/post are excluded */
   assessmentHistory: { stage: string; label: string; at: string | null; confidence: string | null; short: string | null; text: string | null; verdict: string | null }[];
+  /** raw JSON of each analysis layer's output (base / category / distribution /
+   *  strategist), for review + copy in the «Анализ» tab. Newest first. */
+  artifacts: { kind: string; label: string; stage: string | null; model: string | null; at: string | null; content: string }[];
   markets: MarketView[];
   bets: Record<string, { rationale: string | null; items: BetItemView[] }>;
   reassessByStrat: Record<string, { min: string | null; at: string | null; text: string; conf: string | null }[]>;
@@ -266,6 +269,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
         analyzing: jobActive(R.getAnalysisJob(db, m.id), nowMs),
         preLineup: pre ? view(pre) : null, postLineup: post ? view(post) : null,
         assessmentHistory,
+        artifacts: R.artifactsForMatch(db, m.id).map((x) => ({ kind: x.kind, label: x.label, stage: x.stage, model: x.model, at: x.created_at, content: x.content })),
         markets: orderMarkets(markets), bets, reassessByStrat, logByStrat, settledBets, result, lineups, events,
       };
     }

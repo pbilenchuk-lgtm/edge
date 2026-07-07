@@ -118,6 +118,15 @@ export async function analyzeMatch(
       if (modifier?.body) category = await assessCategoryModifier(modifier.body, base, match.home, match.away, safeModel(modifier.model), { fetchImpl: deps.fetchImpl, env });
       const assembled = assembleFootball(base, category?.ok ? category : null);
       a = footballToAssessment(assembled, match.home, match.away, markets.map((m) => m.label));
+      // Record the raw filled schema of EACH layer so the «Анализ» tab can show/
+      // copy exactly what the base produced, what the ЧМ modifier changed, and the
+      // assembled distribution — for review and tests. Best-effort; never blocks.
+      const artAt = now();
+      try {
+        R.saveArtifact(db, { match_id: matchId, kind: "base", stage, content: JSON.stringify(base, null, 2), model, created_at: artAt });
+        if (category?.ok) R.saveArtifact(db, { match_id: matchId, kind: "category", stage, content: JSON.stringify(category, null, 2), model: safeModel(modifier?.model), created_at: artAt });
+        R.saveArtifact(db, { match_id: matchId, kind: "distribution", stage, content: JSON.stringify(assembled, null, 2), model, created_at: artAt });
+      } catch { /* artifact recording is best-effort */ }
     }
   } else {
     a = await assessMatchLLM(
@@ -202,6 +211,9 @@ export async function analyzeMatch(
       context: ctx,
     }, stratModel, { fetchImpl: deps.fetchImpl, env });
     const picksArr = dec.ok ? dec.picks : null;
+    // Record the strategist's raw output per strategy so the «Анализ» tab can
+    // show/copy exactly what each strategy decided (for review). Best-effort.
+    try { R.saveArtifact(db, { match_id: matchId, kind: "strategist", label: strat.name, stage, content: JSON.stringify(dec, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
 
     // Seed exposure from positions this strategy ALREADY holds on the match, and
     // never re-propose on a market it's already in — otherwise the post-lineup

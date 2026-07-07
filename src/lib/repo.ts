@@ -91,7 +91,7 @@ export function upsertAnalyticsPrompt(
 export function analyticsPromptRow(
   db: Database, scope: "sport" | "competition", scopeId: string,
 ): { body: string; model: string | null } | null {
-  const r = db.prepare(`SELECT body, model FROM analytics_prompts WHERE scope=? AND scope_id=? ORDER BY updated_at DESC LIMIT 1`).get(scope, scopeId) as { body: string; model: string | null } | undefined;
+  const r = db.prepare(`SELECT body, model FROM analytics_prompts WHERE scope=? AND scope_id=? ORDER BY updated_at DESC, rowid DESC LIMIT 1`).get(scope, scopeId) as { body: string; model: string | null } | undefined;
   return r ? { body: r.body, model: r.model ?? null } : null;
 }
 
@@ -101,10 +101,10 @@ export function analyticsPromptFor(
   competitionId: string,
 ): { body: string; model: string | null } {
   const base = db
-    .prepare(`SELECT * FROM analytics_prompts WHERE scope='sport' AND scope_id=? ORDER BY updated_at DESC LIMIT 1`)
+    .prepare(`SELECT * FROM analytics_prompts WHERE scope='sport' AND scope_id=? ORDER BY updated_at DESC, rowid DESC LIMIT 1`)
     .get(sportId);
   const override = db
-    .prepare(`SELECT * FROM analytics_prompts WHERE scope='competition' AND scope_id=? ORDER BY updated_at DESC LIMIT 1`)
+    .prepare(`SELECT * FROM analytics_prompts WHERE scope='competition' AND scope_id=? ORDER BY updated_at DESC, rowid DESC LIMIT 1`)
     .get(competitionId);
   const parts = [base?.body, override?.body].filter(Boolean);
   return { body: parts.join("\n\n"), model: base?.model ?? null };
@@ -355,6 +355,23 @@ export function assessmentHistoryForMatch(db: Database, matchId: string, limit =
   return db.prepare(
     `SELECT * FROM assessment_history WHERE match_id=? ORDER BY created_at DESC LIMIT ?`,
   ).all(matchId, limit) as AssessmentHistoryRow[];
+}
+
+// ---------- analysis artifacts (raw JSON of each layer's output) ----------
+export interface AnalysisArtifact { id: string; match_id: string; kind: string; label: string; stage: string | null; content: string; model: string | null; created_at: string }
+/** Store the CURRENT artifact for (match, kind, label) — a new run replaces the
+ *  prior one so the «Анализ» tab shows the latest filled schema, not a pile of
+ *  history. `content` is the raw JSON string exactly as produced. */
+export function saveArtifact(db: Database, a: { match_id: string; kind: string; label?: string; stage?: string | null; content: string; model?: string | null; created_at: string }): void {
+  db.prepare(
+    `INSERT INTO analysis_artifacts(id,match_id,kind,label,stage,content,model,created_at)
+     VALUES(?,?,?,?,?,?,?,?)
+     ON CONFLICT(match_id,kind,label) DO UPDATE SET
+       stage=excluded.stage, content=excluded.content, model=excluded.model, created_at=excluded.created_at`,
+  ).run(uid(), a.match_id, a.kind, a.label ?? "", a.stage ?? null, a.content, a.model ?? null, a.created_at);
+}
+export function artifactsForMatch(db: Database, matchId: string): AnalysisArtifact[] {
+  return db.prepare(`SELECT * FROM analysis_artifacts WHERE match_id=? ORDER BY created_at DESC`).all(matchId) as AnalysisArtifact[];
 }
 
 // ---------- analysis jobs (durable per-match analyze state) ----------
@@ -698,7 +715,7 @@ export function allAnalyticsPrompts(db: Database): {
 export function updateAnalyticsPrompt(
   db: Database, scope: "sport" | "competition", scopeId: string, body: string,
 ): void {
-  const existing = db.prepare(`SELECT id FROM analytics_prompts WHERE scope=? AND scope_id=? ORDER BY updated_at DESC LIMIT 1`).get(scope, scopeId);
+  const existing = db.prepare(`SELECT id FROM analytics_prompts WHERE scope=? AND scope_id=? ORDER BY updated_at DESC, rowid DESC LIMIT 1`).get(scope, scopeId);
   if (existing) db.prepare(`UPDATE analytics_prompts SET body=?, updated_at=? WHERE id=?`).run(body, nowIso(), existing.id);
   else upsertAnalyticsPrompt(db, scope, scopeId, body, null);
 }

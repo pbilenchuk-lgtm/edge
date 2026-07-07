@@ -128,6 +128,25 @@ CREATE TABLE IF NOT EXISTS assessment_history (
 );
 CREATE INDEX IF NOT EXISTS idx_asmt_hist ON assessment_history(match_id, created_at);
 
+-- analysis_artifacts — raw JSON of every produced artifact for a match, so the
+-- «Анализ» tab can show/copy exactly what each layer produced (filled schema):
+-- kind = 'base' (Layer-1 core) | 'category' (Layer-2 modifier delta) |
+-- 'distribution' (assembled 25-market distribution) | 'strategist' (strategist
+-- output; label = strategy name). One CURRENT artifact per (match, kind, label):
+-- a new run REPLACES the prior one (upsert), keeping the tab clean and bounded.
+CREATE TABLE IF NOT EXISTS analysis_artifacts (
+  id         TEXT PRIMARY KEY,
+  match_id   TEXT NOT NULL REFERENCES matches(id),
+  kind       TEXT NOT NULL,
+  label      TEXT NOT NULL DEFAULT '',
+  stage      TEXT,
+  content    TEXT NOT NULL,
+  model      TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (match_id, kind, label)
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts ON analysis_artifacts(match_id);
+
 -- §2.10 markets (котировки рынков, Polymarket-стиль; версионируются по snapshot_at)
 CREATE TABLE IF NOT EXISTS markets (
   id           TEXT PRIMARY KEY,

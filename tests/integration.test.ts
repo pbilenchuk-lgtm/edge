@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { openDb } from "../src/lib/db.js";
-import { seedDatabase } from "../src/lib/seed.js";
+import { seedDatabase, migrateCanonicalPrompts } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import {
   loadPolymarketConfig, getQuotes, fetchMidpointCents,
@@ -69,6 +69,24 @@ test("analytics prompt = base sport + competition override (§2.4)", () => {
   assert.match(p.body, /xG/); // base football
   assert.match(p.body, /Юниорский/); // youth override appended
   assert.equal(p.model, "Claude Opus 4.8");
+});
+
+test("migrateCanonicalPrompts brings stale football base + WC modifier current, once", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db); // seeds the OLD demo football prompt (no "# БАЗОВЫЙ АНАЛИЗ" marker)
+  // simulate a prod DB whose WC modifier is the pre-rewrite version
+  R.upsertAnalyticsPrompt(db, "competition", "pm-soccer-fifwc", "КОНТЕКСТ ТУРНИРА — старый промпт ЧМ", null);
+  assert.ok(!R.analyticsPromptRow(db, "sport", "football")!.body.startsWith("# БАЗОВЫЙ АНАЛИЗ"), "starts stale");
+
+  migrateCanonicalPrompts(db);
+  assert.ok(R.analyticsPromptRow(db, "sport", "football")!.body.startsWith("# БАЗОВЫЙ АНАЛИЗ"), "base brought to Layer-1");
+  assert.ok(R.analyticsPromptRow(db, "competition", "pm-soccer-fifwc")!.body.startsWith("# МОДИФИКАТОР"), "WC modifier brought to Layer-2");
+
+  // idempotent: a second run must NOT append another row (marker already matches)
+  const countBefore = (db.prepare("SELECT COUNT(*) c FROM analytics_prompts WHERE scope='sport' AND scope_id='football'").get() as any).c;
+  migrateCanonicalPrompts(db);
+  const countAfter = (db.prepare("SELECT COUNT(*) c FROM analytics_prompts WHERE scope='sport' AND scope_id='football'").get() as any).c;
+  assert.equal(countAfter, countBefore, "no duplicate insert on re-run");
 });
 
 test("strategy versioning archives old and bumps version (§2.6, §3.5)", () => {
@@ -412,6 +430,17 @@ test("analyzeMatch (football): Layer-2 category modifier folds into the analysis
   assert.match(asmt.body ?? "", /Категория.*ЧМ-специфика применена/, "category notes merged into the body");
   assert.match(asmt.body ?? "", /высота Мехико/, "category driver merged");
   assert.ok(R.latestMarkets(db, "m-lineup").some((m) => m.ai_prob != null), "derived probs (post-modifier) landed on markets");
+  // raw artifacts recorded for review: base + category + distribution (filled schema)
+  const arts = R.artifactsForMatch(db, "m-lineup");
+  const kinds = new Set(arts.map((a) => a.kind));
+  assert.ok(kinds.has("base") && kinds.has("category") && kinds.has("distribution"), "base+category+distribution artifacts stored");
+  const base = arts.find((a) => a.kind === "base")!;
+  assert.ok(JSON.parse(base.content).core.xg_home === 1.6, "base artifact is the raw filled schema");
+  const dist = arts.find((a) => a.kind === "distribution")!;
+  assert.ok(JSON.parse(dist.content).derived.outcome_90, "distribution artifact carries the derived markets");
+  // re-running REPLACES, not appends (one current artifact per kind)
+  await analyzeMatch(db, "m-lineup", { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
+  assert.equal(R.artifactsForMatch(db, "m-lineup").filter((a) => a.kind === "base").length, 1, "base artifact replaced, not duplicated");
 });
 
 test("analyzeMatch (football): refuses to analyze until the real lineup is out", async () => {

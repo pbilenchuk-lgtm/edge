@@ -191,7 +191,7 @@ export function seedDatabase(db: Database): void {
 // ЧМ-2026 tournament context (competition override, concatenated after Промпт 1
 // for WC matches), Промпт 3 = the strategy prompt.
 // ============================================================
-const PROMPT_MATCH_ANALYTICS = `# БАЗОВЫЙ АНАЛИЗ ФУТБОЛЬНОГО МАТЧА (Слой 1)
+export const PROMPT_MATCH_ANALYTICS = `# БАЗОВЫЙ АНАЛИЗ ФУТБОЛЬНОГО МАТЧА (Слой 1)
 
 Ты — аналитик футбольных матчей, работающий от первопринципов. Твоя задача — оценить матч и выдать строго структурированный числовой прогноз по заданной JSON-схеме. Ты НЕ выбираешь ставки и НЕ решаешь о входе в позицию — ты только производишь распределение исходов. Этим займётся другой слой.
 
@@ -241,7 +241,7 @@ const PROMPT_MATCH_ANALYTICS = `# БАЗОВЫЙ АНАЛИЗ ФУТБОЛЬНО
 
 Строго JSON по схеме. Заполняешь: match_type (value + reason), core, overrides (или пусто), drivers, scenarios, calibration, unknowns. Блок derived НЕ заполняешь — его посчитает код. Только JSON, ничего вокруг.`;
 
-const PROMPT_WC_CONTEXT = `# МОДИФИКАТОР ЧЕМПИОНАТА МИРА (Слой 2)
+export const PROMPT_WC_CONTEXT = `# МОДИФИКАТОР ЧЕМПИОНАТА МИРА (Слой 2)
 
 Ты — специалист по спецификам ЧМ по футболу. На вход — готовый выход базового анализа (Слой 1): распределение, core, драйверы, сценарии. Твоя задача — НЕ пересчитывать матч, а выдать ТОЛЬКО поправки (дельту), специфичные для ЧМ, которых база не учла.
 
@@ -365,3 +365,27 @@ const reassess = (matchId: string, strat: string, minute: string, body: string, 
 const tlog = (matchId: string, strat: string, minute: string, type: any, text: string) =>
   ({ id: R.uid(), match_id: matchId, strategy_id: strat, minute, type, text, created_at: T });
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9а-я]+/gi, "-").slice(0, 24);
+
+// ============================================================
+// Canonical-prompt migration (prod DBs seeded before a prompt rewrite).
+//
+// seedMinimal is one-shot / non-destructive: it never re-touches prompts on an
+// already-populated DB. So a production database seeded before the two-layer
+// rewrite still carries the OLD football base + WC modifier prompts, and the
+// structured Layer-1/Layer-2 pipeline runs against instructions that don't match
+// the schema it enforces. Bring stale defaults current on boot — keyed on the
+// version marker so a prompt already on the new format (including any user edits
+// that keep the header) is NEVER clobbered.
+// ============================================================
+const BASE_MARKER = "# БАЗОВЫЙ АНАЛИЗ";
+const WC_MARKER = "# МОДИФИКАТОР";
+export function migrateCanonicalPrompts(db: Database): void {
+  const base = R.analyticsPromptRow(db, "sport", "football");
+  if (!base || !base.body.startsWith(BASE_MARKER)) {
+    R.upsertAnalyticsPrompt(db, "sport", "football", PROMPT_MATCH_ANALYTICS, base?.model ?? "Claude Opus 4.8");
+  }
+  const wc = R.analyticsPromptRow(db, "competition", "pm-soccer-fifwc");
+  if (!wc || !wc.body.startsWith(WC_MARKER)) {
+    R.upsertAnalyticsPrompt(db, "competition", "pm-soccer-fifwc", PROMPT_WC_CONTEXT, wc?.model ?? null);
+  }
+}

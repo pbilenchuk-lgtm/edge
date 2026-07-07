@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
+import { migrateCanonicalPrompts } from "./seed.js";
 
 // node:sqlite is experimental and not in @types/node, so require it
 // dynamically and give it a minimal local type.
@@ -57,6 +58,11 @@ export function getDb(path = dbPath()): Database {
       "UPDATE analysis_jobs SET status='failed', error='прервано рестартом сервера', finished_at=? WHERE status='running'",
     ).run(new Date().toISOString());
   } catch { /* table may not exist on a very old DB; schema just created it */ }
+  // Bring stale default analysis prompts current (prod DBs seeded before the
+  // two-layer rewrite still carry the old football base / WC modifier). Marker-
+  // guarded + idempotent; best-effort so a prompt hiccup never wedges boot.
+  try { migrateCanonicalPrompts(db); }
+  catch { /* non-fatal: analysis still runs on whatever prompt is stored */ }
   _db = db;
   return db;
 }

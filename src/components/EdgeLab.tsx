@@ -854,6 +854,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                     </div>
                   </div>
                 )}
+                <ArtifactsPanel artifacts={match.artifacts} />
                 <PastAssessments history={match.assessmentHistory} />
               </div>
               );
@@ -1131,6 +1132,51 @@ function Assessment({ a }: any) {
       <div style={S.assessTop}><span style={S.confChip}>уверенность: {a.confidence}</span><button onClick={() => setFull(!full)} style={S.fullToggle}>{full ? "кратко" : "подробно"}</button></div>
       <p style={S.assessText}>{full ? a.text : a.short}</p>
       {a.verdict && <div style={S.verdict}><span style={{ color: "#e8a838" }}>&#9656;</span> {a.verdict}</div>}
+    </div>
+  );
+}
+
+// Raw JSON artifacts of each analysis layer — the FILLED schema, for review and
+// tests. Each is copyable (button) and collapsible; base/category/distribution
+// from the analysis, plus one per strategist. Nothing is hidden — «фиксируется
+// чётко» — but collapsed by default so the tab stays readable.
+const ARTIFACT_META: Record<string, { title: string; num: string; bg: string }> = {
+  base: { title: "Базовый анализ (Слой 1)", num: "1", bg: "#70b56a" },
+  category: { title: "Модификатор категории (Слой 2)", num: "2", bg: "#e8a838" },
+  distribution: { title: "Сборка — распределение (25 рынков)", num: "Σ", bg: "#5b9bd5" },
+  strategist: { title: "Стратег", num: "S", bg: "#b07fd0" },
+};
+function ArtifactBlock({ art }: any) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const meta = ARTIFACT_META[art.kind] ?? { title: art.kind, num: "?", bg: MUTE };
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(art.content); setCopied(true); setTimeout(() => setCopied(false), 1200); }
+    catch { /* clipboard blocked — the field is still open for manual select */ setOpen(true); }
+  };
+  const bytes = art.content.length;
+  return (
+    <div style={S.artifactBlock}>
+      <div style={S.artifactHead}>
+        <span style={{ ...S.artifactBadge, background: meta.bg }}>{meta.num}</span>
+        <span style={S.artifactTitle}>{meta.title}{art.label ? ` · ${art.label}` : ""}</span>
+        <span style={S.artifactMeta}>{(bytes / 1024).toFixed(1)}KB{art.model ? ` · ${art.model}` : ""}</span>
+        <button style={S.artifactBtn} onClick={copy}>{copied ? "✓ скопировано" : "копировать"}</button>
+        <button style={S.artifactBtn} onClick={() => setOpen((v) => !v)}>{open ? "свернуть" : "показать"}</button>
+      </div>
+      {open && <pre style={S.artifactPre}>{art.content}</pre>}
+    </div>
+  );
+}
+function ArtifactsPanel({ artifacts }: any) {
+  if (!artifacts || artifacts.length === 0) return null;
+  // stable, meaningful order: base → category → distribution → strategists
+  const order = ["base", "category", "distribution", "strategist"];
+  const sorted = [...artifacts].sort((a: any, b: any) => (order.indexOf(a.kind) + 1 || 99) - (order.indexOf(b.kind) + 1 || 99));
+  return (
+    <div style={S.analysisStage}>
+      <div style={S.analysisStageLabel}><span style={{ ...S.stageNum, background: "#3a4150", color: "#cbd3e0", fontSize: 9 }}>{"{ }"}</span> Артефакты (схема — для проверки и тестов)</div>
+      <div style={S.artifactList}>{sorted.map((a: any, i: number) => <ArtifactBlock key={`${a.kind}-${a.label}-${i}`} art={a} />)}</div>
     </div>
   );
 }
@@ -2012,6 +2058,14 @@ const S: Record<string, React.CSSProperties> = {
   decisionName: { fontSize: 13, fontWeight: 700 },
   decisionVerdict: { marginLeft: "auto", fontSize: 10.5, color: "#7fb4e8", background: "#1e2836", borderRadius: 20, padding: "2px 10px", fontFamily: "'JetBrains Mono', monospace" },
   decisionText: { fontSize: 12.5, color: "#d3d8e0", lineHeight: 1.55, marginTop: 8 },
+  artifactList: { display: "flex", flexDirection: "column", gap: 8 },
+  artifactBlock: { border: `1px solid ${LINE}`, borderRadius: 8, background: "#12161d", overflow: "hidden" },
+  artifactHead: { display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", flexWrap: "wrap" },
+  artifactBadge: { width: 18, height: 18, borderRadius: "50%", color: "#12161d", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, flexShrink: 0 },
+  artifactTitle: { fontSize: 12.5, fontWeight: 700, color: "#e6e9ef" },
+  artifactMeta: { fontSize: 11, color: MUTE, marginLeft: "auto" },
+  artifactBtn: { fontSize: 11, fontWeight: 600, color: "#cbd3e0", background: "#20262f", border: `1px solid ${LINE}`, borderRadius: 6, padding: "3px 8px", cursor: "pointer" },
+  artifactPre: { margin: 0, padding: 10, background: "#0d1015", color: "#b8c2d0", fontSize: 11.5, lineHeight: 1.5, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", overflow: "auto", whiteSpace: "pre", borderTop: `1px solid ${LINE}`, maxHeight: 420 },
   decisionBets: { display: "flex", flexDirection: "column", gap: 4, marginTop: 8 },
   decisionBetRow: { display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" },
   decisionBetMkt: { fontSize: 12, fontWeight: 600, color: "#e6e9ef" },
