@@ -94,6 +94,7 @@ export interface Strategy {
 export interface StrategyShare {
   competition_id: string;
   strategy_id: string;
+  risk_profile_id: string; // назначенный профиль пары (default 'medium')
   pct: number;
 }
 
@@ -156,6 +157,9 @@ export interface Bet {
   id: string;
   match_id: string;
   strategy_id: string;
+  /** risk profile of the (strategy, profile) pair that placed the bet — the
+   *  budget/exposure unit. May be null on legacy rows (pre-profiles). */
+  risk_profile_id?: string | null;
   market_label: string;
   status: BetStatus;
   proposed_price: number | null;

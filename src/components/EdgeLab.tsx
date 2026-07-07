@@ -238,6 +238,8 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [catalog, setCatalog] = useState(initial.catalog);
   const [compBudget, setCompBudget] = useState(initial.compBudget);
   const [shares, setShares] = useState(initial.shares);
+  const [shareRows, setShareRows] = useState<any>(initial.shareRows || {});
+  const [riskProfiles, setRiskProfiles] = useState<any[]>(initial.riskProfiles || []);
   const [analysis, setAnalysis] = useState(initial.analysis);
   const [matchDb, setMatchDb] = useState(initial.matchDb);
   const [providers, setProviders] = useState(initial.providers);
@@ -308,9 +310,15 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     const r = await mutate({ type: "setBudget", compId: cid, amount: amt }).catch(() => ({ ok: false }));
     if (r && r.ok === false) toast("err", r.error || "Не удалось сохранить бюджет — изменение откатится");
   };
-  const saveShares = async (cid: string, newShares: any) => {
-    setShares((p) => ({ ...p, [cid]: newShares })); setShareModal(null);
-    const r = await mutate({ type: "setShares", compId: cid, shares: newShares }).catch(() => ({ ok: false }));
+  const saveShares = async (cid: string, rows: { strategyId: string; profileId: string; pct: number }[]) => {
+    // rows = (strategy, profile, pct) pairs. Keep the summed-by-strategy map in
+    // sync for the back-compat display, and the rows for the modal.
+    const summed: Record<string, number> = {};
+    for (const r of rows) summed[r.strategyId] = (summed[r.strategyId] ?? 0) + r.pct;
+    setShares((p: any) => ({ ...p, [cid]: summed }));
+    setShareRows((p: any) => ({ ...p, [cid]: rows }));
+    setShareModal(null);
+    const r = await mutate({ type: "setShares", compId: cid, rows }).catch(() => ({ ok: false }));
     if (r && r.ok === false) toast("err", r.error || "Не удалось сохранить доли — изменение откатится");
   };
 
@@ -389,6 +397,8 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     // all its per-strategy tab content (log / reassess / settle) renders empty.
     if (app.compBudget) setCompBudget(app.compBudget);
     if (app.shares) setShares(app.shares);
+    if (app.shareRows) setShareRows(app.shareRows);
+    if (app.riskProfiles) setRiskProfiles(app.riskProfiles);
     if (typeof app.treasuryTotal === "number") setTotalBalance(app.treasuryTotal);
     if (app.strategyStats) setStrategyStats(app.strategyStats);
     if (app.eventFeed) setEventFeed(app.eventFeed);
@@ -652,7 +662,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       </ErrorBoundary>
 
       {compModal && <BudgetModal comp={COMPETITIONS.find((c) => c.id === compModal)!} current={compBudget[compModal] || 0} free={freeBalance} onClose={() => setCompModal(null)} onSave={(amt: number) => setBudget(compModal, amt)} />}
-      {shareModal && <SharesModal comp={COMPETITIONS.find((c) => c.id === shareModal)!} strats={catalog.filter((s) => s.sport === COMPETITIONS.find((c) => c.id === shareModal)!.sport)} budget={compBudget[shareModal]} current={shares[shareModal] || {}} onClose={() => setShareModal(null)} onSave={(sh: any) => saveShares(shareModal, sh)} />}
+      {shareModal && <SharesModal comp={COMPETITIONS.find((c) => c.id === shareModal)!} strats={catalog.filter((s) => s.sport === COMPETITIONS.find((c) => c.id === shareModal)!.sport)} profiles={riskProfiles} budget={compBudget[shareModal]} rows={shareRows[shareModal] || []} onClose={() => setShareModal(null)} onSave={(rows: any) => saveShares(shareModal, rows)} />}
 
       <footer style={S.footer}>
         Два уровня денег: казна→турнир ($), турнир→стратегии (%). Данные — из БД; котировки обновляются через сервер (Polymarket). Правки бюджета/долей/стратегий сохраняются.
@@ -1791,26 +1801,47 @@ function BudgetModal({ comp, current, free, onClose, onSave }: any) {
   );
 }
 
-function SharesModal({ comp, strats, budget, current, onClose, onSave }: any) {
-  const [sh, setSh] = useState(() => Object.fromEntries(strats.map((s: any) => [s.id, current[s.id] || 0])));
-  const total = (Object.values(sh) as number[]).reduce((a, b) => a + b, 0);
+// Budget allocation = a list of (strategy + risk-profile) rows, each with its %.
+// The same strategy can appear under several profiles (e.g. Overreaction on
+// «Средний» and «Агрессивный») to compare the methodology across aggressiveness.
+function SharesModal({ comp, strats, profiles, budget, rows, onClose, onSave }: any) {
+  const profs = (profiles && profiles.length) ? profiles : [{ id: "medium", name: "Средний" }];
+  const [list, setList] = useState<any[]>(() =>
+    (rows && rows.length)
+      ? rows.map((r: any) => ({ strategyId: r.strategyId, profileId: r.profileId || "medium", pct: r.pct }))
+      : []);
+  const total = list.reduce((a, r) => a + (Number(r.pct) || 0), 0);
   const over = total > 100;
-  const setPct = (id: string, v: number) => setSh((p: any) => ({ ...p, [id]: Math.max(0, Math.min(100, Math.round(v))) }));
+  const dupe = (i: number) => list.some((r, j) => j !== i && r.strategyId === list[i].strategyId && r.profileId === list[i].profileId);
+  const anyDupe = list.some((_, i) => dupe(i));
+  const stratName = (id: string) => strats.find((s: any) => s.id === id)?.name ?? id;
+  const stratColor = (id: string) => strats.find((s: any) => s.id === id)?.color ?? MUTE;
+  const setRow = (i: number, patch: any) => setList((p) => p.map((r, j) => j === i ? { ...r, ...patch } : r));
+  const addRow = () => setList((p) => [...p, { strategyId: strats[0]?.id, profileId: "medium", pct: 0 }]);
+  const rmRow = (i: number) => setList((p) => p.filter((_, j) => j !== i));
   return (
-    <Modal title={`Доли стратегий · ${comp.name}`} onClose={onClose}>
+    <Modal title={`Стратегия + профиль · ${comp.name}`} onClose={onClose}>
       <div style={S.sharesHead}><span>Бюджет турнира: <b>{fmtMoney0(budget)}</b></span><span style={{ color: over ? "#ff6b6b" : total === 100 ? "#5fd08a" : "#e8a838" }}>распределено {total}% {over ? "(перебор!)" : `· свободно ${100 - total}%`}</span></div>
-      {strats.map((s: any) => (
-        <div key={s.id} style={S.shareRow}>
-          <span style={{ ...S.dot, background: s.color }} />
-          <span style={S.shareName}>{s.name}</span>
-          <input type="range" min="0" max="100" value={sh[s.id]} onChange={(e) => setPct(s.id, +e.target.value)} style={S.shareRange} />
-          <div style={S.sharePctBox}><input type="number" min="0" max="100" value={sh[s.id]} onChange={(e) => setPct(s.id, +e.target.value)} style={S.sharePctInput} /><span style={S.sharePctSign}>%</span></div>
-          <span style={S.shareDollar}>{fmtMoney0(Math.floor(budget * sh[s.id] / 100))}</span>
+      {list.length === 0 && <div style={S.allocNote}>Пар пока нет. Добавь пару «стратегия + профиль» и задай ей долю бюджета.</div>}
+      {list.map((r, i) => (
+        <div key={i} style={{ ...S.shareRow, opacity: 1, borderBottom: dupe(i) ? "1px solid #ff6b6b" : undefined }}>
+          <span style={{ ...S.dot, background: stratColor(r.strategyId) }} />
+          <select value={r.strategyId} onChange={(e) => setRow(i, { strategyId: e.target.value })} style={S.shareSelect}>
+            {strats.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <select value={r.profileId} onChange={(e) => setRow(i, { profileId: e.target.value })} style={S.shareSelect} title="риск-профиль (пороги)">
+            {profs.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <div style={S.sharePctBox}><input type="number" min="0" max="100" value={r.pct} onChange={(e) => setRow(i, { pct: Math.max(0, Math.min(100, Math.round(+e.target.value))) })} style={S.sharePctInput} /><span style={S.sharePctSign}>%</span></div>
+          <span style={S.shareDollar}>{fmtMoney0(Math.floor(budget * (r.pct || 0) / 100))}</span>
+          <button style={S.shareRmBtn} onClick={() => rmRow(i)} title="убрать">✕</button>
         </div>
       ))}
-      <div style={S.allocNote}>Проверенной стратегии — больше %, тестовой — меньше. Сумма не обязана быть 100%.</div>
+      <button style={S.shareAddBtn} onClick={addRow}>+ добавить пару (стратегия + профиль)</button>
+      <div style={S.allocNote}>Профиль = набор порогов (агрессивность). Одну стратегию можно поставить с разными профилями. Сумма долей не обязана быть 100%.</div>
       {over && <div style={S.warnBox}>Сумма долей превышает 100%. Уменьши.</div>}
-      <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Отмена</button><button style={{ ...S.saveBtn, opacity: over ? 0.4 : 1 }} disabled={over} onClick={() => onSave(Object.fromEntries(Object.entries(sh).filter(([, v]: any) => v > 0)))}>Сохранить</button></div>
+      {anyDupe && <div style={S.warnBox}>Есть повторяющаяся пара «стратегия + профиль». Убери дубль.</div>}
+      <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Отмена</button><button style={{ ...S.saveBtn, opacity: (over || anyDupe) ? 0.4 : 1 }} disabled={over || anyDupe} onClick={() => onSave(list.filter((r) => (Number(r.pct) || 0) > 0))}>Сохранить</button></div>
     </Modal>
   );
 }
@@ -2194,7 +2225,10 @@ const S: Record<string, React.CSSProperties> = {
   shareRow: { display: "flex", alignItems: "center", gap: 10, marginBottom: 10 },
   shareName: { fontSize: 13, fontWeight: 600, width: 90, flexShrink: 0 },
   shareRange: { flex: 1 },
-  sharePctBox: { display: "flex", alignItems: "center", background: INK, border: `1px solid ${LINE}`, borderRadius: 6, padding: "2px 6px", width: 62 },
+  shareSelect: { flex: 1, minWidth: 0, background: INK, border: `1px solid ${LINE}`, borderRadius: 6, color: TEXT, fontSize: 12.5, padding: "5px 6px", outline: "none" },
+  shareRmBtn: { background: "transparent", border: "none", color: MUTE, fontSize: 13, cursor: "pointer", flexShrink: 0, padding: "0 2px" },
+  shareAddBtn: { marginTop: 4, marginBottom: 4, background: "#20262f", border: `1px solid ${LINE}`, borderRadius: 8, color: "#cbd3e0", fontSize: 12.5, fontWeight: 600, padding: "8px 12px", cursor: "pointer", width: "100%" },
+  sharePctBox: { display: "flex", alignItems: "center", background: INK, border: `1px solid ${LINE}`, borderRadius: 6, padding: "2px 6px", width: 62, flexShrink: 0 },
   sharePctInput: { width: 34, background: "transparent", border: "none", color: TEXT, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", textAlign: "right", outline: "none" },
   sharePctSign: { fontSize: 12, color: MUTE },
   shareDollar: { fontSize: 12, fontFamily: "'JetBrains Mono', monospace", color: "#e8a838", width: 56, textAlign: "right", flexShrink: 0 },

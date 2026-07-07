@@ -546,16 +546,20 @@ export async function strategistReassess(
       // (b) ENTRIES — fresh positions the trigger opened. Only strategies with a
       // live share can enter; code sizes/gates. Dedup against markets this
       // strategy already holds/proposed so we never double up on the same bet.
-      const share = shares.find((s) => s.strategy_id === sid);
+      // Highest-share active (strategy, profile) pair for this strategy — its
+      // profile sizes/tags any live entry. (The full multi-profile live path is
+      // the live-executor module; one profile per strategy is the common case.)
+      const share = shares.filter((s) => s.strategy_id === sid && s.pct > 0).sort((a, b) => b.pct - a.pct)[0];
       if (share && share.pct > 0 && dec.picks.length) {
+        const profile = share.risk_profile_id;
         const budget = stratBudget(c.budget, share.pct);
         const held = new Set(R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").map((b) => norm(b.market_label)));
-        // Seed exposure + realized from ALL the strategy's matches in this comp
-        // (open AND still-proposed — autoEnter will fill the proposals), so the
-        // §9.3 cap is per-COMPETITION, not per-match: concurrent matches can't each
-        // stake the full share.
-        let exposure = strategyCompExposure(db, comp, sid);
-        const realizedPnl = strategyCompRealized(db, comp, sid);
+        // Seed exposure + realized from ALL this pair's matches in the comp (open
+        // AND still-proposed — autoEnter will fill the proposals), so the §9.3 cap
+        // is per-COMPETITION and per-pair: concurrent matches can't each stake the
+        // full share.
+        let exposure = strategyCompExposure(db, comp, sid, profile);
+        const realizedPnl = strategyCompRealized(db, comp, sid, profile);
         for (const pick of dec.picks) {
           const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
           if (!mk || mk.price == null) { unfilled.push(`«${pick.label}» — нет рынка`); continue; }
@@ -573,7 +577,7 @@ export async function strategistReassess(
           exposure += d.stake;
           held.add(norm(mk.label));
           R.insertBet(db, {
-            id: R.uid(), match_id: m.id, strategy_id: sid, market_label: mk.label,
+            id: R.uid(), match_id: m.id, strategy_id: sid, risk_profile_id: profile, market_label: mk.label,
             status: "proposed", proposed_price: mk.price, entry_price: null, current_price: null,
             closing_price: null, ai_prob: aiProb, stake: d.stake,
             rationale: `переоценка: «${mk.label}» край ${d.edge.toFixed(1)}%. ${pick.reason || d.reason}.`,

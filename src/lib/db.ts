@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { migrateCanonicalPrompts } from "./seed.js";
+import { migrateCanonicalPrompts, migrateSeedStrategists } from "./seed.js";
 import { seedRiskProfiles } from "./riskConfig.js";
 
 // node:sqlite is experimental and not in @types/node, so require it
@@ -68,6 +68,10 @@ export function getDb(path = dbPath()): Database {
   // doesn't have them yet — idempotent, so a live prod DB gets them without a wipe.
   try { seedRiskProfiles(db, new Date().toISOString()); }
   catch { /* non-fatal */ }
+  // Ensure the two real strategists exist on an already-populated DB (seedMinimal
+  // won't re-run). Non-destructive; existing strategies + shares are untouched.
+  try { migrateSeedStrategists(db, new Date().toISOString()); }
+  catch { /* non-fatal */ }
   _db = db;
   return db;
 }
@@ -95,9 +99,28 @@ export function initSchema(db: Database): void {
     "ALTER TABLE match_live ADD COLUMN stats TEXT",
     "ALTER TABLE strategies ADD COLUMN prompt_live TEXT",
     "ALTER TABLE strategy_versions ADD COLUMN prompt_live TEXT",
+    "ALTER TABLE bets ADD COLUMN risk_profile_id TEXT",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }
+  // strategy_shares gained risk_profile_id + a 3-part PK. SQLite can't ALTER a
+  // PK, so recreate the table when the old (2-part) one is detected, backfilling
+  // every existing allocation onto the MEDIUM profile. Guarded + row-preserving.
+  try {
+    const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='strategy_shares'").get() as { sql?: string } | undefined;
+    if (row?.sql && !/risk_profile_id/i.test(row.sql)) {
+      db.exec("BEGIN");
+      db.exec(`CREATE TABLE strategy_shares_new (
+        competition_id TEXT NOT NULL, strategy_id TEXT NOT NULL,
+        risk_profile_id TEXT NOT NULL DEFAULT 'medium',
+        pct REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (competition_id, strategy_id, risk_profile_id))`);
+      db.exec("INSERT INTO strategy_shares_new(competition_id,strategy_id,risk_profile_id,pct) SELECT competition_id,strategy_id,'medium',pct FROM strategy_shares");
+      db.exec("DROP TABLE strategy_shares");
+      db.exec("ALTER TABLE strategy_shares_new RENAME TO strategy_shares");
+      db.exec("COMMIT");
+    }
+  } catch { try { db.exec("ROLLBACK"); } catch { /* ignore */ } }
   // SQLite can't ALTER a CHECK constraint, so relax the old trade_log.type CHECK
   // (which excluded the later 'skip' type) by recreating the table. Guarded: runs
   // only when the existing CHECK is the old, skip-less one; preserves all rows.

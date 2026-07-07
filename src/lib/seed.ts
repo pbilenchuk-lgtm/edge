@@ -34,6 +34,9 @@ export function seedDatabase(db: Database): void {
   // --- treasury (§2.3) ---
   R.setTreasury(db, 5000);
 
+  // --- named risk presets (aggressive/medium/conservative) ---
+  seedRiskProfiles(db, T);
+
   // --- sports ---
   for (const [id, label] of Object.entries(SPORT_LABELS)) R.upsertSport(db, id, label);
 
@@ -510,5 +513,20 @@ export function migrateCanonicalPrompts(db: Database): void {
   const wc = R.analyticsPromptRow(db, "competition", "pm-soccer-fifwc");
   if (!wc || !wc.body.startsWith(WC_MARKER)) {
     R.upsertAnalyticsPrompt(db, "competition", "pm-soccer-fifwc", PROMPT_WC_CONTEXT, wc?.model ?? null);
+  }
+}
+
+// Ensure the two real two-phase strategists exist on an ALREADY-populated DB
+// (seedMinimal is one-shot, so a live prod DB seeded earlier never got them).
+// Non-destructive: only inserts the ones that are missing; leaves any existing
+// strategies + their shares untouched (the user reassigns budget via the UI).
+export function migrateSeedStrategists(db: Database, now: string): void {
+  const defs: Array<Pick<Parameters<typeof R.insertStrategy>[1], "id" | "name" | "tag" | "color" | "prompt" | "prompt_live">> = [
+    { id: "overreaction", name: "Overreaction", tag: "выкуп переоценки", color: "#e8a838", prompt: STRAT_OVERREACTION_PREMATCH, prompt_live: STRAT_OVERREACTION_LIVE },
+    { id: "prematch_value", name: "Pre-match Value", tag: "предматч value", color: "#5b9bd5", prompt: STRAT_PMVALUE_PREMATCH, prompt_live: STRAT_PMVALUE_LIVE },
+  ];
+  for (const d of defs) {
+    if (R.getStrategy(db, d.id)) continue;
+    R.insertStrategy(db, { id: d.id, sport_id: "football", name: d.name, tag: d.tag, color: d.color, version: 1, model: "Claude Opus 4.8", created_at: now, prompt: d.prompt, prompt_live: d.prompt_live, params: {} });
   }
 }

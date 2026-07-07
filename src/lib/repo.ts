@@ -293,15 +293,16 @@ export function deleteProviderKey(db: Database, provider: string): void {
 }
 
 // ---------- shares ----------
-export function setShare(db: Database, s: StrategyShare): void {
+export function setShare(db: Database, s: Omit<StrategyShare, "risk_profile_id"> & { risk_profile_id?: string }): void {
+  const profile = s.risk_profile_id ?? "medium";
   db.prepare(
-    `INSERT INTO strategy_shares(competition_id,strategy_id,pct) VALUES(?,?,?)
-     ON CONFLICT(competition_id,strategy_id) DO UPDATE SET pct=excluded.pct`,
-  ).run(s.competition_id, s.strategy_id, s.pct);
+    `INSERT INTO strategy_shares(competition_id,strategy_id,risk_profile_id,pct) VALUES(?,?,?,?)
+     ON CONFLICT(competition_id,strategy_id,risk_profile_id) DO UPDATE SET pct=excluded.pct`,
+  ).run(s.competition_id, s.strategy_id, profile, s.pct);
 }
 export function sharesForComp(db: Database, competitionId: string): StrategyShare[] {
-  return db.prepare(`SELECT * FROM strategy_shares WHERE competition_id=?`)
-    .all(competitionId) as StrategyShare[];
+  return (db.prepare(`SELECT * FROM strategy_shares WHERE competition_id=?`)
+    .all(competitionId) as any[]).map((r) => ({ ...r, risk_profile_id: r.risk_profile_id ?? "medium" }));
 }
 export function clearShares(db: Database, competitionId: string): void {
   db.prepare(`DELETE FROM strategy_shares WHERE competition_id=?`).run(competitionId);
@@ -666,11 +667,11 @@ export function setMarketAiProb(db: Database, marketId: string, prob: number): v
 // ---------- bets ----------
 export function insertBet(db: Database, b: Bet): void {
   db.prepare(
-    `INSERT INTO bets(id,match_id,strategy_id,market_label,status,proposed_price,entry_price,
+    `INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,proposed_price,entry_price,
        current_price,closing_price,ai_prob,stake,rationale,entered_minute,result,payout,settled_by,settled_at,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
-    b.id, b.match_id, b.strategy_id, b.market_label, b.status, b.proposed_price, b.entry_price,
+    b.id, b.match_id, b.strategy_id, b.risk_profile_id ?? null, b.market_label, b.status, b.proposed_price, b.entry_price,
     b.current_price, b.closing_price, b.ai_prob, b.stake, b.rationale, b.entered_minute,
     b.result, b.payout, b.settled_by ?? null, b.settled_at ?? null, b.created_at,
   );

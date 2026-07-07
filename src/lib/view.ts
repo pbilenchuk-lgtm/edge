@@ -98,7 +98,10 @@ export interface AppData {
   sports: { id: string; label: string }[];
   competitions: { id: string; sport: string; name: string; matches: string[] }[];
   compBudget: Record<string, number>;
+  /** per-comp summed share % by strategy (across its profiles) — back-compat display */
   shares: Record<string, Record<string, number>>;
+  /** per-comp allocation ROWS: the real (strategy, profile, pct) pairs */
+  shareRows: Record<string, { strategyId: string; profileId: string; pct: number }[]>;
   catalog: StrategyView[];
   analysis: { modelBySport: Record<string, string>; bySport: Record<string, string>; byComp: Record<string, string> };
   matchDb: Record<string, MatchView>;
@@ -135,10 +138,17 @@ export function buildAppData(db: Database, env = process.env): AppData {
 
   const compBudget: Record<string, number> = {};
   const shares: Record<string, Record<string, number>> = {};
+  const shareRows: Record<string, { strategyId: string; profileId: string; pct: number }[]> = {};
   const competitions = comps.map((c) => {
     compBudget[c.id] = c.budget;
     const sh = sharesByComp.get(c.id)!;
-    if (sh.length) shares[c.id] = Object.fromEntries(sh.map((s) => [s.strategy_id, s.pct]));
+    if (sh.length) {
+      // back-compat map: strategy → summed pct across its profiles
+      const byStrat: Record<string, number> = {};
+      for (const s of sh) byStrat[s.strategy_id] = (byStrat[s.strategy_id] ?? 0) + s.pct;
+      shares[c.id] = byStrat;
+      shareRows[c.id] = sh.map((s) => ({ strategyId: s.strategy_id, profileId: s.risk_profile_id, pct: s.pct }));
+    }
     return { id: c.id, sport: c.sport_id, name: c.name, matches: (matchesByComp.get(c.id) ?? []).map((m) => m.id) };
   });
 
@@ -319,7 +329,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
 
   const strategyStats = computeStrategyStats(strategies, allMatches, betsByMatch, pricesByMatch);
 
-  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskProfiles: listRiskProfileViews(db) };
+  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, shareRows, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskProfiles: listRiskProfileViews(db) };
   // node:sqlite rows have a null prototype; React Server Components can't pass
   // those to a client component. A JSON round-trip yields plain objects.
   return JSON.parse(JSON.stringify(payload));

@@ -89,12 +89,17 @@ CREATE TABLE IF NOT EXISTS strategy_versions (
   created_at  TEXT NOT NULL
 );
 
--- §2.7 strategy_shares (доли стратегий в турнире; инвариант: SUM(pct) <= 100)
+-- §2.7 strategy_shares — доли (стратегия + риск-профиль) в турнире. Единица
+-- распределения бюджета = ПАРА (strategy, risk_profile); одна стратегия может
+-- стоять под несколькими профилями. Инвариант: SUM(pct) <= 100 по турниру.
 CREATE TABLE IF NOT EXISTS strategy_shares (
-  competition_id TEXT NOT NULL REFERENCES competitions(id),
-  strategy_id    TEXT NOT NULL REFERENCES strategies(id),
-  pct            REAL NOT NULL DEFAULT 0,   -- доля в % (0..100)
-  PRIMARY KEY (competition_id, strategy_id)
+  competition_id  TEXT NOT NULL REFERENCES competitions(id),
+  strategy_id     TEXT NOT NULL REFERENCES strategies(id),
+  -- no FK to risk_profiles: a profile may be deleted/renamed without orphaning
+  -- an allocation, and code resolves a missing profile to defaults gracefully.
+  risk_profile_id TEXT NOT NULL DEFAULT 'medium',
+  pct             REAL NOT NULL DEFAULT 0,   -- доля в % (0..100)
+  PRIMARY KEY (competition_id, strategy_id, risk_profile_id)
 );
 
 -- §2.8 matches
@@ -188,6 +193,7 @@ CREATE TABLE IF NOT EXISTS bets (
   id             TEXT PRIMARY KEY,
   match_id       TEXT NOT NULL REFERENCES matches(id),
   strategy_id    TEXT NOT NULL REFERENCES strategies(id),
+  risk_profile_id TEXT,           -- риск-профиль пары, которым размещена ставка
   market_label   TEXT NOT NULL,
   status         TEXT NOT NULL CHECK (status IN
                    ('proposed','open','not_filled','settled_won','settled_lost')),

@@ -41,13 +41,15 @@ export async function POST(req: Request) {
         return ok({ total: amount, free: freeBalance(amount, R.listCompetitions(db)) });
       }
       case "setShares": {
-        const { compId, shares } = body as { compId: string; shares: Record<string, number> };
-        if (!compId || !shares || typeof shares !== "object") return bad("нужны compId и shares");
-        const list = Object.entries(shares).map(([, pct]) => ({ pct: Number(pct) }));
-        if (!sharesValid(list)) return bad("Сумма долей превышает 100% (§9.2)");
+        // New shape: rows of (strategy, profile, pct) pairs. Back-compat: an
+        // object {strategyId: pct} is treated as pairs on the MEDIUM profile.
+        const { compId, rows, shares } = body as { compId: string; rows?: { strategyId: string; profileId: string; pct: number }[]; shares?: Record<string, number> };
+        if (!compId) return bad("нужен compId");
+        const pairs = rows ?? Object.entries(shares ?? {}).map(([strategyId, pct]) => ({ strategyId, profileId: "medium", pct: Number(pct) }));
+        if (!sharesValid(pairs.map((p) => ({ pct: Number(p.pct) })))) return bad("Сумма долей превышает 100% (§9.2)");
         R.clearShares(db, compId);
-        for (const [sid, pct] of Object.entries(shares))
-          if (Number(pct) > 0) R.setShare(db, { competition_id: compId, strategy_id: sid, pct: Number(pct) });
+        for (const p of pairs)
+          if (Number(p.pct) > 0) R.setShare(db, { competition_id: compId, strategy_id: p.strategyId, risk_profile_id: p.profileId || "medium", pct: Number(p.pct) });
         return ok();
       }
       case "createStrategy": {

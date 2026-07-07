@@ -186,22 +186,25 @@ export async function analyzeMatch(
     return { ok: true, stage, confidence: a.confidence, betsCreated: 0, decisions: [] };
   }
   R.clearProposedBets(db, matchId);
-  const strategies = R.listStrategies(db, sport).filter((s) => {
-    const share = R.sharesForComp(db, match.competition_id).find((x) => x.strategy_id === s.id);
-    return share && share.pct > 0 && (comp?.budget ?? 0) > 0;
-  });
+  // The budget unit is now a (strategy, risk-profile) PAIR: a competition can
+  // fund the same strategy under several profiles, each with its own share.
+  const strategyById = new Map(R.listStrategies(db, sport).map((s) => [s.id, s]));
+  const pairs = R.sharesForComp(db, match.competition_id)
+    .filter((sh) => sh.pct > 0 && (comp?.budget ?? 0) > 0 && strategyById.has(sh.strategy_id))
+    .map((sh) => ({ strat: strategyById.get(sh.strategy_id)!, profile: sh.risk_profile_id, pct: sh.pct }));
 
   let betsCreated = 0;
   const decisions: AnalyzeResult["decisions"] = [];
-  for (const strat of strategies) {
-    const share = R.sharesForComp(db, match.competition_id).find((x) => x.strategy_id === strat.id)!;
-    const budget = stratBudget(comp!.budget, share.pct);
+  for (const { strat, profile, pct } of pairs) {
+    const budget = stratBudget(comp!.budget, pct);
+    const pairLabel = `${strat.name} · ${profile}`;
 
     // Universal path: let the strategy's PROMPT (any methodology) pick the
     // markets + conviction. Code still sizes/gates (§9.6). If no key / the
     // strategist fails, fall back to the pure edge+threshold path below.
     const stratModel = safeModel(strat.model ?? model);
-    const openPos = R.betsForMatch(db, matchId, strat.id).filter((b) => b.status === "open");
+    // Positions THIS pair already holds (same strategy AND same profile).
+    const openPos = R.betsForMatch(db, matchId, strat.id).filter((b) => b.status === "open" && (b.risk_profile_id ?? "medium") === profile);
     const dec = await strategistDecide({
       strategyName: strat.name, strategyPrompt: strat.prompt,
       match: { home: match.home, away: match.away, sport, state: match.state, minute: match.minute, scoreHome: match.score_home, scoreAway: match.score_away },
@@ -211,19 +214,19 @@ export async function analyzeMatch(
       context: ctx,
     }, stratModel, { fetchImpl: deps.fetchImpl, env });
     const picksArr = dec.ok ? dec.picks : null;
-    // Record the strategist's raw output per strategy so the «Анализ» tab can
-    // show/copy exactly what each strategy decided (for review). Best-effort.
-    try { R.saveArtifact(db, { match_id: matchId, kind: "strategist", label: strat.name, stage, content: JSON.stringify(dec, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
+    // Record the strategist's raw output per (strategy, profile) so the «Анализ»
+    // tab can show/copy exactly what each pair decided (for review). Best-effort.
+    try { R.saveArtifact(db, { match_id: matchId, kind: "strategist", label: pairLabel, stage, content: JSON.stringify(dec, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
 
-    // Seed exposure from positions this strategy ALREADY holds on the match, and
+    // Seed exposure from positions this pair ALREADY holds on the match, and
     // never re-propose on a market it's already in — otherwise the post-lineup
     // re-analysis would double up and breach the per-match budget cap (§9.3).
     const held = new Set(openPos.map((b) => norm(b.market_label)));
-    // §9.3 budget cap is per-COMPETITION: seed exposure + realized from ALL of
-    // the strategy's matches in this comp (not just this one), so total committed
-    // stake across concurrent matches can't exceed the strategy's share.
-    let exposure = strategyCompExposure(db, match.competition_id, strat.id);
-    const realizedPnl = strategyCompRealized(db, match.competition_id, strat.id);
+    // §9.3 budget cap is per-COMPETITION and per-PAIR: seed exposure + realized
+    // from ALL of this (strategy, profile) pair's matches in the comp, so total
+    // committed stake across concurrent matches can't exceed the pair's share.
+    let exposure = strategyCompExposure(db, match.competition_id, strat.id, profile);
+    const realizedPnl = strategyCompRealized(db, match.competition_id, strat.id, profile);
     let entries = 0, skipped = 0;
     // best edges first
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
@@ -245,7 +248,7 @@ export async function analyzeMatch(
       exposure += d.stake;
       entries++;
       R.insertBet(db, {
-        id: R.uid(), match_id: matchId, strategy_id: strat.id, market_label: m.label,
+        id: R.uid(), match_id: matchId, strategy_id: strat.id, risk_profile_id: profile, market_label: m.label,
         status: "proposed", proposed_price: m.price, entry_price: null, current_price: null,
         closing_price: null, ai_prob: aiProb, stake: d.stake,
         // When the strategist ran we cite its reason; when it DIDN'T (no key or a
@@ -264,7 +267,7 @@ export async function analyzeMatch(
     if (entries === 0 && skipped > 0) {
       R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — край недостаточен (${skipped} ${skipped === 1 ? "рынок" : "рынков"} ниже порога)`, created_at: now() });
     }
-    decisions.push({ strategy: strat.name, entries, skipped });
+    decisions.push({ strategy: pairLabel, entries, skipped });
     betsCreated += entries;
   }
 
@@ -326,24 +329,26 @@ export function sameMarketLabel(a: string, b: string): boolean {
   return numTokens(na) === numTokens(nb) && extraAllFiller(tokenSet(a), tokenSet(b));
 }
 
-/** Open + still-proposed stake ($) this strategy has committed across the WHOLE
- *  competition. The §9.3 budget cap is per-COMPETITION, not per-match — seeding
- *  the sizer with only the current match's exposure let a strategy stake its full
- *  share on each of N concurrent matches (≈N× the budget). */
-export function strategyCompExposure(db: Database, competitionId: string, strategyId: string): number {
+/** Open + still-proposed stake ($) a (strategy, profile) PAIR has committed across
+ *  the WHOLE competition. The §9.3 budget cap is per-COMPETITION and per-pair —
+ *  seeding the sizer with only the current match's exposure let a pair stake its
+ *  full share on each of N concurrent matches (≈N× the budget). Pass profileId to
+ *  scope to one pair; omit to sum the strategy across all profiles. */
+export function strategyCompExposure(db: Database, competitionId: string, strategyId: string, profileId?: string): number {
   let sum = 0;
   for (const mt of R.listMatches(db, competitionId))
     for (const b of R.betsForMatch(db, mt.id, strategyId))
-      if (b.status === "open" || b.status === "proposed") sum += b.stake ?? 0;
+      if ((b.status === "open" || b.status === "proposed") && (profileId == null || (b.risk_profile_id ?? "medium") === profileId)) sum += b.stake ?? 0;
   return sum;
 }
-/** Realized P&L ($) this strategy booked across the WHOLE competition (bankroll
- *  = budget + realized, so a loss elsewhere shrinks what's re-stakeable here). */
-export function strategyCompRealized(db: Database, competitionId: string, strategyId: string): number {
+/** Realized P&L ($) a (strategy, profile) pair booked across the WHOLE competition
+ *  (bankroll = budget + realized, so a loss elsewhere shrinks what's re-stakeable
+ *  here). Pass profileId to scope to one pair; omit for the whole strategy. */
+export function strategyCompRealized(db: Database, competitionId: string, strategyId: string, profileId?: string): number {
   let sum = 0;
   for (const mt of R.listMatches(db, competitionId))
     for (const b of R.betsForMatch(db, mt.id, strategyId))
-      if (b.status === "settled_won" || b.status === "settled_lost") sum += (b.payout ?? 0) - (b.stake ?? 0);
+      if ((b.status === "settled_won" || b.status === "settled_lost") && (profileId == null || (b.risk_profile_id ?? "medium") === profileId)) sum += (b.payout ?? 0) - (b.stake ?? 0);
   return sum;
 }
 // ============================================================

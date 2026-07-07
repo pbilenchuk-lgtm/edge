@@ -71,6 +71,37 @@ test("analytics prompt = base sport + competition override (§2.4)", () => {
   assert.equal(p.model, "Claude Opus 4.8");
 });
 
+test("strategy_shares: (strategy, profile) is the key — same strategy under two profiles coexists", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  // legacy call without a profile defaults to medium
+  R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", pct: 40 } as any);
+  // same strategy, a different profile → a SECOND allocation row, not an overwrite
+  R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", risk_profile_id: "aggressive", pct: 25 });
+  const rows = R.sharesForComp(db, "wc2026").filter((s) => s.strategy_id === "edge");
+  assert.equal(rows.length, 2, "two pairs for one strategy");
+  assert.deepEqual(rows.map((r) => [r.risk_profile_id, r.pct]).sort(), [["aggressive", 25], ["medium", 40]]);
+  // updating one pair doesn't touch the other
+  R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", risk_profile_id: "medium", pct: 10 });
+  const med = R.sharesForComp(db, "wc2026").find((s) => s.strategy_id === "edge" && s.risk_profile_id === "medium")!;
+  assert.equal(med.pct, 10);
+});
+
+test("analyzeMatch tags proposed bets with the pair's risk profile", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  // reassign m-lineup's comp: edge strategy on the AGGRESSIVE profile
+  R.clearShares(db, "wc2026");
+  R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", risk_profile_id: "aggressive", pct: 60 });
+  const labels = R.latestMarkets(db, "m-lineup").map((m) => m.label);
+  // high total xG → Over 2.5 well above its 53.5¢ price = real edge; picks for all labels.
+  const analysis = { match_type: "group", match_type_reason: "ничья", core: { xg_home: 2.2, xg_away: 1.4, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 }, overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.7, scenario_confidence: 0.6, sample_size: 12, notes: "" }, unknowns: [], picks: labels.map((l) => ({ label: l, conviction: "высокая", reason: "t" })), exits: [] };
+  await analyzeMatch(db, "m-lineup", { fetchImpl: mockLLM(analysis), env: { ANTHROPIC_API_KEY: "k" } });
+  const bets = R.betsForMatch(db, "m-lineup", "edge");
+  assert.ok(bets.length > 0, "edge proposed at least one bet");
+  assert.ok(bets.every((b) => b.risk_profile_id === "aggressive"), "every bet carries the pair's profile");
+});
+
 test("seedMinimal seeds two two-phase strategists + three named risk profiles", () => {
   const db = openDb(":memory:");
   seedMinimal(db);
