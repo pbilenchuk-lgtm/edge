@@ -643,7 +643,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
             <span style={S.stratStripTitle}>Стратегии на «{comp?.name}»</span>
             {compBudget[comp?.id] > 0 && <button style={S.shareBtn} onClick={() => setShareModal(comp.id)}>⚙ Распределить доли %</button>}
           </div>
-          <div style={S.bankStrip}>
+          <div style={S.bankStrip} className="el-bank-grid">
             {(compBudget[comp?.id] || 0) === 0 && <div style={S.noStrat}>У «{comp?.name}» нет бюджета. Нажми $ на плашке турнира.</div>}
             {compBudget[comp?.id] > 0 && compStrats.length === 0 && <div style={S.noStrat}>Бюджет есть, но доли стратегий не заданы. Нажми «Распределить доли %».</div>}
             {compBudget[comp?.id] > 0 && compPairsOf(shareRows, catalog, riskProfiles, comp.id, compBudget).map((p: any) => {
@@ -2107,6 +2107,7 @@ const CSS = `* { box-sizing: border-box; } button { font-family: inherit; } butt
   .el-match-body { display: grid !important; grid-template-columns: 1fr 280px; gap: 16px; align-items: start; }
   .el-strat-grid { display: block !important; column-count: 2; column-gap: 10px; }
   .el-strat-grid > * { break-inside: avoid; margin-bottom: 10px; }
+  .el-bank-grid { display: grid !important; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
   .el-odds-col { position: sticky; top: 12px; }
   .el-master-detail { display: grid !important; grid-template-columns: 220px 1fr; gap: 12px; align-items: start; }
 }
@@ -2171,14 +2172,14 @@ const S: Record<string, React.CSSProperties> = {
   shareBtn: { marginLeft: "auto", background: "transparent", border: `1px solid #e8a83866`, color: "#e8a838", borderRadius: 8, padding: "5px 12px", fontSize: 12, cursor: "pointer", fontWeight: 600 },
   bankStrip: { display: "flex", flexDirection: "column", gap: 4, marginBottom: 16 },
   noStrat: { fontSize: 12.5, color: "#e8a838", background: "#2e2a1a", borderRadius: 8, padding: "10px 14px" },
-  bankCell: { display: "flex", alignItems: "center", gap: 8, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "5px 12px" },
+  bankCell: { display: "flex", alignItems: "center", gap: 8, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px" },
   dot: { width: 9, height: 9, borderRadius: "50%", flexShrink: 0 },
   bankInfo: { display: "flex", flexDirection: "column" },
-  bankNm: { fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap" },
+  bankNm: { fontSize: 13, fontWeight: 600, whiteSpace: "nowrap" },
   bankBudget: { fontSize: 10.5, color: MUTE, fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap" },
   bankNums: { marginLeft: "auto", textAlign: "right" },
-  bankEq: { marginLeft: "auto", fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap" },
-  bankD: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap", minWidth: 118, textAlign: "right" },
+  bankEq: { marginLeft: "auto", fontSize: 14, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap" },
+  bankD: { fontSize: 10.5, fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap", textAlign: "right" },
   main: { display: "flex", flexDirection: "column", gap: 12 },
   empty: { color: MUTE, padding: 30, textAlign: "center" },
   errBox: { background: "#2e1f22", border: "1px solid #ff6b6b55", borderRadius: 12, padding: "16px 18px", margin: "10px 0", color: "#ffd7d7" },
