@@ -327,16 +327,20 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
     // manage/exit it in play, which is exactly how capital bleeds (user rule).
     const liveData = hasLiveData(db, m);
     const bets = R.betsForMatch(db, m.id);
-    // A strategy must never hold two OPEN positions on the SAME market — that's
-    // the double-exposure a concurrent analyze/reassess race (or analyze+reassess
-    // in one cycle) could otherwise fill. This single choke point guards it
-    // regardless of how duplicate proposals were created.
-    const openKey = new Set(bets.filter((b) => b.status === "open").map((b) => `${b.strategy_id}|${b.market_label}`));
+    // A (strategy, PROFILE) pair must never hold two OPEN positions on the SAME
+    // market — that's the double-exposure a concurrent analyze/reassess race (or
+    // analyze+reassess in one cycle) could otherwise fill. Keyed by PAIR, not
+    // strategy: the same strategy funded under two profiles is a separate trading
+    // unit (we simulate strategy+profile independently), so each may hold the
+    // market with its own size. This single choke point guards it regardless of
+    // how duplicate proposals were created.
+    const pairMkt = (b: typeof bets[number]) => `${b.strategy_id}|${b.risk_profile_id ?? "medium"}|${b.market_label}`;
+    const openKey = new Set(bets.filter((b) => b.status === "open").map(pairMkt));
     for (const b of bets) {
       if (b.status !== "proposed") continue;
       if (preLineupHold) continue; // preview only — keep it «предлагается» until lineups are out
       if (!liveData) continue; // no provider live coverage → hold as «предлагается», never fill blind
-      const key = `${b.strategy_id}|${b.market_label}`;
+      const key = pairMkt(b);
       if (openKey.has(key)) { R.updateBet(db, b.id, { status: "not_filled" }); continue; } // already in this market — drop the dup
       const mk = markets.find((x) => x.label === b.market_label);
       const quote = mk?.price ?? b.proposed_price ?? 0;

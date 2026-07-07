@@ -105,6 +105,28 @@ test("autoEnter executes against the order book — VWAP fill + depth cap on a t
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "enter" && /VWAP.*комиссия/.test(l.text)), "execution + fee logged");
 });
 
+test("autoEnter: two profiles of the SAME strategy both fill the SAME market independently", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "e", league: "l", home_lineup: null, away_lineup: null, stats: null, updated_at: "t" });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 50, ai_prob: 0.6, liquidity: "1000", external_ref: "TOKEN", snapshot_at: "t", is_closing: false });
+  // same strategy, same market, DIFFERENT profiles → two independent trading units
+  for (const [id, prof, stake] of [["agg", "aggressive", 200], ["med", "medium", 100]] as const)
+    R.insertBet(db, { id, match_id: mid, strategy_id: strat.id, risk_profile_id: prof, market_label: "Over 1.5", status: "proposed", proposed_price: 50, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.6, stake, rationale: null, entered_minute: null, result: null, payout: null, settled_by: null, created_at: "t" });
+
+  // execution model off → fills at the quote, no order book needed
+  await autoEnter(db, { now: () => "t" });
+
+  const agg = R.getBet(db, "agg")!, med = R.getBet(db, "med")!;
+  assert.equal(agg.status, "open", "aggressive pair filled");
+  assert.equal(med.status, "open", "medium pair ALSO filled on the same market (not dropped as a dup)");
+  assert.equal(agg.stake, 200); assert.equal(med.stake, 100);
+});
+
 test("evaluateExits fills the close against the bid book — exit slippage into P&L", async () => {
   const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
   const db = openDb(":memory:");
