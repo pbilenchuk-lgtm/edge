@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
-import { seedDatabase, migrateSharesToAggressive } from "../src/lib/seed.js";
+import { seedDatabase, migrateSharesToAggressive, migrateSharesAllPairs } from "../src/lib/seed.js";
 import { loadPolymarketConfig } from "../src/lib/polymarket.js";
 import * as R from "../src/lib/repo.js";
 
@@ -9,6 +9,29 @@ test("loadPolymarketConfig: taker fee defaults to the real Polymarket SPORTS rat
   assert.equal(loadPolymarketConfig({}).exec.takerFeeRate, 0.0075);
   // env still overrides for a schedule change
   assert.equal(loadPolymarketConfig({ POLYMARKET_TAKER_FEE_RATE: "0.01" }).exec.takerFeeRate, 0.01);
+});
+
+test("migrateSharesAllPairs: every football category gets all 3×3 pairs, evenly, once", () => {
+  const db = openDb(":memory:");
+  R.upsertSport(db, "football", "Футбол");
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "pm-a", sport_id: "football", name: "A", budget: 900, external_league: null, created_at: "t" });
+  R.upsertCompetition(db, { id: "pm-tennis", sport_id: "tennis", name: "T", budget: 900, external_league: null, created_at: "t" });
+
+  migrateSharesAllPairs(db, "t");
+
+  const rows = R.sharesForComp(db, "pm-a");
+  assert.equal(rows.length, 9, "3 strategists × 3 profiles = 9 pairs");
+  assert.deepEqual([...new Set(rows.map((r) => r.risk_profile_id))].sort(), ["aggressive", "conservative", "medium"]);
+  assert.deepEqual([...new Set(rows.map((r) => r.strategy_id))].sort(), ["live_xg", "overreaction", "prematch_value"]);
+  assert.ok(rows.every((r) => r.pct === rows[0].pct), "funds split evenly across pairs");
+  assert.ok(rows[0].pct > 11 && rows[0].pct < 12, `~11.11% each, got ${rows[0].pct}`);
+  // non-football category untouched
+  assert.equal(R.sharesForComp(db, "pm-tennis").length, 0, "tennis has no strategists → no pairs");
+  // idempotent — a later manual reallocation survives a re-run
+  R.clearShares(db, "pm-a");
+  migrateSharesAllPairs(db, "t2");
+  assert.equal(R.sharesForComp(db, "pm-a").length, 0, "re-run no-ops after the marker is set");
 });
 
 test("migrateSharesToAggressive: every share → aggressive, live bets retagged, idempotent", () => {

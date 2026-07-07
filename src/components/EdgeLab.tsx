@@ -652,8 +652,11 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
               return (
                 <div key={p.key} style={S.bankCell}>
                   <span style={{ ...S.dot, background: p.color }} />
-                  <div style={S.bankInfo}><span style={S.bankNm}>{p.name} <ProfileBadge id={p.profileId} name={p.profileName} /></span><span style={S.bankBudget}>{p.pct}% · {fmtMoney0(p.budget)}</span></div>
-                  <div style={S.bankNums}><span style={S.bankEq}>{fmtMoney(e.equity)}</span><span style={{ ...S.bankD, color: d >= 0 ? "#5fd08a" : "#ff6b6b" }}>{d >= 0 ? "▲" : "▼"}{fmtMoney(d)} ({d >= 0 ? "+" : ""}{p.budget ? ((d / p.budget) * 100).toFixed(1) : "0.0"}%)</span></div>
+                  <span style={S.bankNm}>{p.name}</span>
+                  <ProfileBadge id={p.profileId} name={p.profileName} />
+                  <span style={S.bankBudget}>{p.pct}% · {fmtMoney0(p.budget)}</span>
+                  <span style={S.bankEq}>{fmtMoney(e.equity)}</span>
+                  <span style={{ ...S.bankD, color: d >= 0 ? "#5fd08a" : "#ff6b6b" }}>{d >= 0 ? "▲" : "▼"}{fmtMoney(d)} ({d >= 0 ? "+" : ""}{p.budget ? ((d / p.budget) * 100).toFixed(1) : "0.0"}%)</span>
                 </div>
               );
             })}
@@ -2166,16 +2169,16 @@ const S: Record<string, React.CSSProperties> = {
   stratStripHead: { display: "flex", alignItems: "center", marginBottom: 8 },
   stratStripTitle: { fontSize: 12, color: MUTE, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700 },
   shareBtn: { marginLeft: "auto", background: "transparent", border: `1px solid #e8a83866`, color: "#e8a838", borderRadius: 8, padding: "5px 12px", fontSize: 12, cursor: "pointer", fontWeight: 600 },
-  bankStrip: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 },
+  bankStrip: { display: "flex", flexDirection: "column", gap: 4, marginBottom: 16 },
   noStrat: { fontSize: 12.5, color: "#e8a838", background: "#2e2a1a", borderRadius: 8, padding: "10px 14px" },
-  bankCell: { display: "flex", alignItems: "center", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px" },
+  bankCell: { display: "flex", alignItems: "center", gap: 8, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "5px 12px" },
   dot: { width: 9, height: 9, borderRadius: "50%", flexShrink: 0 },
   bankInfo: { display: "flex", flexDirection: "column" },
-  bankNm: { fontSize: 13, fontWeight: 600 },
-  bankBudget: { fontSize: 10.5, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
+  bankNm: { fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap" },
+  bankBudget: { fontSize: 10.5, color: MUTE, fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap" },
   bankNums: { marginLeft: "auto", textAlign: "right" },
-  bankEq: { fontSize: 15, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", display: "block" },
-  bankD: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace" },
+  bankEq: { marginLeft: "auto", fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap" },
+  bankD: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace", whiteSpace: "nowrap", minWidth: 118, textAlign: "right" },
   main: { display: "flex", flexDirection: "column", gap: 12 },
   empty: { color: MUTE, padding: 30, textAlign: "center" },
   errBox: { background: "#2e1f22", border: "1px solid #ff6b6b55", borderRadius: 12, padding: "16px 18px", margin: "10px 0", color: "#ffd7d7" },

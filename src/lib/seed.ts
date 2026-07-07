@@ -9,7 +9,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { extractThresholdsHeuristic } from "./thresholds.js";
-import { seedRiskProfiles } from "./riskConfig.js";
+import { seedRiskProfiles, RISK_PROFILE_DEFS } from "./riskConfig.js";
 import { SPORT_LABELS } from "./polymarket.js";
 import type { Bet, Market } from "./types.js";
 
@@ -653,4 +653,27 @@ export function migrateSharesToAggressive(db: Database, now: string): void {
   // settled bets keep their historical tag (don't rewrite realized P&L).
   db.prepare(`UPDATE bets SET risk_profile_id='aggressive' WHERE status IN ('open','proposed')`).run();
   R.metaSet(db, AGGRESSIVE_MARK, now, now);
+}
+
+// One-time: put the FULL grid of pairs on every football category — all 3
+// strategists × all 3 risk profiles = 9 pairs, funds split evenly — so every
+// (strategy, profile) combination is simulated side by side. Marker-guarded:
+// runs once, then respects any later manual reallocation. Supersedes the
+// aggressive-only assignment above (runs after it in boot order).
+const ALL_PAIRS_MARK = "shares_all_pairs_v1";
+export function migrateSharesAllPairs(db: Database, now: string): void {
+  if (R.metaGet(db, ALL_PAIRS_MARK)) return;
+  migrateSeedStrategists(db, now); // ensure the trio exists
+  const strategyIds = STRATEGIST_DEFS.map((d) => d.id);           // 3
+  const profileIds = RISK_PROFILE_DEFS.map((p) => p.id);          // aggressive/medium/conservative
+  const n = strategyIds.length * profileIds.length;               // 9
+  const pct = Math.round(10000 / n) / 100;                        // even split → 11.11% each
+  for (const c of R.listCompetitions(db)) {
+    if (c.sport_id !== "football") continue;
+    R.clearShares(db, c.id);
+    for (const sid of strategyIds)
+      for (const pid of profileIds)
+        R.setShare(db, { competition_id: c.id, strategy_id: sid, risk_profile_id: pid, pct });
+  }
+  R.metaSet(db, ALL_PAIRS_MARK, now, now);
 }
