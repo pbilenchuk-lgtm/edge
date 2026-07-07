@@ -384,6 +384,91 @@ function failed(error?: string): MatchAssessment {
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
 
 // ------------------------------------------------------------
+// Football analysis — Layer 1 (structured CORE, no quotes). The model estimates
+// only xG + first-half shares + scenarios; the ENGINE (poisson.ts) derives every
+// market. See football_analysis_schema. Prices are never shown to the analyst.
+// ------------------------------------------------------------
+
+export interface FootballCore { xg_home: number; xg_away: number; home_share_1h: number; away_share_1h: number; poisson_correction: number }
+export interface FootballOverride { target: string; adjust: number; reason: string }
+export interface FootballAnalysis {
+  ok: boolean;
+  matchType: "group" | "knockout" | "uncertain";
+  matchTypeReason: string;
+  core: FootballCore;
+  overrides: FootballOverride[];
+  drivers: { factor: string; direction: string; magnitude: string; confidence: number }[];
+  scenarios: { trigger: string; prob: number; shifts: unknown; note: string }[];
+  calibration: { xg_confidence: number; scenario_confidence: number; sample_size: number; notes: string };
+  unknowns: string[];
+  error?: string;
+}
+export interface FootballAssessInput {
+  home: string; away: string; state: string;
+  analyticsPrompt: string;   // the base football prompt (methodology + rules)
+  marketLabels: string[];    // available markets — used ONLY to infer match_type, never as quotes
+  context?: string;          // real lineups / stats / events (no prices)
+}
+
+const num = (x: unknown, def = 0): number => (Number.isFinite(x) ? Number(x) : def);
+
+export async function assessFootballStructured(
+  input: FootballAssessInput, model: string, deps: Deps = {},
+): Promise<FootballAnalysis> {
+  const res = await callLLM({
+    model,
+    system:
+      "Ты — футбольный аналитик Слоя 1. Следуй методологии из промпта пользователя и верни СТРОГО один JSON-объект по схеме ниже — без markdown-заборов, без текста вокруг. " +
+      "Ты оцениваешь ТОЛЬКО ядро (несколько чисел) и сценарии; весь рынок (тоталы/форы/BTTS/исход) посчитает код по Пуассону — сам их НЕ считай. Котировки НЕ используешь. " +
+      "СХЕМА: {match_type:'group'|'knockout'|'uncertain', match_type_reason:str, " +
+      "core:{xg_home:float, xg_away:float, home_share_1h:float 0..1, away_share_1h:float 0..1, poisson_correction:float (0=чистый Пуассон, >0 повышает ничьи)}, " +
+      "overrides:[{target:'напр. totals_match.2.5.over или outcome_90.draw', adjust:float (сдвиг вероятности), reason:str}] (пусто если нет; КАЖДЫЙ с reason), " +
+      "drivers:[{factor:str, direction:str, magnitude:'small'|'medium'|'large', confidence:float 0..1}], " +
+      "scenarios:[{trigger:str, prob:float 0..1, shifts:{outcome_90:{home,draw,away}, xg_remaining_home:float, xg_remaining_away:float, note:str}}] (МИНИМУМ 5 узлов), " +
+      "calibration:{xg_confidence:float 0..1, scenario_confidence:float 0..1, sample_size:int, notes:str}, unknowns:[str]}. " +
+      "Блок derived НЕ заполняй — его считает код.",
+    prompt: `${input.analyticsPrompt}\n\n## ВХОДНЫЕ ДАННЫЕ\nМатч: ${input.home} — ${input.away} (состояние: ${input.state}).\nДоступные рынки (ТОЛЬКО чтобы определить match_type — это НЕ котировки, цен тут нет):\n${input.marketLabels.map((l) => `- ${l}`).join("\n")}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы/статистика/события):\n${input.context}\n` : ""}\nВерни ТОЛЬКО JSON по схеме.`,
+    maxTokens: 6000,
+  }, deps);
+  if (!res.ok) return failedFootball(res.error);
+  try {
+    const j = JSON.parse(extractJson(res.text));
+    const c = j.core ?? {};
+    if (!Number.isFinite(c.xg_home) || !Number.isFinite(c.xg_away)) return failedFootball("нет xg_home/xg_away в core");
+    const mt = ["group", "knockout", "uncertain"].includes(j.match_type) ? j.match_type : "uncertain";
+    return {
+      ok: true,
+      matchType: mt,
+      matchTypeReason: String(j.match_type_reason ?? ""),
+      core: {
+        xg_home: num(c.xg_home), xg_away: num(c.xg_away),
+        home_share_1h: c.home_share_1h != null ? clamp01(num(c.home_share_1h, 0.44)) : 0.44,
+        away_share_1h: c.away_share_1h != null ? clamp01(num(c.away_share_1h, 0.44)) : 0.44,
+        poisson_correction: num(c.poisson_correction, 0),
+      },
+      overrides: Array.isArray(j.overrides)
+        ? j.overrides.filter((o: any) => o && typeof o.target === "string" && Number.isFinite(o.adjust) && typeof o.reason === "string" && o.reason.trim())
+            .map((o: any) => ({ target: String(o.target), adjust: num(o.adjust), reason: String(o.reason) }))
+        : [],
+      drivers: Array.isArray(j.drivers) ? j.drivers.filter((x: any) => x && typeof x.factor === "string").map((x: any) => ({ factor: String(x.factor), direction: String(x.direction ?? ""), magnitude: String(x.magnitude ?? "medium"), confidence: clamp01(num(x.confidence, 0.5)) })) : [],
+      scenarios: Array.isArray(j.scenarios) ? j.scenarios.filter((x: any) => x && typeof x.trigger === "string").map((x: any) => ({ trigger: String(x.trigger), prob: clamp01(num(x.prob, 0)), shifts: x.shifts ?? null, note: String(x.shifts?.note ?? x.note ?? "") })) : [],
+      calibration: {
+        xg_confidence: clamp01(num(j.calibration?.xg_confidence, 0.5)),
+        scenario_confidence: clamp01(num(j.calibration?.scenario_confidence, 0.5)),
+        sample_size: Math.max(0, Math.round(num(j.calibration?.sample_size, 0))),
+        notes: String(j.calibration?.notes ?? ""),
+      },
+      unknowns: Array.isArray(j.unknowns) ? j.unknowns.map((u: any) => String(u)).filter(Boolean) : [],
+    };
+  } catch {
+    return failedFootball("невалидный JSON от модели");
+  }
+}
+function failedFootball(error?: string): FootballAnalysis {
+  return { ok: false, matchType: "uncertain", matchTypeReason: "", core: { xg_home: 0, xg_away: 0, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 }, overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0, scenario_confidence: 0, sample_size: 0, notes: "" }, unknowns: [], error };
+}
+
+// ------------------------------------------------------------
 // Strategist — turns a strategy PROMPT (any methodology) into market picks
 // (§9.5: strategy reads analytics; §9.6: CODE still sizes the actual stake).
 // This is what makes the strategy universal — the prompt drives the decisions,

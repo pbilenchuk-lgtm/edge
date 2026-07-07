@@ -516,8 +516,8 @@ test("autoAnalyze analyzes an eligible match once per stage", async () => {
   seedDatabase(db);
   // clear seeded assessments so matches become eligible
   db.exec("DELETE FROM assessments");
-  const labels = R.latestMarkets(db, "m-lineup").map((m) => m.label);
-  const deps = { fetchImpl: mockLLM({ confidence: "высокая", short: "s", body: "b", verdict: "v", markets: labels.map((l) => ({ label: l, prob: 0.6 })) }), env: { ANTHROPIC_API_KEY: "k" } };
+  // football → structured Layer-1 analysis (CORE, not per-market probs)
+  const deps = { fetchImpl: mockLLM({ match_type: "group", match_type_reason: "ничья есть", core: { xg_home: 1.5, xg_away: 1.1, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 }, overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 8, notes: "" }, unknowns: [] }), env: { ANTHROPIC_API_KEY: "k" } };
 
   const first = await autoAnalyze(db, deps);
   const lineup = first.find((a) => a.matchId === "m-lineup");

@@ -12,7 +12,9 @@
 
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
-import { assessMatchLLM, effectiveEnv, strategistDecide, resolveModel } from "./llm.js";
+import { assessMatchLLM, assessFootballStructured, effectiveEnv, strategistDecide, resolveModel, type MatchAssessment, type FootballAnalysis } from "./llm.js";
+import { derivePoissonMarkets, applyOverrides, type DerivedMarkets } from "./poisson.js";
+import { footballLabelProb } from "./footballMarkets.js";
 import { sizeBet } from "./thresholds.js";
 import { edgePct } from "./edge.js";
 import { stratBudget } from "./money.js";
@@ -32,6 +34,37 @@ export interface AnalyzeResult {
   confidence?: string;
   betsCreated?: number;
   decisions?: { strategy: string; entries: number; skipped: number }[];
+}
+
+const pct = (x: number) => `${Math.round(x * 100)}%`;
+
+/** Turn the structured football analysis into the generic assessment: derive the
+ *  whole market by Poisson (+ overrides), map each real market label to its derived
+ *  probability, and render a readable body that carries the scenario tree (the seed
+ *  for live management). */
+function footballToAssessment(fa: FootballAnalysis, home: string, away: string, marketLabels: string[]): MatchAssessment {
+  if (!fa.ok) return { ok: false, confidence: "средняя", short: "", body: "", verdict: "", markets: [], error: fa.error ?? "анализ не удался" };
+  const d = derivePoissonMarkets(fa.core);
+  applyOverrides(d, fa.overrides);
+  const markets = marketLabels
+    .map((label) => ({ label, prob: footballLabelProb(label, home, away, d) }))
+    .filter((x): x is { label: string; prob: number } => x.prob != null);
+  const conf = fa.calibration.xg_confidence >= 0.7 ? "высокая" : fa.calibration.xg_confidence >= 0.4 ? "средняя" : "низкая";
+  const o = d.outcome_90;
+  const verdict = `xG ${fa.core.xg_home.toFixed(2)}–${fa.core.xg_away.toFixed(2)} · П1 ${pct(o.home)} / X ${pct(o.draw)} / П2 ${pct(o.away)} · Over2.5 ${pct(d.totals_match["2.5"])} · BTTS ${pct(d.btts)}`;
+  const short = `Тип: ${fa.matchType}${fa.matchTypeReason ? ` — ${fa.matchTypeReason}` : ""}`;
+  return { ok: true, confidence: conf, short, body: renderFootballBody(fa, d), verdict, markets };
+}
+
+function renderFootballBody(fa: FootballAnalysis, d: DerivedMarkets): string {
+  const L: string[] = [];
+  L.push(`Ядро: xG ${fa.core.xg_home.toFixed(2)}–${fa.core.xg_away.toFixed(2)}; доля 1-го тайма ${fa.core.home_share_1h.toFixed(2)}/${fa.core.away_share_1h.toFixed(2)}; поправка ${fa.core.poisson_correction}.`);
+  L.push(`Рынок (Пуассон): П1/X/П2 ${pct(d.outcome_90.home)}/${pct(d.outcome_90.draw)}/${pct(d.outcome_90.away)}; тоталы 1.5/2.5/3.5 ${pct(d.totals_match["1.5"])}/${pct(d.totals_match["2.5"])}/${pct(d.totals_match["3.5"])}; BTTS ${pct(d.btts)}.`);
+  if (fa.drivers.length) L.push("Драйверы: " + fa.drivers.map((x) => `${x.factor} (${x.direction}, ${x.magnitude})`).join("; ") + ".");
+  if (fa.scenarios.length) L.push("Сценарии (для лайв-управления):\n" + fa.scenarios.map((s) => `• ${s.trigger} (P≈${pct(s.prob)})${s.note ? ` — ${s.note}` : ""}`).join("\n"));
+  if (fa.unknowns.length) L.push("Неизвестно: " + fa.unknowns.join("; ") + ".");
+  if (fa.calibration.notes) L.push("Калибровка: " + fa.calibration.notes);
+  return L.join("\n");
 }
 
 export async function analyzeMatch(
@@ -59,11 +92,19 @@ export async function analyzeMatch(
   // OR a key entered via the UI (Models screen), resolved from the DB.
   const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
   const ctx = matchContext(db, matchId); // real lineups + events, if enriched from ESPN
-  const a = await assessMatchLLM(
-    { home: match.home, away: match.away, sport, state: match.state, analyticsPrompt: prompt.body, markets: markets.map((m) => ({ label: m.label })), context: ctx },
-    model,
-    { fetchImpl: deps.fetchImpl, env },
-  );
+  // Football → structured Layer-1 analysis: the model estimates only CORE (xG +
+  // shares + scenarios), CODE derives every market by Poisson. Other sports keep
+  // the generic label-probability path. Either way the analyst never sees quotes.
+  const a: MatchAssessment = sport === "football"
+    ? footballToAssessment(
+        await assessFootballStructured({ home: match.home, away: match.away, state: match.state, analyticsPrompt: prompt.body, marketLabels: markets.map((m) => m.label), context: ctx }, model, { fetchImpl: deps.fetchImpl, env }),
+        match.home, match.away, markets.map((m) => m.label),
+      )
+    : await assessMatchLLM(
+        { home: match.home, away: match.away, sport, state: match.state, analyticsPrompt: prompt.body, markets: markets.map((m) => ({ label: m.label })), context: ctx },
+        model,
+        { fetchImpl: deps.fetchImpl, env },
+      );
 
   if (!a.ok) {
     // ТЗ §6: record the failure, don't block the match — but never clobber a

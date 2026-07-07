@@ -368,28 +368,37 @@ test("provider keys: DB key enables a provider; env still wins", () => {
   assert.equal(providerEnabled("anthropic", effectiveEnv(R.getProviderKeys(db), {})), false);
 });
 
-test("analyzeMatch: fuzzy label mapping survives model paraphrase", async () => {
+test("analyzeMatch (football): structured CORE → Poisson-derived ai_prob on real labels", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
-  const labels = R.latestMarkets(db, "m-lineup").map((m) => m.label);
-  // model paraphrases "Over 2.5" -> "Over 2.5 goals"; all others verbatim.
-  const assessment = {
-    confidence: "высокая", short: "s", body: "b", verdict: "v",
-    markets: labels.map((l) => ({ label: l === "Over 2.5" ? "Over 2.5 goals" : l, prob: 0.5 })),
+  // Layer 1: the model returns only CORE + scenarios (NO per-market probs, NO
+  // quotes); the engine derives every market by Poisson and maps it to the labels.
+  const analysis = {
+    match_type: "group", match_type_reason: "есть трёхисходный рынок с ничьёй",
+    core: { xg_home: 1.6, xg_away: 1.0, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 },
+    overrides: [], drivers: [],
+    scenarios: [{ trigger: "ранний гол фаворита", prob: 0.3, shifts: { outcome_90: { home: 0.72, draw: 0.18, away: 0.1 }, xg_remaining_home: 1.2, xg_remaining_away: 0.9, note: "рынок переоценит фаворита" } }],
+    calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 8, notes: "мало матчей текущим составом" }, unknowns: [],
   };
-  const r = await analyzeMatch(db, "m-lineup", { fetchImpl: mockLLM(assessment), env: { ANTHROPIC_API_KEY: "k" } });
+  const r = await analyzeMatch(db, "m-lineup", { fetchImpl: mockLLM(analysis), env: { ANTHROPIC_API_KEY: "k" } });
   assert.equal(r.ok, true);
-  const over25 = R.latestMarkets(db, "m-lineup").find((m) => m.label === "Over 2.5")!;
-  assert.equal(over25.ai_prob, 0.5); // fuzzy-matched despite the "goals" drift
+  const mkts = R.latestMarkets(db, "m-lineup");
+  assert.ok(mkts.some((m) => m.ai_prob != null), "derived probs landed on real market labels");
+  const under = mkts.find((m) => /under 2\.5/i.test(m.label));
+  if (under) assert.ok(under.ai_prob != null && under.ai_prob > 0 && under.ai_prob < 1, "Under 2.5 got a derived prob");
+  // the assessment carries the Poisson headline + scenario tree for live management
+  const asmt = R.assessmentsForMatch(db, "m-lineup").find((a) => a.status === "ok")!;
+  assert.match(asmt.verdict ?? "", /xG .*П1/);
+  assert.match(asmt.body ?? "", /Сценарии/);
 });
 
 test("analyzeMatch: a prior loss no longer halts entries (portfolio stop-loss removed)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
   const labels = R.latestMarkets(db, "m-lineup").map((m) => m.label);
-  // mock carries both assessment fields and strategist picks (one static JSON
-  // answers both LLM calls); the strategist picks every market so bets flow.
-  const assessment = { confidence: "высокая", short: "s", body: "b", verdict: "v", markets: labels.map((l) => ({ label: l, prob: 0.99 })), picks: labels.map((l) => ({ label: l, conviction: "высокая", reason: "t" })), exits: [] };
+  // One static JSON answers both LLM calls: CORE for the football analysis (total
+  // xG ~3.2 → Over 2.5 ≈ 62% vs the 53.5¢ market = real edge) + strategist picks.
+  const assessment = { match_type: "group", match_type_reason: "ничья есть", core: { xg_home: 1.8, xg_away: 1.4, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 }, overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.7, scenario_confidence: 0.5, sample_size: 10, notes: "" }, unknowns: [], picks: labels.map((l) => ({ label: l, conviction: "высокая", reason: "t" })), exits: [] };
   const deps = { fetchImpl: mockLLM(assessment), env: { ANTHROPIC_API_KEY: "k" } };
 
   // baseline: strong edges => at least one strategy proposes bets
