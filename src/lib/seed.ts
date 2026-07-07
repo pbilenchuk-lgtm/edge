@@ -42,7 +42,6 @@ export function seedDatabase(db: Database): void {
     ["wc2026", "football", "ЧМ-2026", 1500, "fifa.world"],
     ["ucl", "football", "Лига чемпионов", 400, "uefa.champions"],
     ["youth", "football", "Юниоры U-20", 0, null],
-    ["atp", "tennis", "ATP Masters", 400, "atp"],
   ];
   for (const [id, sport, name, budget, league] of comps)
     R.upsertCompetition(db, { id, sport_id: sport, name, budget, external_league: league, created_at: T });
@@ -51,9 +50,6 @@ export function seedDatabase(db: Database): void {
   R.upsertAnalyticsPrompt(db, "sport", "football",
     "Оцени матч объективно. Учитывай силу составов (после объявления — приоритет), территориальное преимущество, xG, форму, мотивацию, тактику, H2H. Дай вероятности П1/Х/П2 и ключевых рынков. Две версии: развёрнутая и краткое саммари.",
     "Claude Opus 4.8");
-  R.upsertAnalyticsPrompt(db, "sport", "tennis",
-    "Оцени матч объективно. Покрытие и его соответствие стилю, форма, физика, H2H, усталость. Вероятность победы каждого игрока и ключевых рынков. Краткое саммари + развёрнутая версия.",
-    "Claude Sonnet 5");
   R.upsertAnalyticsPrompt(db, "competition", "youth",
     "Юниорский футбол: мало статистики, выше дисперсия. Опирайся на индивидуальный класс и физику больше, чем на командные метрики. Помечай уверенность ниже.",
     null);
@@ -66,8 +62,6 @@ export function seedDatabase(db: Database): void {
       prompt: "Входи на любой edge >= 3%. Размер всегда 5%. Выход по финалу.\nОграничители: не более 5% на ставку." },
     { id: "kelly", sport_id: "football", name: "Kelly ½", tag: "half-kelly", color: "#70b56a", version: 1, model: "Claude Sonnet 5", created_at: T,
       prompt: "Входи при edge >= 2%. Размер = 0.5*edge/(odds-1), максимум 25%.\nПереоценка на голах. Ограничители: не более 25% на ставку, стоп -30%." },
-    { id: "tn1", sport_id: "tennis", name: "Serve Edge", tag: "теннис", color: "#c98bdb", version: 1, model: "Claude Sonnet 5", created_at: T,
-      prompt: "Входи при edge >= 4% и преимуществе на покрытии. Размер 8%. Переоценка после сета.\nОграничители: не более 10% на ставку." },
   ];
   for (const s of strats)
     R.insertStrategy(db, { ...s, params: extractThresholdsHeuristic(s.prompt) });
@@ -76,7 +70,6 @@ export function seedDatabase(db: Database): void {
   const shares: Record<string, Record<string, number>> = {
     wc2026: { edge: 50, kelly: 30, flat: 20 },
     ucl: { flat: 100 },
-    atp: { tn1: 100 },
   };
   for (const [comp, m] of Object.entries(shares))
     for (const [strat, pct] of Object.entries(m))
@@ -178,19 +171,11 @@ export function seedDatabase(db: Database): void {
   addMarkets(db, "m-ucl-live", [["Under 2.5", oddsToCents(1.9), 0.58, "300K"]]);
   addBets(db, "m-ucl-live", "flat", [open("Under 2.5", 51, 53, 0.58, 20, "1'", "Вход ТМ2.5 по дисциплине Flat.")]);
 
-  // m-tennis: Алькарас–Синнер
-  R.insertMatch(db, base("m-tennis", "atp", "Алькарас", "Синнер", "lineup", { lineup_out: true, kickoff_at: "через 30 мин" }));
-  R.upsertAssessment(db, assess("m-tennis", "post_lineup", "высокая", "Алькарас лучше на быстром харде.",
-    "Алькарас лучше на быстром харде, Синнер стабильнее на приёме. Рынок близок к справедливому.", "Малый вход П1."));
-  addMarkets(db, "m-tennis", [["П1 Алькарас", oddsToCents(1.75), 0.60, "120K"]]);
-  addBets(db, "m-tennis", "tn1", [prop("П1 Алькарас", oddsToCents(1.75), 0.60, 8, "Малый край на покрытии — точечный вход 8%.")]);
-
   // --- quality_metrics (§2.14): demo values from the reference mockup ---
   const quality: Record<string, { brier: number; clv: number; samples: number; calib: Array<[string, number, number]> }> = {
     edge: { brier: 0.182, clv: 3.4, samples: 24, calib: [["50-60%", 55, 53], ["60-70%", 65, 67], ["70-80%", 75, 72], ["80%+", 85, 88]] },
     flat: { brier: 0.213, clv: 0.8, samples: 24, calib: [["50-60%", 55, 51], ["60-70%", 65, 64], ["70-80%", 75, 70], ["80%+", 85, 79]] },
     kelly: { brier: 0.195, clv: 2.1, samples: 18, calib: [["50-60%", 55, 56], ["60-70%", 65, 63], ["70-80%", 75, 74], ["80%+", 85, 83]] },
-    tn1: { brier: 0.24, clv: -0.5, samples: 6, calib: [["50-60%", 55, 52], ["60-70%", 65, 61]] },
   };
   for (const [sid, q] of Object.entries(quality))
     R.upsertQuality(db, {
@@ -287,8 +272,6 @@ export function seedMinimal(db: Database): void {
   // competition override — analyticsPromptFor concatenates them for WC matches.
   R.upsertAnalyticsPrompt(db, "sport", "football", PROMPT_MATCH_ANALYTICS, "Claude Opus 4.8");
   R.upsertAnalyticsPrompt(db, "competition", "pm-soccer-fifwc", PROMPT_WC_CONTEXT, null);
-  R.upsertAnalyticsPrompt(db, "sport", "tennis",
-    "Оцени матч объективно. Покрытие и его соответствие стилю, форма, физика, H2H, усталость. Вероятность победы каждого игрока и ключевых рынков.", "Claude Sonnet 5");
 
   // ONE real strategy — the user's ЧМ-2026 methodology (Промпт 3). Params encode
   // its hardcoded thresholds (edge ladder, per-bet cap, session stop).

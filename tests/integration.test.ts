@@ -29,8 +29,8 @@ test("seed populates the full slice", () => {
   seedDatabase(db);
 
   assert.equal(R.getTreasury(db).total_balance, 5000);
-  assert.equal(R.listCompetitions(db).length, 4);
-  assert.equal(R.listStrategies(db).length, 4);
+  assert.equal(R.listCompetitions(db).length, 3); // football only (wc2026, ucl, youth)
+  assert.equal(R.listStrategies(db).length, 3);   // edge, flat, kelly (tennis dropped)
 
   const m = R.getMatch(db, "m-lineup");
   assert.ok(m);
@@ -211,7 +211,7 @@ test("discoverSportMatches returns the MOST-LIQUID matches first, then caps", as
   });
   const events = [mkEvent("low", "Aaa", "Bbb", 100), mkEvent("hi", "Ccc", "Ddd", 9000), mkEvent("mid", "Eee", "Fff", 1000)];
   const fetchImpl = (async () => ({ ok: true, json: async () => events })) as unknown as typeof fetch;
-  const out = await discoverSportMatches(cfg, "tennis", "2026-07-06T00:00:00Z", { fetchImpl }, { limit: 2, windowDays: 30, nowMs: Date.parse("2026-07-06T00:00:00Z") });
+  const out = await discoverSportMatches(cfg, "football", "2026-07-06T00:00:00Z", { fetchImpl }, { limit: 2, windowDays: 30, nowMs: Date.parse("2026-07-06T00:00:00Z") });
   assert.equal(out.length, 2, "capped to 2");
   assert.equal(out[0].home, "Ccc", "most-liquid (9000) first");
   assert.equal(out[1].home, "Eee", "second most-liquid (1000); the thin one (100) dropped by the cap");
@@ -239,12 +239,12 @@ test("polymarket: titleMatchScore matches on surnames", () => {
 
 test("polymarket: findMatchEvent / bySlug / listSportEvents via mocked Gamma", async () => {
   const cfg = loadPolymarketConfig({ POLYMARKET_ENABLED: "true" });
-  const ev = await findMatchEvent(cfg, { sport: "tennis", home: "Connor Doig", away: "Eudald Gonzalez" }, { fetchImpl: eventsFetch });
+  const ev = await findMatchEvent(cfg, { sport: "football", home: "Connor Doig", away: "Eudald Gonzalez" }, { fetchImpl: eventsFetch });
   assert.ok(ev);
   assert.equal(ev!.slug, "atp-doig-gonzal-2026-07-04");
 
   // wrong names -> no confident match
-  assert.equal(await findMatchEvent(cfg, { sport: "tennis", home: "Nadal", away: "Federer" }, { fetchImpl: eventsFetch }), null);
+  assert.equal(await findMatchEvent(cfg, { sport: "football", home: "Nadal", away: "Federer" }, { fetchImpl: eventsFetch }), null);
   // unknown sport -> null without any fetch
   assert.equal(await findMatchEvent(cfg, { sport: "curling", home: "a", away: "b" }, { fetchImpl: eventsFetch }), null);
 
@@ -259,23 +259,24 @@ test("importPolymarketMatches: liquid match imported even w/o ESPN coverage; thi
   const { importPolymarketMatches } = await import("../src/lib/engine.js");
   const base = loadPolymarketConfig({ POLYMARKET_ENABLED: "true" });
   const now = "2026-07-03T12:00:00Z";
-  // The tennis fixture is a Wimbledon Juniors match — ESPN doesn't cover it, so
-  // the old ESPN-only gate skipped it. With liquidity 1234+500 it now imports.
+  // Generic import path: a liquid Polymarket fixture with no ESPN coverage still
+  // imports by liquidity (1234+500). Uses the football sport (the only discovered
+  // sport now); the fixture's title/series is just a vehicle for the mechanic.
   const db = openDb(":memory:");
   seedDatabase(db);
-  const items = await importPolymarketMatches(db, "tennis",
+  const items = await importPolymarketMatches(db, "football",
     { fetchImpl: eventsFetch, polymarket: { ...base, minLiquidity: 250 }, now: () => now });
   assert.equal(items.length, 1, "liquid uncovered match imported");
   assert.equal(items[0].created, true);
-  const m = R.matchByExternalRef(db, "pm:tennis:connordoig-eudaldgonzalez");
-  assert.ok(m, "match row created under a pm-* tennis category");
+  const m = R.matchByExternalRef(db, "pm:football:connordoig-eudaldgonzalez");
+  assert.ok(m, "match row created under a pm-* category");
   assert.ok(R.latestMarkets(db, m!.id).length >= 2, "settleable markets attached");
-  assert.ok(db.prepare("SELECT 1 FROM sports WHERE id='tennis'").get(), "sport row present (FK target)");
+  assert.ok(db.prepare("SELECT 1 FROM sports WHERE id='football'").get(), "sport row present (FK target)");
 
   // Same fixture, threshold above its liquidity → skipped entirely.
   const db2 = openDb(":memory:");
   seedDatabase(db2);
-  const none = await importPolymarketMatches(db2, "tennis",
+  const none = await importPolymarketMatches(db2, "football",
     { fetchImpl: eventsFetch, polymarket: { ...base, minLiquidity: 100000 }, now: () => now });
   assert.equal(none.length, 0, "sub-threshold liquidity → not imported");
 });
