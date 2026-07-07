@@ -559,6 +559,32 @@ test("pruneRemovedCategories drops cricket + non-ATP tennis (no-bet), keeps ATP 
   assert.ok(db.prepare("SELECT 1 FROM sports WHERE id='tennis'").get(), "tennis sport row kept (still has comps)");
 });
 
+test("pruneRemovedCategories retires a dropped sport ENTIRELY — funded comp + strategy + shares + bets", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertSport(db, "tennis", "Теннис");
+  // a FUNDED tennis category with a tennis strategy, a share, a match and a bet —
+  // exactly the state that used to survive pruning (budget + shares + P&L guards).
+  R.upsertCompetition(db, { id: "pm-atp", sport_id: "tennis", name: "ATP", budget: 10000, external_league: null, created_at: "t" });
+  R.insertStrategy(db, { id: "tn1", sport_id: "tennis", name: "Serve Edge", tag: null, color: "#fff", version: 1, model: "Claude Sonnet 5", prompt: "x", params: {}, created_at: "t" });
+  R.setShare(db, { competition_id: "pm-atp", strategy_id: "tn1", pct: 100 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-atp", home: "Alcaraz", away: "Sinner", state: "finished", lineup_out: true, kickoff_at: null, minute: null, score_home: 2, score_away: 1, final_score: "2:1", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertBet(db, { id: "b-tn", match_id: mid, strategy_id: "tn1", market_label: "П1", status: "settled_won", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: 55, ai_prob: 0.6, stake: 100, rationale: null, entered_minute: "10'", result: "won", payout: 180, created_at: "t" });
+
+  // tennis is NOT in keepSports → the whole sport is retired regardless of funding.
+  R.pruneRemovedCategories(db, { keepSports: new Set(["football"]), tennisSeriesAllow: new Set() });
+  assert.ok(!R.listCompetitions(db).some((c) => c.id === "pm-atp"), "funded tennis comp removed");
+  assert.equal(R.getStrategy(db, "tn1"), null, "tennis strategy removed");
+  assert.equal(R.getMatch(db, mid), null, "tennis match removed");
+  assert.equal(R.getBet(db, "b-tn"), null, "tennis bet removed");
+  assert.equal(db.prepare("SELECT 1 FROM strategy_shares WHERE strategy_id='tn1'").get(), undefined, "share removed");
+  assert.equal(db.prepare("SELECT 1 FROM sports WHERE id='tennis'").get(), undefined, "tennis sport row (tab) gone");
+  // football untouched
+  assert.ok(db.prepare("SELECT 1 FROM sports WHERE id='football'").get(), "football kept");
+  assert.ok(R.listStrategies(db, "football").length >= 1, "football strategies kept");
+});
+
 test("espnLeagueForSeries: covered leagues resolve, uncovered (tennis/minor) return null", async () => {
   const { espnLeagueForSeries } = await import("../src/lib/engine.js");
   assert.equal(espnLeagueForSeries("FIFA World Cup", "soccer-fifwc"), "fifa.world");

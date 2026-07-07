@@ -438,22 +438,55 @@ export function deleteMatchesById(db: Database, ids: string[]): number {
   return deleteMatches(db, ids);
 }
 
+/** Delete a competition and its children — NO transaction (caller owns one). */
+function deleteCompetitionRows(db: Database, id: string): void {
+  const matchIds = (db.prepare(`SELECT id FROM matches WHERE competition_id=?`).all(id) as { id: string }[]).map((r) => r.id);
+  deleteMatchRows(db, matchIds);
+  db.prepare(`DELETE FROM strategy_shares WHERE competition_id=?`).run(id);
+  db.prepare(`DELETE FROM analytics_prompts WHERE scope='competition' AND scope_id=?`).run(id);
+  db.prepare(`DELETE FROM competitions WHERE id=?`).run(id);
+}
+
 /** Delete a competition and everything under it (matches + their children,
  *  strategy shares, comp-scoped analytics prompts, the comp row) in ONE
  *  transaction — so a crash can't leave an empty orphaned competition row. */
 export function deleteCompetition(db: Database, id: string): void {
-  const matchIds = (db.prepare(`SELECT id FROM matches WHERE competition_id=?`).all(id) as { id: string }[]).map((r) => r.id);
   db.exec("BEGIN");
   try {
-    deleteMatchRows(db, matchIds);
-    db.prepare(`DELETE FROM strategy_shares WHERE competition_id=?`).run(id);
-    db.prepare(`DELETE FROM analytics_prompts WHERE scope='competition' AND scope_id=?`).run(id);
-    db.prepare(`DELETE FROM competitions WHERE id=?`).run(id);
+    deleteCompetitionRows(db, id);
     db.exec("COMMIT");
   } catch (e) {
     db.exec("ROLLBACK");
     throw e;
   }
+}
+
+/** Fully retire a sport dropped from the app: every competition (cascading its
+ *  matches/bets/…), every strategy (+ versions, quality, shares and any
+ *  strategy-scoped rows), sport-scoped analytics prompts, and the sport row —
+ *  funded or not, since it will never be traded again. All in one transaction.
+ *  Returns competitions removed. */
+export function removeSport(db: Database, sportId: string): number {
+  const comps = (db.prepare(`SELECT id FROM competitions WHERE sport_id=?`).all(sportId) as { id: string }[]).map((r) => r.id);
+  const strats = (db.prepare(`SELECT id FROM strategies WHERE sport_id=?`).all(sportId) as { id: string }[]).map((r) => r.id);
+  db.exec("BEGIN");
+  try {
+    for (const cid of comps) deleteCompetitionRows(db, cid);
+    for (const sid of strats) {
+      // Strategy-scoped children first (match-scoped ones already went with the
+      // comps above), then the strategy row — respecting the FKs to strategies(id).
+      for (const t of ["strategy_versions", "quality_metrics", "strategy_shares", "bets", "reassessments", "trade_log"])
+        db.prepare(`DELETE FROM ${t} WHERE strategy_id=?`).run(sid);
+      db.prepare(`DELETE FROM strategies WHERE id=?`).run(sid);
+    }
+    db.prepare(`DELETE FROM analytics_prompts WHERE scope='sport' AND scope_id=?`).run(sportId);
+    db.prepare(`DELETE FROM sports WHERE id=?`).run(sportId);
+    db.exec("COMMIT");
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  }
+  return comps.length;
 }
 
 /**
@@ -466,11 +499,23 @@ export function deleteCompetition(db: Database, id: string): void {
  */
 export function pruneRemovedCategories(db: Database, opts: { keepSports: Set<string>; tennisSeriesAllow: Set<string> }): number {
   let removed = 0;
+  // A sport dropped from the app ENTIRELY (not in keepSports) is retired outright —
+  // every competition + strategy + sport row, funded or invested or not — because
+  // we will never trade it again and it only clutters the UI. Gather sport ids from
+  // all three tables so an orphan (comp/strategy whose sport row already went) is
+  // still swept.
+  const sportIds = new Set<string>();
+  for (const r of db.prepare(`SELECT id AS s FROM sports UNION SELECT sport_id AS s FROM competitions UNION SELECT sport_id AS s FROM strategies`).all() as { s: string }[])
+    sportIds.add(r.s);
+  for (const sid of sportIds) if (!opts.keepSports.has(sid)) removed += removeSport(db, sid);
+
+  // Within KEPT sports: prune the noisy discovered catch-alls — but never a
+  // competition the user has invested in (bet / budget / shares) or a seeded one.
   for (const c of listCompetitions(db)) {
     if (!c.id.startsWith("pm-")) continue; // only discovered catch-alls
+    if (!opts.keepSports.has(c.sport_id)) continue; // already retired above
     let doomed = false;
     if (c.id === `pm-${c.sport_id}`) doomed = true;                      // seriesless «… · прочее» catch-all
-    else if (!opts.keepSports.has(c.sport_id)) doomed = true;            // untracked sport (cricket)
     else if (c.sport_id === "tennis") {
       const slug = c.id.slice(3);                                        // pm-<slug>
       if (!opts.tennisSeriesAllow.has(slug)) doomed = true;             // non-ATP series
@@ -481,11 +526,6 @@ export function pruneRemovedCategories(db: Database, opts: { keepSports: Set<str
     if (hasBet || hasShares) continue;                                   // invested → keep (P&L / config)
     deleteCompetition(db, c.id);
     removed++;
-  }
-  for (const s of db.prepare(`SELECT id FROM sports`).all() as { id: string }[]) {
-    if (opts.keepSports.has(s.id)) continue;
-    if (!db.prepare(`SELECT 1 FROM competitions WHERE sport_id=? LIMIT 1`).get(s.id))
-      db.prepare(`DELETE FROM sports WHERE id=?`).run(s.id);
   }
   return removed;
 }
