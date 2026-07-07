@@ -414,6 +414,25 @@ test("analyzeMatch (football): Layer-2 category modifier folds into the analysis
   assert.ok(R.latestMarkets(db, "m-lineup").some((m) => m.ai_prob != null), "derived probs (post-modifier) landed on markets");
 });
 
+test("analyzeMatch (football): refuses to analyze until the real lineup is out", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  // m-lineup carries real lineups (seed) → analysis runs. Strip the lineup data
+  // (keep the coverage marker row) and it must refuse: без составов не анализируем.
+  R.upsertMatchLive(db, { match_id: "m-lineup", espn_event_id: "seed-lineup", league: "fifa.world", home_lineup: null, away_lineup: null, stats: null, updated_at: "2026-07-06T00:00:00Z" });
+  let called = false;
+  const spyFetch: typeof fetch = (async () => { called = true; return mockLLM({ core: { xg_home: 1, xg_away: 1, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 } })(); }) as unknown as typeof fetch;
+  const r = await analyzeMatch(db, "m-lineup", { fetchImpl: spyFetch, env: { ANTHROPIC_API_KEY: "k" } });
+  assert.equal(r.ok, false, "no lineup → no analysis");
+  assert.match(r.error ?? "", /состав/i, "message points at the missing lineup");
+  assert.equal(called, false, "the model is never even called");
+  assert.equal(R.assessmentsForMatch(db, "m-lineup").filter((a) => a.status === "failed").length, 0, "a missing lineup is not recorded as a failed run");
+  // once the lineup lands, the same match analyzes fine.
+  R.upsertMatchLive(db, { match_id: "m-lineup", espn_event_id: "seed-lineup", league: "fifa.world", home_lineup: JSON.stringify({ team: "Португалия", formation: "4-3-3", starters: ["Rúben Dias"] }), away_lineup: JSON.stringify({ team: "Хорватия", formation: "4-1-4-1", starters: ["Modrić"] }), stats: null, updated_at: "2026-07-06T00:00:00Z" });
+  const r2 = await analyzeMatch(db, "m-lineup", { fetchImpl: mockLLM({ match_type: "group", match_type_reason: "ничья есть", core: { xg_home: 1.6, xg_away: 1.0, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 }, overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 8, notes: "" }, unknowns: [] }), env: { ANTHROPIC_API_KEY: "k" } });
+  assert.equal(r2.ok, true, "lineup present → analysis proceeds");
+});
+
 test("analyzeMatch: a prior loss no longer halts entries (portfolio stop-loss removed)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

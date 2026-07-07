@@ -79,6 +79,15 @@ export async function analyzeMatch(
 
   const comp = R.listCompetitions(db).find((c) => c.id === match.competition_id);
   const sport = comp?.sport_id ?? "football";
+  // Football (and any lineup-sport): NO pre-match analysis until the real starting
+  // XI is published. The `lineup_out` flag isn't enough on its own — it also flips
+  // on a pure ~1h-before-kickoff timer with no confirmed roster. Require actual
+  // lineup data (без составов анализ не делаем). A live match's lineup is out by
+  // definition, so it's never held here. Returned before any assessment is
+  // recorded, so a match still waiting on lineups is «ждём состав», not a failure.
+  if (R.awaitingLineup(db, match, sport)) {
+    return { ok: false, error: "ждём состав — без стартового состава анализ не делаем", stage: "pre_lineup" };
+  }
   const prompt = R.analyticsPromptFor(db, sport, match.competition_id);
   // A strategy/prompt whose saved model label was later removed would otherwise
   // abort the whole analyze with "неизвестная модель" — fall back to the default
@@ -374,6 +383,13 @@ export function startAnalysis(db: Database, matchId: string, deps: AnalyzeDeps =
   if (!match) return { ok: false, error: "матч не найден" };
   if (!R.latestMarkets(db, matchId).length) {
     return { ok: false, error: "у матча нет рынков — сначала подтяни котировки (Polymarket)" };
+  }
+  // Lineup gate (football): don't even fire the model until the real starting XI
+  // is out — mirrors the guard in analyzeMatch, but rejects cheaply here so a
+  // manual «Прогнать» shows «ждём состав» instead of launching a doomed run.
+  const compForGate = R.listCompetitions(db).find((c) => c.id === match.competition_id);
+  if (R.awaitingLineup(db, match, compForGate?.sport_id ?? "football")) {
+    return { ok: false, error: "ждём состав — без стартового состава анализ не делаем" };
   }
   // An active (non-stale) running job means a real run is in flight — dedupe.
   // A stale 'running' row (dead promise) is not honored: we re-kick over it.

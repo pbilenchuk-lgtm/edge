@@ -762,7 +762,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
       <div style={S.cardHead}>
         <div>
           <div style={S.matchup}>{match.home}{match.state === "live" || match.state === "finished" ? <span style={S.score}> {match.scoreHome}:{match.scoreAway} </span> : <span style={S.vs}> — </span>}{match.away}</div>
-          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && match.kickoff}{match.state === "live" && `LIVE · ${match.clock || (match.minute != null ? `${match.minute}'` : "")}`}{match.state === "finished" && (match.endTime ? `завершён ${match.endTime}` : "финал")}{hasLineups && <>{"  ·  "}<span style={{ color: match.lineupOut ? "#70b56a" : "#8b95a5" }}>{match.lineupOut ? "✓ состав" : "○ без состава"}</span></>}</div>
+          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && match.kickoff}{match.state === "live" && `LIVE · ${match.clock || (match.minute != null ? `${match.minute}'` : "")}`}{match.state === "finished" && (match.endTime ? `завершён ${match.endTime}` : "финал")}{hasLineups && (() => { const out = match.lineupsReady || match.state === "live" || match.state === "finished"; return <>{"  ·  "}<span style={{ color: out ? "#70b56a" : "#e8a838" }}>{out ? "✓ состав" : "○ ждём состав — анализ позже"}</span></>; })()}</div>
           {match.state === "finished" && match.duration && <div style={S.finishTiming}>{match.kickoffTime}–{match.endTime} · длительность {match.duration}{match.endNote && ` · ${match.endNote}`}</div>}
         </div>
         <div style={{ ...S.stateBadge, background: meta.bg, color: meta.color }}>{match.state === "live" && <span style={S.pulse} />}{meta.label}</div>

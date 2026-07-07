@@ -179,6 +179,28 @@ export interface MatchLive { match_id: string; espn_event_id: string | null; lea
 export function getMatchLive(db: Database, matchId: string): MatchLive | undefined {
   return db.prepare(`SELECT * FROM match_live WHERE match_id=?`).get(matchId) as MatchLive | undefined;
 }
+/** Sports where a confirmed starting lineup materially changes the read, so we
+ *  refuse to ANALYZE (and to fund pre-match capital) until the real roster is
+ *  published. Currently football only. */
+export const LINEUP_SPORTS = new Set(["football"]);
+/** Have REAL starting lineups actually been published for this match? True only
+ *  when the provider stored both sides' starters (engine.ts, provider lineupOut =
+ *  both teams have starters). This is NOT the `lineup_out` flag — that also flips
+ *  on a pure ~1h-before-kickoff timer with no real roster. For sports where the
+ *  lineup materially changes the read (football), analysis is gated on THIS. */
+export function hasLineups(db: Database, matchId: string): boolean {
+  const l = getMatchLive(db, matchId);
+  return !!(l && l.home_lineup && l.away_lineup);
+}
+/** Should we HOLD analysis on this match because the lineup isn't out yet?
+ *  True only for a lineup-sport (football) still PRE-kickoff (upcoming/lineup)
+ *  whose real starting XI hasn't been published. A live/finished match has its
+ *  lineup out by definition — never held — so live trading is unaffected. */
+export function awaitingLineup(db: Database, match: { id: string; state: string; competition_id: string }, sport: string): boolean {
+  if (!LINEUP_SPORTS.has(sport)) return false;
+  if (match.state !== "upcoming" && match.state !== "lineup") return false;
+  return !hasLineups(db, match.id);
+}
 export function upsertMatchLive(db: Database, m: MatchLive): void {
   db.prepare(
     `INSERT INTO match_live(match_id,espn_event_id,league,home_lineup,away_lineup,stats,updated_at)

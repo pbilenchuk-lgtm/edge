@@ -31,7 +31,7 @@ export interface BetItemView {
 export interface MatchView {
   id: string; competitionId: string; home: string; away: string; state: string;
   minute: number | null; clock: string | null; scoreHome: number | null; scoreAway: number | null;
-  lineupOut: boolean; kickoff: string | null; kickoffAt: string | null; oddsUpdated: string | null;
+  lineupOut: boolean; lineupsReady: boolean; kickoff: string | null; kickoffAt: string | null; oddsUpdated: string | null;
   finalScore: string | null; kickoffTime: string | null; endTime: string | null;
   duration: string | null; endNote: string | null;
   /** a per-match LLM analyze run is in flight (durable; survives reload) */
@@ -258,6 +258,9 @@ export function buildAppData(db: Database, env = process.env): AppData {
       matchDb[m.id] = {
         id: m.id, competitionId: m.competition_id, home: m.home, away: m.away, state: m.state,
         minute: liveMinute, clock: m.clock ?? null, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
+        // Real starting XI published (provider), NOT the ~1h timer flip — this is
+        // what actually gates football analysis, so the UI badge must track it.
+        lineupsReady: R.hasLineups(db, m.id),
         kickoff: warsawLabel(m.kickoff_at), kickoffAt: m.kickoff_at, oddsUpdated: null, finalScore: m.final_score, kickoffTime: m.kickoff_time,
         endTime: m.end_time, duration: m.duration, endNote: m.end_note,
         analyzing: jobActive(R.getAnalysisJob(db, m.id), nowMs),

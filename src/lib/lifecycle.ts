@@ -159,11 +159,16 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
   const max = opts.max ?? 6;
   const nowMs = Date.parse(nowFn(deps)()) || Date.now();
   const budgetByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.budget]));
+  const sportByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.sport_id]));
   const out: AutoAnalyzeItem[] = [];
   for (const { comp, match: m } of activeMatches(db)) {
     if (out.length >= max) break;
     if ((budgetByComp.get(comp) ?? 0) <= 0) continue;              // unfunded → skip (economical)
     if (!R.latestMarkets(db, m.id).length) continue;               // needs tradeable odds
+    // Football (lineup-sport): no pre-match analysis until the real starting XI
+    // is out — без составов анализ не делаем. Silently skip (it becomes eligible
+    // the tick after the provider publishes lineups; a live match is never held).
+    if (R.awaitingLineup(db, m, sportByComp.get(comp) ?? "football")) continue;
     const stage = m.lineup_out ? "post_lineup" : "pre_lineup";
     // Time gate: pre-match assessment only within ~12h of kickoff; the final
     // (post-lineup) pass runs once lineups are out (advanceClocks flips it ~1h
@@ -184,9 +189,8 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
 
 export interface AutoEnterItem { matchId: string; strategyId: string; market: string; price: number; stake: number }
 
-// Sports where a confirmed starting lineup materially changes the read, so we
-// hold pre-match capital until it's out (mirrors the frontend LINEUP_SPORTS).
-const LINEUP_SPORTS = new Set(["football"]);
+// Sports where a confirmed starting lineup materially changes the read
+// (R.LINEUP_SPORTS) drive the pre-match capital hold below.
 
 // A match has LIVE-DATA coverage once our provider has actually matched the
 // fixture: real lineups/stats (a match_live row), a real in-match event
@@ -277,7 +281,7 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
     // pre-lineup we still analyze and PROPOSE possible bets (shown as
     // «предлагается»), but they only fill once the lineup lands (lineup_out) or
     // the match is live. This keeps the pre-match read a preview, not an entry.
-    const preLineupHold = LINEUP_SPORTS.has(sport) && !m.lineup_out && (m.state === "upcoming" || m.state === "lineup");
+    const preLineupHold = R.LINEUP_SPORTS.has(sport) && !m.lineup_out && (m.state === "upcoming" || m.state === "lineup");
     const markets = R.latestMarkets(db, m.id);
     if (!markets.length) continue; // no quotes → nothing tradeable, no entry
     // Never open a position on a match we have no LIVE data for — we couldn't
