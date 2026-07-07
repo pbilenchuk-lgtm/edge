@@ -99,9 +99,10 @@ test("autoEnter executes against the order book — VWAP fill + depth cap on a t
   const b = R.getBet(db, "bk-1")!;
   assert.equal(b.status, "open");
   assert.ok(b.stake != null && b.stake <= 143 && b.stake > 100, `stake capped to book depth (~$142), got ${b.stake}`);
-  assert.ok(b.entry_price != null && b.entry_price > 47 && b.entry_price < 49, `filled at VWAP above best ask, got ${b.entry_price}`);
+  // VWAP ~47.3¢ + taker fee (~0.75¢ near 50¢) → effective entry ~48¢, above best ask.
+  assert.ok(b.entry_price != null && b.entry_price > 47.5 && b.entry_price < 49, `filled at VWAP+fee above best ask, got ${b.entry_price}`);
   assert.ok(res.some((r) => r.market === "Over 1.5"), "reported as entered");
-  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "enter" && /VWAP/.test(l.text)), "execution quality logged");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "enter" && /VWAP.*комиссия/.test(l.text)), "execution + fee logged");
 });
 
 test("evaluateExits fills the close against the bid book — exit slippage into P&L", async () => {
@@ -123,9 +124,10 @@ test("evaluateExits fills the close against the bid book — exit slippage into 
 
   assert.equal(exits.length, 1);
   const b = R.getBet(db, "ex-1")!;
-  assert.equal(b.closing_price, 74, "closed at the bid-book VWAP, not the 80¢ mid");
-  assert.equal(b.payout, 148, "100 × 74/50 — exit slippage booked into P&L (vs 160 at the mid)");
-  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "exit" && /выход VWAP/.test(l.text)), "exit execution logged");
+  // bid VWAP 74¢ minus the taker fee (0.03·74·26/100 = 0.58¢) → 73.4¢ net.
+  assert.equal(b.closing_price, 73.4, "closed at bid-book VWAP minus the exit taker fee, not the 80¢ mid");
+  assert.equal(b.payout, 146.8, "100 × 73.4/50 — exit slippage + fee booked into P&L (vs 160 at the mid)");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "exit" && /выход VWAP.*комиссия/.test(l.text)), "exit execution + fee logged");
 });
 
 test("evaluateExits closes an open position when the edge is gone", async () => {

@@ -19,7 +19,7 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches } from "./engine.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBook, type PolymarketConfig } from "./polymarket.js";
-import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents } from "./execution.js";
+import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents } from "./execution.js";
 import type { Bet, Market } from "./types.js";
 import { analyzeMatch, jobActive, matchContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision, sizeBet } from "./thresholds.js";
@@ -221,16 +221,20 @@ async function executeEntry(
     if (capUsd <= 0) return { skip: true, priceCents: quoteCents, stake: 0, note: `нет объёма с эджем (аск ${bestAsk}¢ vs справ. ${fairCents.toFixed(0)}¢, слиппедж съедает край)` };
     const stake = Math.min(proposedUsd, capUsd);
     const fill = simulateBuy(book.asks, stake);
+    const fee = takerFeeCents(fill.avgPriceCents, exec.takerFeeRate); // taker fee on entry, per share
+    const eff = Math.round((fill.avgPriceCents + fee) * 10) / 10;      // effective cost/share
     const slip = Math.round((fill.avgPriceCents - bestAsk) * 10) / 10;
     const capped = stake < proposedUsd - 0.5;
-    const note = `VWAP ${fill.avgPriceCents}¢ (котир. ${bestAsk}¢${slip > 0 ? `, слип +${slip}¢` : ""}) · сдвиг→${fill.newTopCents}¢${capped ? ` · урезан по глубине $${Math.round(proposedUsd)}→$${Math.round(stake)}` : ""}`;
-    return { skip: false, priceCents: fill.avgPriceCents, stake: Math.round(stake), note };
+    const note = `VWAP ${fill.avgPriceCents}¢ (котир. ${bestAsk}¢${slip > 0 ? `, слип +${slip}¢` : ""}) + комиссия ${fee}¢ · сдвиг→${fill.newTopCents}¢${capped ? ` · урезан по глубине $${Math.round(proposedUsd)}→$${Math.round(stake)}` : ""}`;
+    return { skip: false, priceCents: eff, stake: Math.round(stake), note };
   }
   // Parametric fallback: dead/near-resolved book or a fetch error.
   const liq = Number(mk?.liquidity ?? 0) || 0;
   const avg = parametricBuyAvgCents(quoteCents, proposedUsd, liq, exec.fallbackK);
-  if (avg >= fairCents - exec.edgeFloorCents) return { skip: true, priceCents: avg, stake: 0, note: `≈VWAP ${avg}¢ ≥ справ.−порог — эдж съеден слиппеджем (модель по ликв. $${Math.round(liq)})` };
-  return { skip: false, priceCents: avg, stake: proposedUsd, note: `≈VWAP ${avg}¢ (модель по ликвидности, книга недоступна)` };
+  const fee = takerFeeCents(avg, exec.takerFeeRate);
+  const eff = Math.round((avg + fee) * 10) / 10;
+  if (eff >= fairCents - exec.edgeFloorCents) return { skip: true, priceCents: eff, stake: 0, note: `≈${eff}¢ (VWAP+комиссия) ≥ справ.−порог — эдж съеден (модель по ликв. $${Math.round(liq)})` };
+  return { skip: false, priceCents: eff, stake: proposedUsd, note: `≈VWAP ${avg}¢ + комиссия ${fee}¢ (модель по ликвидности)` };
 }
 
 const appendReason = (existing: string | null, note?: string): string =>
@@ -252,12 +256,16 @@ async function sellVwapCents(
   if (book && book.bids.length) {
     const f = simulateSell(book.bids, shares);
     const bestBid = book.bids[0].priceCents;
+    const fee = takerFeeCents(f.avgPriceCents, poly.exec.takerFeeRate); // taker fee on exit
+    const eff = Math.round((f.avgPriceCents - fee) * 10) / 10;           // proceeds/share after fee
     const slip = Math.round((bestBid - f.avgPriceCents) * 10) / 10;
-    return { cents: f.avgPriceCents, note: `выход VWAP ${f.avgPriceCents}¢ (бид ${bestBid}¢${slip > 0 ? `, слип −${slip}¢` : ""})` };
+    return { cents: eff, note: `выход VWAP ${f.avgPriceCents}¢ (бид ${bestBid}¢${slip > 0 ? `, слип −${slip}¢` : ""}) − комиссия ${fee}¢` };
   }
   const liq = Number(mk?.liquidity ?? 0) || 0;
   const avg = parametricSellAvgCents(quoteCents, basisUsd, liq, poly.exec.fallbackK);
-  return { cents: avg, note: `≈выход ${avg}¢ (модель по ликвидности)` };
+  const fee = takerFeeCents(avg, poly.exec.takerFeeRate);
+  const eff = Math.round((avg - fee) * 10) / 10;
+  return { cents: eff, note: `≈выход ${avg}¢ − комиссия ${fee}¢ (модель по ликвидности)` };
 }
 
 export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<AutoEnterItem[]> {

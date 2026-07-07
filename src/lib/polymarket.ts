@@ -52,6 +52,8 @@ export interface PolymarketConfig {
     maxImpactCents: number;
     /** parametric fallback slope: cents of slippage when order == full liquidity */
     fallbackK: number;
+    /** Polymarket TAKER fee rate (sports 0.03). Charged on entry AND exit. */
+    takerFeeRate: number;
   };
 }
 
@@ -102,6 +104,7 @@ export function loadPolymarketConfig(
       edgeFloorCents: Number(env.EXEC_EDGE_FLOOR_CENTS ?? 1.5),
       maxImpactCents: Number(env.EXEC_MAX_IMPACT_CENTS ?? 2),
       fallbackK: Number(env.EXEC_FALLBACK_K ?? 4),
+      takerFeeRate: Number(env.POLYMARKET_TAKER_FEE_RATE ?? 0.03),
     },
   };
 }

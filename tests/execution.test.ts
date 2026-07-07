@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents } from "../src/lib/execution.js";
+import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents } from "../src/lib/execution.js";
 
 // asks ascending by price; each level: priceCents × size(shares).
 const asks = [
@@ -54,6 +54,13 @@ test("maxExecutableBuyUsd: edge ceiling binds when it's tighter than impact", ()
   // fair 48.5, floor 1.5 → ceiling 47.0 → only the 46.8 level.
   const cap = maxExecutableBuyUsd(asks, 48.5, { edgeFloorCents: 1.5, maxImpactCents: 10 });
   assert.equal(Math.round(cap), Math.round(200 * 0.468));
+});
+
+test("takerFeeCents: Polymarket sports taker fee — peaks at 50¢, symmetric, 0.75¢ max", () => {
+  assert.equal(takerFeeCents(50, 0.03), 0.75, "peak $0.75 per 100 shares at 50¢");
+  assert.equal(takerFeeCents(30, 0.03), takerFeeCents(70, 0.03), "symmetric around 50¢");
+  assert.equal(takerFeeCents(30, 0.03), 0.63, "0.03·30·70/100");
+  assert.ok(takerFeeCents(99, 0.03) < 0.05 && takerFeeCents(1, 0.03) < 0.05, "tiny near the extremes");
 });
 
 test("parametric fallback: slippage scales with order/liquidity, bounded", () => {
