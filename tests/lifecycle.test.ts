@@ -353,6 +353,33 @@ test("strategistReassess closes a position the strategy prompt says to cut", asy
   assert.equal(b.payout, 72.73); // 100 * 40/55
 });
 
+test("module 5: live reassess uses the LIVE prompt + battle sheet, sizes by risk_config, tags the profile", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  // a two-phase strategy with a DISTINCT live prompt, assigned on the aggressive profile
+  R.insertStrategy(db, { id: "s5", sport_id: "football", name: "S5", tag: null, color: "#fff", version: 1, model: null, prompt: "ПРЕДМАТЧ-ТЕЛО-XYZ", prompt_live: "ЛАЙВ-ТЕЛО-QWE", params: {}, created_at: "t" });
+  R.clearShares(db, comp.id);
+  R.setShare(db, { competition_id: comp.id, strategy_id: "s5", risk_profile_id: "aggressive", pct: 60 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "A wins", price: 45, ai_prob: 0.62, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  // battle sheet for the pair (prematch plan) that the live executor should receive
+  R.saveArtifact(db, { match_id: mid, kind: "battle_sheet", label: "S5 · aggressive", stage: "post_lineup", content: JSON.stringify({ plan: "BATTLE-SHEET-MARKER", live_triggers_armed: [] }), model: null, created_at: "t" });
+
+  let sent = "";
+  const mock = (async (_url: any, init: any) => { sent = init.body; return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [{ label: "A wins", conviction: "высокая", reason: "выкуп по плану" }], exits: [], note: "" }) }] }) }; }) as any;
+  const res = await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } }, { newEventMatchIds: new Set([mid]), max: 50, onlyStrategyId: "s5" });
+
+  assert.match(sent, /ЛАЙВ-ТЕЛО-QWE/, "the LIVE prompt (prompt_live) was used, not the prematch one");
+  assert.ok(!/ПРЕДМАТЧ-ТЕЛО-XYZ/.test(sent), "the prematch prompt was NOT used");
+  assert.match(sent, /BATTLE-SHEET-MARKER/, "the pair's battle sheet was fed to the live strategist");
+  const bet = R.betsForMatch(db, mid, "s5").find((b) => b.status === "proposed");
+  assert.ok(bet, "a live entry was opened");
+  assert.equal(bet!.risk_profile_id, "aggressive", "the entry is tagged with the pair's profile");
+  assert.ok(res.entries.some((e) => e.market === "A wins"));
+});
+
 test("strategistReassess opens a fresh entry on a live trigger (no prior position)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

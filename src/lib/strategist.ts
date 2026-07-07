@@ -85,6 +85,10 @@ export interface SizeInput {
   matchExposure?: number;  // $ already committed by this pair ON THIS MATCH
   compExposure?: number;   // $ already committed by this pair across the comp
   cfg: RiskConfig;
+  /** LIVE: skip the absurd_edge_block flag. In-play a huge edge is REAL, not a
+   *  data bug — a resolved market (Over 1.5 at 0:2 ≈ 98%) legitimately sits far
+   *  from a lagging book; that gap IS the strategist's alpha. Default false. */
+  allowLargeEdge?: boolean;
 }
 
 /**
@@ -106,8 +110,9 @@ export function sizePrematch(inp: SizeInput): SizeResult {
   if (budget <= 0) return skip("нет бюджета пары");
 
   // Safeguard: an edge above absurd_edge_block is almost surely a bug (bad quote /
-  // wrong market), not value — flag, do NOT trade.
-  if (edge > cfg.safeguards.absurd_edge_block) return flag(`edge ${(edge * 100).toFixed(1)}% > absurd_edge_block ${(cfg.safeguards.absurd_edge_block * 100).toFixed(0)}% — вероятно баг`);
+  // wrong market), not value — flag, do NOT trade. Skipped in live (allowLargeEdge)
+  // where a resolved-market edge is genuine.
+  if (!inp.allowLargeEdge && edge > cfg.safeguards.absurd_edge_block) return flag(`edge ${(edge * 100).toFixed(1)}% > absurd_edge_block ${(cfg.safeguards.absurd_edge_block * 100).toFixed(0)}% — вероятно баг`);
 
   // Thresholds (profile). Thin markets use the raised min_edge.
   const thin = inp.liquidity != null && inp.liquidity < cfg.entry_thresholds.min_market_liquidity;

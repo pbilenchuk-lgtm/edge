@@ -20,9 +20,11 @@ import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches } from "./engine.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBook, type PolymarketConfig } from "./polymarket.js";
 import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents, liquidationCents } from "./execution.js";
-import type { Bet, Market } from "./types.js";
+import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, matchContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
-import { exitDecision, sizeBet } from "./thresholds.js";
+import { exitDecision } from "./thresholds.js";
+import { impliedProbs, sizePrematch } from "./strategist.js";
+import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
 import { hoursUntil } from "./time.js";
@@ -470,6 +472,24 @@ export interface ReassessResult { exits: ExitItem[]; entries: ReassessEntry[] }
  * call per (match, strategy) — so it only fires where the user holds risk or a
  * trigger actually fired. This is what makes reassessment *react* to live data.
  */
+/** Parse a liquidity string ("$2.5M", "1234", "780K") to a number, or null. */
+function liqNum(s: string | null): number | null {
+  if (s == null) return null;
+  const m = String(s).replace(/[$,\s]/g, "").match(/^([\d.]+)\s*([mk]?)/i);
+  if (!m) return null;
+  const v = parseFloat(m[1]);
+  if (!isFinite(v)) return null;
+  const suf = m[2].toLowerCase();
+  return suf === "m" ? v * 1e6 : suf === "k" ? v * 1e3 : v;
+}
+/** Numeric analysis calibration for the live min_calibration gate: from the stored
+ *  distribution artifact, else the word-confidence band. */
+function liveCalibration(db: Database, matchId: string, confidence: string): number {
+  const art = R.artifactsForMatch(db, matchId).find((x) => x.kind === "distribution");
+  if (art) { try { const v = JSON.parse(art.content)?.calibration?.xg_confidence; if (typeof v === "number") return v; } catch { /* ignore */ } }
+  return confidence === "высокая" ? 0.75 : confidence === "низкая" ? 0.3 : 0.5;
+}
+
 export async function strategistReassess(
   db: Database, deps: EngineDeps = {}, opts: { max?: number; newEventMatchIds?: Set<string>; triggeredOnly?: boolean; labelFor?: Map<string, ReassessTrigger>; onlyStrategyId?: string } = {},
 ): Promise<ReassessResult> {
@@ -521,27 +541,37 @@ export async function strategistReassess(
     const assess = R.assessmentsForMatch(db, m.id).filter((a) => a.status === "ok").sort((a, b) => (a.created_at >= b.created_at ? -1 : 1))[0];
     const ctx = matchContext(db, m.id); // real lineups + stats + events
 
-    // Strategies to run: those with an active share (can enter) plus any that
-    // already hold an open position on this match (must be able to exit).
-    const shares = R.sharesForComp(db, comp);
-    const sids = new Set<string>();
-    for (const s of shares) if (s.pct > 0) sids.add(s.strategy_id);
-    for (const b of open) sids.add(b.strategy_id);
+    // PAIRS to run (LIVE branch of the unified engine — same (strategy, profile)
+    // unit as the prematch pass): pairs with an active share (can enter) plus any
+    // pair already holding an open position (must be able to exit, pct=0).
+    const shares = R.sharesForComp(db, comp).filter((s) => s.pct > 0);
+    const strategyById = new Map(R.listStrategies(db).map((s) => [s.id, s]));
+    const pairMap = new Map<string, { strat: Strategy; profile: string; pct: number }>();
+    for (const s of shares) { const st = strategyById.get(s.strategy_id); if (st) pairMap.set(`${s.strategy_id}::${s.risk_profile_id}`, { strat: st, profile: s.risk_profile_id, pct: s.pct }); }
+    for (const b of open) { const pid = b.risk_profile_id ?? "medium"; const key = `${b.strategy_id}::${pid}`; if (!pairMap.has(key)) { const st = strategyById.get(b.strategy_id); if (st) pairMap.set(key, { strat: st, profile: pid, pct: 0 }); } }
+    // De-vigged implied + numeric calibration once for the match.
+    const quotes = markets.map((mk) => ({ label: mk.label, priceCents: mk.price, liquidity: liqNum(mk.liquidity) }));
+    const impliedMap = impliedProbs(quotes);
+    const calibration = liveCalibration(db, m.id, assess?.confidence ?? "средняя");
 
-    for (const sid of sids) {
+    for (const { strat, profile, pct } of pairMap.values()) {
       if (calls >= max) break;
-      if (opts.onlyStrategyId && sid !== opts.onlyStrategyId) continue; // manual: one strategy only
-      const strat = R.getStrategy(db, sid);
-      if (!strat) continue;
-      const myOpen = open.filter((b) => b.strategy_id === sid);
+      if (opts.onlyStrategyId && strat.id !== opts.onlyStrategyId) continue; // manual: one strategy only
+      const sid = strat.id;
+      const pairLabel = `${strat.name} · ${profile}`;
+      const myOpen = open.filter((b) => b.strategy_id === sid && (b.risk_profile_id ?? "medium") === profile);
       calls++;
+      // Feed the pair's BATTLE SHEET (the prematch plan) so the live strategist
+      // EXECUTES it (live_triggers / take_price / thesis_stop) rather than
+      // re-deriving — using its LIVE prompt window (prompt_live).
+      const battleSheet = R.artifactsForMatch(db, m.id).find((x) => x.kind === "battle_sheet" && x.label === pairLabel)?.content;
       const dec = await strategistDecide({
-        strategyName: strat.name, strategyPrompt: strat.prompt,
+        strategyName: strat.name, strategyPrompt: strat.prompt_live ?? strat.prompt,
         match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, minuteApprox },
         assessment: { confidence: assess?.confidence ?? "средняя", short: assess?.short ?? "", verdict: assess?.verdict ?? "" },
         markets: markets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob, liquidity: mk.liquidity != null ? Number(mk.liquidity) : null, openCents: mk.label in opens ? opens[mk.label] : null })),
         openPositions: myOpen.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
-        context: ctx,
+        context: ctx + (battleSheet ? `\n\nБОЕВОЙ ЛИСТ (план из предматча — исполняй его, не переизобретай):\n${battleSheet}` : ""),
       }, strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
       if (!dec.ok) continue;
       touched.add(sid);
@@ -576,47 +606,42 @@ export async function strategistReassess(
         touched.add(sid);
       }
 
-      // (b) ENTRIES — fresh positions the trigger opened. Only strategies with a
-      // live share can enter; code sizes/gates. Dedup against markets this
-      // strategy already holds/proposed so we never double up on the same bet.
-      // Highest-share active (strategy, profile) pair for this strategy — its
-      // profile sizes/tags any live entry. (The full multi-profile live path is
-      // the live-executor module; one profile per strategy is the common case.)
-      const share = shares.filter((s) => s.strategy_id === sid && s.pct > 0).sort((a, b) => b.pct - a.pct)[0];
-      if (share && share.pct > 0 && dec.picks.length) {
-        const profile = share.risk_profile_id;
-        const budget = stratBudget(c.budget, share.pct);
-        const held = new Set(R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").map((b) => norm(b.market_label)));
-        // Seed exposure + realized from ALL this pair's matches in the comp (open
-        // AND still-proposed — autoEnter will fill the proposals), so the §9.3 cap
-        // is per-COMPETITION and per-pair: concurrent matches can't each stake the
-        // full share.
-        let exposure = strategyCompExposure(db, comp, sid, profile);
-        const realizedPnl = strategyCompRealized(db, comp, sid, profile);
+      // (b) ENTRIES — live positions the trigger/plan opened (buyback, xG add).
+      // Only a pair with an ACTIVE share can open (pct=0 = exit-only pair whose
+      // share was removed). Code sizes/gates via the profile's risk_config (§9.6,
+      // module #3/#5); the strategist re-estimates the live prob, edge is off the
+      // de-vigged price. Dedup against markets this pair already holds/proposed.
+      if (pct > 0 && dec.picks.length) {
+        const budget = stratBudget(c.budget, pct);
+        const cfg = getProfileConfig(db, profile);
+        const held = new Set(R.betsForMatch(db, m.id, sid).filter((b) => (b.status === "open" || b.status === "proposed") && (b.risk_profile_id ?? "medium") === profile).map((b) => norm(b.market_label)));
+        // §9.3 cap is per-COMPETITION and per-pair (open + proposed − realized).
+        let exposure = strategyCompExposure(db, comp, sid, profile) - strategyCompRealized(db, comp, sid, profile);
+        let matchExposure = myOpen.reduce((s, b) => s + (b.stake ?? 0), 0);
         for (const pick of dec.picks) {
           const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
           if (!mk || mk.price == null) { unfilled.push(`«${pick.label}» — нет рынка`); continue; }
           // LIVE re-scoring: size off the strategist's OWN current probability (it
           // re-estimates from the live score/minute — a 0:2 game's "Over 1.5" is
-          // ~1.0, not the stale pre-match ai_prob). Fall back to the stored prob
-          // only if none given. Refresh the market ai_prob so the UI edge is live
-          // too (the odds refresh carries ai_prob forward).
-          const aiProb = pick.prob != null ? pick.prob : mk.ai_prob;
-          if (aiProb == null) { unfilled.push(`«${mk.label}» — нет оценки`); continue; }
+          // ~1.0, not the stale pre-match prob). Fall back to the stored prob only
+          // if none given. Refresh the market ai_prob so the UI edge is live too.
+          const ourProb = pick.prob != null ? pick.prob : mk.ai_prob;
+          if (ourProb == null) { unfilled.push(`«${mk.label}» — нет оценки`); continue; }
           if (pick.prob != null) R.setMarketAiProb(db, mk.id, pick.prob);
           if (held.has(norm(mk.label))) continue;                       // already in this market
-          const d = sizeBet({ params: strat.params, aiProb, priceCents: mk.price, budget, exposure, realizedPnl, confidence: pick.conviction as Confidence });
-          if (!d.enter) { unfilled.push(`«${mk.label}» — ${d.reason}`); continue; }
-          exposure += d.stake;
+          const implied = impliedMap.get(mk.label)?.implied ?? mk.price / 100;
+          const r = sizePrematch({ ourProb, priceCents: mk.price, implied, calibration, liquidity: liqNum(mk.liquidity), budget, matchExposure, compExposure: exposure, cfg, allowLargeEdge: true });
+          if (r.status !== "enter") { unfilled.push(`«${mk.label}» — ${r.reason}`); continue; }
+          exposure += r.stake; matchExposure += r.stake;
           held.add(norm(mk.label));
           R.insertBet(db, {
             id: R.uid(), match_id: m.id, strategy_id: sid, risk_profile_id: profile, market_label: mk.label,
             status: "proposed", proposed_price: mk.price, entry_price: null, current_price: null,
-            closing_price: null, ai_prob: aiProb, stake: d.stake,
-            rationale: `переоценка: «${mk.label}» край ${d.edge.toFixed(1)}%. ${pick.reason || d.reason}.`,
+            closing_price: null, ai_prob: ourProb, stake: r.stake,
+            rationale: `переоценка (лайв): «${mk.label}» edge ${(r.edge * 100).toFixed(1)}%. ${pick.reason || r.reason}.`,
             entered_minute: null, result: null, payout: null, created_at: now,
           });
-          out.entries.push({ matchId: m.id, strategyId: sid, market: mk.label, stake: d.stake });
+          out.entries.push({ matchId: m.id, strategyId: sid, market: mk.label, stake: r.stake });
           enteredMarkets.push(mk.label);
           touched.add(sid);
         }
