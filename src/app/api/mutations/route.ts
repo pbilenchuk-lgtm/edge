@@ -16,6 +16,7 @@ export async function POST(req: Request) {
     const { canSetBudget, sharesValid, freeBalance } = await import("@/lib/money");
     const { extractThresholds, extractThresholdsHeuristic } = await import("@/lib/thresholds");
     const { heuristicName, proposeImprovement, effectiveEnv } = await import("@/lib/llm");
+    const { parseRiskProfile, loadRiskConfig } = await import("@/lib/riskConfig");
 
     const db = getDb();
     let body: any;
@@ -65,6 +66,8 @@ export async function POST(req: Request) {
       }
       case "patchStrategy": {
         const { id, patch } = body;
+        // Frontend sends promptLive (camelCase); the repo column is prompt_live.
+        if (patch && patch.promptLive !== undefined) { patch.prompt_live = patch.promptLive; delete patch.promptLive; }
         R.updateStrategy(db, id, patch);
         return ok();
       }
@@ -72,6 +75,29 @@ export async function POST(req: Request) {
         const { id } = body;
         if (!id || !R.getStrategy(db, id)) return bad("стратегия не найдена");
         R.deleteStrategy(db, id);
+        return ok();
+      }
+      // --- risk profiles (Окно 4) ---
+      case "parseRiskConfig": {
+        // «вытащить и захардкодить»: free text → validated risk config (or errors)
+        const { text } = body as { text: string };
+        const res = parseRiskProfile(String(text ?? ""));
+        return ok({ config: res.config ?? null, errors: res.errors ?? [] });
+      }
+      case "saveRiskProfile": {
+        const { id, name, config } = body as { id?: string; name: string; config: unknown };
+        if (!name || !String(name).trim()) return bad("пустое название профиля");
+        const loaded = loadRiskConfig(config); // re-validate before persisting
+        if (!loaded.ok || !loaded.config) return bad("невалидный конфиг: " + (loaded.errors ?? []).join("; "));
+        const slug = (id && String(id).trim()) || "rp-" + String(name).toLowerCase().replace(/[^a-z0-9а-я]+/gi, "-").slice(0, 20) + "-" + Date.now().toString(36);
+        const existing = R.getRiskProfileRow(db, slug);
+        R.upsertRiskProfile(db, { id: slug, name: String(name).trim(), content: JSON.stringify(loaded.config), sort: existing?.sort ?? R.listRiskProfiles(db).length, created_at: existing?.created_at ?? new Date().toISOString() });
+        return ok({ id: slug });
+      }
+      case "deleteRiskProfile": {
+        const { id } = body as { id: string };
+        if (!id) return bad("нет id профиля");
+        R.deleteRiskProfile(db, id);
         return ok();
       }
       case "setProviderKey": {

@@ -219,3 +219,49 @@ export function listRiskProfileViews(db: Database): RiskProfileView[] {
 export function getRiskConfig(db: Database): RiskConfig {
   return getProfileConfig(db, DEFAULT_PROFILE_ID);
 }
+
+// ============================================================
+// «Вытащить и захардкодить» for a risk profile — extract the numeric constants
+// from a human's free text (the risk_config_prompt values) into a raw config,
+// then loadRiskConfig VALIDATES it. Dependency-free regex over the known field
+// names (robust to "field: 0.05" / "field = 0.05" / "field 0.05" formats).
+// ============================================================
+const RISK_FIELD_PATHS: Record<string, string> = {
+  min_edge_low_liquidity: "entry_thresholds.min_edge_low_liquidity", // before min_edge (prefix)
+  min_edge: "entry_thresholds.min_edge",
+  min_calibration: "entry_thresholds.min_calibration",
+  min_market_liquidity: "entry_thresholds.min_market_liquidity",
+  kelly_fraction_base: "sizing.kelly_fraction_base",
+  calibration_ref: "sizing.calibration_ref",
+  max_position_pct: "sizing.max_position_pct",
+  max_match_exposure_pct: "sizing.max_match_exposure_pct",
+  daily_loss_limit_pct: "bankroll_limits.daily_loss_limit_pct",
+  max_concurrent_exposure_pct: "bankroll_limits.max_concurrent_exposure_pct",
+  max_concurrent_positions: "bankroll_limits.max_concurrent_positions",
+  global_drawdown_killswitch_pct: "safeguards.global_drawdown_killswitch_pct",
+  absurd_edge_block: "safeguards.absurd_edge_block",
+  max_quote_age_seconds: "safeguards.max_quote_age_seconds",
+  prob_sum_tolerance: "safeguards.prob_sum_tolerance",
+};
+/** Extract a raw risk config from free text (validated separately by loadRiskConfig). */
+export function parseRiskConfigHeuristic(text: string): Record<string, unknown> {
+  const raw: any = {};
+  const claimed: Array<[number, number]> = []; // char spans already consumed by a longer field name
+  const clampM = text.match(/kelly_fraction_clamp\s*[:=]?\s*\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]/i);
+  if (clampM) set(raw, "sizing.kelly_fraction_clamp", [parseFloat(clampM[1]), parseFloat(clampM[2])]);
+  for (const [field, path] of Object.entries(RISK_FIELD_PATHS)) {
+    const re = new RegExp(field + "\\s*[:=]?\\s*(-?\\d+(?:\\.\\d+)?)", "i");
+    const m = re.exec(text);
+    if (!m || m.index == null) continue;
+    // skip a match that sits inside an already-claimed longer field (min_edge vs
+    // min_edge_low_liquidity): the longer name is listed first and claims its span.
+    if (claimed.some(([s, e]) => m.index >= s && m.index < e)) continue;
+    claimed.push([m.index, m.index + m[0].length]);
+    set(raw, path, parseFloat(m[1]));
+  }
+  return raw;
+}
+/** Parse free text → validated config (or errors), for the profile «вытащить» button. */
+export function parseRiskProfile(text: string): RiskConfigLoad {
+  return loadRiskConfig(parseRiskConfigHeuristic(text));
+}

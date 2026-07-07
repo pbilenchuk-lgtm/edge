@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadRiskConfig, getRiskConfig, getProfileConfig, seedRiskProfiles, listRiskProfileViews, DEFAULT_RISK_CONFIG, RISK_PROFILE_DEFS } from "../src/lib/riskConfig.js";
+import { loadRiskConfig, getRiskConfig, getProfileConfig, seedRiskProfiles, listRiskProfileViews, parseRiskProfile, parseRiskConfigHeuristic, DEFAULT_RISK_CONFIG, RISK_PROFILE_DEFS } from "../src/lib/riskConfig.js";
 import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 
@@ -85,6 +85,36 @@ test("seedRiskProfiles: seeds three named presets, idempotent, each validates", 
   // idempotent — re-seeding doesn't duplicate
   seedRiskProfiles(db, "2026-07-08T00:00:00Z");
   assert.equal(listRiskProfileViews(db).length, 3);
+});
+
+test("parseRiskProfile: «вытащить» pulls values from free text, validates, defaults the rest", () => {
+  const text = `entry_thresholds:
+  min_edge: 0.03
+  min_edge_low_liquidity: 0.05
+  min_calibration: 0.40
+sizing:
+  kelly_fraction_base: 0.33
+  kelly_fraction_clamp: [0.05, 0.40]
+  max_position_pct: 0.08
+safeguards:
+  absurd_edge_block: 0.25`;
+  const res = parseRiskProfile(text);
+  assert.ok(res.ok && res.config, res.errors?.join("; "));
+  assert.equal(res.config!.entry_thresholds.min_edge, 0.03);
+  // min_edge_low_liquidity must NOT be shadowed by the min_edge regex
+  assert.equal(res.config!.entry_thresholds.min_edge_low_liquidity, 0.05);
+  assert.equal(res.config!.sizing.kelly_fraction_base, 0.33);
+  assert.deepEqual(res.config!.sizing.kelly_fraction_clamp, [0.05, 0.40]);
+  assert.equal(res.config!.sizing.max_position_pct, 0.08);
+  assert.equal(res.config!.safeguards.absurd_edge_block, 0.25);
+  // an unmentioned field falls back to the default
+  assert.ok(res.config!._defaults_used.includes("bankroll_limits.daily_loss_limit_pct"));
+});
+
+test("parseRiskConfigHeuristic: an out-of-range value surfaces as a validation error", () => {
+  const res = parseRiskProfile("min_edge = 1.5\nkelly_fraction_base = 0.2");
+  assert.equal(res.ok, false);
+  assert.ok(res.errors!.some((e) => e.includes("min_edge")));
 });
 
 test("getProfileConfig: unknown id → defaults; every preset def loads clean", () => {

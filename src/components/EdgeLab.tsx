@@ -643,6 +643,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       ) : screen === "strategies" ? (
         <StrategyScreen sportId={sportId} sportLabel={SPORTS.find((s) => s.id === sportId)?.label ?? sportId} catalog={catalog} setCatalog={setCatalog}
           competitions={COMPETITIONS} matchDb={matchDb} compBudget={compBudget} shares={shares} providers={PROVIDERS} quality={QUALITY}
+          riskProfiles={riskProfiles} setRiskProfiles={setRiskProfiles}
           analysis={analysis} setAnalysis={setAnalysis} onGoModels={() => setScreen("models")} />
       ) : screen === "portfolio" ? (
         <PortfolioScreen open={collectPortfolio(COMPETITIONS, matchDb, catalog, compBudget, shares)} closed={collectClosed(COMPETITIONS, matchDb, catalog)} onGoMatches={() => setScreen("matches")} />
@@ -1205,9 +1206,23 @@ function ModelSelect({ value, models, onChange, onGoModels }: any) {
   );
 }
 
-function StrategyScreen({ sportId, sportLabel, catalog, setCatalog, competitions, matchDb, compBudget, shares, providers, quality, analysis, setAnalysis, onGoModels }: any) {
+function StrategyScreen({ sportId, sportLabel, catalog, setCatalog, competitions, matchDb, compBudget, shares, providers, quality, riskProfiles, setRiskProfiles, analysis, setAnalysis, onGoModels }: any) {
   const [modal, setModal] = useState<any>(null);
+  const [profModal, setProfModal] = useState<any>(null);
   const sportStrats = catalog.filter((s: any) => s.sport === sportId);
+  const saveRiskProfile = async (draft: any) => {
+    const res = await mutate({ type: "saveRiskProfile", id: draft.id, name: draft.name, config: draft.config });
+    if (res && res.ok !== false) {
+      const id = res.id || draft.id;
+      setRiskProfiles((p: any[]) => { const rest = p.filter((x) => x.id !== id); return [...rest, { id, name: draft.name, sort: 99, config: draft.config }]; });
+    }
+    setProfModal(null);
+  };
+  const deleteRiskProfile = (id: string, name: string) => {
+    if (typeof window !== "undefined" && !window.confirm(`Удалить риск-профиль «${name}»? Категории на нём вернутся к дефолтным порогам.`)) return;
+    setRiskProfiles((p: any[]) => p.filter((x) => x.id !== id));
+    mutate({ type: "deleteRiskProfile", id });
+  };
   // Same urgency order as the main bar: live categories first, then soonest kickoff.
   const catUrgency = (c: any): { live: boolean; nextKo: number } => {
     let live = false, nextKo = Infinity;
@@ -1233,7 +1248,7 @@ function StrategyScreen({ sportId, sportLabel, catalog, setCatalog, competitions
   const availableModels = providers.filter((p: any) => p.hasKey).flatMap((p: any) => p.models);
 
   const addStrategy = async (draft: any) => {
-    const res = await mutate({ type: "createStrategy", sport: sportId, name: draft.name, prompt: draft.prompt, model: draft.model, params: draft.params });
+    const res = await mutate({ type: "createStrategy", sport: sportId, name: draft.name, prompt: draft.prompt, promptLive: draft.promptLive, model: draft.model, params: draft.params });
     const id = res.id || "s" + Date.now();
     setCatalog((c: any) => [...c, { ...draft, id, version: 1, sport: sportId, color: res.color || PALETTE[c.length % PALETTE.length], tag: "custom" }]);
     setModal(null);
@@ -1295,17 +1310,99 @@ function StrategyScreen({ sportId, sportLabel, catalog, setCatalog, competitions
       </div>
 
       <div style={S.stratIntro}>
-        <div style={S.stratIntroTop}><div><div style={S.stratIntroTitle}>Стратегии · {sportLabel}</div><div style={S.stratIntroSub}>Бюджет и доли — на экране «Матчи». Модель выбирается для каждой стратегии.</div></div><button style={S.addBtn} onClick={() => setModal({ type: "new" })}>+ Новая</button></div>
-        <div style={S.howto}>Опиши стратегию <b>словами</b>: вход, размер, переоценка, выход, ограничители. Движок вытащит числа.</div>
+        <div style={S.stratIntroTop}><div><div style={S.stratIntroTitle}>Стратегии · {sportLabel}</div><div style={S.stratIntroSub}>Каждая стратегия — ДВА окна: предматч и лайв. Бюджет и доли (стратегия+профиль) — на экране «Матчи».</div></div><button style={S.addBtn} onClick={() => setModal({ type: "new" })}>+ Новая</button></div>
+        <div style={S.howto}>Опиши стратегию <b>словами</b> в двух окнах: <b>①</b> предматч (что открыть + заготовки live-плана) и <b>②</b> лайв (как вести в игре). Пороги/размер — из риск-профиля, не из промта.</div>
       </div>
 
       {sportStrats.length === 0 && <div style={S.empty}>В категории «{sportLabel}» пока нет стратегий.</div>}
       {sportStrats.map((st: any) => <StrategyCard key={st.id} st={st} overall={stratOverall(competitions, matchDb, st.id, sportId, compBudget, shares)} availableModels={availableModels} onSetModel={(m: string) => updateStrategy(st.id, { model: m })} onGoModels={onGoModels} onEdit={() => setModal({ type: "edit", stratId: st.id })} onImprove={() => setModal({ type: "improve", stratId: st.id })} onDelete={() => deleteStrategy(st.id, st.name)} />)}
 
+      {/* Risk profiles — the named threshold/sizing configs (Окно 4). Added from a
+          prompt (human values) → «вытащить и захардкодить» → validated config. */}
+      <div style={{ ...S.stratIntro, marginTop: 28 }}>
+        <div style={S.stratIntroTop}><div><div style={S.stratIntroTitle}>Риск-профили</div><div style={S.stratIntroSub}>Пороги / сайзинг / лимиты / предохранители. Категория назначается как пара «стратегия + профиль».</div></div><button style={S.addBtn} onClick={() => setProfModal({ mode: "new" })}>+ Профиль</button></div>
+        <div style={S.howto}>Опиши значения <b>словами</b> (min_edge, kelly_fraction_base, max_position_pct…), нажми <b>«вытащить и захардкодить»</b> — движок структурирует и провалидирует конфиг.</div>
+      </div>
+      {(riskProfiles || []).map((p: any) => <RiskProfileCard key={p.id} profile={p} onEdit={() => setProfModal({ mode: "edit", profile: p })} onDelete={() => deleteRiskProfile(p.id, p.name)} />)}
+
       {modal?.type === "new" && <PromptModal title={`Новая стратегия · ${sportLabel}`} availableModels={availableModels} onGoModels={onGoModels} onClose={() => setModal(null)} onSave={addStrategy} />}
       {modal?.type === "edit" && <PromptModal title="Редактировать" strat={catalog.find((s: any) => s.id === modal.stratId)} availableModels={availableModels} onGoModels={onGoModels} onClose={() => setModal(null)} onSave={(d: any) => { updateStrategy(modal.stratId, d); setModal(null); }} />}
       {modal?.type === "improve" && <ImproveModal strat={catalog.find((s: any) => s.id === modal.stratId)} stats={improveStats(quality[modal.stratId], stratOverall(competitions, matchDb, modal.stratId, sportId, compBudget, shares))} onClose={() => setModal(null)} onAccept={(p: string, params: any) => acceptImprovement(modal.stratId, p, params)} />}
+      {profModal && <RiskProfileModal profile={profModal.mode === "edit" ? profModal.profile : null} onClose={() => setProfModal(null)} onSave={saveRiskProfile} />}
     </main>
+  );
+}
+
+// A named risk profile card — the headline thresholds/sizing at a glance.
+function RiskProfileCard({ profile, onEdit, onDelete }: any) {
+  const c = profile.config || {};
+  const e = c.entry_thresholds || {}, s = c.sizing || {}, sg = c.safeguards || {};
+  const pct = (x: number) => x != null ? `${(x * 100).toFixed(x < 0.1 ? 1 : 0)}%` : "—";
+  return (
+    <div style={S.rpCard}>
+      <div style={S.rpHead}>
+        <span style={S.rpName}>{profile.name}</span>
+        <span style={S.rpId}>{profile.id}</span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button style={S.rpBtn} onClick={onEdit}>править</button>
+          <button style={{ ...S.rpBtn, color: "#e07a5f" }} onClick={onDelete}>удалить</button>
+        </div>
+      </div>
+      <div style={S.rpGrid}>
+        <div style={S.rpCell}><span style={S.rpK}>min_edge</span><span style={S.rpV}>{pct(e.min_edge)}</span></div>
+        <div style={S.rpCell}><span style={S.rpK}>min_calibration</span><span style={S.rpV}>{e.min_calibration ?? "—"}</span></div>
+        <div style={S.rpCell}><span style={S.rpK}>Kelly base</span><span style={S.rpV}>{s.kelly_fraction_base ?? "—"}</span></div>
+        <div style={S.rpCell}><span style={S.rpK}>max позиция</span><span style={S.rpV}>{pct(s.max_position_pct)}</span></div>
+        <div style={S.rpCell}><span style={S.rpK}>max на матч</span><span style={S.rpV}>{pct(s.max_match_exposure_pct)}</span></div>
+        <div style={S.rpCell}><span style={S.rpK}>absurd edge</span><span style={S.rpV}>{pct(sg.absurd_edge_block)}</span></div>
+      </div>
+    </div>
+  );
+}
+
+// Add/edit a risk profile: name + free-text values → «вытащить и захардкодить»
+// (server structures + validates) → confirm the config → save as a named profile.
+function RiskProfileModal({ profile, onClose, onSave }: any) {
+  const [name, setName] = useState(profile?.name || "");
+  const seed = profile?.config ? JSON.stringify(profile.config, null, 2) : "";
+  const [text, setText] = useState(seed);
+  const [config, setConfig] = useState<any>(profile?.config || null);
+  const [errors, setErrors] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const extract = async () => {
+    setBusy(true);
+    const res = await mutate({ type: "parseRiskConfig", text });
+    setBusy(false);
+    setConfig(res.config || null);
+    setErrors(res.errors || []);
+  };
+  const pct = (x: number) => x != null ? `${(x * 100).toFixed(x < 0.1 ? 1 : 0)}%` : "—";
+  return (
+    <Modal title={profile ? `Профиль · ${profile.name}` : "Новый риск-профиль"} onClose={onClose}>
+      <label style={S.fieldLabel}>Название</label>
+      <input style={{ ...S.input, width: "100%" }} value={name} onChange={(e) => setName(e.target.value)} placeholder="напр. Агрессивный" />
+      <label style={S.fieldLabel}>Значения словами (min_edge, kelly_fraction_base, max_position_pct, absurd_edge_block…)</label>
+      <textarea style={S.textarea} value={text} onChange={(e) => setText(e.target.value)} placeholder={"min_edge: 0.05\nmin_calibration: 0.45\nkelly_fraction_base: 0.20\nkelly_fraction_clamp: [0.05, 0.33]\nmax_position_pct: 0.05\nmax_match_exposure_pct: 0.10\nabsurd_edge_block: 0.25"} />
+      <button style={S.parseBtn} onClick={extract} disabled={!text.trim() || busy}>{busy ? "движок структурирует…" : "→ Вытащить и захардкодить"}</button>
+      {errors.length > 0 && <div style={S.warnBox}>{errors.map((x, i) => <div key={i}>{x}</div>)}</div>}
+      {config && (
+        <div style={S.parsedBox}>
+          <div style={S.parsedLabel}>Провалидированный конфиг{config._defaults_used?.length ? ` · ${config._defaults_used.length} по дефолту` : ""}:</div>
+          <div style={S.rpGrid}>
+            <div style={S.rpCell}><span style={S.rpK}>min_edge</span><span style={S.rpV}>{pct(config.entry_thresholds?.min_edge)}</span></div>
+            <div style={S.rpCell}><span style={S.rpK}>min_calibration</span><span style={S.rpV}>{config.entry_thresholds?.min_calibration}</span></div>
+            <div style={S.rpCell}><span style={S.rpK}>Kelly base</span><span style={S.rpV}>{config.sizing?.kelly_fraction_base}</span></div>
+            <div style={S.rpCell}><span style={S.rpK}>Kelly clamp</span><span style={S.rpV}>[{(config.sizing?.kelly_fraction_clamp || []).join(", ")}]</span></div>
+            <div style={S.rpCell}><span style={S.rpK}>max позиция</span><span style={S.rpV}>{pct(config.sizing?.max_position_pct)}</span></div>
+            <div style={S.rpCell}><span style={S.rpK}>max на матч</span><span style={S.rpV}>{pct(config.sizing?.max_match_exposure_pct)}</span></div>
+            <div style={S.rpCell}><span style={S.rpK}>дневной стоп</span><span style={S.rpV}>{pct(config.bankroll_limits?.daily_loss_limit_pct)}</span></div>
+            <div style={S.rpCell}><span style={S.rpK}>killswitch</span><span style={S.rpV}>{pct(config.safeguards?.global_drawdown_killswitch_pct)}</span></div>
+            <div style={S.rpCell}><span style={S.rpK}>absurd edge</span><span style={S.rpV}>{pct(config.safeguards?.absurd_edge_block)}</span></div>
+          </div>
+        </div>
+      )}
+      <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Отмена</button><button style={{ ...S.saveBtn, opacity: (name.trim() && config) ? 1 : 0.4 }} disabled={!name.trim() || !config} onClick={() => onSave({ id: profile?.id, name: name.trim(), config })}>Сохранить</button></div>
+    </Modal>
   );
 }
 
@@ -1850,38 +1947,34 @@ function SharesModal({ comp, strats, profiles, budget, rows, onClose, onSave }: 
 function PromptModal({ title, strat, availableModels, onGoModels, onClose, onSave }: any) {
   const [name, setName] = useState(strat?.name || "");
   const [prompt, setPrompt] = useState(strat?.prompt || "");
+  const [promptLive, setPromptLive] = useState(strat?.promptLive || "");
   const [model, setModel] = useState(strat?.model || (availableModels[0] || ""));
-  const [parsed, setParsed] = useState<any>(strat?.params || null);
-  const [parsing, setParsing] = useState(false);
   const [gen, setGen] = useState(false);
-  const runParse = async () => {
-    setParsing(true);
-    const res = await mutate({ type: "parseThresholds", prompt });
-    setParsed(res.params || { note: "пороги не распознаны" });
-    setParsing(false);
-  };
   const genName = async () => {
     setGen(true);
     const res = await mutate({ type: "suggestName", prompt });
     if (res.name) setName(res.name);
     setGen(false);
   };
-  const canSave = name.trim() && prompt.trim() && parsed;
+  // Sizing/thresholds now come from the assigned risk profile (risk_config), not
+  // per-strategy params — a strategy is its two prompts. params kept empty.
+  const canSave = name.trim() && prompt.trim();
   return (
     <Modal title={title} onClose={onClose}>
       <label style={S.fieldLabel}>Название</label>
       <div style={S.nameRow}>
-        <input style={{ ...S.input, flex: 1 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="напр. Playoff Guard" />
+        <input style={{ ...S.input, flex: 1 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="напр. Overreaction" />
         <button style={S.genNameBtn} onClick={genName} disabled={!prompt.trim() || gen} title="Придумать название">{gen ? "…" : "✨ придумать"}</button>
       </div>
-      {!prompt.trim() && <div style={S.genHint}>сначала опиши промт — из него сгенерируется название</div>}
+      {!prompt.trim() && <div style={S.genHint}>сначала опиши предматч-промт — из него сгенерируется название</div>}
       <label style={S.fieldLabel}>Модель, на которой думает стратегия</label>
       <ModelSelect value={model} models={availableModels} onChange={setModel} onGoModels={onGoModels} />
-      <label style={S.fieldLabel}>Промт (вход, размер, переоценка, выход, ограничители — словами)</label>
-      <textarea style={S.textarea} value={prompt} onChange={(e) => { setPrompt(e.target.value); setParsed(null); }} placeholder={"Входи при edge >= 4% и высокой уверенности.\nОграничители: не более 12% на ставку, стоп -20%."} />
-      <button style={S.parseBtn} onClick={runParse} disabled={!prompt.trim() || parsing}>{parsing ? "движок парсит…" : "→ Распознать пороги движком"}</button>
-      {parsed && <div style={S.parsedBox}><div style={S.parsedLabel}>Движок распознал пороги:</div><div style={S.paramList}>{Object.entries(parsed).map(([k, v]) => { const d = describeParam(k, v); return <div key={k} style={{ ...S.paramItem, ...(k === "note" ? { borderColor: "#e8a83866" } : {}) }}><span style={S.paramItemLabel}>{d.label}</span><span style={{ ...S.paramItemValue, ...(k === "note" ? { color: "#e8a838" } : {}) }}>{d.value}</span></div>; })}</div></div>}
-      <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Отмена</button><button style={{ ...S.saveBtn, opacity: canSave ? 1 : 0.4 }} disabled={!canSave} onClick={() => onSave({ name, prompt, model, params: parsed, tag: "custom" })}>Сохранить</button></div>
+      <label style={S.fieldLabel}>① Предматч-окно (что открыть до матча + заготовки live-плана)</label>
+      <textarea style={S.textarea} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={"# ПРЕДМАТЧ\nОчисти цену от vig (код), edge посчитан, риск-конфиг — закон…"} />
+      <label style={S.fieldLabel}>② Лайв-окно (как вести/выкупать/защищать в игре)</label>
+      <textarea style={S.textarea} value={promptLive} onChange={(e) => setPromptLive(e.target.value)} placeholder={"# LIVE\nИсполняешь заготовки из боевого листа: событие + цена → действие…"} />
+      {!promptLive.trim() && <div style={S.genHint}>без лайв-окна стратегия не сможет вести позиции в игре (модуль 5)</div>}
+      <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Отмена</button><button style={{ ...S.saveBtn, opacity: canSave ? 1 : 0.4 }} disabled={!canSave} onClick={() => onSave({ name, prompt, promptLive, model, params: {}, tag: "custom" })}>Сохранить</button></div>
     </Modal>
   );
 }
@@ -2090,6 +2183,15 @@ const S: Record<string, React.CSSProperties> = {
   decisionName: { fontSize: 13, fontWeight: 700 },
   decisionVerdict: { marginLeft: "auto", fontSize: 10.5, color: "#7fb4e8", background: "#1e2836", borderRadius: 20, padding: "2px 10px", fontFamily: "'JetBrains Mono', monospace" },
   decisionText: { fontSize: 12.5, color: "#d3d8e0", lineHeight: 1.55, marginTop: 8 },
+  rpCard: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 14, marginBottom: 10 },
+  rpHead: { display: "flex", alignItems: "center", gap: 10, marginBottom: 10 },
+  rpName: { fontSize: 14, fontWeight: 700, color: TEXT },
+  rpId: { fontSize: 11, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
+  rpBtn: { fontSize: 11.5, fontWeight: 600, color: "#cbd3e0", background: "#20262f", border: `1px solid ${LINE}`, borderRadius: 6, padding: "4px 10px", cursor: "pointer" },
+  rpGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8 },
+  rpCell: { display: "flex", flexDirection: "column", gap: 2, background: INK, border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 8px" },
+  rpK: { fontSize: 10.5, color: MUTE },
+  rpV: { fontSize: 13, fontWeight: 600, color: "#e6e9ef", fontFamily: "'JetBrains Mono', monospace" },
   artifactList: { display: "flex", flexDirection: "column", gap: 8 },
   artifactBlock: { border: `1px solid ${LINE}`, borderRadius: 8, background: "#12161d", overflow: "hidden" },
   artifactHead: { display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", flexWrap: "wrap" },
