@@ -191,6 +191,11 @@ export function updateStrategy(
 /** Remove a strategy and all of its dependent rows (paper data — no FK cascade
  * in the schema, so we delete children first, in FK-safe order). */
 export function deleteStrategy(db: Database, id: string): void {
+  // analysis_artifacts (strategist / battle_sheet) are keyed by label = strategy
+  // NAME (± " · profile"), not strategy_id — clean them by name so a deleted
+  // strategy's artifacts don't linger in the «Анализ» tab.
+  const name = (db.prepare(`SELECT name FROM strategies WHERE id=?`).get(id) as { name?: string } | undefined)?.name;
+  if (name) db.prepare(`DELETE FROM analysis_artifacts WHERE kind IN ('strategist','battle_sheet') AND (label=? OR label LIKE ?)`).run(name, `${name} · %`);
   for (const sql of [
     `DELETE FROM trade_log WHERE strategy_id=?`,
     `DELETE FROM reassessments WHERE strategy_id=?`,

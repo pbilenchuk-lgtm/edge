@@ -581,6 +581,9 @@ const STRATEGIST_DEFS: Array<Pick<Parameters<typeof R.insertStrategy>[1], "id" |
   { id: "live_xg", name: "Live xG Momentum", tag: "live xG", color: "#70b56a", prompt: STRAT_LIVEXG_PREMATCH, prompt_live: STRAT_LIVEXG_LIVE },
 ];
 export function migrateSeedStrategists(db: Database, now: string): void {
+  // strategies.sport_id has an FK to sports(id); on a brand-new DB the sport row
+  // may not exist yet at boot, which would FK-throw and leave the roster missing.
+  R.upsertSport(db, "football", SPORT_LABELS["football"] ?? "Футбол");
   for (const d of STRATEGIST_DEFS) {
     if (R.getStrategy(db, d.id)) continue;
     R.insertStrategy(db, { id: d.id, sport_id: "football", name: d.name, tag: d.tag, color: d.color, version: 1, model: "Claude Opus 4.8", created_at: now, prompt: d.prompt, prompt_live: d.prompt_live, params: {} });

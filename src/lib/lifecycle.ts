@@ -199,15 +199,19 @@ export async function autoRunStrategists(db: Database, deps: EngineDeps = {}, op
   const budgetByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.budget]));
   const strategyById = new Map(R.listStrategies(db).map((s) => [s.id, s]));
   const out: AutoStrategistItem[] = [];
-  for (const { comp, match: m } of activeMatches(db)) {
+  for (const { comp, sport, match: m } of activeMatches(db)) {
     if (out.length >= max) break;
     if (m.state === "live" || m.state === "finished") continue;      // live is the reassess/live-executor path
     if ((budgetByComp.get(comp) ?? 0) <= 0) continue;
     if (!R.latestMarkets(db, m.id).length) continue;
     if (!R.assessmentsForMatch(db, m.id).some((a) => a.status === "ok")) continue; // not analysed yet → autoAnalyze handles it
     if (jobActive(R.getAnalysisJob(db, m.id), Date.now())) continue;   // analysis in flight
+    // Build the expected-pair set the SAME way the producer (runStrategists) does:
+    // strategies of the comp's sport only. Otherwise a cross-sport share would
+    // expect a battle_sheet the producer never emits → the marker never completes
+    // → re-run every tick.
     const pairs = R.sharesForComp(db, comp)
-      .filter((sh) => sh.pct > 0 && strategyById.has(sh.strategy_id))
+      .filter((sh) => sh.pct > 0 && strategyById.get(sh.strategy_id)?.sport_id === sport)
       .map((sh) => `${strategyById.get(sh.strategy_id)!.name} · ${sh.risk_profile_id}`);
     if (!pairs.length) continue;
     const sheets = new Set(R.artifactsForMatch(db, m.id).filter((a) => a.kind === "battle_sheet").map((a) => a.label));

@@ -14,6 +14,23 @@ test("siblingLabel: pairs Over/Under and Yes/No, null for one-sided", () => {
   assert.equal(siblingLabel("Team to Advance — Portugal", labels), null);
 });
 
+test("siblingLabel: Yes/No de-vig is symmetric even with inconsistent dash formatting", () => {
+  const labels = ["BTTS - Yes", "BTTS No"]; // one side dashed, the other not
+  assert.equal(siblingLabel("BTTS - Yes", labels), "BTTS No", "yes side finds no side");
+  assert.equal(siblingLabel("BTTS No", labels), "BTTS - Yes", "no side finds yes side (symmetric)");
+  // both sides de-vig to the same group → sum to 1
+  const imp = impliedProbs([{ label: "BTTS - Yes", priceCents: 58 }, { label: "BTTS No", priceCents: 49 }]);
+  assert.ok(imp.get("BTTS - Yes")!.sided && imp.get("BTTS No")!.sided, "both sides de-vigged");
+  assert.ok(Math.abs((imp.get("BTTS - Yes")!.implied + imp.get("BTTS No")!.implied) - 1) < 1e-9);
+});
+
+test("sizePrematch: a binding cap is honored with FLOOR — never exceeded by rounding", () => {
+  // max_position_pct 5% of budget 110 = $5.50 cap; a big edge would size past it.
+  const r = sizePrematch({ ourProb: 0.75, priceCents: 55, implied: 0.55, calibration: 0.8, budget: 110, cfg: MED });
+  assert.equal(r.status, "enter");
+  assert.ok(r.stake <= 5, `floored at or below the $5.50 cap, got ${r.stake}`); // 5, not 6
+});
+
 test("impliedProbs: de-vigs a two-sided group to sum 1; raw for one-sided", () => {
   // Over 55¢ + Under 52¢ = 1.07 vig → implied Over = 55/107 ≈ 0.514
   const imp = impliedProbs([{ label: "Over 2.5", priceCents: 55 }, { label: "Under 2.5", priceCents: 52 }, { label: "Team to Advance — X", priceCents: 70 }]);

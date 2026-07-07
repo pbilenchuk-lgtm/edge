@@ -23,6 +23,11 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
  * team totals) and "… — Yes" ⇄ "… — No" (BTTS etc.). One-sided markets (a lone
  * "Team to Advance", a handicap) have no sibling → priced raw.
  */
+// Strip a trailing "yes"/"no" (with any separator/spacing) → the group stem, so
+// two sides of a Yes/No market normalise to the SAME key regardless of how each
+// is formatted ("BTTS - Yes" and "BTTS No" both → "btts"). Symmetric de-vig.
+const yesNoSide = (n: string): "yes" | "no" | null => { const m = n.match(/\b(yes|no)\s*$/); return m ? (m[1] as "yes" | "no") : null; };
+const yesNoStem = (n: string): string => n.replace(/\s*(—|-)?\s*(yes|no)\s*$/, "").trim();
 export function siblingLabel(label: string, labels: string[]): string | null {
   const n = norm(label);
   const find = (target: string) => labels.find((l) => l !== label && norm(l) === target) ?? null;
@@ -30,10 +35,14 @@ export function siblingLabel(label: string, labels: string[]): string | null {
   if (m) { const hit = find(`${m[1]}under${m[2]}`.replace(/\s+/g, " ").trim()); if (hit) return hit; }
   m = n.match(/^(.*?)\bunder\b(.*)$/);
   if (m) { const hit = find(`${m[1]}over${m[2]}`.replace(/\s+/g, " ").trim()); if (hit) return hit; }
-  m = n.match(/^(.*?)(—|-)\s*yes$/);
-  if (m) { const hit = find(`${m[1]}${m[2]} no`.replace(/\s+/g, " ").trim()) ?? find(`${m[1]}no`.replace(/\s+/g, " ").trim()); if (hit) return hit; }
-  m = n.match(/^(.*?)(—|-)\s*no$/);
-  if (m) { const hit = find(`${m[1]}${m[2]} yes`.replace(/\s+/g, " ").trim()) ?? find(`${m[1]}yes`.replace(/\s+/g, " ").trim()); if (hit) return hit; }
+  // Yes/No: match on the group stem + opposite side, so de-vig is symmetric and
+  // works even when the two sides are dash-formatted differently.
+  const side = yesNoSide(n);
+  if (side) {
+    const stem = yesNoStem(n), want = side === "yes" ? "no" : "yes";
+    const hit = labels.find((l) => { if (l === label) return false; const nl = norm(l); return yesNoSide(nl) === want && yesNoStem(nl) === stem; });
+    if (hit) return hit;
+  }
   return null;
 }
 
@@ -134,12 +143,14 @@ export function sizePrematch(inp: SizeInput): SizeResult {
   const matchRoom = Math.max(0, cfg.sizing.max_match_exposure_pct * budget - matchExposure);
   // Budget room across the whole comp (existing §9.3 invariant).
   const compRoom = Math.max(0, budget - compExposure);
-  let stake = Math.min(fraction * budget, matchRoom, compRoom);
-  if (stake <= 0) {
+  const capped = Math.min(fraction * budget, matchRoom, compRoom);
+  if (capped <= 0) {
     if (matchRoom <= 0) return skip("исчерпан кэп экспозиции на матч");
     return skip("бюджет пары исчерпан");
   }
-  stake = Math.round(stake);
+  // FLOOR (not round): a binding cap (max_position_pct / max_match_exposure_pct /
+  // budget) must never be exceeded, not even by the ≤$0.50 that Math.round(x.5) adds.
+  const stake = Math.floor(capped);
   if (stake <= 0) return skip("размер округлился до нуля");
 
   return { status: "enter", stake, fraction: stake / budget, edge, implied, kellyFraction: kFrac, reason: `вход: edge ${(edge * 100).toFixed(1)}%, Kelly×${kFrac.toFixed(2)}, ${(stake / budget * 100).toFixed(1)}% бюджета` };
