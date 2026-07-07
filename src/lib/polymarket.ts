@@ -104,7 +104,11 @@ export function loadPolymarketConfig(
       edgeFloorCents: Number(env.EXEC_EDGE_FLOOR_CENTS ?? 1.5),
       maxImpactCents: Number(env.EXEC_MAX_IMPACT_CENTS ?? 2),
       fallbackK: Number(env.EXEC_FALLBACK_K ?? 4),
-      takerFeeRate: Number(env.POLYMARKET_TAKER_FEE_RATE ?? 0.03),
+      // Real Polymarket taker fee for the SPORTS category = 0.75% (fee schedule
+      // effective 2026-03-30; fee = C·rate·p·(1−p)). All our markets are football,
+      // so 0.0075 is the accurate rate — makers rebate, but we always cross the
+      // book (taker) on entry AND exit. Override per-env if the schedule changes.
+      takerFeeRate: Number(env.POLYMARKET_TAKER_FEE_RATE ?? 0.0075),
     },
   };
 }

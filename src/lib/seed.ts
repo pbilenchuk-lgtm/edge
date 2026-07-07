@@ -625,7 +625,32 @@ export function migrateStrategyRoster(db: Database, now: string): void {
   const pcts = [34, 33, 33]; // even thirds, sum 100
   for (const c of R.listCompetitions(db)) {
     R.clearShares(db, c.id);
-    trio.forEach((sid, i) => R.setShare(db, { competition_id: c.id, strategy_id: sid, risk_profile_id: "medium", pct: pcts[i] }));
+    trio.forEach((sid, i) => R.setShare(db, { competition_id: c.id, strategy_id: sid, risk_profile_id: "aggressive", pct: pcts[i] }));
   }
   R.deleteStrategy(db, LEGACY_STRATEGY_ID); // removes wc + its shares/bets/versions everywhere
+}
+
+// One-time reassignment: put EVERY (category × strategy) allocation onto the
+// AGGRESSIVE risk profile, so strategies are simulated at their boldest (lower
+// min-edge, bigger Kelly, wider stops, later take-profit). Guarded by a persistent
+// marker so it runs exactly once and never clobbers the user's later manual
+// profile picks. Per competition, collapse each strategy's shares to a single
+// aggressive row (summing pct across any prior profiles → total budget preserved),
+// then retag still-live bets so their exits use the aggressive thresholds too.
+const AGGRESSIVE_MARK = "shares_aggressive_v1";
+export function migrateSharesToAggressive(db: Database, now: string): void {
+  if (R.metaGet(db, AGGRESSIVE_MARK)) return;
+  for (const c of R.listCompetitions(db)) {
+    const shares = R.sharesForComp(db, c.id);
+    if (!shares.length) continue;
+    const byStrat = new Map<string, number>();
+    for (const s of shares) byStrat.set(s.strategy_id, (byStrat.get(s.strategy_id) ?? 0) + s.pct);
+    R.clearShares(db, c.id);
+    for (const [sid, pct] of byStrat)
+      R.setShare(db, { competition_id: c.id, strategy_id: sid, risk_profile_id: "aggressive", pct });
+  }
+  // Retag open/proposed positions so their live exits read the aggressive profile;
+  // settled bets keep their historical tag (don't rewrite realized P&L).
+  db.prepare(`UPDATE bets SET risk_profile_id='aggressive' WHERE status IN ('open','proposed')`).run();
+  R.metaSet(db, AGGRESSIVE_MARK, now, now);
 }

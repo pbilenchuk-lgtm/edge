@@ -313,6 +313,18 @@ export function clearShares(db: Database, competitionId: string): void {
   db.prepare(`DELETE FROM strategy_shares WHERE competition_id=?`).run(competitionId);
 }
 
+// ---------- app_meta (KV: migration markers etc.) ----------
+export function metaGet(db: Database, key: string): string | null {
+  const row = db.prepare(`SELECT value FROM app_meta WHERE key=?`).get(key) as { value?: string } | undefined;
+  return row?.value ?? null;
+}
+export function metaSet(db: Database, key: string, value: string, now: string): void {
+  db.prepare(
+    `INSERT INTO app_meta(key,value,updated_at) VALUES(?,?,?)
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+  ).run(key, value, now);
+}
+
 // ---------- matches ----------
 export function insertMatch(db: Database, m: Match): void {
   db.prepare(

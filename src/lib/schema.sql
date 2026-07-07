@@ -52,6 +52,14 @@ CREATE TABLE IF NOT EXISTS risk_profiles (
   created_at TEXT NOT NULL
 );
 
+-- app_meta — tiny key/value store for one-time migration markers and similar
+-- boot bookkeeping. Additive (IF NOT EXISTS), so old prod DBs pick it up cleanly.
+CREATE TABLE IF NOT EXISTS app_meta (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 -- §2.4 analytics_prompts (аналитические промты; scope = sport | competition)
 CREATE TABLE IF NOT EXISTS analytics_prompts (
   id         TEXT PRIMARY KEY,

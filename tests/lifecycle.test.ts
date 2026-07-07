@@ -94,7 +94,7 @@ test("autoEnter executes against the order book — VWAP fill + depth cap on a t
   // ceiling 53.5; impact 2 over 47 → 49. cap = min = 49¢ → only 47+48 qualify ⇒ ~$142.
   const book = { asks: [{ price: "0.47", size: "200" }, { price: "0.48", size: "100" }, { price: "0.60", size: "5000" }], bids: [{ price: "0.46", size: "300" }] };
   const fetchImpl = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
-  const res = await autoEnter(db, { now: () => "t", polymarket: loadPolymarketConfig({ POLYMARKET_ENABLED: "true" }), fetchImpl });
+  const res = await autoEnter(db, { now: () => "t", polymarket: loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" }), fetchImpl });
 
   const b = R.getBet(db, "bk-1")!;
   assert.equal(b.status, "open");
@@ -120,7 +120,7 @@ test("evaluateExits fills the close against the bid book — exit slippage into 
   // 200 shares to sell. bids: 78¢×100 + 70¢×500 → sell 200 = 100@78 + 100@70 ⇒ VWAP 74¢ (not the 80¢ mid).
   const book = { asks: [{ price: "0.82", size: "100" }], bids: [{ price: "0.78", size: "100" }, { price: "0.70", size: "500" }] };
   const fetchImpl = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
-  const exits = await evaluateExits(db, { now: () => "t", polymarket: loadPolymarketConfig({ POLYMARKET_ENABLED: "true" }), fetchImpl });
+  const exits = await evaluateExits(db, { now: () => "t", polymarket: loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" }), fetchImpl });
 
   assert.equal(exits.length, 1);
   const b = R.getBet(db, "ex-1")!;

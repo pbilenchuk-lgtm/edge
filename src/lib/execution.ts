@@ -133,9 +133,9 @@ export function parametricSellAvgCents(quoteCents: number, notionalUsd: number, 
 /**
  * Polymarket TAKER fee per share, in cents. fee$ = feeRate · p · (1−p) with p in
  * dollars; ×100 for cents = feeRate · p · (100−p) / 100 (p in cents). Symmetric
- * around 50¢ where it peaks (sports feeRate 0.03 → 0.75¢/share = $0.75 per 100).
- * Makers pay 0; we cross the book (taker) on BOTH entry and exit, so it applies
- * each way and must be subtracted from realized P&L.
+ * around 50¢ where it peaks (real sports feeRate 0.0075 → 0.1875¢/share ≈ $0.19
+ * per 100 shares at 50¢). Makers rebate; we cross the book (taker) on BOTH entry
+ * and exit, so it applies each way and must be subtracted from realized P&L.
  */
 export function takerFeeCents(priceCents: number, feeRate: number): number {
   const p = Math.max(0, Math.min(100, priceCents));

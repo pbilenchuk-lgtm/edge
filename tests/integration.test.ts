@@ -148,7 +148,7 @@ test("seedMinimal seeds three two-phase strategists + three named risk profiles"
   assert.equal(R.listStrategies(db, "football").length, 3);
 });
 
-test("migrateStrategyRoster: retires legacy wc, assigns the trio (medium) to every comp, once", () => {
+test("migrateStrategyRoster: retires legacy wc, assigns the trio (aggressive) to every comp, once", () => {
   const db = openDb(":memory:");
   seedRiskProfiles(db, "t");
   // simulate the pre-transition prod state: only the legacy strategy, funded comps
@@ -168,12 +168,12 @@ test("migrateStrategyRoster: retires legacy wc, assigns the trio (medium) to eve
   for (const id of ["pm-a", "pm-b"]) {
     const rows = R.sharesForComp(db, id);
     assert.equal(rows.length, 3, `${id} has three pairs`);
-    assert.ok(rows.every((r) => r.risk_profile_id === "medium"), "all on medium");
+    assert.ok(rows.every((r) => r.risk_profile_id === "aggressive"), "all on aggressive");
     assert.equal(rows.reduce((a, r) => a + r.pct, 0), 100, "shares sum to 100");
     assert.ok(!rows.some((r) => r.strategy_id === "wc"), "no wc share");
   }
   // idempotent: re-run does nothing (wc already gone), doesn't re-clobber shares
-  R.setShare(db, { competition_id: "pm-a", strategy_id: "overreaction", risk_profile_id: "medium", pct: 50 });
+  R.setShare(db, { competition_id: "pm-a", strategy_id: "overreaction", risk_profile_id: "aggressive", pct: 50 });
   migrateStrategyRoster(db, "t");
   assert.equal(R.sharesForComp(db, "pm-a").find((r) => r.strategy_id === "overreaction")!.pct, 50, "manual edit preserved after transition");
 });

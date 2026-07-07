@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { migrateCanonicalPrompts, migrateStrategyRoster } from "./seed.js";
+import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive } from "./seed.js";
 import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
 
 // node:sqlite is experimental and not in @types/node, so require it
@@ -75,6 +75,11 @@ export function getDb(path = dbPath()): Database {
   // ships, retire the legacy "wc" strategy and assign the trio (medium profile)
   // to every competition. One-time (gated on wc existing); non-recurring.
   try { migrateStrategyRoster(db, new Date().toISOString()); }
+  catch { /* non-fatal */ }
+  // One-time: move every (category × strategy) allocation onto the AGGRESSIVE
+  // profile (and retag live bets). Marker-guarded, so it runs once and respects
+  // later manual profile changes.
+  try { migrateSharesToAggressive(db, new Date().toISOString()); }
   catch { /* non-fatal */ }
   _db = db;
   return db;
