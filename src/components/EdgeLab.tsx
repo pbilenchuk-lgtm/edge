@@ -734,7 +734,16 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
   // bank strip / portfolio use (client odds refresh updates markets[].price but
   // not the bet's currentPrice), keeping the views consistent between reloads.
   const curByLabel: Record<string, number> = {};
-  for (const mk of (match.markets || [])) if (!(mk.label in curByLabel)) curByLabel[mk.label] = mk.price;
+  for (const mk of (match.markets || [])) {
+    if (!(mk.label in curByLabel)) curByLabel[mk.label] = mk.price;
+    // orderMarkets() shows a bare yes-side as "X — Yes" when an "X — No" sibling
+    // exists (e.g. Draw → "Draw — Yes"), but bets are stored under the raw label
+    // ("Draw"). Register the stripped base too, so a bet on such a market still
+    // marks to the live 3s quote instead of silently falling back to the stale
+    // server-snapshot currentPrice — which read as a quote mismatch on the card.
+    const bare = mk.label.replace(/\s—\sYes$/, "");
+    if (bare !== mk.label && !(bare in curByLabel)) curByLabel[bare] = mk.price;
+  }
   // One flash slot next to ↻, two meanings: GREEN when a price actually changed,
   // RED when a refresh failed (oddsErrKey bumped by the parent). `n` keys the
   // animation restart; `kind` picks the colour.
