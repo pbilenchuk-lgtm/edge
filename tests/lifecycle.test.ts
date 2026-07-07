@@ -104,7 +104,31 @@ test("autoEnter executes against the order book — VWAP fill + depth cap on a t
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "enter" && /VWAP/.test(l.text)), "execution quality logged");
 });
 
-test("evaluateExits closes an open position when the edge is gone", () => {
+test("evaluateExits fills the close against the bid book — exit slippage into P&L", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 80, ai_prob: 0.9, liquidity: "1000", external_ref: "TOKEN", snapshot_at: "t", is_closing: false });
+  // entry 50¢, mid 80¢ → +60% ⇒ take-profit fires; ai_prob 90% keeps edge (no edge-gone).
+  R.insertBet(db, { id: "ex-1", match_id: mid, strategy_id: strat.id, market_label: "Over 1.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 80, closing_price: null, ai_prob: 0.9, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+
+  // 200 shares to sell. bids: 78¢×100 + 70¢×500 → sell 200 = 100@78 + 100@70 ⇒ VWAP 74¢ (not the 80¢ mid).
+  const book = { asks: [{ price: "0.82", size: "100" }], bids: [{ price: "0.78", size: "100" }, { price: "0.70", size: "500" }] };
+  const fetchImpl = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
+  const exits = await evaluateExits(db, { now: () => "t", polymarket: loadPolymarketConfig({ POLYMARKET_ENABLED: "true" }), fetchImpl });
+
+  assert.equal(exits.length, 1);
+  const b = R.getBet(db, "ex-1")!;
+  assert.equal(b.closing_price, 74, "closed at the bid-book VWAP, not the 80¢ mid");
+  assert.equal(b.payout, 148, "100 × 74/50 — exit slippage booked into P&L (vs 160 at the mid)");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "exit" && /выход VWAP/.test(l.text)), "exit execution logged");
+});
+
+test("evaluateExits closes an open position when the edge is gone", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
@@ -115,7 +139,7 @@ test("evaluateExits closes an open position when the edge is gone", () => {
   const bid = R.uid();
   R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 62, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "40'", result: null, payout: null, created_at: "t" });
 
-  const exits = evaluateExits(db, { now: () => "t" });
+  const exits = await evaluateExits(db, { now: () => "t" });
   assert.equal(exits.length, 1);
   assert.match(exits[0].reason, /край/);
   const b = R.betsForMatch(db, mid).find((x) => x.id === bid)!;
@@ -236,7 +260,7 @@ test("strategistReassess skips a time-flipped lineup match that is not yet live 
   assert.equal(R.reassessmentsForMatch(db, pm).length, 0, "no reassessment on a not-yet-live lineup match");
 });
 
-test("evaluateExits holds an open position pre-match (lineup_out, not live) — no churn", () => {
+test("evaluateExits holds an open position pre-match (lineup_out, not live) — no churn", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
@@ -248,12 +272,12 @@ test("evaluateExits holds an open position pre-match (lineup_out, not live) — 
   R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 62, ai_prob: 0.4, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
   const bid = R.uid();
   R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 62, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
-  const exits = evaluateExits(db, { now: () => "t" });
+  const exits = await evaluateExits(db, { now: () => "t" });
   assert.equal(exits.length, 0, "no pre-match exit");
   assert.equal(R.getBet(db, bid)!.status, "open", "position held until kickoff");
   // once live, the same edge-gone rule fires
   R.updateMatch(db, mid, { state: "live", minute: 10 });
-  assert.equal(evaluateExits(db, { now: () => "t" }).length, 1, "closes once live");
+  assert.equal((await evaluateExits(db, { now: () => "t" })).length, 1, "closes once live");
 });
 test("strategistReassess supports partial fixation (fraction)", async () => {
   const db = openDb(":memory:");

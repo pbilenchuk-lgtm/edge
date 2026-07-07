@@ -19,7 +19,7 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches } from "./engine.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBook, type PolymarketConfig } from "./polymarket.js";
-import { simulateBuy, maxExecutableBuyUsd, parametricBuyAvgCents } from "./execution.js";
+import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents } from "./execution.js";
 import type { Bet, Market } from "./types.js";
 import { analyzeMatch, jobActive, matchContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision, sizeBet } from "./thresholds.js";
@@ -236,6 +236,30 @@ async function executeEntry(
 const appendReason = (existing: string | null, note?: string): string =>
   [existing, note].filter(Boolean).join(" · ");
 
+/** Realistic exit price: sell the closed position's shares into the bid side of
+ *  the real book (VWAP), so exit slippage is booked into P&L. Only called when a
+ *  close is actually happening, so the book fetch stays bounded. `basisUsd` is the
+ *  stake being closed (full or partial). Falls back to a parametric haircut, or
+ *  (execution off) the passed quote. */
+async function sellVwapCents(
+  mk: Market | undefined, entryCents: number, basisUsd: number,
+  poly: PolymarketConfig, deps: EngineDeps, quoteCents: number,
+): Promise<{ cents: number; note?: string }> {
+  if (!poly.enabled) return { cents: quoteCents };
+  const token = mk?.external_ref ?? null;
+  const shares = entryCents > 0 ? basisUsd / (entryCents / 100) : 0;
+  const book = token && shares > 0 ? await fetchOrderBook(token, poly, deps) : null;
+  if (book && book.bids.length) {
+    const f = simulateSell(book.bids, shares);
+    const bestBid = book.bids[0].priceCents;
+    const slip = Math.round((bestBid - f.avgPriceCents) * 10) / 10;
+    return { cents: f.avgPriceCents, note: `выход VWAP ${f.avgPriceCents}¢ (бид ${bestBid}¢${slip > 0 ? `, слип −${slip}¢` : ""})` };
+  }
+  const liq = Number(mk?.liquidity ?? 0) || 0;
+  const avg = parametricSellAvgCents(quoteCents, basisUsd, liq, poly.exec.fallbackK);
+  return { cents: avg, note: `≈выход ${avg}¢ (модель по ликвидности)` };
+}
+
 export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<AutoEnterItem[]> {
   const now = nowFn(deps)();
   const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
@@ -339,8 +363,9 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
   return { pnl, partial: true };
 }
 
-export function evaluateExits(db: Database, deps: EngineDeps = {}): ExitItem[] {
+export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promise<ExitItem[]> {
   const now = nowFn(deps)();
+  const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
   const out: ExitItem[] = [];
   const touched = new Set<string>();
   for (const { match: m } of activeMatches(db)) {
@@ -362,8 +387,10 @@ export function evaluateExits(db: Database, deps: EngineDeps = {}): ExitItem[] {
       // stop can fire. (Defensive: entries always store a non-null ai_prob.)
       const d = exitDecision({ params: strat.params, aiProb: b.ai_prob ?? 1, entryPriceCents: b.entry_price, currentPriceCents: mk.price });
       if (!d.exit) continue;
-      const pnl = closeBetEarly(db, b, mk.price, d.reason, minuteLabel(m), now);
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${mk.price}¢ · ${d.reason} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+      // Fill the close against the real book (sell into bids) — exit slippage into P&L.
+      const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price);
+      const pnl = closeBetEarly(db, b, sell.cents, d.reason, minuteLabel(m), now);
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${d.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason: d.reason, pnl });
       touched.add(b.strategy_id);
     }
@@ -406,6 +433,7 @@ export async function strategistReassess(
   const triggeredOnly = opts.triggeredOnly ?? false;
   const now = nowFn(deps)();
   const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
+  const poly = deps.polymarket ?? loadPolymarketConfig(env);
   const comps = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
   const out: ReassessResult = { exits: [], entries: [] };
   const touched = new Set<string>();
@@ -489,9 +517,12 @@ export async function strategistReassess(
         // second would size off the already-shrunk stake → over-fixation.
         if (exitedIds.has(b.id)) continue;
         exitedIds.add(b.id);
-        const { pnl, partial } = closeBetPortion(db, b, ex.fraction, mk.price, minuteLabel(m), now);
+        // Fill the (partial) close against the real bid book — exit slippage into P&L.
+        const basis = (b.stake ?? 0) * Math.min(ex.fraction, 1);
+        const sell = await sellVwapCents(mk, b.entry_price, basis, poly, deps, mk.price);
+        const { pnl, partial } = closeBetPortion(db, b, ex.fraction, sell.cents, minuteLabel(m), now);
         const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
-        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag}) @ ${mk.price}¢ · стратег: ${ex.reason} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag}) @ ${sell.cents}¢ · стратег: ${ex.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
         out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}`, pnl });
         exitedMarkets.push(`${b.market_label} (${tag})`);
         touched.add(sid);
@@ -621,7 +652,7 @@ export async function runAutoCycle(
   // deterministic safety-net exits, then strategist-driven reassessment (exits +
   // fresh entries) on matches with risk or a fresh live trigger.
   const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [] } as ReassessResult);
-  const exited = [...stepSync("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
+  const exited = [...await step("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
   const entered = await step("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
   stepSync("prune", () => R.pruneMarketSnapshots(db), 0); // keep the snapshot history bounded (persistent DB)
   // Bound the matches table: drop finished/stale matches that carry NO bets (the
@@ -806,7 +837,7 @@ export async function runLiveCycle(
   for (const id of periodicReassessMatches(db, deps)) if (!labelFor.has(id)) labelFor.set(id, "time");
   const reassessIds = new Set(labelFor.keys());
 
-  const detExits = stepSyncLive("exits", () => evaluateExits(db, deps), [] as ExitItem[]); // cheap TP/stop, reacts to price every tick
+  const detExits = await stepLive("exits", () => evaluateExits(db, deps), [] as ExitItem[]); // cheap TP/stop, reacts to price every tick
   const reassess = await stepLive("reassess", () => strategistReassess(db, deps, { newEventMatchIds: reassessIds, triggeredOnly: true, labelFor }), { exits: [], entries: [] } as ReassessResult);
   await stepLive("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fill any positions the strategist just opened
 
