@@ -21,7 +21,7 @@ import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarket
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBook, type PolymarketConfig } from "./polymarket.js";
 import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents, liquidationCents } from "./execution.js";
 import type { Bet, Market } from "./types.js";
-import { analyzeMatch, jobActive, matchContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
+import { analyzeMatch, runStrategists, jobActive, matchContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision, sizeBet } from "./thresholds.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -179,6 +179,39 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
     if (jobActive(R.getAnalysisJob(db, m.id), Date.now())) continue; // a run is in flight
     const r = await analyzeMatch(db, m.id, deps);
     out.push({ matchId: m.id, match: `${m.home}–${m.away}`, stage, ok: r.ok, bets: r.betsCreated ?? 0 });
+  }
+  return out;
+}
+
+export interface AutoStrategistItem { matchId: string; match: string; bets: number }
+/**
+ * Unified strategist engine — the RE-RUN pass. For an already-analysed, funded,
+ * NON-live match whose CURRENT (strategy, profile) roster hasn't produced a
+ * battle_sheet yet (e.g. right after the roster/shares changed), re-run the
+ * strategists off the stored analysis — WITHOUT re-running the expensive LLM
+ * analysis. The per-pair battle_sheet artifact is the "already ran" marker, so
+ * this self-limits: once every current pair has one, the match is skipped.
+ */
+export async function autoRunStrategists(db: Database, deps: EngineDeps = {}, opts: { max?: number } = {}): Promise<AutoStrategistItem[]> {
+  const max = opts.max ?? 6;
+  const budgetByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.budget]));
+  const strategyById = new Map(R.listStrategies(db).map((s) => [s.id, s]));
+  const out: AutoStrategistItem[] = [];
+  for (const { comp, match: m } of activeMatches(db)) {
+    if (out.length >= max) break;
+    if (m.state === "live" || m.state === "finished") continue;      // live is the reassess/live-executor path
+    if ((budgetByComp.get(comp) ?? 0) <= 0) continue;
+    if (!R.latestMarkets(db, m.id).length) continue;
+    if (!R.assessmentsForMatch(db, m.id).some((a) => a.status === "ok")) continue; // not analysed yet → autoAnalyze handles it
+    if (jobActive(R.getAnalysisJob(db, m.id), Date.now())) continue;   // analysis in flight
+    const pairs = R.sharesForComp(db, comp)
+      .filter((sh) => sh.pct > 0 && strategyById.has(sh.strategy_id))
+      .map((sh) => `${strategyById.get(sh.strategy_id)!.name} · ${sh.risk_profile_id}`);
+    if (!pairs.length) continue;
+    const sheets = new Set(R.artifactsForMatch(db, m.id).filter((a) => a.kind === "battle_sheet").map((a) => a.label));
+    if (pairs.every((p) => sheets.has(p))) continue;                  // current roster already ran here
+    const r = await runStrategists(db, m.id, deps);
+    out.push({ matchId: m.id, match: `${m.home}–${m.away}`, bets: r.betsCreated });
   }
   return out;
 }
@@ -668,6 +701,9 @@ export async function runAutoCycle(
   // reassessment proposals created in the same cycle. Running it first means the
   // reassessment's entries are added afterwards and survive to autoEnter.
   const analyzed = await step("analyze", () => autoAnalyze(db, deps), [] as AutoAnalyzeItem[]);
+  // Re-run the strategist engine on already-analysed matches whose current roster
+  // changed (e.g. after reassigning strategies/profiles) — cheap, no re-analysis.
+  await step("runStrategists", () => autoRunStrategists(db, deps), [] as AutoStrategistItem[]);
   // deterministic safety-net exits, then strategist-driven reassessment (exits +
   // fresh entries) on matches with risk or a fresh live trigger.
   const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [] } as ReassessResult);

@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats } from "../src/lib/lifecycle.js";
 import { analyzeMatch } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
@@ -526,6 +526,30 @@ test("autoAnalyze analyzes an eligible match once per stage", async () => {
 
   const second = await autoAnalyze(db, deps);
   assert.ok(!second.some((a) => a.matchId === "m-lineup"), "not re-analyzed for the same stage");
+});
+
+test("autoRunStrategists re-runs the engine for a NEW roster pair, without re-analysis, self-limiting", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM assessments; DELETE FROM analysis_artifacts;");
+  const deps = { fetchImpl: mockLLM({ match_type: "group", match_type_reason: "ничья есть", core: { xg_home: 1.6, xg_away: 1.1, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 }, overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 8, notes: "" }, unknowns: [] }), env: { ANTHROPIC_API_KEY: "k" } };
+  await autoAnalyze(db, deps); // analyses m-lineup → ok assessment + battle_sheets for the seeded (medium) pairs
+  assert.ok(R.assessmentsForMatch(db, "m-lineup").some((a) => a.status === "ok"));
+
+  // roster change: drop the seeded pairs, assign edge on the AGGRESSIVE profile
+  R.clearShares(db, "wc2026");
+  R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", risk_profile_id: "aggressive", pct: 60 });
+  assert.ok(!R.artifactsForMatch(db, "m-lineup").some((a) => a.kind === "battle_sheet" && a.label.includes("aggressive")), "no aggressive battle_sheet yet");
+
+  const ran = await autoRunStrategists(db, deps);
+  assert.ok(ran.some((x) => x.matchId === "m-lineup"), "engine re-ran m-lineup for the new pair");
+  assert.ok(R.artifactsForMatch(db, "m-lineup").some((a) => a.kind === "battle_sheet" && a.label.includes("Edge Tiered · aggressive")), "aggressive battle_sheet produced without re-analysis");
+  // no new assessment was written (analysis was NOT re-run)
+  assert.equal(R.assessmentsForMatch(db, "m-lineup").filter((a) => a.status === "ok").length, 1, "analysis not re-run");
+
+  // self-limiting: the roster is now covered → second pass skips this match
+  const again = await autoRunStrategists(db, deps);
+  assert.ok(!again.some((x) => x.matchId === "m-lineup"), "not re-run once every current pair has a battle_sheet");
 });
 
 test("pruneMarketSnapshots caps non-closing history, keeps closing snapshots", () => {

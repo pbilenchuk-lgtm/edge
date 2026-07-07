@@ -179,27 +179,56 @@ export async function analyzeMatch(
     }
     if (hit) { hit.used = true; if (hit.prob != null) R.setMarketAiProb(db, m.id, hit.prob); }
   }
-  const freshMarkets = R.latestMarkets(db, matchId);
+  // Strategist pass is DECOUPLED (unified engine): it reads the stored analysis +
+  // fresh quotes + risk_config and can be re-run on its own (e.g. when the roster
+  // /shares change) without re-running the expensive analysis. Pass the exact
+  // calibration we just computed so this run doesn't have to reload it.
+  const res = await runStrategists(db, matchId, deps, { calibration: calibrationNum });
+  return { ok: true, stage, confidence: a.confidence, betsCreated: res.betsCreated, decisions: res.decisions };
+}
 
-  // strategy decisions (§9.5: strategy reads analytics; §9.6: code sizes).
-  // Only replace existing proposals if this run actually produced usable
-  // probabilities — a degenerate run (no market label matched, all probs
-  // invalid) must not wipe the previous good proposals with nothing to replace.
-  const anyAiProb = freshMarkets.some((m) => m.ai_prob != null);
-  if (!anyAiProb) {
-    return { ok: true, stage, confidence: a.confidence, betsCreated: 0, decisions: [] };
-  }
+/**
+ * The STRATEGIST engine, decoupled from analysis. Reads the latest OK assessment
+ * + the markets' analysis probs + fresh quotes + each (strategy, profile) pair's
+ * risk_config, then proposes/sizes bets in CODE (module #3). Re-runnable: a roster
+ * or shares change re-runs THIS without re-analysing. Returns per-pair decisions.
+ * A no-op (returns 0) when there's no usable assessment/probabilities yet.
+ */
+export async function runStrategists(
+  db: Database, matchId: string, deps: AnalyzeDeps = {}, opts: { calibration?: number | null } = {},
+): Promise<{ betsCreated: number; decisions: AnalyzeResult["decisions"] }> {
+  const now = deps.now ?? (() => new Date().toISOString());
+  const match = R.getMatch(db, matchId);
+  if (!match) return { betsCreated: 0, decisions: [] };
+  const comp = R.listCompetitions(db).find((c) => c.id === match.competition_id);
+  const sport = comp?.sport_id ?? "football";
+  const assessment = R.assessmentsForMatch(db, matchId).filter((x) => x.status === "ok").sort((x, y) => (x.created_at >= y.created_at ? -1 : 1))[0];
+  if (!assessment) return { betsCreated: 0, decisions: [] }; // nothing analysed yet
+  const stage: "pre_lineup" | "post_lineup" = match.lineup_out ? "post_lineup" : "pre_lineup";
+  const prompt = R.analyticsPromptFor(db, sport, match.competition_id);
+  const DEFAULT_MODEL = deps.defaultModel ?? "Claude Opus 4.8";
+  const safeModel = (m: string | null | undefined) => (m && resolveModel(m) ? m : DEFAULT_MODEL);
+  const model = safeModel(prompt.model);
+  const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
+  const ctx = matchContext(db, matchId);
+
+  const freshMarkets = R.latestMarkets(db, matchId);
+  // Only replace existing proposals if we actually have usable probabilities — a
+  // degenerate state must not wipe the previous good proposals with nothing.
+  if (!freshMarkets.some((m) => m.ai_prob != null)) return { betsCreated: 0, decisions: [] };
   R.clearProposedBets(db, matchId);
-  // The budget unit is now a (strategy, risk-profile) PAIR: a competition can
-  // fund the same strategy under several profiles, each with its own share.
+  // Calibration for the min_calibration gate: caller-supplied (fresh analysis),
+  // else the stored distribution artifact, else the word-confidence band.
+  const calibration = opts.calibration ?? calibrationFromArtifact(db, matchId) ?? confBand(assessment.confidence ?? "средняя");
+
+  // The budget unit is a (strategy, risk-profile) PAIR: a comp can fund the same
+  // strategy under several profiles, each with its own share.
   const strategyById = new Map(R.listStrategies(db, sport).map((s) => [s.id, s]));
   const pairs = R.sharesForComp(db, match.competition_id)
     .filter((sh) => sh.pct > 0 && (comp?.budget ?? 0) > 0 && strategyById.has(sh.strategy_id))
     .map((sh) => ({ strat: strategyById.get(sh.strategy_id)!, profile: sh.risk_profile_id, pct: sh.pct }));
 
-  // Quotes → de-vigged implied probs, once (same for every pair). The strategist
-  // is the FIRST layer to see prices (the analyst was blind); edge is computed
-  // here, in code, off the cleaned prices.
+  // Quotes → de-vigged implied probs, once (same for every pair).
   const quotes = freshMarkets.map((m) => ({ label: m.label, priceCents: m.price, liquidity: parseLiq(m.liquidity) }));
   const impliedMap = impliedProbs(quotes);
 
@@ -208,54 +237,35 @@ export async function analyzeMatch(
   for (const { strat, profile, pct } of pairs) {
     const budget = stratBudget(comp!.budget, pct);
     const pairLabel = `${strat.name} · ${profile}`;
-
-    // Universal path: let the strategy's PROMPT (any methodology) pick the
-    // markets + conviction. Code still sizes/gates (§9.6). If no key / the
-    // strategist fails, fall back to the pure edge+threshold path below.
     const stratModel = safeModel(strat.model ?? model);
-    // Positions THIS pair already holds (same strategy AND same profile).
     const openPos = R.betsForMatch(db, matchId, strat.id).filter((b) => b.status === "open" && (b.risk_profile_id ?? "medium") === profile);
     const dec = await strategistDecide({
       strategyName: strat.name, strategyPrompt: strat.prompt,
       match: { home: match.home, away: match.away, sport, state: match.state, minute: match.minute, scoreHome: match.score_home, scoreAway: match.score_away },
-      assessment: { confidence: a.confidence, short: a.short, verdict: a.verdict },
+      assessment: { confidence: assessment.confidence ?? "средняя", short: assessment.short ?? "", verdict: assessment.verdict ?? "" },
       markets: freshMarkets.map((m) => ({ label: m.label, priceCents: m.price, aiProb: m.ai_prob })),
       openPositions: openPos.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
       context: ctx,
     }, stratModel, { fetchImpl: deps.fetchImpl, env });
     const picksArr = dec.ok ? dec.picks : null;
-    // Record the strategist's raw output per (strategy, profile) so the «Анализ»
-    // tab can show/copy exactly what each pair decided (for review). Best-effort.
     try { R.saveArtifact(db, { match_id: matchId, kind: "strategist", label: pairLabel, stage, content: JSON.stringify(dec, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
 
-    // Seed exposure from positions this pair ALREADY holds on the match, and
-    // never re-propose on a market it's already in — otherwise the post-lineup
-    // re-analysis would double up and breach the per-match budget cap (§9.3).
     const held = new Set(openPos.map((b) => norm(b.market_label)));
-    // §9.3 budget cap is per-COMPETITION and per-PAIR: seed exposure + realized
-    // from ALL of this (strategy, profile) pair's matches in the comp, so total
-    // committed stake across concurrent matches can't exceed the pair's share.
     let exposure = strategyCompExposure(db, match.competition_id, strat.id, profile) - strategyCompRealized(db, match.competition_id, strat.id, profile);
-    // money math is CODE, sized against the PAIR's risk profile (§9.6, module #3)
     const cfg = getProfileConfig(db, profile);
     const psFlags = probSumFlags(quotes, cfg);
-    const calibration = calibrationNum ?? confBand(a.confidence);
     let matchExposure = openPos.reduce((s, b) => s + (b.stake ?? 0), 0);
     let entries = 0, skipped = 0, flagged = 0;
     const battle: any[] = [];
-    // best de-vigged edges first
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
       .map((m) => { const implied = impliedMap.get(m.label)?.implied ?? m.price / 100; return { m, implied, edge: (m.ai_prob as number) - implied }; })
       .sort((x, y) => y.edge - x.edge);
     for (const { m, implied } of ranked) {
-      // When the strategist ran, only its picks are eligible.
       const pick = picksArr?.find((p) => sameMarketLabel(p.label, m.label));
       if (picksArr && !pick) { skipped++; continue; }
-      if (held.has(norm(m.label))) { skipped++; continue; } // already open on this market
-      // Prefer the strategist's own probability when it gave one, else the analysis prob.
+      if (held.has(norm(m.label))) { skipped++; continue; }
       const ourProb = pick?.prob != null ? pick.prob : (m.ai_prob as number);
       if (pick?.prob != null) R.setMarketAiProb(db, m.id, pick.prob);
-      // Safeguard: a group whose prices don't sum near 1 is a bad/stale book — flag.
       if (psFlags.has(m.label)) { flagged++; battle.push({ market: m.label, status: "flag", reason: "prob_sum вне допуска" }); continue; }
       const r = sizePrematch({ ourProb, priceCents: m.price, implied, calibration, liquidity: parseLiq(m.liquidity), budget, matchExposure, compExposure: exposure, cfg });
       battle.push({ market: m.label, our_prob: round3(ourProb), implied: round3(implied), edge_pct: round3(r.edge * 100), status: r.status, stake: r.stake, kelly_fraction: round3(r.kellyFraction), reason: r.reason });
@@ -270,13 +280,7 @@ export async function analyzeMatch(
         entered_minute: null, result: null, payout: null, created_at: now(),
       });
     }
-    // Battle-sheet artifact: the CODE-side sizing (edge/implied/stake/flags per
-    // market) for the pair + the strategist's plan — for review and tests.
     try { R.saveArtifact(db, { match_id: matchId, kind: "battle_sheet", label: pairLabel, stage, content: JSON.stringify({ pair: pairLabel, profile, budget, calibration, positions: battle, flagged, strategist_plan: dec.ok ? dec : { ok: false } }, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
-    // Discipline event: a funded, active strategy that looked at the match and
-    // entered NOTHING (край недостаточен) — a valid «Пропуск» (ТЗ §4.2), so it
-    // shows in the feed instead of the tab being permanently empty. One per
-    // (match, strategy, run), not per-market, to avoid flooding the log.
     if (entries === 0 && (skipped + flagged) > 0) {
       const why = flagged > 0 && skipped === 0 ? `флаги предохранителей (${flagged})` : `край недостаточен (${skipped} ниже порога)`;
       R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — ${why}`, created_at: now() });
@@ -284,8 +288,7 @@ export async function analyzeMatch(
     decisions.push({ strategy: pairLabel, entries, skipped });
     betsCreated += entries;
   }
-
-  return { ok: true, stage, confidence: a.confidence, betsCreated, decisions };
+  return { betsCreated, decisions };
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
@@ -293,6 +296,14 @@ const round3 = (x: number) => Math.round(x * 1000) / 1000;
 /** Word confidence → a numeric band for the profile's min_calibration gate
  *  (used only for non-football, where there's no assembled xg_confidence). */
 const confBand = (c: string) => (c === "высокая" ? 0.75 : c === "низкая" ? 0.3 : 0.5);
+/** Numeric analysis calibration from the stored `distribution` artifact (for a
+ *  strategist re-run that isn't attached to a fresh analysis), or null. */
+function calibrationFromArtifact(db: Database, matchId: string): number | null {
+  const art = R.artifactsForMatch(db, matchId).find((x) => x.kind === "distribution");
+  if (!art) return null;
+  try { const v = JSON.parse(art.content)?.calibration?.xg_confidence; return typeof v === "number" ? v : null; }
+  catch { return null; }
+}
 /** Parse a liquidity string ("$2.5M", "1234", "780K") to a number, or null. */
 function parseLiq(s: string | null): number | null {
   if (s == null) return null;
