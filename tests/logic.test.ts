@@ -69,7 +69,6 @@ test("thresholds: extract tiered/flat/kelly prompts", () => {
   );
   assert.deepEqual(edge.tiers, [[10, 0.2], [7, 0.15], [5, 0.1], [3, 0.05]]);
   assert.equal(edge.maxPerBet, 0.2);
-  assert.equal(edge.stop, -0.25);
   assert.equal(edge.minEdge, 3, "lowest tier is the effective min edge, not 10");
   assert.equal(edge.minConfidence, "высокая");
 
@@ -284,20 +283,13 @@ test("thresholds: numeric minConfidence still gates (не отключается
   assert.match(skip.reason, /уверенность/);
 });
 
-test("sizeBet: portfolio stop-loss halts entries once drawdown hits it", () => {
-  const params: StrategyParams = { flatSize: 0.05, minEdge: 1, stop: -0.2 };
+test("sizeBet: no portfolio stop-loss — a prior loss never blocks a fresh edge entry", () => {
+  const params: StrategyParams = { flatSize: 0.05, minEdge: 1 };
   const base = { params, aiProb: 0.6, priceCents: 50, budget: 1000, confidence: "высокая" as const };
-  assert.equal(sizeBet({ ...base, drawdown: -0.1 }).enter, true);   // above the stop
-  const halted = sizeBet({ ...base, drawdown: -0.25 });             // past the stop
-  assert.equal(halted.enter, false);
-  assert.match(halted.reason, /стоп-лосс/);
-  assert.equal(sizeBet({ ...base }).enter, true);                   // no drawdown info => no halt
-});
-
-test("thresholds: stop-loss captured in both sign conventions", () => {
-  assert.equal(validateParams({ stop: 0.2 } as StrategyParams).stop, -0.2);   // LLM (0..1) — was dropped before
-  assert.equal(validateParams({ stop: -0.25 } as StrategyParams).stop, -0.25); // heuristic
-  assert.equal(validateParams({ stop: 0 } as StrategyParams).stop, undefined);
+  // Even with a big realized loss on the competition (bankroll shrunk), a real
+  // edge still enters — the portfolio stop that used to freeze all entries is gone.
+  assert.equal(sizeBet({ ...base, realizedPnl: -500 }).enter, true);
+  assert.equal(sizeBet({ ...base }).enter, true);
 });
 
 // ---------------- metrics (§2.14) ----------------

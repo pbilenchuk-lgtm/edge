@@ -19,7 +19,7 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches } from "./engine.js";
 import { SPORT_TAG_IDS, SPORT_LABELS } from "./polymarket.js";
-import { analyzeMatch, jobActive, matchContext, strategyDrawdown, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
+import { analyzeMatch, jobActive, matchContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision, sizeBet } from "./thresholds.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -454,7 +454,6 @@ export async function strategistReassess(
       const share = shares.find((s) => s.strategy_id === sid);
       if (share && share.pct > 0 && dec.picks.length) {
         const budget = stratBudget(c.budget, share.pct);
-        const drawdown = strategyDrawdown(db, comp, sid, budget);
         const held = new Set(R.betsForMatch(db, m.id, sid).filter((b) => b.status === "open" || b.status === "proposed").map((b) => norm(b.market_label)));
         // Seed exposure + realized from ALL the strategy's matches in this comp
         // (open AND still-proposed — autoEnter will fill the proposals), so the
@@ -474,7 +473,7 @@ export async function strategistReassess(
           if (aiProb == null) { unfilled.push(`«${mk.label}» — нет оценки`); continue; }
           if (pick.prob != null) R.setMarketAiProb(db, mk.id, pick.prob);
           if (held.has(norm(mk.label))) continue;                       // already in this market
-          const d = sizeBet({ params: strat.params, aiProb, priceCents: mk.price, budget, exposure, realizedPnl, confidence: pick.conviction as Confidence, drawdown });
+          const d = sizeBet({ params: strat.params, aiProb, priceCents: mk.price, budget, exposure, realizedPnl, confidence: pick.conviction as Confidence });
           if (!d.enter) { unfilled.push(`«${mk.label}» — ${d.reason}`); continue; }
           exposure += d.stake;
           held.add(norm(mk.label));

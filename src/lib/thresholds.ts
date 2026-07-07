@@ -60,9 +60,6 @@ export function extractThresholdsHeuristic(prompt: string): StrategyParams {
   const maxBet = s.match(/не более (\d+(?:[.,]\d+)?)\s*%/);
   if (maxBet) p.maxPerBet = num(maxBet[1]) / 100;
 
-  const stop = s.match(/стоп[^0-9-]*(-?\d+(?:[.,]\d+)?)\s*%/);
-  if (stop) p.stop = -Math.abs(num(stop[1])) / 100;
-
   const minEdge = s.match(/edge\s*>?=?\s*(\d+(?:[.,]\d+)?)\s*%/);
   if (minEdge) p.minEdge = num(minEdge[1]);
 
@@ -126,12 +123,6 @@ export function validateParams(raw: StrategyParams): StrategyParams {
   const p: StrategyParams = {};
   // Fraction fields: keep any positive number, clamped to [0,1].
   if (isPos(raw.maxPerBet)) p.maxPerBet = clamp(raw.maxPerBet!, 0, 1);
-  // Portfolio stop-loss as a drawdown fraction. Accept BOTH sign conventions:
-  // the heuristic emits it negative (-0.25), the LLM extractor is told 0..1 and
-  // emits it positive (0.2). Store canonically as a negative fraction so a
-  // plainly-stated stop-loss is never silently dropped on the LLM path.
-  if (typeof raw.stop === "number" && raw.stop !== 0 && Math.abs(raw.stop) <= 1)
-    p.stop = -Math.abs(raw.stop);
   if (typeof raw.edgeExit === "boolean") p.edgeExit = raw.edgeExit;
   if (typeof raw.minEdge === "number" && raw.minEdge >= 0 && raw.minEdge <= 100)
     p.minEdge = raw.minEdge;
@@ -177,9 +168,6 @@ export interface SizeInput {
    *  can't recycle the whole budget again (bankroll = budget + realized). */
   realizedPnl?: number;
   confidence?: Confidence | null;
-  /** current P&L fraction of the strategy on the competition (negative = drawdown),
-   *  used to enforce params.stop — halt entries once the stop-loss is hit. */
-  drawdown?: number;
 }
 
 export interface SizeDecision {
@@ -217,12 +205,6 @@ export function sizeBet(input: SizeInput): SizeDecision {
   // return a NaN stake. Reject it up front.
   if (!Number.isFinite(aiProb) || aiProb < 0 || aiProb > 1 || !Number.isFinite(edge)) {
     return skip("некорректная вероятность модели");
-  }
-
-  // Portfolio stop-loss (§ risk control): once the strategy's drawdown on this
-  // competition reaches the stop, halt ALL new entries until it recovers.
-  if (params.stop != null && input.drawdown != null && input.drawdown <= params.stop) {
-    return skip(`портфель на стоп-лоссе (${(input.drawdown * 100).toFixed(0)}% ≤ ${(params.stop * 100).toFixed(0)}%) — входы остановлены`);
   }
 
   if (params.minConfidence != null) {

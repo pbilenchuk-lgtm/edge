@@ -239,7 +239,7 @@ export function settleMatch(
       if (match.score_home == null || match.score_away == null) { skipped++; continue; }
       // The match is FINISHED with a known score but this market can't be
       // auto-resolved (Advance / penalties / an unknown label, no override).
-      // Leaving it open locks the stake in strategyDrawdown forever — the match
+      // Leaving it open strands the stake as open exposure forever — the match
       // is never active again. Void it: refund the stake, zero P&L, tagged
       // 'void' so it's excluded from win/lose accuracy.
       R.updateBet(db, b.id, {

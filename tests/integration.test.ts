@@ -366,7 +366,7 @@ test("analyzeMatch: fuzzy label mapping survives model paraphrase", async () => 
   assert.equal(over25.ai_prob, 0.5); // fuzzy-matched despite the "goals" drift
 });
 
-test("analyzeMatch: portfolio stop-loss halts a strategy's entries", async () => {
+test("analyzeMatch: a prior loss no longer halts entries (portfolio stop-loss removed)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
   const labels = R.latestMarkets(db, "m-lineup").map((m) => m.label);
@@ -381,19 +381,23 @@ test("analyzeMatch: portfolio stop-loss halts a strategy's entries", async () =>
   assert.ok(baseline.length > 0, "baseline should propose bets");
   const strat = baseline[0].strategy_id;
 
-  // give that strategy a stop-loss and blow it with a big settled loss on
-  // another match of the same competition, then re-analyze.
+  // settle a ~30% drawdown on another match of the same competition (deep enough
+  // to have tripped the old -10%/-25% portfolio stop, but leaving bankroll room),
+  // then re-analyze: with the stop removed, a real edge still proposes bets.
   const s = R.getStrategy(db, strat)!;
-  R.updateStrategy(db, strat, { params: { ...s.params, stop: -0.1, minEdge: 1 } });
+  R.updateStrategy(db, strat, { params: { ...s.params, minEdge: 1 } });
+  const comp = R.listCompetitions(db).find((c) => R.listMatches(db, c.id).some((m) => m.id === "m-lineup"))!;
+  const pct = R.sharesForComp(db, comp.id).find((x) => x.strategy_id === strat)?.pct ?? 100;
+  const stratBudget = Math.round((comp.budget * pct) / 100);
   R.insertBet(db, {
     id: R.uid(), match_id: "m-finished", strategy_id: strat, market_label: "x",
     status: "settled_lost", proposed_price: 50, entry_price: 50, current_price: 50,
-    closing_price: 50, ai_prob: 0.5, stake: 100000, rationale: "blown", entered_minute: null,
+    closing_price: 50, ai_prob: 0.5, stake: Math.round(stratBudget * 0.3), rationale: "drawdown", entered_minute: null,
     result: "lost", payout: 0, created_at: "t",
   });
   await analyzeMatch(db, "m-lineup", deps);
   const after = R.betsForMatch(db, "m-lineup").filter((b) => b.status === "proposed" && b.strategy_id === strat);
-  assert.equal(after.length, 0, "stopped-out strategy proposes nothing");
+  assert.ok(after.length > 0, "still proposes on a real edge despite a drawdown that used to trip the stop");
 });
 
 // ---------------- StatPal provider (tennis / esports / cricket) ----------------

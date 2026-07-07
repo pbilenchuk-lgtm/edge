@@ -53,8 +53,6 @@ export interface AnalyticsPrompt {
 export interface StrategyParams {
   /** max fraction of budget on a single bet (from «не более 20%») */
   maxPerBet?: number;
-  /** portfolio stop-loss, negative fraction (from «стоп -25%») */
-  stop?: number;
   /** min edge % to enter (from «edge >= 3%») */
   minEdge?: number;
   /** fixed size fraction (from «размер всегда 5%») */

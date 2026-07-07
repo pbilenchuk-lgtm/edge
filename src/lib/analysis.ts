@@ -125,8 +125,6 @@ export async function analyzeMatch(
   for (const strat of strategies) {
     const share = R.sharesForComp(db, match.competition_id).find((x) => x.strategy_id === strat.id)!;
     const budget = stratBudget(comp!.budget, share.pct);
-    // Portfolio drawdown so far (realized + open) — enforces params.stop.
-    const drawdown = strategyDrawdown(db, match.competition_id, strat.id, budget);
 
     // Universal path: let the strategy's PROMPT (any methodology) pick the
     // markets + conviction. Code still sizes/gates (§9.6). If no key / the
@@ -168,7 +166,7 @@ export async function analyzeMatch(
       // else the analysis prob. Refresh the market so the shown edge matches.
       const aiProb = pick?.prob != null ? pick.prob : (m.ai_prob as number);
       if (pick?.prob != null) R.setMarketAiProb(db, m.id, pick.prob);
-      const d = sizeBet({ params: strat.params, aiProb, priceCents: m.price, budget, exposure, realizedPnl, confidence: conf, drawdown });
+      const d = sizeBet({ params: strat.params, aiProb, priceCents: m.price, budget, exposure, realizedPnl, confidence: conf });
       if (!d.enter) { skipped++; continue; }
       exposure += d.stake;
       entries++;
@@ -252,11 +250,6 @@ export function sameMarketLabel(a: string, b: string): boolean {
   return numTokens(na) === numTokens(nb) && extraAllFiller(tokenSet(a), tokenSet(b));
 }
 
-/**
- * Strategy's current P&L on a competition as a fraction of its budget
- * (negative = drawdown): realized P&L on settled bets + mark-to-market on open
- * bets, across every match of the competition. Feeds the stop-loss gate.
- */
 /** Open + still-proposed stake ($) this strategy has committed across the WHOLE
  *  competition. The §9.3 budget cap is per-COMPETITION, not per-match — seeding
  *  the sizer with only the current match's exposure let a strategy stake its full
@@ -277,22 +270,6 @@ export function strategyCompRealized(db: Database, competitionId: string, strate
       if (b.status === "settled_won" || b.status === "settled_lost") sum += (b.payout ?? 0) - (b.stake ?? 0);
   return sum;
 }
-export function strategyDrawdown(db: Database, competitionId: string, strategyId: string, budget: number): number {
-  if (budget <= 0) return 0;
-  let pnl = 0;
-  for (const mt of R.listMatches(db, competitionId)) {
-    for (const b of R.betsForMatch(db, mt.id, strategyId)) {
-      const stake = b.stake ?? 0;
-      if (b.status === "settled_won" || b.status === "settled_lost") {
-        pnl += (b.payout ?? 0) - stake;
-      } else if (b.status === "open" && b.current_price != null && b.entry_price != null && b.entry_price > 0) {
-        pnl += stake * (b.current_price / b.entry_price) - stake;
-      }
-    }
-  }
-  return pnl / budget;
-}
-
 // ============================================================
 // Async, per-match orchestration (discover/analyze split).
 //
