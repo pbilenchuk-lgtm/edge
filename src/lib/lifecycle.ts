@@ -18,7 +18,9 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches } from "./engine.js";
-import { SPORT_TAG_IDS, SPORT_LABELS } from "./polymarket.js";
+import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBook, type PolymarketConfig } from "./polymarket.js";
+import { simulateBuy, maxExecutableBuyUsd, parametricBuyAvgCents } from "./execution.js";
+import type { Bet, Market } from "./types.js";
 import { analyzeMatch, jobActive, matchContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision, sizeBet } from "./thresholds.js";
 import { stratBudget } from "./money.js";
@@ -199,8 +201,44 @@ export function hasLiveData(db: Database, m: Match): boolean {
   return R.eventsForMatch(db, m.id).some((e) => e.type !== "stats" && e.type !== "other");
 }
 
-export function autoEnter(db: Database, deps: EngineDeps = {}): AutoEnterItem[] {
+interface EntryExec { skip: boolean; priceCents: number; stake: number; note?: string }
+
+/** Model an entry fill against the real order book: VWAP price (slippage), size
+ *  capped to what the book absorbs while keeping edge and bounding price impact.
+ *  Falls back to a parametric model, or (execution off / no CLOB) the raw quote. */
+async function executeEntry(
+  b: Bet, mk: Market | undefined, quoteCents: number, proposedUsd: number,
+  poly: PolymarketConfig, deps: EngineDeps,
+): Promise<EntryExec> {
+  if (!poly.enabled) return { skip: false, priceCents: quoteCents, stake: proposedUsd }; // execution model off → quote fill
+  const fairCents = (b.ai_prob ?? 0) * 100;
+  const exec = poly.exec;
+  const token = mk?.external_ref ?? null;
+  const book = token ? await fetchOrderBook(token, poly, deps) : null;
+  if (book && book.asks.length) {
+    const bestAsk = book.asks[0].priceCents;
+    const capUsd = maxExecutableBuyUsd(book.asks, fairCents, exec);
+    if (capUsd <= 0) return { skip: true, priceCents: quoteCents, stake: 0, note: `нет объёма с эджем (аск ${bestAsk}¢ vs справ. ${fairCents.toFixed(0)}¢, слиппедж съедает край)` };
+    const stake = Math.min(proposedUsd, capUsd);
+    const fill = simulateBuy(book.asks, stake);
+    const slip = Math.round((fill.avgPriceCents - bestAsk) * 10) / 10;
+    const capped = stake < proposedUsd - 0.5;
+    const note = `VWAP ${fill.avgPriceCents}¢ (котир. ${bestAsk}¢${slip > 0 ? `, слип +${slip}¢` : ""}) · сдвиг→${fill.newTopCents}¢${capped ? ` · урезан по глубине $${Math.round(proposedUsd)}→$${Math.round(stake)}` : ""}`;
+    return { skip: false, priceCents: fill.avgPriceCents, stake: Math.round(stake), note };
+  }
+  // Parametric fallback: dead/near-resolved book or a fetch error.
+  const liq = Number(mk?.liquidity ?? 0) || 0;
+  const avg = parametricBuyAvgCents(quoteCents, proposedUsd, liq, exec.fallbackK);
+  if (avg >= fairCents - exec.edgeFloorCents) return { skip: true, priceCents: avg, stake: 0, note: `≈VWAP ${avg}¢ ≥ справ.−порог — эдж съеден слиппеджем (модель по ликв. $${Math.round(liq)})` };
+  return { skip: false, priceCents: avg, stake: proposedUsd, note: `≈VWAP ${avg}¢ (модель по ликвидности, книга недоступна)` };
+}
+
+const appendReason = (existing: string | null, note?: string): string =>
+  [existing, note].filter(Boolean).join(" · ");
+
+export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<AutoEnterItem[]> {
   const now = nowFn(deps)();
+  const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
   const out: AutoEnterItem[] = [];
   for (const { sport, match: m } of activeMatches(db)) {
     // Don't DEPLOY capital on a lineup-sport match before its lineups are out —
@@ -225,12 +263,23 @@ export function autoEnter(db: Database, deps: EngineDeps = {}): AutoEnterItem[] 
       if (!liveData) continue; // no provider live coverage → hold as «предлагается», never fill blind
       const key = `${b.strategy_id}|${b.market_label}`;
       if (openKey.has(key)) { R.updateBet(db, b.id, { status: "not_filled" }); continue; } // already in this market — drop the dup
-      const price = markets.find((x) => x.label === b.market_label)?.price ?? b.proposed_price ?? 0;
-      if (price <= 0) continue;
-      R.updateBet(db, b.id, { status: "open", entry_price: price, current_price: price, entered_minute: minuteLabel(m) });
+      const mk = markets.find((x) => x.label === b.market_label);
+      const quote = mk?.price ?? b.proposed_price ?? 0;
+      if (quote <= 0) continue;
+      const proposed = b.stake ?? 0;
+
+      // Execute against the real order book: fill at VWAP (slippage), cap the size
+      // to what the book can absorb while keeping edge AND not moving the price too
+      // far (market impact). This is what stops a big stake from eating its own
+      // edge on a thin market. Falls back to a parametric model, or (execution off)
+      // the quote itself.
+      const ex = await executeEntry(b, mk, quote, proposed, poly, deps);
+      if (ex.skip) { R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, ex.note) }); continue; }
+
+      R.updateBet(db, b.id, { status: "open", entry_price: ex.priceCents, current_price: ex.priceCents, stake: ex.stake, entered_minute: minuteLabel(m) });
       openKey.add(key);
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "enter", text: `вход «${b.market_label}» @ ${price}¢ · $${b.stake ?? 0}`, created_at: now });
-      out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, price, stake: b.stake ?? 0 });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "enter", text: `вход «${b.market_label}» @ ${ex.priceCents}¢ · $${ex.stake}${ex.note ? ` · ${ex.note}` : ""}`, created_at: now });
+      out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, price: ex.priceCents, stake: ex.stake });
     }
   }
   return out;
@@ -573,7 +622,7 @@ export async function runAutoCycle(
   // fresh entries) on matches with risk or a fresh live trigger.
   const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [] } as ReassessResult);
   const exited = [...stepSync("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
-  const entered = stepSync("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
+  const entered = await step("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
   stepSync("prune", () => R.pruneMarketSnapshots(db), 0); // keep the snapshot history bounded (persistent DB)
   // Bound the matches table: drop finished/stale matches that carry NO bets (the
   // Polymarket discovery flood). Never touches a match with betting history, so
@@ -759,7 +808,7 @@ export async function runLiveCycle(
 
   const detExits = stepSyncLive("exits", () => evaluateExits(db, deps), [] as ExitItem[]); // cheap TP/stop, reacts to price every tick
   const reassess = await stepLive("reassess", () => strategistReassess(db, deps, { newEventMatchIds: reassessIds, triggeredOnly: true, labelFor }), { exits: [], entries: [] } as ReassessResult);
-  stepSyncLive("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fill any positions the strategist just opened
+  await stepLive("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fill any positions the strategist just opened
 
   return {
     live: inPlay.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),

@@ -337,7 +337,7 @@ export function startAnalysis(db: Database, matchId: string, deps: AnalyzeDeps =
       // avoids the analysis⇄lifecycle import cycle; best-effort so a fill error
       // never masks a successful analysis.
       if (r.ok) {
-        try { const { autoEnter } = await import("./lifecycle.js"); autoEnter(db, deps); } catch { /* fill is best-effort */ }
+        try { const { autoEnter } = await import("./lifecycle.js"); await autoEnter(db, deps); } catch { /* fill is best-effort */ }
       }
       R.finishAnalysisJob(db, matchId, !r.ok, r.error ?? null, now(deps)());
     })

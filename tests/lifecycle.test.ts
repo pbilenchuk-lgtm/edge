@@ -26,13 +26,13 @@ test("exitDecision: take-profit, stop, edge-gone, hold", () => {
   assert.equal(exitDecision({ params: NE, aiProb: 0.9, entryPriceCents: 50, currentPriceCents: 20 }).exit, true);  // stop still fires
 });
 
-test("autoEnter fills proposed bets at the current price", () => {
+test("autoEnter fills proposed bets at the current price", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
   // m-lineup is seeded with proposed bets + priced markets
   const proposedBefore = R.betsForMatch(db, "m-lineup").filter((b) => b.status === "proposed");
   assert.ok(proposedBefore.length > 0);
-  const filled = autoEnter(db, { now: () => "t" });
+  const filled = await autoEnter(db, { now: () => "t" });
   assert.ok(filled.length >= proposedBefore.length);
   const b = R.betsForMatch(db, "m-lineup").find((x) => x.id === proposedBefore[0].id)!;
   assert.equal(b.status, "open");
@@ -40,7 +40,7 @@ test("autoEnter fills proposed bets at the current price", () => {
   assert.ok(R.tradeLogForMatch(db, "m-lineup").some((l) => l.type === "enter"));
 });
 
-test("autoEnter holds a football bet until lineups are out (no pre-lineup entry)", () => {
+test("autoEnter holds a football bet until lineups are out (no pre-lineup entry)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
@@ -49,17 +49,17 @@ test("autoEnter holds a football bet until lineups are out (no pre-lineup entry)
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
   R.insertBet(db, { id: "pl-1", match_id: mid, strategy_id: strat.id, market_label: "Over 2.5", status: "proposed", proposed_price: 55, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.6, stake: 50, rationale: null, entered_minute: null, result: null, payout: null, settled_by: null, created_at: "t" });
-  autoEnter(db, { now: () => "t" });
+  await autoEnter(db, { now: () => "t" });
   assert.equal(R.getBet(db, "pl-1")!.status, "proposed", "held as a preview before lineups are out");
   // Lineups out = the provider confirmed the fixture (live coverage) — required
   // before any capital is deployed.
   R.updateMatch(db, mid, { lineup_out: true });
   R.upsertMatchLive(db, { match_id: mid, espn_event_id: "e", league: "l", home_lineup: JSON.stringify({ team: "A", formation: "4-4-2", starters: ["x"] }), away_lineup: null, stats: null, updated_at: "t" });
-  autoEnter(db, { now: () => "t" });
+  await autoEnter(db, { now: () => "t" });
   assert.equal(R.getBet(db, "pl-1")!.status, "open", "enters once lineups are out");
 });
 
-test("autoEnter refuses to open a position on a match with no live data (blind = bleed)", () => {
+test("autoEnter refuses to open a position on a match with no live data (blind = bleed)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
@@ -70,12 +70,38 @@ test("autoEnter refuses to open a position on a match with no live data (blind =
   R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
   R.insertBet(db, { id: "nd-1", match_id: mid, strategy_id: strat.id, market_label: "Over 2.5", status: "proposed", proposed_price: 55, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.6, stake: 50, rationale: null, entered_minute: null, result: null, payout: null, settled_by: null, created_at: "t" });
 
-  autoEnter(db, { now: () => "t" });
+  await autoEnter(db, { now: () => "t" });
   assert.equal(R.getBet(db, "nd-1")!.status, "proposed", "no live data → held, not filled");
   // once the provider drives a real minute, coverage exists → it can fill
   R.updateMatch(db, mid, { minute: 30 });
-  autoEnter(db, { now: () => "t" });
+  await autoEnter(db, { now: () => "t" });
   assert.equal(R.getBet(db, "nd-1")!.status, "open", "fills once live data is present");
+});
+
+test("autoEnter executes against the order book — VWAP fill + depth cap on a thin book", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 40, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "e", league: "l", home_lineup: null, away_lineup: null, stats: null, updated_at: "t" }); // live coverage
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 47, ai_prob: 0.55, liquidity: "1000", external_ref: "TOKEN", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "bk-1", match_id: mid, strategy_id: strat.id, market_label: "Over 1.5", status: "proposed", proposed_price: 47, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.55, stake: 500, rationale: null, entered_minute: null, result: null, payout: null, settled_by: null, created_at: "t" });
+
+  // fair 55¢. asks: 47¢×200sh ($94), 48¢×100 ($48), 60¢ deep. floor 1.5 → edge
+  // ceiling 53.5; impact 2 over 47 → 49. cap = min = 49¢ → only 47+48 qualify ⇒ ~$142.
+  const book = { asks: [{ price: "0.47", size: "200" }, { price: "0.48", size: "100" }, { price: "0.60", size: "5000" }], bids: [{ price: "0.46", size: "300" }] };
+  const fetchImpl = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
+  const res = await autoEnter(db, { now: () => "t", polymarket: loadPolymarketConfig({ POLYMARKET_ENABLED: "true" }), fetchImpl });
+
+  const b = R.getBet(db, "bk-1")!;
+  assert.equal(b.status, "open");
+  assert.ok(b.stake != null && b.stake <= 143 && b.stake > 100, `stake capped to book depth (~$142), got ${b.stake}`);
+  assert.ok(b.entry_price != null && b.entry_price > 47 && b.entry_price < 49, `filled at VWAP above best ask, got ${b.entry_price}`);
+  assert.ok(res.some((r) => r.market === "Over 1.5"), "reported as entered");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "enter" && /VWAP/.test(l.text)), "execution quality logged");
 });
 
 test("evaluateExits closes an open position when the edge is gone", () => {

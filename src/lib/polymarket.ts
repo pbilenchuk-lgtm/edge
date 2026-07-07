@@ -29,6 +29,7 @@
 // ============================================================
 
 import "./http.js"; // configure proxy dispatcher for server-side fetch
+import type { OrderBook } from "./execution.js";
 
 export interface PolymarketConfig {
   enabled: boolean;
@@ -43,6 +44,15 @@ export interface PolymarketConfig {
    *  Low-liquidity fixtures aren't worth betting — user: «меня не интересуют
    *  матчи с низкой ликвидностью». 0 disables the filter. */
   minLiquidity: number;
+  /** execution model (order-book slippage + impact). See execution.ts. */
+  exec: {
+    /** min edge (cents) each bought share must keep vs fair value */
+    edgeFloorCents: number;
+    /** max price move (cents) above best ask while filling an entry */
+    maxImpactCents: number;
+    /** parametric fallback slope: cents of slippage when order == full liquidity */
+    fallbackK: number;
+  };
 }
 
 /**
@@ -88,6 +98,11 @@ export function loadPolymarketConfig(
     discoverLimit: Number(env.POLYMARKET_DISCOVER_LIMIT ?? 1000),
     maxMarketsPerMatch: Number(env.POLYMARKET_MAX_MARKETS ?? 40),
     minLiquidity: Number(env.POLYMARKET_MIN_LIQUIDITY ?? 250),
+    exec: {
+      edgeFloorCents: Number(env.EXEC_EDGE_FLOOR_CENTS ?? 1.5),
+      maxImpactCents: Number(env.EXEC_MAX_IMPACT_CENTS ?? 2),
+      fallbackK: Number(env.EXEC_FALLBACK_K ?? 4),
+    },
   };
 }
 
@@ -128,6 +143,34 @@ export async function fetchMidpointCents(
   const mid = Number(json.mid);
   if (!isFinite(mid)) throw new Error("CLOB midpoint not numeric");
   return round1(mid * 100);
+}
+
+/** Live order book for one CLOB token, prices in cents and levels sorted best-first
+ *  (bids desc, asks asc). Returns null on any failure or an empty/dead book — the
+ *  caller then falls back to the parametric slippage model. */
+export async function fetchOrderBook(
+  tokenId: string,
+  cfg: PolymarketConfig,
+  deps: FetchDeps = {},
+): Promise<OrderBook | null> {
+  try {
+    const doFetch = deps.fetchImpl ?? fetch;
+    const url = `${cfg.clobBase}/book?token_id=${encodeURIComponent(tokenId)}`;
+    const res = await withTimeout(cfg.timeoutMs, (signal) => doFetch(url, { signal }));
+    if (!res.ok) return null;
+    const json = (await res.json()) as { error?: string; bids?: { price: string; size: string }[]; asks?: { price: string; size: string }[] };
+    if (json.error) return null;
+    const norm = (arr: { price: string; size: string }[] | undefined) =>
+      (arr ?? [])
+        .map((l) => ({ priceCents: round1(Number(l.price) * 100), size: Number(l.size) }))
+        .filter((l) => isFinite(l.priceCents) && l.priceCents > 0 && l.priceCents < 100 && isFinite(l.size) && l.size > 0);
+    const bids = norm(json.bids).sort((a, b) => b.priceCents - a.priceCents); // best (highest) first
+    const asks = norm(json.asks).sort((a, b) => a.priceCents - b.priceCents); // best (lowest) first
+    if (!bids.length && !asks.length) return null;
+    return { bids, asks };
+  } catch {
+    return null;
+  }
 }
 
 /**
