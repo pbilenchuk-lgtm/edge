@@ -154,6 +154,18 @@ function compPairsOf(shareRows: any, catalog: any[], riskProfiles: any[], compId
     })
     .filter(Boolean);
 }
+// Compact risk-profile marker: a colored circle with the profile's first letter
+// (А/С/К for Агрессивный/Средний/Консервативный), full name on hover — saves the
+// space the full label ate next to every pair. Color keys on the known profile
+// ids; a custom profile falls back to neutral grey but keeps its initial.
+const PROFILE_COLOR: Record<string, string> = { aggressive: "#e0685f", medium: "#e8a838", conservative: "#5fd08a" };
+function ProfileBadge({ id, name }: { id: string; name: string }) {
+  const c = PROFILE_COLOR[id] || "#8b95a5";
+  const letter = (name || id || "?").trim().charAt(0).toUpperCase();
+  return (
+    <span title={name} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 16, height: 16, borderRadius: "50%", background: `${c}22`, border: `1px solid ${c}`, color: c, fontSize: 9.5, fontWeight: 700, flexShrink: 0, verticalAlign: "middle" }}>{letter}</span>
+  );
+}
 function stratOverall(competitions: any[], matchDb: any, stratId: string, sportId: string, compBudget: any, shares: any) {
   const comps = competitions.filter((c) => c.sport === sportId);
   let sumPnl = 0, sumBudget = 0; const roiList: number[] = [];
@@ -640,7 +652,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
               return (
                 <div key={p.key} style={S.bankCell}>
                   <span style={{ ...S.dot, background: p.color }} />
-                  <div style={S.bankInfo}><span style={S.bankNm}>{p.name}<span style={S.bankProfile}> · {p.profileName}</span></span><span style={S.bankBudget}>{p.pct}% · {fmtMoney0(p.budget)}</span></div>
+                  <div style={S.bankInfo}><span style={S.bankNm}>{p.name} <ProfileBadge id={p.profileId} name={p.profileName} /></span><span style={S.bankBudget}>{p.pct}% · {fmtMoney0(p.budget)}</span></div>
                   <div style={S.bankNums}><span style={S.bankEq}>{fmtMoney(e.equity)}</span><span style={{ ...S.bankD, color: d >= 0 ? "#5fd08a" : "#ff6b6b" }}>{d >= 0 ? "▲" : "▼"}{fmtMoney(d)} ({d >= 0 ? "+" : ""}{p.budget ? ((d / p.budget) * 100).toFixed(1) : "0.0"}%)</span></div>
                 </div>
               );
@@ -931,7 +943,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                     <div key={p.key} style={S.stratBlock}>
                       <div style={S.stratBlockHead}>
                         <span style={{ ...S.dot, background: p.color }} /><span style={S.stratName}>{p.name}</span>
-                        <span style={S.stratProfileTag}>{p.profileName}</span>
+                        <ProfileBadge id={p.profileId} name={p.profileName} />
                         <span style={S.stratBudgetChip}>{p.pct}% · {fmtMoney0(budget)}</span>
                         {/* Always-on run icon. Live → full reassessment (revisit
                             positions of ALL the strategy's pairs); pre-match/lineup →
@@ -2161,7 +2173,6 @@ const S: Record<string, React.CSSProperties> = {
   bankInfo: { display: "flex", flexDirection: "column" },
   bankNm: { fontSize: 13, fontWeight: 600 },
   bankBudget: { fontSize: 10.5, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
-  bankProfile: { color: "#8b95a5", fontWeight: 400 },
   bankNums: { marginLeft: "auto", textAlign: "right" },
   bankEq: { fontSize: 15, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", display: "block" },
   bankD: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace" },
@@ -2286,7 +2297,6 @@ const S: Record<string, React.CSSProperties> = {
   stratBlock: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12 },
   stratBlockHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 },
   stratName: { fontSize: 13.5, fontWeight: 700 },
-  stratProfileTag: { fontSize: 10, color: "#8b95a5", background: "#232a35", border: `1px solid ${LINE}`, borderRadius: 20, padding: "1px 8px", whiteSpace: "nowrap" },
   stratBudgetChip: { marginLeft: "auto", fontSize: 10.5, color: "#e8a838", fontFamily: "'JetBrains Mono', monospace", background: "#2e2a1a", borderRadius: 20, padding: "2px 10px" },
   stratReassessBtn: { flex: "0 0 auto", width: 26, height: 26, display: "inline-flex", alignItems: "center", justifyContent: "center", background: "transparent", border: `1px solid #5b9bd566`, color: "#7fb4e8", borderRadius: 7, fontSize: 13, cursor: "pointer", lineHeight: 1, padding: 0 },
   noBets: { fontSize: 12, color: MUTE, fontStyle: "italic" },
