@@ -190,7 +190,18 @@ export const LINEUP_SPORTS = new Set(["football"]);
  *  lineup materially changes the read (football), analysis is gated on THIS. */
 export function hasLineups(db: Database, matchId: string): boolean {
   const l = getMatchLive(db, matchId);
-  return !!(l && l.home_lineup && l.away_lineup);
+  if (!l) return false;
+  // A match_live row is ALSO written as a bare coverage marker with EMPTY
+  // starters ({team, formation:null, starters:[]}) before the teamsheet lands —
+  // a non-null string, so a mere presence check wrongly reads as "состав есть".
+  // Require an actually populated starting XI on BOTH sides (mirrors the
+  // provider's lineupOut = both teams have starters).
+  return lineupHasStarters(l.home_lineup) && lineupHasStarters(l.away_lineup);
+}
+function lineupHasStarters(raw: string | null): boolean {
+  if (!raw) return false;
+  try { const s = JSON.parse(raw); return Array.isArray(s?.starters) && s.starters.length > 0; }
+  catch { return false; }
 }
 /** Should we HOLD analysis on this match because the lineup isn't out yet?
  *  True only for a lineup-sport (football) still PRE-kickoff (upcoming/lineup)
