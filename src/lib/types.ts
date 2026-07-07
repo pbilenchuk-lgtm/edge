@@ -84,7 +84,8 @@ export interface Strategy {
   tag: string | null;
   color: string | null;
   version: number;
-  prompt: string;
+  prompt: string;              // предматч-окно стратега
+  prompt_live: string | null;  // live-окно стратега (может отсутствовать)
   params: StrategyParams;
   model: string | null;
   created_at: string;

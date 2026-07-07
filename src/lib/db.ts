@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { migrateCanonicalPrompts } from "./seed.js";
+import { seedRiskProfiles } from "./riskConfig.js";
 
 // node:sqlite is experimental and not in @types/node, so require it
 // dynamically and give it a minimal local type.
@@ -63,6 +64,10 @@ export function getDb(path = dbPath()): Database {
   // guarded + idempotent; best-effort so a prompt hiccup never wedges boot.
   try { migrateCanonicalPrompts(db); }
   catch { /* non-fatal: analysis still runs on whatever prompt is stored */ }
+  // Seed the named risk presets (aggressive/medium/conservative) onto any DB that
+  // doesn't have them yet — idempotent, so a live prod DB gets them without a wipe.
+  try { seedRiskProfiles(db, new Date().toISOString()); }
+  catch { /* non-fatal */ }
   _db = db;
   return db;
 }
@@ -88,6 +93,8 @@ export function initSchema(db: Database): void {
     "ALTER TABLE bets ADD COLUMN settled_at TEXT",
     "ALTER TABLE matches ADD COLUMN clock TEXT",
     "ALTER TABLE match_live ADD COLUMN stats TEXT",
+    "ALTER TABLE strategies ADD COLUMN prompt_live TEXT",
+    "ALTER TABLE strategy_versions ADD COLUMN prompt_live TEXT",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }

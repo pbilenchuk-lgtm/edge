@@ -12,7 +12,7 @@ import { warsawLabel, warsawClock, isIso } from "./time.js";
 import { SPORT_LABELS, isNoiseMarket } from "./polymarket.js";
 import { resolveFootballMarket } from "./settlement.js";
 import { maxLiveMinutes } from "./lifecycle.js";
-import { getRiskConfig, type RiskConfig } from "./riskConfig.js";
+import { listRiskProfileViews, type RiskProfileView } from "./riskConfig.js";
 import type { StrategyParams, Match, Bet } from "./types.js";
 
 export interface MarketView {
@@ -57,7 +57,7 @@ export interface MatchView {
 export interface LineupView { team: string; formation: string | null; starters: string[] }
 export interface StrategyView {
   id: string; name: string; tag: string | null; color: string; version: number;
-  sport: string; model: string | null; prompt: string; params: StrategyParams;
+  sport: string; model: string | null; prompt: string; promptLive: string | null; params: StrategyParams;
 }
 export interface QualityView {
   brier: number | null; clv: number | null; samples: number;
@@ -107,8 +107,8 @@ export interface AppData {
   providers: ProviderView[];
   cron: CronView;
   strategyStats: Record<string, StrategyStats>;
-  /** global risk constants (Окно 4), read by both strategists */
-  riskConfig: RiskConfig;
+  /** named risk presets (Окно 4); a competition assigns (strategy, profile) pairs */
+  riskProfiles: RiskProfileView[];
 }
 export interface CronView {
   enabled: boolean; tickMin: number; discoverHr: number; liveSec: number; nextRunAt: string | null;
@@ -144,7 +144,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
 
   const catalog: StrategyView[] = strategies.map((s) => ({
     id: s.id, name: s.name, tag: s.tag, color: s.color ?? "#8b95a5", version: s.version,
-    sport: s.sport_id, model: s.model, prompt: s.prompt, params: s.params,
+    sport: s.sport_id, model: s.model, prompt: s.prompt, promptLive: s.prompt_live, params: s.params,
   }));
 
   // analytics maps
@@ -319,7 +319,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
 
   const strategyStats = computeStrategyStats(strategies, allMatches, betsByMatch, pricesByMatch);
 
-  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskConfig: getRiskConfig(db) };
+  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskProfiles: listRiskProfileViews(db) };
   // node:sqlite rows have a null prototype; React Server Components can't pass
   // those to a client component. A JSON round-trip yields plain objects.
   return JSON.parse(JSON.stringify(payload));

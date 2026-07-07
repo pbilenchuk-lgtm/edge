@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadRiskConfig, getRiskConfig, DEFAULT_RISK_CONFIG } from "../src/lib/riskConfig.js";
+import { loadRiskConfig, getRiskConfig, getProfileConfig, seedRiskProfiles, listRiskProfileViews, DEFAULT_RISK_CONFIG, RISK_PROFILE_DEFS } from "../src/lib/riskConfig.js";
 import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 
@@ -61,10 +61,35 @@ test("loadRiskConfig: non-numeric field rejected; returned config is frozen", ()
   assert.ok(Object.isFrozen(r.config));
 });
 
-test("getRiskConfig: no row → defaults; stored valid config round-trips", () => {
+test("getRiskConfig: no profiles → defaults; after seeding → MEDIUM preset", () => {
   const db = openDb(":memory:");
-  assert.deepEqual(getRiskConfig(db), DEFAULT_RISK_CONFIG);
-  const custom = loadRiskConfig({ entry_thresholds: { min_edge: 0.06 } });
-  R.setRiskConfigRaw(db, JSON.stringify(custom.config), "2026-07-07T00:00:00Z");
-  assert.equal(getRiskConfig(db).entry_thresholds.min_edge, 0.06, "stored value read back");
+  assert.deepEqual(getRiskConfig(db), DEFAULT_RISK_CONFIG); // nothing seeded
+  seedRiskProfiles(db, "2026-07-07T00:00:00Z");
+  // getRiskConfig reads the MEDIUM reference profile
+  assert.equal(getRiskConfig(db).entry_thresholds.min_edge, 0.05);
+  assert.equal(getRiskConfig(db).sizing.kelly_fraction_base, 0.20);
+});
+
+test("seedRiskProfiles: seeds three named presets, idempotent, each validates", () => {
+  const db = openDb(":memory:");
+  seedRiskProfiles(db, "2026-07-07T00:00:00Z");
+  const views = listRiskProfileViews(db);
+  assert.equal(views.length, 3);
+  assert.deepEqual(views.map((v) => v.id), ["aggressive", "medium", "conservative"], "ordered by sort");
+  assert.deepEqual(views.map((v) => v.name), ["Агрессивный", "Средний", "Консервативный"]);
+  // aggressive is bolder than conservative on the key knobs
+  const agg = getProfileConfig(db, "aggressive"), con = getProfileConfig(db, "conservative");
+  assert.ok(agg.sizing.kelly_fraction_base > con.sizing.kelly_fraction_base);
+  assert.ok(agg.entry_thresholds.min_edge < con.entry_thresholds.min_edge);
+  assert.ok(agg.sizing.max_position_pct > con.sizing.max_position_pct);
+  // idempotent — re-seeding doesn't duplicate
+  seedRiskProfiles(db, "2026-07-08T00:00:00Z");
+  assert.equal(listRiskProfileViews(db).length, 3);
+});
+
+test("getProfileConfig: unknown id → defaults; every preset def loads clean", () => {
+  const db = openDb(":memory:");
+  seedRiskProfiles(db, "2026-07-07T00:00:00Z");
+  assert.deepEqual(getProfileConfig(db, "does-not-exist"), DEFAULT_RISK_CONFIG);
+  for (const def of RISK_PROFILE_DEFS) assert.equal(loadRiskConfig(def.values).ok, true, `${def.id} validates`);
 });

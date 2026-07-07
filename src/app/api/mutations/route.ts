@@ -51,12 +51,12 @@ export async function POST(req: Request) {
         return ok();
       }
       case "createStrategy": {
-        const { sport, name, prompt, model, params } = body;
+        const { sport, name, prompt, promptLive, model, params } = body;
         const count = R.listStrategies(db).length;
         const id = "s" + Date.now();
         R.insertStrategy(db, {
           id, sport_id: sport, name, tag: "custom", color: PALETTE[count % PALETTE.length],
-          version: 1, prompt, params: params ?? extractThresholdsHeuristic(prompt),
+          version: 1, prompt, prompt_live: promptLive ?? null, params: params ?? extractThresholdsHeuristic(prompt),
           model: model ?? null, created_at: new Date().toISOString(),
         });
         return ok({ id, color: PALETTE[count % PALETTE.length] });

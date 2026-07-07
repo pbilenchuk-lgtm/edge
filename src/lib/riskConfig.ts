@@ -136,17 +136,86 @@ export function loadRiskConfig(raw: unknown): RiskConfigLoad {
   return { ok: true, config: Object.freeze(cfg) };
 }
 
-/**
- * The effective risk config every layer reads (read-only). Loads the stored raw
- * config through the validator; if nothing is stored, or a stored blob somehow
- * fails validation (shouldn't — we only persist validated ones), falls back to
- * the frozen defaults so the system always has a coherent config to size against.
- */
-export function getRiskConfig(db: Database): RiskConfig {
-  const raw = R.getRiskConfigRaw(db);
-  if (!raw) return DEFAULT_RISK_CONFIG;
+// ============================================================
+// Named risk profiles — three presets (risk_profiles.md). The mechanics are
+// identical; only the numbers differ. MEDIUM is the reference used to TEST the
+// strategists (same profile for all, so the result reflects the strategist, not
+// the thresholds). AGGRESSIVE/CONSERVATIVE are baked in but tuned separately,
+// later, on the winning strategist. min_market_liquidity + max_concurrent_
+// positions are "human-set" in the doc — sensible Polymarket-scaled values here.
+// ============================================================
+export interface RiskProfileDef { id: string; name: string; sort: number; values: unknown }
+export const RISK_PROFILE_DEFS: RiskProfileDef[] = [
+  {
+    id: "aggressive", name: "Агрессивный", sort: 0,
+    values: {
+      config_version: "aggressive-1.0",
+      entry_thresholds: { min_edge: 0.03, min_edge_low_liquidity: 0.05, min_calibration: 0.40, min_market_liquidity: 500 },
+      sizing: { kelly_fraction_base: 0.33, calibration_ref: 0.6, kelly_fraction_clamp: [0.05, 0.40], max_position_pct: 0.08, max_match_exposure_pct: 0.15 },
+      bankroll_limits: { daily_loss_limit_pct: 0.20, max_concurrent_exposure_pct: 0.40, max_concurrent_positions: 12 },
+      safeguards: { global_drawdown_killswitch_pct: 0.35, absurd_edge_block: 0.25, max_quote_age_seconds: 30, prob_sum_tolerance: 0.02 },
+    },
+  },
+  {
+    id: "medium", name: "Средний", sort: 1,
+    values: {
+      config_version: "medium-1.0",
+      entry_thresholds: { min_edge: 0.05, min_edge_low_liquidity: 0.07, min_calibration: 0.45, min_market_liquidity: 1000 },
+      sizing: { kelly_fraction_base: 0.20, calibration_ref: 0.6, kelly_fraction_clamp: [0.05, 0.33], max_position_pct: 0.05, max_match_exposure_pct: 0.10 },
+      bankroll_limits: { daily_loss_limit_pct: 0.15, max_concurrent_exposure_pct: 0.30, max_concurrent_positions: 8 },
+      safeguards: { global_drawdown_killswitch_pct: 0.30, absurd_edge_block: 0.25, max_quote_age_seconds: 30, prob_sum_tolerance: 0.02 },
+    },
+  },
+  {
+    id: "conservative", name: "Консервативный", sort: 2,
+    values: {
+      config_version: "conservative-1.0",
+      entry_thresholds: { min_edge: 0.07, min_edge_low_liquidity: 0.10, min_calibration: 0.55, min_market_liquidity: 2000 },
+      sizing: { kelly_fraction_base: 0.12, calibration_ref: 0.6, kelly_fraction_clamp: [0.04, 0.20], max_position_pct: 0.03, max_match_exposure_pct: 0.06 },
+      bankroll_limits: { daily_loss_limit_pct: 0.10, max_concurrent_exposure_pct: 0.20, max_concurrent_positions: 5 },
+      safeguards: { global_drawdown_killswitch_pct: 0.25, absurd_edge_block: 0.25, max_quote_age_seconds: 30, prob_sum_tolerance: 0.02 },
+    },
+  },
+];
+/** The reference profile used to test strategists (doc: use MEDIUM for all). */
+export const DEFAULT_PROFILE_ID = "medium";
+
+/** Seed the three preset profiles if none exist yet. Idempotent; called on boot
+ *  so a live prod DB gets them without a wipe. Each is validated before storing;
+ *  a preset that somehow fails validation is skipped (never persist garbage). */
+export function seedRiskProfiles(db: Database, now: string): void {
+  if (R.listRiskProfiles(db).length > 0) return;
+  for (const def of RISK_PROFILE_DEFS) {
+    const loaded = loadRiskConfig(def.values);
+    if (!loaded.ok || !loaded.config) continue;
+    R.upsertRiskProfile(db, { id: def.id, name: def.name, content: JSON.stringify(loaded.config), sort: def.sort, created_at: now });
+  }
+}
+
+/** A named profile's validated config, or defaults if missing/corrupt. */
+export function getProfileConfig(db: Database, id: string): RiskConfig {
+  const row = R.getRiskProfileRow(db, id);
+  if (!row) return DEFAULT_RISK_CONFIG;
   try {
-    const loaded = loadRiskConfig(JSON.parse(raw));
+    const loaded = loadRiskConfig(JSON.parse(row.content));
     return loaded.ok && loaded.config ? loaded.config : DEFAULT_RISK_CONFIG;
   } catch { return DEFAULT_RISK_CONFIG; }
+}
+
+export interface RiskProfileView { id: string; name: string; sort: number; config: RiskConfig }
+/** All profiles for the UI, each parsed to its validated config. */
+export function listRiskProfileViews(db: Database): RiskProfileView[] {
+  return R.listRiskProfiles(db).map((r) => {
+    let config = DEFAULT_RISK_CONFIG;
+    try { const l = loadRiskConfig(JSON.parse(r.content)); if (l.ok && l.config) config = l.config; } catch { /* fall back */ }
+    return { id: r.id, name: r.name, sort: r.sort, config };
+  });
+}
+
+/**
+ * The effective risk config every layer reads (read-only) — the MEDIUM reference
+ * profile while strategists are being tested. Falls back to frozen defaults.
+ */
+export function getRiskConfig(db: Database): RiskConfig {
+  return getProfileConfig(db, DEFAULT_PROFILE_ID);
 }

@@ -50,6 +50,24 @@ export function setRiskConfigRaw(db: Database, content: string, updatedAt: strin
   ).run(content, updatedAt);
 }
 
+// ---------- risk profiles (named risk presets) ----------
+export interface RiskProfileRow { id: string; name: string; content: string; sort: number; created_at: string }
+export function listRiskProfiles(db: Database): RiskProfileRow[] {
+  return db.prepare(`SELECT * FROM risk_profiles ORDER BY sort, created_at`).all() as RiskProfileRow[];
+}
+export function getRiskProfileRow(db: Database, id: string): RiskProfileRow | undefined {
+  return db.prepare(`SELECT * FROM risk_profiles WHERE id=?`).get(id) as RiskProfileRow | undefined;
+}
+export function upsertRiskProfile(db: Database, p: { id: string; name: string; content: string; sort?: number; created_at: string }): void {
+  db.prepare(
+    `INSERT INTO risk_profiles(id,name,content,sort,created_at) VALUES(?,?,?,?,?)
+     ON CONFLICT(id) DO UPDATE SET name=excluded.name, content=excluded.content, sort=excluded.sort`,
+  ).run(p.id, p.name, p.content, p.sort ?? 0, p.created_at);
+}
+export function deleteRiskProfile(db: Database, id: string): void {
+  db.prepare(`DELETE FROM risk_profiles WHERE id=?`).run(id);
+}
+
 // ---------- sports / competitions ----------
 export function upsertSport(db: Database, id: string, label: string): void {
   db.prepare(
@@ -126,10 +144,10 @@ export function analyticsPromptFor(
 // ---------- strategies ----------
 export function insertStrategy(db: Database, s: Strategy): void {
   db.prepare(
-    `INSERT INTO strategies(id,sport_id,name,tag,color,version,prompt,params,model,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO strategies(id,sport_id,name,tag,color,version,prompt,prompt_live,params,model,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
-    s.id, s.sport_id, s.name, s.tag, s.color, s.version, s.prompt,
+    s.id, s.sport_id, s.name, s.tag, s.color, s.version, s.prompt, s.prompt_live ?? null,
     JSON.stringify(s.params), s.model, s.created_at,
   );
 }
@@ -150,9 +168,9 @@ export function saveStrategyVersion(
   const cur = getStrategy(db, strategyId);
   if (!cur) throw new Error(`strategy ${strategyId} not found`);
   db.prepare(
-    `INSERT INTO strategy_versions(id,strategy_id,version,prompt,params,reason,created_at)
-     VALUES(?,?,?,?,?,?,?)`,
-  ).run(uid(), strategyId, cur.version, cur.prompt, JSON.stringify(cur.params), reason, nowIso());
+    `INSERT INTO strategy_versions(id,strategy_id,version,prompt,prompt_live,params,reason,created_at)
+     VALUES(?,?,?,?,?,?,?,?)`,
+  ).run(uid(), strategyId, cur.version, cur.prompt, cur.prompt_live ?? null, JSON.stringify(cur.params), reason, nowIso());
   const next = cur.version + 1;
   db.prepare(`UPDATE strategies SET prompt=?,params=?,version=? WHERE id=?`)
     .run(prompt, JSON.stringify(params), next, strategyId);
@@ -160,11 +178,11 @@ export function saveStrategyVersion(
 }
 export function updateStrategy(
   db: Database, id: string,
-  patch: Partial<Pick<Strategy, "name" | "prompt" | "model" | "tag">> & { params?: StrategyParams },
+  patch: Partial<Pick<Strategy, "name" | "prompt" | "prompt_live" | "model" | "tag">> & { params?: StrategyParams },
 ): void {
   const cols: string[] = [];
   const vals: unknown[] = [];
-  for (const k of ["name", "prompt", "model", "tag"] as const)
+  for (const k of ["name", "prompt", "prompt_live", "model", "tag"] as const)
     if (patch[k] !== undefined) { cols.push(`${k}=?`); vals.push(patch[k]); }
   if (patch.params !== undefined) { cols.push(`params=?`); vals.push(JSON.stringify(patch.params)); }
   if (!cols.length) return;
@@ -184,7 +202,7 @@ export function deleteStrategy(db: Database, id: string): void {
   ]) db.prepare(sql).run(id);
 }
 function mapStrategy(r: any): Strategy {
-  return { ...r, params: safeJson<StrategyParams>(r.params, {}) };
+  return { ...r, prompt_live: r.prompt_live ?? null, params: safeJson<StrategyParams>(r.params, {}) };
 }
 
 // ---------- match live (ESPN link + lineups) & events ----------

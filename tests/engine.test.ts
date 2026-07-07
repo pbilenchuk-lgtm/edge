@@ -591,7 +591,7 @@ test("pruneRemovedCategories retires a dropped sport ENTIRELY — funded comp + 
   // a FUNDED tennis category with a tennis strategy, a share, a match and a bet —
   // exactly the state that used to survive pruning (budget + shares + P&L guards).
   R.upsertCompetition(db, { id: "pm-atp", sport_id: "tennis", name: "ATP", budget: 10000, external_league: null, created_at: "t" });
-  R.insertStrategy(db, { id: "tn1", sport_id: "tennis", name: "Serve Edge", tag: null, color: "#fff", version: 1, model: "Claude Sonnet 5", prompt: "x", params: {}, created_at: "t" });
+  R.insertStrategy(db, { id: "tn1", sport_id: "tennis", name: "Serve Edge", tag: null, color: "#fff", version: 1, model: "Claude Sonnet 5", prompt: "x", prompt_live: null, params: {}, created_at: "t" });
   R.setShare(db, { competition_id: "pm-atp", strategy_id: "tn1", pct: 100 });
   const mid = R.uid();
   R.insertMatch(db, { id: mid, competition_id: "pm-atp", home: "Alcaraz", away: "Sinner", state: "finished", lineup_out: true, kickoff_at: null, minute: null, score_home: 2, score_away: 1, final_score: "2:1", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });

@@ -32,12 +32,24 @@ CREATE TABLE IF NOT EXISTS treasury (
   total_balance REAL NOT NULL
 );
 
--- risk_config (Окно 4) — single-row global risk constants (validated JSON), read
--- by both strategists as immutable constants. Absent → code uses DEFAULT_RISK_CONFIG.
+-- risk_config (Окно 4) — legacy single-row global risk constants. Superseded by
+-- risk_profiles (named presets); kept so old DBs don't error. No longer read.
 CREATE TABLE IF NOT EXISTS risk_config (
   id         INTEGER PRIMARY KEY CHECK (id = 1),
   content    TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+-- risk_profiles (Окно 4) — NAMED risk presets (aggressive/medium/conservative,
+-- plus any the user adds). Each `content` is a validated RiskConfig JSON. A
+-- competition assigns budget to (strategy, risk_profile) pairs, so both carry a
+-- name the человек picks. `sort` orders them in the UI.
+CREATE TABLE IF NOT EXISTS risk_profiles (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  content    TEXT NOT NULL,
+  sort       INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
 );
 
 -- §2.4 analytics_prompts (аналитические промты; scope = sport | competition)
@@ -58,7 +70,8 @@ CREATE TABLE IF NOT EXISTS strategies (
   tag        TEXT,
   color      TEXT,                 -- hex for UI
   version    INTEGER NOT NULL DEFAULT 1,
-  prompt     TEXT NOT NULL,        -- цельный промт словами
+  prompt     TEXT NOT NULL,        -- предматч-окно стратега (цельный промт словами)
+  prompt_live TEXT,                -- live-окно стратега (может отсутствовать)
   params     TEXT NOT NULL DEFAULT '{}',  -- jsonb: пороги, извлечённые движком (§3.2)
   model      TEXT,
   created_at TEXT NOT NULL
@@ -70,6 +83,7 @@ CREATE TABLE IF NOT EXISTS strategy_versions (
   strategy_id TEXT NOT NULL REFERENCES strategies(id),
   version     INTEGER NOT NULL,
   prompt      TEXT NOT NULL,
+  prompt_live TEXT,
   params      TEXT NOT NULL DEFAULT '{}',
   reason      TEXT,                -- обоснование изменения (от ИИ)
   created_at  TEXT NOT NULL

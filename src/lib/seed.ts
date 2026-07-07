@@ -9,6 +9,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { extractThresholdsHeuristic } from "./thresholds.js";
+import { seedRiskProfiles } from "./riskConfig.js";
 import { SPORT_LABELS } from "./polymarket.js";
 import type { Bet, Market } from "./types.js";
 
@@ -55,7 +56,7 @@ export function seedDatabase(db: Database): void {
     null);
 
   // --- strategies (§2.5) with params re-extracted from the prompt (§3.2) ---
-  const strats: Array<Omit<Parameters<typeof R.insertStrategy>[1], "params">> = [
+  const strats: Array<Omit<Parameters<typeof R.insertStrategy>[1], "params" | "prompt_live">> = [
     { id: "edge", sport_id: "football", name: "Edge Tiered", tag: "лесенка", color: "#e8a838", version: 1, model: "Claude Opus 4.8", created_at: T,
       prompt: "Входи ТОЛЬКО при уверенности «высокая» и когда рынок не впитал информацию.\nРазмер по лесенке: edge>=10% -> 20%; 7-10% -> 15%; 5-7% -> 10%; 3-5% -> 5%.\nМожно несколько ставок на матч. Переоценка на голах.\nОграничители: не более 20% на ставку, стоп -25%." },
     { id: "flat", sport_id: "football", name: "Flat", tag: "фикс 5%", color: "#5b9bd5", version: 1, model: "Claude Haiku 4.5", created_at: T,
@@ -64,7 +65,7 @@ export function seedDatabase(db: Database): void {
       prompt: "Входи при edge >= 2%. Размер = 0.5*edge/(odds-1), максимум 25%.\nПереоценка на голах. Ограничители: не более 25% на ставку, стоп -30%." },
   ];
   for (const s of strats)
-    R.insertStrategy(db, { ...s, params: extractThresholdsHeuristic(s.prompt) });
+    R.insertStrategy(db, { ...s, prompt_live: null, params: extractThresholdsHeuristic(s.prompt) });
 
   // --- shares (§2.7) ---
   const shares: Record<string, Record<string, number>> = {
@@ -292,11 +293,126 @@ const PROMPT_STRATEGY = `Ты — стратег по ставкам на про
 
 ФОРМАТ ВЫВОДА: тип матча + дерево сценариев; таблица линий (ставка | P | edge | роль | размер по порогам); портфель с проверкой корреляции; дерево триггеров вход/выход; явный вывод, включая «пропуск». Всегда: «разбор вероятностей, не совет ставить».`;
 
+// ============================================================
+// The two real strategists (each = ПРЕДМАТЧ prompt + LIVE prompt). Code cleans
+// vig / computes edge / sizes against the assigned risk profile; the LLM writes
+// the plan (battle sheet) and, in live, the actions. Strategy 1 (overreaction)
+// deploys mostly IN-PLAY; strategy 2 (pre-match value) does its work BEFORE the
+// match and only defends in live.
+// ============================================================
+export const STRAT_OVERREACTION_PREMATCH = `# [ОКНО: ПРЕДМАТЧ] СТРАТЕГ 1 — OVERREACTION
+
+Предматчевая часть стратега in-play overreaction. Ты работаешь ДО матча. Твоя задача здесь — НЕ набрать позиции, а ПОДГОТОВИТЬ выкуп в live: определить, при каких событиях и по каким целевым ценам стратег будет выкупать переоценку. Основной капитал этого стратега разворачивается в live-окне, не здесь.
+
+Общие правила: котировки очищены от vig в коде, edge приходит посчитанным, риск-конфиг — закон (не переопределять), строгий JSON на выходе.
+
+## ВХОД
+distribution (со сценарным деревом), котировки, risk_config.
+
+## ЧТО ДЕЛАЕШЬ
+1. Проверить предохранители (свежесть котировок, целостность сумм, absurd_edge) — flagged в сторону.
+2. Пред-матч позиции — открываешь ТОЛЬКО если pre-match edge очень большой И calibration высокая. Это исключение, не основная работа. Обычно pre_match_positions почти пустой.
+3. ГЛАВНОЕ — подготовить триггеры выкупа для live. По сценарному дереву определить узлы, где ожидается переоценка, и прописать для каждого целевую цену выкупа и условие. Это уходит в live_plan боевого листа.
+
+## ЗАРЯДКА ТРИГГЕРОВ (ядро предматч-работы этого стратега)
+Для каждого релевантного узла дерева пропиши заготовку выкупа:
+- «ранний гол андердога до ~25'» → выкуп фаворита при цене ниже X; условие-фильтр: только если live-xG НЕ подтверждает доминирование андердога.
+- «удаление у фаворита рано» → частичный выкуп меньшим размером при цене ниже Y.
+- «фаворит забил/повёл» → пометка, что это точка ФИКСАЦИИ выкупной позиции, не входа.
+Каждый триггер: событие, целевая цена, размер, фильтр ложного сигнала.
+
+## ВЫХОД (battle_sheet, предматч-часть)
+Строгий JSON: { "strategist": "overreaction", "phase": "prematch", "pre_match_positions": [...], "live_triggers_armed": [ { "scenario_trigger": , "buyback_target": , "price_trigger": , "size": , "false_signal_filter": , "linked_node": } ], "rejected_markets": [...], "flagged": [...], "notes": }`;
+
+export const STRAT_OVERREACTION_LIVE = `# [ОКНО: LIVE] СТРАТЕГ 1 — OVERREACTION
+
+Live-часть стратега overreaction. Это ОСНОВНАЯ фаза этого стратега — здесь разворачивается его капитал. Ты исполняешь заряженные в предматч-окне триггеры выкупа: сопоставляешь событие на поле и свежую цену с заготовкой и выкупаешь переоценку. Не строишь стратегию заново.
+
+Общие правила: предохранители первыми, кэпы всегда, стоп по тезису, строгий JSON.
+
+## ВХОД
+battle_sheet (с live_triggers_armed из предматч-окна), live-состояние матча (счёт, время, события, live-xG), свежие котировки, открытые позиции, risk_config.
+
+## ЧТО ДЕЛАЕШЬ (по шагам)
+1. Предохранители и лимиты: свежесть котировок, целостность сумм, статус лимитов банка. Что сработало — ограничивает действия.
+2. Матчинг события с заряженным триггером из live_triggers_armed.
+3. ФИЛЬТР ЛОЖНОГО СИГНАЛА перед выкупом (критично): проверь live-xG. Если событие — гол андердога, но андердог при этом территориально давит по live-xG → это НЕ overreaction, гол отражает реальность, НЕ выкупать. Выкуп только когда данные подтверждают, что сдвиг цены эмоциональный, а не заслуженный.
+4. Проверка ценового триггера: цена дошла до buyback_target? Да → формируешь выкуп (после проверки кэпов). Нет → hold, ждёшь цену.
+5. Выходы открытых выкупных позиций: достигнут take_price (переоценка отыграна)? сломан thesis_stop (андердог продолжает доминировать/забил второй)? → фикс/закрытие.
+
+## ГЛАВНЫЕ УЗЛЫ
+- ранний гол андердога → выкуп фаворита (с фильтром live-xG).
+- удаление у фаворита рано → частичный выкуп, меньше размер.
+- фаворит забил/повёл → ФИКСАЦИЯ выкупной позиции (take), не вход.
+
+## ДИСЦИПЛИНА ВЫХОДА
+Ты ловишь ВОЗВРАТ, а не держишь до финала. Отыгралось до справедливой цены — вышел. Не превращай выкуп в веру до конца матча. Тезис сломан (рынок был прав) — закрыл с убытком, не усредняешь.
+
+## ВЫХОД (actions)
+Строгий JSON: { "strategist": "overreaction", "phase": "live", "timestamp_context": , "safeguard_status": {...}, "false_signal_check": { "live_xg_home": , "live_xg_away": , "verdict": "overreaction|real_shift", "note": }, "matched_trigger": , "actions": [ { "market": , "action": "add|reduce|close|open_new|hold", "side": , "price": , "size_pct": , "reason": , "cap_check": } ], "exit_checks": [...], "notes": }`;
+
+export const STRAT_PMVALUE_PREMATCH = `# [ОКНО: ПРЕДМАТЧ] СТРАТЕГ 2 — PRE-MATCH VALUE
+
+Предматчевая часть стратега pre-match value. Это ОСНОВНАЯ фаза этого стратега — здесь делается вся его работа. Ты входишь до матча на расхождении твоего распределения с очищенной ценой рынка. Live для этого стратега — только защита (в live-окне).
+
+Общие правила: котировки очищены от vig в коде, edge приходит посчитанным, риск-конфиг — закон, строгий JSON.
+
+## ВХОД
+distribution, котировки, risk_config.
+
+## ЧТО ДЕЛАЕШЬ
+1. Предохранители (свежесть, целостность сумм, absurd_edge) — flagged в сторону.
+2. По каждому рынку взять посчитанный edge, применить пороги, отобрать входы.
+3. Сайзинг по Kelly (фракция от calibration, клампы, корреляционный кэп на матч).
+4. Расписать план входа и выхода по каждой позиции.
+
+## КЛЮЧЕВОЙ ФИЛЬТР — где этот стратег имеет право входить
+Надёжен только на тонких/невнимательных рынках. Дисциплина обязательна:
+- Приоритет производным рынкам (командные тоталы, 1st/2nd half, форы) — рынок туда смотрит меньше.
+- На главном исходе ликвидных матчей — требуй повышенный edge и высокую calibration. По умолчанию считай, что тут рынок прав.
+- Большой edge на очень ликвидном главном рынке = флаг ошибки модели, а не value. Скепсис к себе растёт с ликвидностью.
+
+## ПЛАН ВХОДА
+- immediate — большой edge + риск коррекции к матчу.
+- limit — ждёшь лучшей цены на движении к матчу (целевая цена).
+- scaled — неликвидный рынок, частями (транши).
+
+## ПЛАН ВЫХОДА (прописать до входа)
+- take_price: рынок пришёл к нашей оценке → фиксация.
+- thesis_stop: появилась инфа, которой не было при входе и которая меняет базовую оценку (травма/красная в старте, состав не тот).
+- держать до конца только если edge жив и тезис цел.
+
+## ВЫХОД (battle_sheet, предматч-часть)
+Строгий JSON: { "strategist": "prematch_value", "phase": "prematch", "pre_match_positions": [ { "market": , "side": , "our_prob": , "market_implied": , "edge": , "calibration": , "market_thinness": "thin|liquid", "kelly_fraction": , "size_pct": , "entry": {...}, "exit": {...} } ], "rejected_markets": [...], "flagged": [...], "match_exposure_total_pct": , "notes": }`;
+
+export const STRAT_PMVALUE_LIVE = `# [ОКНО: LIVE] СТРАТЕГ 2 — PRE-MATCH VALUE (защитная фаза)
+
+Live-часть стратега pre-match value. Для этого стратега live — НЕ источник альфы, а ЗАЩИТА уже открытых пред-матч позиций. Ты не ищешь новых входов в live. Ты только ведёшь и защищаешь то, что открыто до матча.
+
+Общие правила: предохранители первыми, кэпы всегда, стоп по тезису, строгий JSON.
+
+## ВХОД
+battle_sheet (pre_match_positions), live-состояние матча, свежие котировки, открытые позиции, risk_config.
+
+## ЧТО ДЕЛАЕШЬ
+1. Предохранители и лимиты.
+2. По каждой открытой пред-матч позиции проверить выходы:
+   - take_price достигнут (рынок пришёл к нашей оценке) → фиксация.
+   - thesis_stop сломан (появилась инфа, меняющая базовую оценку: травма/красная ключевого в старте, состав оказался не тот) → закрытие.
+   - liquidity_time_stop (рынок пересыхает к концу) → выйти, пока есть контрагент.
+3. НЕ открывать новые позиции по live-событиям. Выкуп переоценки и xG-моментум — это другие стратеги, не этот.
+
+## ЕДИНСТВЕННОЕ ИСКЛЮЧЕНИЕ ДЛЯ ВХОДА
+Если live-событие создаёт ту же pre-match-неэффективность, что ты ищешь (напр. рынок медленно отреагировал на подтверждённый состав/новость и производный рынок теперь явно мисприсит) — можно добор, но по тем же строгим правилам, что и пред-матч (тонкий рынок, большой edge, высокая calibration). Это редко.
+
+## ВЫХОД (actions)
+Строгий JSON: { "strategist": "prematch_value", "phase": "live", "timestamp_context": , "safeguard_status": {...}, "exit_checks": [ { "position": , "trigger_hit": "take_price|thesis_stop|liquidity_time_stop|none", "action": } ], "new_entry": { "allowed": false, "exception_used": , "detail": }, "actions": [ { "market": , "action": "reduce|close|hold|add", "price": , "size_pct": , "reason": , "cap_check": } ], "notes": }`;
+
 /**
  * Clean-start seed for a real deployment. Bakes in the user's ЧМ-2026 default
- * prompts (match analytics + WC context + strategy) and ONE real strategy, so
- * nothing needs re-uploading. Real categories/matches arrive from "Подтянуть
- * матчи" and the cron. This is what the production container seeds on first boot.
+ * analysis prompts + the TWO real two-phase strategists (each with a предматч and
+ * a live prompt). Real categories/matches arrive from "Подтянуть матчи" and the
+ * cron. This is what the production container seeds on first boot.
  */
 export function seedMinimal(db: Database): void {
   // NON-DESTRUCTIVE + idempotent. If the DB already holds data (treasury row
@@ -317,16 +433,23 @@ export function seedMinimal(db: Database): void {
   R.upsertAnalyticsPrompt(db, "sport", "football", PROMPT_MATCH_ANALYTICS, "Claude Opus 4.8");
   R.upsertAnalyticsPrompt(db, "competition", "pm-soccer-fifwc", PROMPT_WC_CONTEXT, null);
 
-  // ONE real strategy — the user's ЧМ-2026 methodology (Промпт 3). Params encode
-  // its hardcoded thresholds (edge ladder, per-bet cap, session stop).
+  // The two real two-phase strategists. Sizing/edge/caps come from the assigned
+  // risk profile (risk_config), not per-strategy params — so params stay empty;
+  // the strategist LLM only writes the plan (code does the money math).
   R.insertStrategy(db, {
-    id: "wc", sport_id: "football", name: "Мундиаль", tag: "ЧМ-2026", color: "#e8a838", version: 1,
-    model: "Claude Opus 4.8", created_at: T, prompt: PROMPT_STRATEGY,
-    // edgeExit:false — the STRATEGIST manages exits (full/partial fixation) at
-    // each reassessment; the fast loop only guards take-profit / hard stop, so a
-    // momentary dip in model edge no longer churns the position in and out.
-    params: { minEdge: 1, tiers: [[6, 0.15], [4, 0.12], [2.5, 0.09], [1.5, 0.06], [1, 0.04]], maxPerBet: 0.15, takeProfit: 0.6, exitStop: 0.5, edgeExit: false },
+    id: "overreaction", sport_id: "football", name: "Overreaction", tag: "выкуп переоценки", color: "#e8a838",
+    version: 1, model: "Claude Opus 4.8", created_at: T,
+    prompt: STRAT_OVERREACTION_PREMATCH, prompt_live: STRAT_OVERREACTION_LIVE, params: {},
   });
+  R.insertStrategy(db, {
+    id: "prematch_value", sport_id: "football", name: "Pre-match Value", tag: "предматч value", color: "#5b9bd5",
+    version: 1, model: "Claude Opus 4.8", created_at: T,
+    prompt: STRAT_PMVALUE_PREMATCH, prompt_live: STRAT_PMVALUE_LIVE, params: {},
+  });
+
+  // Named risk presets (aggressive/medium/conservative) — a competition assigns
+  // (strategy, profile) pairs. MEDIUM is the reference for testing strategists.
+  seedRiskProfiles(db, T);
 }
 
 // ---------- small builders ----------

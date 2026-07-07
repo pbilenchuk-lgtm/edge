@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { openDb } from "../src/lib/db.js";
-import { seedDatabase, migrateCanonicalPrompts } from "../src/lib/seed.js";
+import { seedDatabase, seedMinimal, migrateCanonicalPrompts } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import {
   loadPolymarketConfig, getQuotes, fetchMidpointCents,
@@ -69,6 +69,39 @@ test("analytics prompt = base sport + competition override (§2.4)", () => {
   assert.match(p.body, /xG/); // base football
   assert.match(p.body, /Юниорский/); // youth override appended
   assert.equal(p.model, "Claude Opus 4.8");
+});
+
+test("seedMinimal seeds two two-phase strategists + three named risk profiles", () => {
+  const db = openDb(":memory:");
+  seedMinimal(db);
+  const strats = R.listStrategies(db, "football");
+  assert.deepEqual(strats.map((s) => s.id).sort(), ["overreaction", "prematch_value"]);
+  for (const s of strats) {
+    assert.ok(s.prompt && s.prompt.length > 50, `${s.id} has a prematch prompt`);
+    assert.ok(s.prompt_live && s.prompt_live.length > 50, `${s.id} has a live prompt`);
+  }
+  const over = strats.find((s) => s.id === "overreaction")!;
+  assert.match(over.prompt, /ПРЕДМАТЧ/);
+  assert.match(over.prompt_live!, /LIVE/);
+  // three named profiles seeded
+  assert.deepEqual(R.listRiskProfiles(db).map((p) => p.id), ["aggressive", "medium", "conservative"]);
+  // idempotent: seedMinimal on a populated DB is a no-op (doesn't duplicate)
+  seedMinimal(db);
+  assert.equal(R.listStrategies(db, "football").length, 2);
+});
+
+test("two-phase strategy: prompt_live persists through insert, version bump keeps it", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.insertStrategy(db, { id: "s2p", sport_id: "football", name: "Two-Phase", tag: null, color: "#fff", version: 1, model: null, prompt: "предматч тело", prompt_live: "live тело", params: {}, created_at: "t" });
+  assert.equal(R.getStrategy(db, "s2p")!.prompt_live, "live тело");
+  // editing the live prompt only
+  R.updateStrategy(db, "s2p", { prompt_live: "новое live" });
+  assert.equal(R.getStrategy(db, "s2p")!.prompt_live, "новое live");
+  // version bump archives the current (incl. live) and keeps live on the row
+  R.saveStrategyVersion(db, "s2p", "новый предматч", {}, "правка");
+  assert.equal(R.getStrategy(db, "s2p")!.prompt, "новый предматч");
+  assert.equal(R.getStrategy(db, "s2p")!.prompt_live, "новое live", "live prompt survives a prematch version bump");
 });
 
 test("migrateCanonicalPrompts brings stale football base + WC modifier current, once", () => {
