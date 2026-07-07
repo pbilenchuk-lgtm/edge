@@ -115,6 +115,45 @@ function stratEquityOnComp(matchDb: any, comp: any, stratId: string, budget: num
   }
   return { equity: budget + realized + unreal, realized, unreal, staked };
 }
+// Equity of ONE (strategy, profile) PAIR on a competition — the pair is the
+// budget/trading unit, so a strategy funded under two profiles shows two lines.
+// Realized P&L comes from settled bets tagged with this profile; unrealized from
+// open bets tagged with it (both fall back to "medium" for pre-tag legacy rows).
+function pairEquityOnComp(matchDb: any, comp: any, stratId: string, profileId: string, budget: number) {
+  const ofPair = (p: any) => (p ?? "medium") === profileId;
+  let realized = 0, unreal = 0, staked = 0;
+  for (const mid of comp.matches) {
+    const m = matchDb[mid];
+    if (!m) continue;
+    for (const b of (m.settledBets?.[stratId] || [])) if (ofPair(b.profileId)) realized += (b.payout ?? 0) - (b.stake ?? 0);
+    const cur: Record<string, number> = {};
+    for (const mk of (m.markets || [])) if (!(mk.label in cur)) cur[mk.label] = mk.price;
+    for (const b of betItems(m.bets?.[stratId])) {
+      if (b.status === "open" && ofPair(b.profileId) && b.entryPrice != null && b.entryPrice > 0) {
+        const stake = b.stake ?? 0;
+        staked += stake;
+        const price = cur[b.market] ?? b.currentPrice ?? b.entryPrice;
+        unreal += stake * (price / b.entryPrice) - stake;
+      }
+    }
+  }
+  return { equity: budget + realized + unreal, realized, unreal, staked };
+}
+// The (strategy, profile) pairs funded on a competition, each a display row.
+function compPairsOf(shareRows: any, catalog: any[], riskProfiles: any[], compId: string, compBudget: any) {
+  if (!(compBudget[compId] > 0)) return [];
+  const profName = (id: string) => (riskProfiles || []).find((p: any) => p.id === id)?.name || id;
+  return (shareRows?.[compId] || [])
+    .filter((r: any) => r.pct > 0)
+    .map((r: any) => {
+      const st = catalog.find((s: any) => s.id === r.strategyId);
+      if (!st) return null;
+      return { key: `${r.strategyId}::${r.profileId}`, strategyId: r.strategyId, profileId: r.profileId,
+        name: st.name, color: st.color, profileName: profName(r.profileId), pct: r.pct,
+        budget: Math.floor((compBudget[compId] || 0) * r.pct / 100) };
+    })
+    .filter(Boolean);
+}
 function stratOverall(competitions: any[], matchDb: any, stratId: string, sportId: string, compBudget: any, shares: any) {
   const comps = competitions.filter((c) => c.sport === sportId);
   let sumPnl = 0, sumBudget = 0; const roiList: number[] = [];
@@ -595,16 +634,14 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
           <div style={S.bankStrip}>
             {(compBudget[comp?.id] || 0) === 0 && <div style={S.noStrat}>У «{comp?.name}» нет бюджета. Нажми $ на плашке турнира.</div>}
             {compBudget[comp?.id] > 0 && compStrats.length === 0 && <div style={S.noStrat}>Бюджет есть, но доли стратегий не заданы. Нажми «Распределить доли %».</div>}
-            {compBudget[comp?.id] > 0 && compStrats.map((st) => {
-              const pct = shares[comp.id][st.id];
-              const budget = stratBudget(compBudget, comp.id, shares, st.id);
-              const e = stratEquityOnComp(matchDb, comp, st.id, budget);
-              const d = e.equity - budget;
+            {compBudget[comp?.id] > 0 && compPairsOf(shareRows, catalog, riskProfiles, comp.id, compBudget).map((p: any) => {
+              const e = pairEquityOnComp(matchDb, comp, p.strategyId, p.profileId, p.budget);
+              const d = e.equity - p.budget;
               return (
-                <div key={st.id} style={S.bankCell}>
-                  <span style={{ ...S.dot, background: st.color }} />
-                  <div style={S.bankInfo}><span style={S.bankNm}>{st.name}</span><span style={S.bankBudget}>{pct}% · {fmtMoney0(budget)}</span></div>
-                  <div style={S.bankNums}><span style={S.bankEq}>{fmtMoney(e.equity)}</span><span style={{ ...S.bankD, color: d >= 0 ? "#5fd08a" : "#ff6b6b" }}>{d >= 0 ? "▲" : "▼"}{fmtMoney(d)} ({d >= 0 ? "+" : ""}{budget ? ((d / budget) * 100).toFixed(1) : "0.0"}%)</span></div>
+                <div key={p.key} style={S.bankCell}>
+                  <span style={{ ...S.dot, background: p.color }} />
+                  <div style={S.bankInfo}><span style={S.bankNm}>{p.name}<span style={S.bankProfile}> · {p.profileName}</span></span><span style={S.bankBudget}>{p.pct}% · {fmtMoney0(p.budget)}</span></div>
+                  <div style={S.bankNums}><span style={S.bankEq}>{fmtMoney(e.equity)}</span><span style={{ ...S.bankD, color: d >= 0 ? "#5fd08a" : "#ff6b6b" }}>{d >= 0 ? "▲" : "▼"}{fmtMoney(d)} ({d >= 0 ? "+" : ""}{p.budget ? ((d / p.budget) * 100).toFixed(1) : "0.0"}%)</span></div>
                 </div>
               );
             })}
@@ -632,7 +669,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
                   {shown.length === 0 && <div style={S.empty}>{matchTab === "finished" ? "Завершённых матчей пока нет." : "Актуальных матчей нет — появятся, когда подтянутся будущие или начнутся текущие."}</div>}
                   {shown.map((mid) => (
                     <ErrorBoundary key={mid} label={`${matchDb[mid].home}–${matchDb[mid].away}`}>
-                      <MatchCard match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} onResumeAnalyze={pollAnalyze} oddsErrKey={oddsErr[mid] || 0} />
+                      <MatchCard match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} shareRows={shareRows} riskProfiles={riskProfiles} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} onResumeAnalyze={pollAnalyze} oddsErrKey={oddsErr[mid] || 0} />
                     </ErrorBoundary>
                   ))}
                 </>
@@ -672,10 +709,13 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   );
 }
 
-function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, onReassess, onAnalyze, onResumeAnalyze, oddsErrKey }: any) {
+function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskProfiles, onRefreshOdds, onReassess, onAnalyze, onResumeAnalyze, oddsErrKey }: any) {
   const meta = STATE_META[match.state] ?? { label: String(match.state ?? "—").toUpperCase(), color: "#8b95a5", bg: "#232a35" };
   const hasLineups = LINEUP_SPORTS.has(comp.sport); // does this sport have team sheets?
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
+  // The (strategy, profile) PAIRS funded here — the real trading unit, so a
+  // strategy funded under two profiles renders two blocks in the strat tab.
+  const compPairs = compPairsOf(shareRows, catalog, riskProfiles, comp.id, compBudget);
   // Strategies to surface in the per-strategy bars (log / reassess / settle): the
   // funded ones PLUS any that actually have data on THIS match. A strategy can
   // place a bet and then have its share zeroed (or the client's share map lag
@@ -883,32 +923,32 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
               <div style={S.stratListGrid} className="el-strat-grid">
                 {analyzing && <div style={S.runningRow}><span style={S.spinner} /> ИИ прогоняет стратегии…</div>}
                 {analyzeErr && <div style={S.analysisPending}>{analyzeErr}</div>}
-                {compStrats.length === 0 && <div style={S.noStrat}>Стратегия не активирована на «{comp.name}». Задай бюджет турниру (кнопка <b>$</b> на плашке) и распредели долю стратегии («⚙ Распределить доли %» над матчами) — тогда она начнёт играть и появится здесь.</div>}
-                {compStrats.map((st: any) => {
-                  const budget = stratBudget(compBudget, comp.id, shares, st.id);
-                  const raw = match.bets?.[st.id];
-                  const items = betItems(raw);
+                {compPairs.length === 0 && <div style={S.noStrat}>Стратегия не активирована на «{comp.name}». Задай бюджет турниру (кнопка <b>$</b> на плашке) и распредели долю стратегии («⚙ Распределить доли %» над матчами) — тогда она начнёт играть и появится здесь.</div>}
+                {compPairs.map((p: any) => {
+                  const budget = p.budget;
+                  const items = (match.bets?.[p.strategyId]?.items || []).filter((b: any) => (b.profileId || "medium") === p.profileId);
                   return (
-                    <div key={st.id} style={S.stratBlock}>
+                    <div key={p.key} style={S.stratBlock}>
                       <div style={S.stratBlockHead}>
-                        <span style={{ ...S.dot, background: st.color }} /><span style={S.stratName}>{st.name}</span>
-                        <span style={S.stratBudgetChip}>{shares[comp.id][st.id]}% · {fmtMoney0(budget)}</span>
-                        {/* Always-on per-strategy run icon. Live → full reassessment
-                            (revisit positions); pre-match/lineup → analyze the match
-                            (podбор ставок). Hidden only once the match is finished. */}
+                        <span style={{ ...S.dot, background: p.color }} /><span style={S.stratName}>{p.name}</span>
+                        <span style={S.stratProfileTag}>{p.profileName}</span>
+                        <span style={S.stratBudgetChip}>{p.pct}% · {fmtMoney0(budget)}</span>
+                        {/* Always-on run icon. Live → full reassessment (revisit
+                            positions of ALL the strategy's pairs); pre-match/lineup →
+                            analyze the match. Hidden once the match is finished. */}
                         {match.state !== "finished" && (() => {
                           const live = match.state === "live";
                           const noQuotes = !match.markets?.length;
-                          const busy = reassessing[st.id] || (!live && analyzing);
+                          const busy = reassessing[p.strategyId] || (!live && analyzing);
                           return (
                           <button
                             style={{ ...S.stratReassessBtn, opacity: (busy || noQuotes) ? 0.5 : 1 }}
                             disabled={busy || noQuotes}
                             title={live
-                              ? `Переоценить «${st.name}» по этому матчу (ИИ пересмотрит позиции: вход/частичный или полный выход)`
+                              ? `Переоценить «${p.name}» по этому матчу (ИИ пересмотрит позиции: вход/частичный или полный выход)`
                               : noQuotes ? "Нет котировок — сначала «Подтянуть матчи»" : `Прогнать ИИ по матчу — подобрать ставки стратегий`}
                             onClick={async () => {
-                              if (live) { setReassessing((p) => ({ ...p, [st.id]: true })); try { await onReassess(match.id, st.id); } finally { setReassessing((p) => ({ ...p, [st.id]: false })); } }
+                              if (live) { setReassessing((pp) => ({ ...pp, [p.strategyId]: true })); try { await onReassess(match.id, p.strategyId); } finally { setReassessing((pp) => ({ ...pp, [p.strategyId]: false })); } }
                               else { await runAnalyze(); }
                             }}
                           >{busy ? "…" : "↻"}</button>
@@ -2121,6 +2161,7 @@ const S: Record<string, React.CSSProperties> = {
   bankInfo: { display: "flex", flexDirection: "column" },
   bankNm: { fontSize: 13, fontWeight: 600 },
   bankBudget: { fontSize: 10.5, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
+  bankProfile: { color: "#8b95a5", fontWeight: 400 },
   bankNums: { marginLeft: "auto", textAlign: "right" },
   bankEq: { fontSize: 15, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", display: "block" },
   bankD: { fontSize: 11, fontFamily: "'JetBrains Mono', monospace" },
@@ -2245,6 +2286,7 @@ const S: Record<string, React.CSSProperties> = {
   stratBlock: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12 },
   stratBlockHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 },
   stratName: { fontSize: 13.5, fontWeight: 700 },
+  stratProfileTag: { fontSize: 10, color: "#8b95a5", background: "#232a35", border: `1px solid ${LINE}`, borderRadius: 20, padding: "1px 8px", whiteSpace: "nowrap" },
   stratBudgetChip: { marginLeft: "auto", fontSize: 10.5, color: "#e8a838", fontFamily: "'JetBrains Mono', monospace", background: "#2e2a1a", borderRadius: 20, padding: "2px 10px" },
   stratReassessBtn: { flex: "0 0 auto", width: 26, height: 26, display: "inline-flex", alignItems: "center", justifyContent: "center", background: "transparent", border: `1px solid #5b9bd566`, color: "#7fb4e8", borderRadius: 7, fontSize: 13, cursor: "pointer", lineHeight: 1, padding: 0 },
   noBets: { fontSize: 12, color: MUTE, fontStyle: "italic" },
