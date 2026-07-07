@@ -43,6 +43,22 @@ test("assembleFootball: category core_adjustment lowers xG → totals drop, meta
   assert.equal(as.overrides.length, 2, "base + category overrides merged");
 });
 
+test("assembleFootball: drops garbage scenario nodes (empty shifts AND empty note)", () => {
+  const cat: CategoryDelta = {
+    ok: true, coreAdjustments: [], newDrivers: [],
+    newScenarios: [
+      { trigger: "выход в овертайм", prob: 0.2, shifts: null, note: "" },                  // garbage → dropped
+      { trigger: "параллельный матч", prob: 0.15, shifts: null, note: "меняет мотивацию" }, // has note → kept
+    ],
+    overrideAdjustments: [], confidenceXgDelta: 0, confidenceScenarioDelta: 0, notes: "",
+  };
+  const as = assembleFootball(base, cat);
+  const triggers = as.scenarios.map((s) => s.trigger);
+  assert.ok(triggers.includes("параллельный матч"), "filled scenario kept");
+  assert.ok(!triggers.includes("выход в овертайм"), "empty scenario dropped");
+  assert.ok(triggers.includes("ранний гол"), "base scenario (has note) kept");
+});
+
 test("assembleFootball: outcome_90 stays a valid distribution after everything", () => {
   const cat: CategoryDelta = { ok: true, coreAdjustments: [{ target: "xg_home", op: "add", value: 0.3, reason: "хозяева" }], newDrivers: [], newScenarios: [], overrideAdjustments: [{ target: "outcome_90.draw", adjust: 0.05, reason: "ничья вероятнее" }], confidenceXgDelta: 0, confidenceScenarioDelta: 0, notes: "" };
   const as = assembleFootball(base, cat);

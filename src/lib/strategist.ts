@@ -123,8 +123,10 @@ export function sizePrematch(inp: SizeInput): SizeResult {
   // where a resolved-market edge is genuine.
   if (!inp.allowLargeEdge && edge > cfg.safeguards.absurd_edge_block) return flag(`edge ${(edge * 100).toFixed(1)}% > absurd_edge_block ${(cfg.safeguards.absurd_edge_block * 100).toFixed(0)}% — вероятно баг`);
 
-  // Thresholds (profile). Thin markets use the raised min_edge.
-  const thin = inp.liquidity != null && inp.liquidity < cfg.entry_thresholds.min_market_liquidity;
+  // Thresholds (profile). Thin markets use the raised min_edge. UNKNOWN depth
+  // (liquidity null — we couldn't read it) is treated as thin: an unmeasurable
+  // book is a reason for caution, not for the easier bar.
+  const thin = inp.liquidity == null || inp.liquidity < cfg.entry_thresholds.min_market_liquidity;
   const minEdge = thin ? cfg.entry_thresholds.min_edge_low_liquidity : cfg.entry_thresholds.min_edge;
   if (calibration < cfg.entry_thresholds.min_calibration) return skip(`калибровка ${calibration.toFixed(2)} < ${cfg.entry_thresholds.min_calibration}`);
   if (edge < minEdge) return skip(`edge ${(edge * 100).toFixed(1)}% < порога ${(minEdge * 100).toFixed(1)}%${thin ? " (тонкий рынок)" : ""}`);

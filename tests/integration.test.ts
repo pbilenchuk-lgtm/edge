@@ -203,11 +203,19 @@ test("migrateCanonicalPrompts brings stale football base + WC modifier current, 
   assert.ok(R.analyticsPromptRow(db, "sport", "football")!.body.startsWith("# БАЗОВЫЙ АНАЛИЗ"), "base brought to Layer-1");
   assert.ok(R.analyticsPromptRow(db, "competition", "pm-soccer-fifwc")!.body.startsWith("# МОДИФИКАТОР"), "WC modifier brought to Layer-2");
 
-  // idempotent: a second run must NOT append another row (marker already matches)
+  assert.match(R.analyticsPromptRow(db, "sport", "football")!.body, /Слой 1 · v2/, "base is at the current version");
+
+  // idempotent: a second run must NOT append another row (version already current)
   const countBefore = (db.prepare("SELECT COUNT(*) c FROM analytics_prompts WHERE scope='sport' AND scope_id='football'").get() as any).c;
   migrateCanonicalPrompts(db);
   const countAfter = (db.prepare("SELECT COUNT(*) c FROM analytics_prompts WHERE scope='sport' AND scope_id='football'").get() as any).c;
   assert.equal(countAfter, countBefore, "no duplicate insert on re-run");
+
+  // version-aware: a prompt with the right HEADER but an OLD version tag is re-pushed
+  R.upsertAnalyticsPrompt(db, "sport", "football", "# БАЗОВЫЙ АНАЛИЗ ФУТБОЛЬНОГО МАТЧА (Слой 1 · v1)\nстарое тело", "Claude Opus 4.8");
+  assert.ok(!R.analyticsPromptRow(db, "sport", "football")!.body.includes("Слой 1 · v2"), "v1 in place");
+  migrateCanonicalPrompts(db);
+  assert.match(R.analyticsPromptRow(db, "sport", "football")!.body, /Слой 1 · v2/, "v1 upgraded to v2");
 });
 
 test("strategy versioning archives old and bumps version (§2.6, §3.5)", () => {

@@ -67,13 +67,22 @@ test("sizePrematch: aggressive stakes more and enters lower edge than conservati
   const db = openDb(":memory:");
   seedRiskProfiles(db, "t");
   const agg = getProfileConfig(db, "aggressive"), con = getProfileConfig(db, "conservative");
-  // a modest 4% edge: aggressive (min 3%) enters, conservative (min 7%) skips
-  const inp = { ourProb: 0.56, priceCents: 52, implied: 0.52, calibration: 0.6, budget: 1000 };
+  // a modest 4% edge on a LIQUID market (so the normal min_edge applies, not the
+  // thin bar): aggressive (min 3%) enters, conservative (min 7%) skips
+  const inp = { ourProb: 0.56, priceCents: 52, implied: 0.52, calibration: 0.6, budget: 1000, liquidity: 100000 };
   assert.equal(sizePrematch({ ...inp, cfg: agg }).status, "enter", "aggressive enters 4% edge");
   assert.equal(sizePrematch({ ...inp, cfg: con }).status, "skip", "conservative skips 4% edge");
   // on a big shared edge, aggressive stakes more (higher Kelly + higher caps)
-  const big = { ourProb: 0.66, priceCents: 52, implied: 0.52, calibration: 0.7, budget: 1000 };
+  const big = { ourProb: 0.66, priceCents: 52, implied: 0.52, calibration: 0.7, budget: 1000, liquidity: 100000 };
   assert.ok(sizePrematch({ ...big, cfg: agg }).stake > sizePrematch({ ...big, cfg: con }).stake, "aggressive stakes more");
+});
+
+test("sizePrematch: unknown liquidity (null) is treated as THIN — the cautious bar applies", () => {
+  // edge 6%: passes the normal min_edge (5%) but fails the thin bar (7%). With
+  // liquidity unknown, the thin bar must apply → skip.
+  const base = { ourProb: 0.61, priceCents: 55, implied: 0.55, calibration: 0.7, budget: 1000, cfg: MED };
+  assert.equal(sizePrematch({ ...base, liquidity: null }).status, "skip", "unknown depth → cautious → skip a 6% edge");
+  assert.equal(sizePrematch({ ...base, liquidity: 100000 }).status, "enter", "known-deep market → normal bar → 6% enters");
 });
 
 test("sizePrematch: match-exposure cap limits the stake", () => {
