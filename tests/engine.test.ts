@@ -72,6 +72,28 @@ test("parseEspnSummary extracts lineups + typed key events", () => {
   assert.equal(d.events[1].type, "yellow_card");
 });
 
+test("parseEspnSummary keeps the positional layout: role tags, ordered by formation slot", () => {
+  const s = {
+    rosters: [
+      { homeAway: "home", team: { displayName: "Portugal" }, formation: "4-3-3", roster: [
+        { starter: true, formationPlace: "9", position: { abbreviation: "F" }, athlete: { displayName: "Ronaldo" } },
+        { starter: true, formationPlace: "1", position: { abbreviation: "G" }, athlete: { displayName: "Costa" } },
+        { starter: true, formationPlace: "3", athlete: { displayName: "Dias", position: { abbreviation: "D" } } }, // pos on athlete
+        { starter: false, formationPlace: "2", position: { abbreviation: "D" }, athlete: { displayName: "Bench" } },
+      ] },
+      { homeAway: "away", team: { displayName: "Croatia" }, formation: "4-1-4-1", roster: [
+        { starter: true, athlete: { displayName: "Modrić" } }, // feed with no position/slot → bare name
+      ] },
+    ],
+    keyEvents: [],
+  };
+  const d = parseEspnSummary(s);
+  // sorted by formationPlace (1,3,9), role tagged, non-starter dropped
+  assert.deepEqual(d.lineups.home!.starters, ["Costa (G)", "Dias (D)", "Ronaldo (F)"]);
+  // graceful when a feed omits positions
+  assert.deepEqual(d.lineups.away!.starters, ["Modrić"]);
+});
+
 test("parseEspnSummary extracts team statistics (possession, shots, chances)", () => {
   const s = {
     rosters: [],

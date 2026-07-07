@@ -401,7 +401,22 @@ function teamStats(r: any): TeamStats | null {
 export function parseEspnSummary(s: any): MatchDetail {
   const teamLineup = (r: any): TeamLineup | null => {
     if (!r) return null;
-    const starters = (r.roster ?? []).filter((p: any) => p.starter).map((p: any) => p.athlete?.displayName).filter(Boolean);
+    // Keep the POSITIONAL layout, not just names: ESPN's roster carries each
+    // starter's role (position.abbreviation) and slot in the shape
+    // (formationPlace, 1..11). Order by that slot and tag the role, so the
+    // analyst sees the actual раскладка (5-3-2 bus vs 4-3-3 with two wingers →
+    // very different xG at identical names), not a flat name list. When a feed
+    // omits the position we fall back to the bare name (no "(?)" noise).
+    const starters = (r.roster ?? [])
+      .filter((p: any) => p.starter)
+      .map((p: any) => ({
+        name: p.athlete?.displayName as string | undefined,
+        pos: (p.position?.abbreviation ?? p.athlete?.position?.abbreviation) as string | undefined,
+        slot: Number(p.formationPlace ?? NaN),
+      }))
+      .filter((p: { name?: string }) => p.name)
+      .sort((a: { slot: number }, b: { slot: number }) => (isNaN(a.slot) ? 99 : a.slot) - (isNaN(b.slot) ? 99 : b.slot))
+      .map((p: { name?: string; pos?: string }) => (p.pos ? `${p.name} (${p.pos})` : p.name!));
     return { team: r.team?.displayName ?? "?", formation: r.formation ?? null, starters };
   };
   const rosters = s.rosters ?? [];
