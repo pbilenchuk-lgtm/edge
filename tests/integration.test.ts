@@ -103,6 +103,32 @@ test("analyzeMatch tags proposed bets with the pair's risk profile", async () =>
   assert.ok(bets.every((b) => b.risk_profile_id === "aggressive"), "every bet carries the pair's profile");
 });
 
+test("module 3: the assigned risk profile gates entries + saves a battle_sheet (calibration differs)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  // same strategy under TWO profiles: medium (min_calibration 0.45) and
+  // conservative (0.55). Analysis calibration 0.50 → medium enters, conservative
+  // is blocked purely by its profile threshold.
+  R.clearShares(db, "wc2026");
+  R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", risk_profile_id: "medium", pct: 40 });
+  R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", risk_profile_id: "conservative", pct: 40 });
+  const labels = R.latestMarkets(db, "m-lineup").map((m) => m.label);
+  const analysis = { match_type: "group", match_type_reason: "ничья", core: { xg_home: 2.3, xg_away: 1.5, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 }, overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.50, scenario_confidence: 0.5, sample_size: 10, notes: "" }, unknowns: [], picks: labels.map((l) => ({ label: l, conviction: "средняя", reason: "t" })), exits: [] };
+  await analyzeMatch(db, "m-lineup", { fetchImpl: mockLLM(analysis), env: { ANTHROPIC_API_KEY: "k" } });
+
+  const medBets = R.betsForMatch(db, "m-lineup", "edge").filter((b) => b.risk_profile_id === "medium" && b.status === "proposed");
+  const conBets = R.betsForMatch(db, "m-lineup", "edge").filter((b) => b.risk_profile_id === "conservative" && b.status === "proposed");
+  assert.ok(medBets.length > 0, "medium (min_calibration 0.45) enters at calibration 0.50");
+  assert.equal(conBets.length, 0, "conservative (min_calibration 0.55) is blocked by its profile");
+
+  // battle_sheet artifact saved per pair, carrying the code-side edges
+  const arts = R.artifactsForMatch(db, "m-lineup").filter((x) => x.kind === "battle_sheet");
+  assert.ok(arts.some((x) => x.label.includes("medium")) && arts.some((x) => x.label.includes("conservative")), "battle_sheet per pair");
+  const med = JSON.parse(arts.find((x) => x.label.includes("medium"))!.content);
+  assert.equal(med.profile, "medium");
+  assert.ok(Array.isArray(med.positions) && med.positions.some((p: any) => typeof p.edge_pct === "number"), "battle_sheet carries computed edges");
+});
+
 test("seedMinimal seeds three two-phase strategists + three named risk profiles", () => {
   const db = openDb(":memory:");
   seedMinimal(db);

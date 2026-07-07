@@ -15,10 +15,9 @@ import * as R from "./repo.js";
 import { assessMatchLLM, assessFootballStructured, assessCategoryModifier, effectiveEnv, strategistDecide, resolveModel, type MatchAssessment, type FootballAnalysis, type CategoryDelta } from "./llm.js";
 import { assembleFootball, type AssembledAnalysis } from "./assembler.js";
 import { footballLabelProb } from "./footballMarkets.js";
-import { sizeBet } from "./thresholds.js";
-import { edgePct } from "./edge.js";
+import { impliedProbs, probSumFlags, sizePrematch } from "./strategist.js";
+import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
-import type { Confidence } from "./types.js";
 
 export interface AnalyzeDeps {
   fetchImpl?: typeof fetch;
@@ -107,6 +106,10 @@ export async function analyzeMatch(
   // derives every market by Poisson. Other sports keep the generic path. The
   // analyst never sees quotes either way.
   let a: MatchAssessment;
+  // Numeric analysis calibration (0..1) for the profile's min_calibration gate —
+  // the word confidence loses the number. Football fills it from the assembled
+  // distribution; other sports map the word back to a band.
+  let calibrationNum: number | null = null;
   if (sport === "football") {
     const basePrompt = R.analyticsPromptRow(db, "sport", sport)?.body ?? prompt.body;
     const base = await assessFootballStructured({ home: match.home, away: match.away, state: match.state, analyticsPrompt: basePrompt, marketLabels: markets.map((m) => m.label), context: ctx }, model, { fetchImpl: deps.fetchImpl, env });
@@ -117,6 +120,7 @@ export async function analyzeMatch(
       let category: CategoryDelta | null = null;
       if (modifier?.body) category = await assessCategoryModifier(modifier.body, base, match.home, match.away, safeModel(modifier.model), { fetchImpl: deps.fetchImpl, env });
       const assembled = assembleFootball(base, category?.ok ? category : null);
+      calibrationNum = assembled.calibration.xg_confidence;
       a = footballToAssessment(assembled, match.home, match.away, markets.map((m) => m.label));
       // Record the raw filled schema of EACH layer so the «Анализ» tab can show/
       // copy exactly what the base produced, what the ЧМ modifier changed, and the
@@ -193,6 +197,12 @@ export async function analyzeMatch(
     .filter((sh) => sh.pct > 0 && (comp?.budget ?? 0) > 0 && strategyById.has(sh.strategy_id))
     .map((sh) => ({ strat: strategyById.get(sh.strategy_id)!, profile: sh.risk_profile_id, pct: sh.pct }));
 
+  // Quotes → de-vigged implied probs, once (same for every pair). The strategist
+  // is the FIRST layer to see prices (the analyst was blind); edge is computed
+  // here, in code, off the cleaned prices.
+  const quotes = freshMarkets.map((m) => ({ label: m.label, priceCents: m.price, liquidity: parseLiq(m.liquidity) }));
+  const impliedMap = impliedProbs(quotes);
+
   let betsCreated = 0;
   const decisions: AnalyzeResult["decisions"] = [];
   for (const { strat, profile, pct } of pairs) {
@@ -225,47 +235,51 @@ export async function analyzeMatch(
     // §9.3 budget cap is per-COMPETITION and per-PAIR: seed exposure + realized
     // from ALL of this (strategy, profile) pair's matches in the comp, so total
     // committed stake across concurrent matches can't exceed the pair's share.
-    let exposure = strategyCompExposure(db, match.competition_id, strat.id, profile);
-    const realizedPnl = strategyCompRealized(db, match.competition_id, strat.id, profile);
-    let entries = 0, skipped = 0;
-    // best edges first
+    let exposure = strategyCompExposure(db, match.competition_id, strat.id, profile) - strategyCompRealized(db, match.competition_id, strat.id, profile);
+    // money math is CODE, sized against the PAIR's risk profile (§9.6, module #3)
+    const cfg = getProfileConfig(db, profile);
+    const psFlags = probSumFlags(quotes, cfg);
+    const calibration = calibrationNum ?? confBand(a.confidence);
+    let matchExposure = openPos.reduce((s, b) => s + (b.stake ?? 0), 0);
+    let entries = 0, skipped = 0, flagged = 0;
+    const battle: any[] = [];
+    // best de-vigged edges first
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
-      .map((m) => ({ m, edge: edgePct(m.ai_prob as number, m.price) }))
+      .map((m) => { const implied = impliedMap.get(m.label)?.implied ?? m.price / 100; return { m, implied, edge: (m.ai_prob as number) - implied }; })
       .sort((x, y) => y.edge - x.edge);
-    for (const { m } of ranked) {
-      // When the strategist ran, only its picks are eligible and its conviction
-      // (from the prompt's methodology) drives the confidence gate.
+    for (const { m, implied } of ranked) {
+      // When the strategist ran, only its picks are eligible.
       const pick = picksArr?.find((p) => sameMarketLabel(p.label, m.label));
       if (picksArr && !pick) { skipped++; continue; }
       if (held.has(norm(m.label))) { skipped++; continue; } // already open on this market
-      const conf = (pick?.conviction ?? a.confidence) as Confidence;
-      // Prefer the strategist's own probability (live-aware) when it gave one,
-      // else the analysis prob. Refresh the market so the shown edge matches.
-      const aiProb = pick?.prob != null ? pick.prob : (m.ai_prob as number);
+      // Prefer the strategist's own probability when it gave one, else the analysis prob.
+      const ourProb = pick?.prob != null ? pick.prob : (m.ai_prob as number);
       if (pick?.prob != null) R.setMarketAiProb(db, m.id, pick.prob);
-      const d = sizeBet({ params: strat.params, aiProb, priceCents: m.price, budget, exposure, realizedPnl, confidence: conf });
-      if (!d.enter) { skipped++; continue; }
-      exposure += d.stake;
-      entries++;
+      // Safeguard: a group whose prices don't sum near 1 is a bad/stale book — flag.
+      if (psFlags.has(m.label)) { flagged++; battle.push({ market: m.label, status: "flag", reason: "prob_sum вне допуска" }); continue; }
+      const r = sizePrematch({ ourProb, priceCents: m.price, implied, calibration, liquidity: parseLiq(m.liquidity), budget, matchExposure, compExposure: exposure, cfg });
+      battle.push({ market: m.label, our_prob: round3(ourProb), implied: round3(implied), edge_pct: round3(r.edge * 100), status: r.status, stake: r.stake, kelly_fraction: round3(r.kellyFraction), reason: r.reason });
+      if (r.status === "flag") { flagged++; continue; }
+      if (r.status !== "enter") { skipped++; continue; }
+      exposure += r.stake; matchExposure += r.stake; entries++;
       R.insertBet(db, {
         id: R.uid(), match_id: matchId, strategy_id: strat.id, risk_profile_id: profile, market_label: m.label,
         status: "proposed", proposed_price: m.price, entry_price: null, current_price: null,
-        closing_price: null, ai_prob: aiProb, stake: d.stake,
-        // When the strategist ran we cite its reason; when it DIDN'T (no key or a
-        // failed call) we fell back to the pure edge+threshold rule — mark that
-        // honestly so the log doesn't read like a methodology-driven pick.
-        rationale: pick
-          ? `«${m.label}»: край ${d.edge.toFixed(1)}%. ${pick.reason || d.reason}.`
-          : `«${m.label}»: край ${d.edge.toFixed(1)}%. ${d.reason}.${picksArr ? "" : " (без стратега — по краю)"}`,
+        closing_price: null, ai_prob: ourProb, stake: r.stake,
+        rationale: `«${m.label}»: edge ${(r.edge * 100).toFixed(1)}% (наша ${(ourProb * 100).toFixed(0)}% vs рынок ${(implied * 100).toFixed(0)}%). ${pick?.reason || r.reason}.`,
         entered_minute: null, result: null, payout: null, created_at: now(),
       });
     }
+    // Battle-sheet artifact: the CODE-side sizing (edge/implied/stake/flags per
+    // market) for the pair + the strategist's plan — for review and tests.
+    try { R.saveArtifact(db, { match_id: matchId, kind: "battle_sheet", label: pairLabel, stage, content: JSON.stringify({ pair: pairLabel, profile, budget, calibration, positions: battle, flagged, strategist_plan: dec.ok ? dec : { ok: false } }, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
     // Discipline event: a funded, active strategy that looked at the match and
     // entered NOTHING (край недостаточен) — a valid «Пропуск» (ТЗ §4.2), so it
     // shows in the feed instead of the tab being permanently empty. One per
     // (match, strategy, run), not per-market, to avoid flooding the log.
-    if (entries === 0 && skipped > 0) {
-      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — край недостаточен (${skipped} ${skipped === 1 ? "рынок" : "рынков"} ниже порога)`, created_at: now() });
+    if (entries === 0 && (skipped + flagged) > 0) {
+      const why = flagged > 0 && skipped === 0 ? `флаги предохранителей (${flagged})` : `край недостаточен (${skipped} ниже порога)`;
+      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — ${why}`, created_at: now() });
     }
     decisions.push({ strategy: pairLabel, entries, skipped });
     betsCreated += entries;
@@ -275,6 +289,20 @@ export async function analyzeMatch(
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+const round3 = (x: number) => Math.round(x * 1000) / 1000;
+/** Word confidence → a numeric band for the profile's min_calibration gate
+ *  (used only for non-football, where there's no assembled xg_confidence). */
+const confBand = (c: string) => (c === "высокая" ? 0.75 : c === "низкая" ? 0.3 : 0.5);
+/** Parse a liquidity string ("$2.5M", "1234", "780K") to a number, or null. */
+function parseLiq(s: string | null): number | null {
+  if (s == null) return null;
+  const m = String(s).replace(/[$,\s]/g, "").match(/^([\d.]+)\s*([mk]?)/i);
+  if (!m) return null;
+  const v = parseFloat(m[1]);
+  if (!isFinite(v)) return null;
+  const suf = m[2].toLowerCase();
+  return suf === "m" ? v * 1e6 : suf === "k" ? v * 1e3 : v;
+}
 
 /** Real lineups + in-match events (ESPN) as a compact context string for the
  *  analytics/strategist prompts — this is what makes reassessment meaningful. */

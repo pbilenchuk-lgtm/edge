@@ -1154,7 +1154,8 @@ const ARTIFACT_META: Record<string, { title: string; num: string; bg: string }> 
   base: { title: "Базовый анализ (Слой 1)", num: "1", bg: "#70b56a" },
   category: { title: "Модификатор категории (Слой 2)", num: "2", bg: "#e8a838" },
   distribution: { title: "Сборка — распределение (25 рынков)", num: "Σ", bg: "#5b9bd5" },
-  strategist: { title: "Стратег", num: "S", bg: "#b07fd0" },
+  battle_sheet: { title: "Боевой лист (код: edge/сайзинг по профилю)", num: "⚔", bg: "#c9756b" },
+  strategist: { title: "Стратег (LLM-план)", num: "S", bg: "#b07fd0" },
 };
 function ArtifactBlock({ art }: any) {
   const [open, setOpen] = useState(false);
@@ -1181,7 +1182,7 @@ function ArtifactBlock({ art }: any) {
 function ArtifactsPanel({ artifacts }: any) {
   if (!artifacts || artifacts.length === 0) return null;
   // stable, meaningful order: base → category → distribution → strategists
-  const order = ["base", "category", "distribution", "strategist"];
+  const order = ["base", "category", "distribution", "battle_sheet", "strategist"];
   const sorted = [...artifacts].sort((a: any, b: any) => (order.indexOf(a.kind) + 1 || 99) - (order.indexOf(b.kind) + 1 || 99));
   return (
     <div style={S.analysisStage}>
