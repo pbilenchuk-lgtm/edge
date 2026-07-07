@@ -414,7 +414,10 @@ test("refreshMatchOdds writes a snapshot, marks to market, and triggers on a big
   assert.equal(over.price, 50);
   assert.ok(R.latestMarkets(db, "m-live").length >= before); // new snapshots layered on
   const edgeOver = R.betsForMatch(db, "m-live", "edge").find((b) => b.market_label === "Over 1.5")!;
-  assert.equal(edgeOver.current_price, 50);
+  // marked to LIQUIDATION value (mid 50¢ haircut for exit slippage + exit fee), i.e.
+  // below the raw mid — this bet is large vs the market's liquidity, so the haircut
+  // is sizeable, which is exactly the point: a thin-market position isn't overstated.
+  assert.ok(edgeOver.current_price != null && edgeOver.current_price > 0 && edgeOver.current_price < 50, `liquidation MTM below mid, got ${edgeOver.current_price}`);
   assert.ok(res.triggers.some((t) => t.created), "price_move reassessment fired");
 });
 

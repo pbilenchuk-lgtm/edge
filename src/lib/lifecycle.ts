@@ -19,7 +19,7 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches } from "./engine.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBook, type PolymarketConfig } from "./polymarket.js";
-import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents } from "./execution.js";
+import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents, liquidationCents } from "./execution.js";
 import type { Bet, Market } from "./types.js";
 import { analyzeMatch, jobActive, matchContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision, sizeBet } from "./thresholds.js";
@@ -217,7 +217,7 @@ async function executeEntry(
   const book = token ? await fetchOrderBook(token, poly, deps) : null;
   if (book && book.asks.length) {
     const bestAsk = book.asks[0].priceCents;
-    const capUsd = maxExecutableBuyUsd(book.asks, fairCents, exec);
+    const capUsd = maxExecutableBuyUsd(book.asks, fairCents, { edgeFloorCents: exec.edgeFloorCents, maxImpactCents: exec.maxImpactCents, feeRate: exec.takerFeeRate });
     if (capUsd <= 0) return { skip: true, priceCents: quoteCents, stake: 0, note: `нет объёма с эджем (аск ${bestAsk}¢ vs справ. ${fairCents.toFixed(0)}¢, слиппедж съедает край)` };
     const stake = Math.min(proposedUsd, capUsd);
     const fill = simulateBuy(book.asks, stake);
@@ -393,7 +393,10 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // When the model prob is unknown, DON'T let it read as "edge gone" (which
       // would force-close on the first tick) — pass 1 so only take-profit / hard
       // stop can fire. (Defensive: entries always store a non-null ai_prob.)
-      const d = exitDecision({ params: strat.params, aiProb: b.ai_prob ?? 1, entryPriceCents: b.entry_price, currentPriceCents: mk.price });
+      // Decide on the LIQUIDATION value (what you'd actually net selling now), not
+      // the optimistic mid — consistent with how the position is marked to market.
+      const liqCents = poly.enabled ? liquidationCents(mk.price, b.stake ?? 0, Number(mk.liquidity ?? 0) || 0, poly.exec.fallbackK, poly.exec.takerFeeRate) : mk.price;
+      const d = exitDecision({ params: strat.params, aiProb: b.ai_prob ?? 1, entryPriceCents: b.entry_price, currentPriceCents: liqCents });
       if (!d.exit) continue;
       // Fill the close against the real book (sell into bids) — exit slippage into P&L.
       const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price);

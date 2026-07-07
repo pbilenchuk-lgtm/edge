@@ -19,6 +19,7 @@ import { reassessNarrative, effectiveEnv } from "./llm.js";
 import { settleBet, resolveFootballMarket } from "./settlement.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig } from "./polymarket.js";
+import { liquidationCents } from "./execution.js";
 import type { SportsProvider } from "./sports.js";
 
 export interface EngineConfig {
@@ -146,9 +147,14 @@ export async function refreshMatchOdds(
       id: R.uid(), match_id: matchId, label: m.label, price, ai_prob: m.ai_prob,
       liquidity: m.liquidity, external_ref: m.external_ref, snapshot_at: now, is_closing: false,
     });
-    // mark-to-market open bets on this market
+    // mark-to-market open bets on this market — at LIQUIDATION value (mid haircut
+    // for exit slippage − exit fee), not the raw mid, so unrealized P&L / equity
+    // reflect what you could actually cash out on this book.
+    const liq = Number(m.liquidity ?? 0) || 0;
     for (const b of R.betsForMatch(db, matchId)) {
-      if (b.status === "open" && b.market_label === m.label) R.updateBet(db, b.id, { current_price: price });
+      if (b.status !== "open" || b.market_label !== m.label) continue;
+      const mtm = poly.enabled ? liquidationCents(price, b.stake ?? 0, liq, poly.exec.fallbackK, poly.exec.takerFeeRate) : price;
+      R.updateBet(db, b.id, { current_price: mtm });
     }
     // price_move reassessment trigger — LIVE only (ТЗ §3.3). Pre-match a
     // discovered match sits in `lineup`/time-flipped `lineup_out` with no game,

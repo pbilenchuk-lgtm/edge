@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents } from "../src/lib/execution.js";
+import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents, liquidationCents } from "../src/lib/execution.js";
 
 // asks ascending by price; each level: priceCents × size(shares).
 const asks = [
@@ -40,20 +40,30 @@ test("simulateSell: hits bids high-first → VWAP below the top bid", () => {
   assert.equal(f.filledShares, 150);
 });
 
-test("maxExecutableBuyUsd: 'both' cap = min(edge-preserving, impact-bounded)", () => {
+test("maxExecutableBuyUsd: 'both' cap = min(edge-preserving, impact-bounded) — no fee", () => {
   // fair 52¢, edge floor 1.5¢ → edge ceiling 50.5¢; impact 2¢ over best 46.8 → 48.8¢.
   // cap = min(50.5, 48.8) = 48.8¢ → include 46.8 + 47.5 + 48.0, exclude 55.
-  const cap = maxExecutableBuyUsd(asks, 52, { edgeFloorCents: 1.5, maxImpactCents: 2 });
+  const cap = maxExecutableBuyUsd(asks, 52, { edgeFloorCents: 1.5, maxImpactCents: 2, feeRate: 0 });
   const want = 200 * 0.468 + 300 * 0.475 + 500 * 0.48;
   assert.equal(Math.round(cap), Math.round(want));
 });
 
-test("maxExecutableBuyUsd: edge ceiling binds when it's tighter than impact", () => {
+test("maxExecutableBuyUsd: edge ceiling binds when it's tighter than impact — no fee", () => {
   // fair 48¢, floor 1.5 → edge ceiling 46.5¢ (below best ask 46.8) → nothing qualifies.
-  assert.equal(maxExecutableBuyUsd(asks, 48, { edgeFloorCents: 1.5, maxImpactCents: 10 }), 0);
+  assert.equal(maxExecutableBuyUsd(asks, 48, { edgeFloorCents: 1.5, maxImpactCents: 10, feeRate: 0 }), 0);
   // fair 48.5, floor 1.5 → ceiling 47.0 → only the 46.8 level.
-  const cap = maxExecutableBuyUsd(asks, 48.5, { edgeFloorCents: 1.5, maxImpactCents: 10 });
+  const cap = maxExecutableBuyUsd(asks, 48.5, { edgeFloorCents: 1.5, maxImpactCents: 10, feeRate: 0 });
   assert.equal(Math.round(cap), Math.round(200 * 0.468));
+});
+
+test("maxExecutableBuyUsd: round-trip fee tightens the edge ceiling", () => {
+  // fair 49.5¢, floor 1.5 → gross ceiling 48.0¢ would include 46.8+47.5 with no fee.
+  // With fee 0.03 the round-trip cost (~1¢/share near 47¢) pushes 47.5¢ over the net
+  // ceiling, so only the 46.8¢ level (rtFee ~1.5¢ → 48.3 > 48? check) survives — the
+  // point: the qualifying depth SHRINKS versus the fee-free case.
+  const withFee = maxExecutableBuyUsd(asks, 49.5, { edgeFloorCents: 1.5, maxImpactCents: 10, feeRate: 0.03 });
+  const noFee = maxExecutableBuyUsd(asks, 49.5, { edgeFloorCents: 1.5, maxImpactCents: 10, feeRate: 0 });
+  assert.ok(withFee < noFee, `fee-aware cap ($${withFee}) tighter than fee-free ($${noFee})`);
 });
 
 test("takerFeeCents: Polymarket sports taker fee — peaks at 50¢, symmetric, 0.75¢ max", () => {
@@ -61,6 +71,15 @@ test("takerFeeCents: Polymarket sports taker fee — peaks at 50¢, symmetric, 0
   assert.equal(takerFeeCents(30, 0.03), takerFeeCents(70, 0.03), "symmetric around 50¢");
   assert.equal(takerFeeCents(30, 0.03), 0.63, "0.03·30·70/100");
   assert.ok(takerFeeCents(99, 0.03) < 0.05 && takerFeeCents(1, 0.03) < 0.05, "tiny near the extremes");
+});
+
+test("liquidationCents: open positions marked below mid (exit haircut + fee)", () => {
+  // thin book: order = 20% of liquidity → sell haircut 0.8¢, minus fee(~49.2¢).
+  const liq = liquidationCents(50, 200, 1000, 4, 0.03);
+  assert.ok(liq < 50, `below the 50¢ mid, got ${liq}`);
+  // deep book: negligible slippage, only the fee → just under the mid.
+  const deep = liquidationCents(50, 10, 1_000_000, 4, 0.03);
+  assert.ok(deep < 50 && deep > 49, `deep book ≈ mid − fee, got ${deep}`);
 });
 
 test("parametric fallback: slippage scales with order/liquidity, bounded", () => {

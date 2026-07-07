@@ -84,26 +84,31 @@ export function simulateSell(bids: BookLevel[], shares: number): SellFill {
 }
 
 export interface DepthCapOpts {
-  /** minimum edge (cents) each bought share must individually keep vs fair value */
+  /** minimum NET edge (cents) each bought share must keep vs fair, after costs */
   edgeFloorCents: number;
   /** max the price may move above the best ask while filling (impact cap) */
   maxImpactCents: number;
+  /** taker fee rate — the ROUND-TRIP fee (entry+exit) is charged against edge */
+  feeRate: number;
 }
 
 /**
- * Max USD to buy under the "both" policy: every share taken must (a) still carry
- * edge — its price ≤ fair − edgeFloor — AND (b) not move the price more than
- * maxImpact above the best ask. Both are marginal price ceilings, so the cap is a
- * single price ceiling = min of the two; sum the notional of every ask at or below
- * it. Returns 0 when even the best ask has no edge (never buy into negative edge).
+ * Max USD to buy under the "both" policy. Every share taken must (a) still carry
+ * edge AFTER round-trip costs — its price + entry&exit taker fees ≤ fair − floor —
+ * AND (b) not move the price more than maxImpact above the best ask. A real trader
+ * won't take a share whose edge is eaten by fees, so the fee is subtracted from the
+ * edge here (not just booked into P&L later). Asks are ascending, so stop at the
+ * first level that violates either ceiling and sum the notional below it. Returns 0
+ * when the best ask already fails — never buy into non-positive net edge.
  */
 export function maxExecutableBuyUsd(asks: BookLevel[], fairCents: number, opts: DepthCapOpts): number {
   if (!asks.length) return 0;
-  const best = asks[0].priceCents;
-  const capCents = Math.min(fairCents - opts.edgeFloorCents, best + opts.maxImpactCents);
+  const impactCeil = asks[0].priceCents + opts.maxImpactCents;
   let usd = 0;
   for (const lvl of asks) {
-    if (lvl.priceCents > capCents + 1e-9) break; // asks are ascending — done
+    const rtFee = 2 * takerFeeCents(lvl.priceCents, opts.feeRate); // entry + exit
+    if (lvl.priceCents > impactCeil + 1e-9) break;                 // impact ceiling
+    if (lvl.priceCents + rtFee > fairCents - opts.edgeFloorCents + 1e-9) break; // net-edge ceiling
     usd += lvl.size * (lvl.priceCents / 100);
   }
   return round2(usd);
@@ -135,6 +140,18 @@ export function parametricSellAvgCents(quoteCents: number, notionalUsd: number, 
 export function takerFeeCents(priceCents: number, feeRate: number): number {
   const p = Math.max(0, Math.min(100, priceCents));
   return round2(feeRate * p * (100 - p) / 100);
+}
+
+/**
+ * Conservative LIQUIDATION value (cents) of an open position: what a share would
+ * net if sold NOW — the mid haircut for exit slippage (parametric, from size vs
+ * liquidity) minus the exit taker fee. Used to mark open positions to market and
+ * to drive exit decisions, so unrealized P&L / equity reflect what you could
+ * actually cash out, not an optimistic mid. Cheap (no book fetch).
+ */
+export function liquidationCents(midCents: number, stakeUsd: number, liquidityUsd: number, fallbackK: number, feeRate: number): number {
+  const sell = parametricSellAvgCents(midCents, stakeUsd, liquidityUsd, fallbackK);
+  return round1(Math.max(0, sell - takerFeeCents(sell, feeRate)));
 }
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
