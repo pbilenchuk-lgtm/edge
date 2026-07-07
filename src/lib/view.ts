@@ -504,11 +504,16 @@ function buildFeed(
   };
   const rows: { at: string; item: FeedItem }[] = [];
   for (const e of R.recentTradeLog(db, POOL)) {
+    // «Пропуски» were pure noise: every cron tick logs a skip per pair, which
+    // floods this bounded window and buries the real entries/settlements. Drop
+    // them from the feed entirely — the strategy card already explains why a
+    // pair isn't entering, so the лента only carries P&L-affecting rows.
+    if (e.type === "skip") continue;
     const inf = info(e.match_id); if (!inf) continue;
     const st = stratById[e.strategy_id];
     // enter → «Входы»; exit (cash-out) AND settle → «Расчёты» (both realize P&L).
     rows.push({ at: e.created_at, item: {
-      t: e.minute ?? "", at: warsawClock(e.created_at), type: e.type === "enter" ? "enter" : e.type === "skip" ? "skip" : "settle",
+      t: e.minute ?? "", at: warsawClock(e.created_at), type: e.type === "enter" ? "enter" : "settle",
       sport: inf.sp, match: inf.match, score: inf.score, strat: st?.name, color: st?.color ?? undefined, text: e.text,
     } });
   }

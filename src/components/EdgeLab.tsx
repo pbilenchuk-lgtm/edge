@@ -1417,7 +1417,7 @@ function improveStats(q: any, overall: any) {
 
 function FeedScreen({ feed }: any) {
   const [filter, setFilter] = useState("all");
-  const types = [["all", "Всё"], ["enter", "Входы"], ["reassess", "Переоценки"], ["settle", "Расчёты"], ["goal", "События матча"], ["skip", "Пропуски"]];
+  const types = [["all", "Всё"], ["enter", "Входы"], ["reassess", "Переоценки"], ["settle", "Расчёты"], ["goal", "События матча"]];
   const MATCH_EVENT = new Set(["goal", "lineup", "card", "sub", "stats"]);
   const shown = filter === "all" ? feed : feed.filter((e: any) => e.type === filter || (filter === "goal" && MATCH_EVENT.has(e.type)));
   return (
@@ -2041,7 +2041,8 @@ const CSS = `* { box-sizing: border-box; } button { font-family: inherit; } butt
 .el-tab-select { display: none; }
 @media (min-width: 760px) {
   .el-match-body { display: grid !important; grid-template-columns: 1fr 280px; gap: 16px; align-items: start; }
-  .el-strat-grid { display: grid !important; grid-template-columns: 1fr 1fr; gap: 10px; align-items: start; }
+  .el-strat-grid { display: block !important; column-count: 2; column-gap: 10px; }
+  .el-strat-grid > * { break-inside: avoid; margin-bottom: 10px; }
   .el-odds-col { position: sticky; top: 12px; }
   .el-master-detail { display: grid !important; grid-template-columns: 220px 1fr; gap: 12px; align-items: start; }
 }
