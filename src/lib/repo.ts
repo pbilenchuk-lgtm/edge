@@ -37,6 +37,19 @@ export function getTreasury(db: Database): Treasury {
   return row ?? { id: 1, total_balance: 0 };
 }
 
+// ---------- risk config (Окно 4 — global validated risk constants) ----------
+/** Raw stored risk-config JSON string, or null if never saved (→ defaults). */
+export function getRiskConfigRaw(db: Database): string | null {
+  const row = db.prepare(`SELECT content FROM risk_config WHERE id=1`).get() as { content: string } | undefined;
+  return row?.content ?? null;
+}
+export function setRiskConfigRaw(db: Database, content: string, updatedAt: string): void {
+  db.prepare(
+    `INSERT INTO risk_config(id,content,updated_at) VALUES(1,?,?)
+     ON CONFLICT(id) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
+  ).run(content, updatedAt);
+}
+
 // ---------- sports / competitions ----------
 export function upsertSport(db: Database, id: string, label: string): void {
   db.prepare(

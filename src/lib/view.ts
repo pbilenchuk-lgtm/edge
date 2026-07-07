@@ -12,6 +12,7 @@ import { warsawLabel, warsawClock, isIso } from "./time.js";
 import { SPORT_LABELS, isNoiseMarket } from "./polymarket.js";
 import { resolveFootballMarket } from "./settlement.js";
 import { maxLiveMinutes } from "./lifecycle.js";
+import { getRiskConfig, type RiskConfig } from "./riskConfig.js";
 import type { StrategyParams, Match, Bet } from "./types.js";
 
 export interface MarketView {
@@ -106,6 +107,8 @@ export interface AppData {
   providers: ProviderView[];
   cron: CronView;
   strategyStats: Record<string, StrategyStats>;
+  /** global risk constants (Окно 4), read by both strategists */
+  riskConfig: RiskConfig;
 }
 export interface CronView {
   enabled: boolean; tickMin: number; discoverHr: number; liveSec: number; nextRunAt: string | null;
@@ -316,7 +319,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
 
   const strategyStats = computeStrategyStats(strategies, allMatches, betsByMatch, pricesByMatch);
 
-  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats };
+  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskConfig: getRiskConfig(db) };
   // node:sqlite rows have a null prototype; React Server Components can't pass
   // those to a client component. A JSON round-trip yields plain objects.
   return JSON.parse(JSON.stringify(payload));

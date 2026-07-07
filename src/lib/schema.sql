@@ -32,6 +32,14 @@ CREATE TABLE IF NOT EXISTS treasury (
   total_balance REAL NOT NULL
 );
 
+-- risk_config (Окно 4) — single-row global risk constants (validated JSON), read
+-- by both strategists as immutable constants. Absent → code uses DEFAULT_RISK_CONFIG.
+CREATE TABLE IF NOT EXISTS risk_config (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  content    TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 -- §2.4 analytics_prompts (аналитические промты; scope = sport | competition)
 CREATE TABLE IF NOT EXISTS analytics_prompts (
   id         TEXT PRIMARY KEY,
