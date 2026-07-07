@@ -411,11 +411,61 @@ battle_sheet (pre_match_positions), live-состояние матча, свеж
 ## ВЫХОД (actions)
 Строгий JSON: { "strategist": "prematch_value", "phase": "live", "timestamp_context": , "safeguard_status": {...}, "exit_checks": [ { "position": , "trigger_hit": "take_price|thesis_stop|liquidity_time_stop|none", "action": } ], "new_entry": { "allowed": false, "exception_used": , "detail": }, "actions": [ { "market": , "action": "reduce|close|hold|add", "price": , "size_pct": , "reason": , "cap_check": } ], "notes": }`;
 
+export const STRAT_LIVEXG_PREMATCH = `# [ОКНО: ПРЕДМАТЧ] СТРАТЕГ 3 — LIVE xG MOMENTUM
+
+Предматчевая часть стратега live-xG momentum. Для этого стратега предматч — минимальная фаза: почти вся работа в live-окне. Здесь ты только настраиваешь пороги xG-перекоса, при которых будешь входить, и проверяешь, что поток live-xG вообще доступен. Без live-xG стратег не запускается.
+
+Общие правила: котировки очищены от vig в коде, edge посчитан, риск-конфиг — закон, строгий JSON.
+
+## ВХОД
+distribution, котировки, risk_config. Проверка: подтверждён ли доступ к потоку live-xG на этот матч.
+
+## ЧТО ДЕЛАЕШЬ
+1. Проверить доступность live-xG. НЕТ данных → стратег помечает себя как inactive для этого матча, пустой выход, причина в notes. Не гадать по счёту.
+2. Предохранители.
+3. Настроить пороги входа: при каком xG-перекосе и при каком расхождении со счётом будешь входить в live. Обычно пред-матч позиций НЕ открывает.
+
+## НАСТРОЙКА ПОРОГОВ (ядро предматч-работы)
+- xg_gap_threshold: минимальный перекос live-xG для входа (напр. 1.0–1.3).
+- контекст матча: если ожидается открытый матч с обоюдными моментами — перекос набирается легче, порог можно чуть выше; если закрытый — осторожнее.
+- какие рынки будешь брать при доминировании (гол/победа доминирующей, её командный Over).
+
+## ВЫХОД (battle_sheet, предматч-часть)
+Строгий JSON: { "strategist": "live_xg", "phase": "prematch", "active": true/false, "inactive_reason": , "pre_match_positions": [...], "live_entry_config": { "xg_gap_threshold": , "target_markets": [...], "context_note": }, "flagged": [...], "notes": }`;
+
+export const STRAT_LIVEXG_LIVE = `# [ОКНО: LIVE] СТРАТЕГ 3 — LIVE xG MOMENTUM
+
+Live-часть стратега live-xG. Это ОСНОВНАЯ и почти единственная фаза этого стратега. Ты ловишь запаздывание счёта относительно игры: команда доминирует по live-xG, но ещё не забила — рынок смотрит на табло, ты входишь в промежутке. Без потока live-xG стратег не действует.
+
+Общие правила: предохранители первыми, кэпы всегда, стоп по тезису, строгий JSON.
+
+## ВХОД
+battle_sheet (live_entry_config с порогами), ПОТОК live-xG (обязателен), live-состояние матча, свежие котировки, открытые позиции, risk_config.
+
+## ЧТО ДЕЛАЕШЬ (по шагам)
+1. Проверить наличие свежего live-xG. Нет → бездействие, флаг. Счёта недостаточно.
+2. Предохранители и лимиты.
+3. Вход: посчитать xG-перекос |live_xg_home − live_xg_away|. Если превысил xg_gap_threshold И счёт этого не отражает (равный или ведёт НЕ доминирующая) → покупка гола/победы доминирующей (или её командного Over) при текущей цене, размер тем больше, чем сильнее и устойчивее перекос.
+4. Фильтры ложного сигнала ПЕРЕД входом:
+   - объём ударов есть, но качество зон низкое (пустой xG) → не входить.
+   - упор в выдающегося вратаря → снизить ожидание/размер.
+   - доминирование от позиции силы, где соперника счёт устраивает (отдал мяч намеренно) → не путь к голу, не входить.
+5. Выходы:
+   - гол доминирующей случился → тезис реализован, фиксация (take).
+   - xG-давление спало, игра выровнялась → тезис умер, выход даже без гола.
+   - thesis_stop особый: доминирующая раскрылась и ПРОПУСТИЛА в контратаку → тезис развернулся, закрытие немедленно.
+
+## РИСК (помни при исполнении)
+Асимметрия: давишь ты, а наказать могут тебя (контратака). Поэтому размеры осторожнее прочих стратегов, а стоп на пропущенный гол — жёсткий и мгновенный. На плохих/медленных live-xG вообще не входить — стратег ослепнет и войдёт в шум.
+
+## ВЫХОД (actions)
+Строгий JSON: { "strategist": "live_xg", "phase": "live", "timestamp_context": , "safeguard_status": { "live_xg_available": bool }, "xg_state": { "home": , "away": , "gap": , "score_reflects_gap": bool, "duration_of_pressure": }, "false_signal_check": { "shot_quality": , "keeper_factor": , "intentional_cede": , "verdict": "real|false" }, "actions": [ { "market": , "action": "open_new|add|reduce|close|hold", "side": , "price": , "size_pct": , "reason": , "cap_check": } ], "exit_checks": [...], "notes": }`;
+
 /**
  * Clean-start seed for a real deployment. Bakes in the user's ЧМ-2026 default
- * analysis prompts + the TWO real two-phase strategists (each with a предматч and
- * a live prompt). Real categories/matches arrive from "Подтянуть матчи" and the
- * cron. This is what the production container seeds on first boot.
+ * analysis prompts + the THREE real two-phase strategists (each with a предматч
+ * and a live prompt). Real categories/matches arrive from "Подтянуть матчи" and
+ * the cron. This is what the production container seeds on first boot.
  */
 export function seedMinimal(db: Database): void {
   // NON-DESTRUCTIVE + idempotent. If the DB already holds data (treasury row
@@ -448,6 +498,11 @@ export function seedMinimal(db: Database): void {
     id: "prematch_value", sport_id: "football", name: "Pre-match Value", tag: "предматч value", color: "#5b9bd5",
     version: 1, model: "Claude Opus 4.8", created_at: T,
     prompt: STRAT_PMVALUE_PREMATCH, prompt_live: STRAT_PMVALUE_LIVE, params: {},
+  });
+  R.insertStrategy(db, {
+    id: "live_xg", sport_id: "football", name: "Live xG Momentum", tag: "live xG", color: "#70b56a",
+    version: 1, model: "Claude Opus 4.8", created_at: T,
+    prompt: STRAT_LIVEXG_PREMATCH, prompt_live: STRAT_LIVEXG_LIVE, params: {},
   });
 
   // Named risk presets (aggressive/medium/conservative) — a competition assigns
@@ -520,13 +575,33 @@ export function migrateCanonicalPrompts(db: Database): void {
 // (seedMinimal is one-shot, so a live prod DB seeded earlier never got them).
 // Non-destructive: only inserts the ones that are missing; leaves any existing
 // strategies + their shares untouched (the user reassigns budget via the UI).
+const STRATEGIST_DEFS: Array<Pick<Parameters<typeof R.insertStrategy>[1], "id" | "name" | "tag" | "color" | "prompt" | "prompt_live">> = [
+  { id: "overreaction", name: "Overreaction", tag: "выкуп переоценки", color: "#e8a838", prompt: STRAT_OVERREACTION_PREMATCH, prompt_live: STRAT_OVERREACTION_LIVE },
+  { id: "prematch_value", name: "Pre-match Value", tag: "предматч value", color: "#5b9bd5", prompt: STRAT_PMVALUE_PREMATCH, prompt_live: STRAT_PMVALUE_LIVE },
+  { id: "live_xg", name: "Live xG Momentum", tag: "live xG", color: "#70b56a", prompt: STRAT_LIVEXG_PREMATCH, prompt_live: STRAT_LIVEXG_LIVE },
+];
 export function migrateSeedStrategists(db: Database, now: string): void {
-  const defs: Array<Pick<Parameters<typeof R.insertStrategy>[1], "id" | "name" | "tag" | "color" | "prompt" | "prompt_live">> = [
-    { id: "overreaction", name: "Overreaction", tag: "выкуп переоценки", color: "#e8a838", prompt: STRAT_OVERREACTION_PREMATCH, prompt_live: STRAT_OVERREACTION_LIVE },
-    { id: "prematch_value", name: "Pre-match Value", tag: "предматч value", color: "#5b9bd5", prompt: STRAT_PMVALUE_PREMATCH, prompt_live: STRAT_PMVALUE_LIVE },
-  ];
-  for (const d of defs) {
+  for (const d of STRATEGIST_DEFS) {
     if (R.getStrategy(db, d.id)) continue;
     R.insertStrategy(db, { id: d.id, sport_id: "football", name: d.name, tag: d.tag, color: d.color, version: 1, model: "Claude Opus 4.8", created_at: now, prompt: d.prompt, prompt_live: d.prompt_live, params: {} });
   }
+}
+
+// One-time roster transition: retire the legacy single strategy ("wc") and put
+// the three real strategists on EVERY existing competition at the MEDIUM profile,
+// split evenly. Gated on "wc" still existing, so it runs exactly once (after it,
+// wc is gone and the guard is false). Non-recurring, so it never clobbers the
+// user's later manual allocations. New competitions discovered afterwards are
+// assigned by the user (this migration only touches what exists at transition).
+const LEGACY_STRATEGY_ID = "wc";
+export function migrateStrategyRoster(db: Database, now: string): void {
+  migrateSeedStrategists(db, now); // always ensure the three exist
+  if (!R.getStrategy(db, LEGACY_STRATEGY_ID)) return; // already transitioned
+  const trio = STRATEGIST_DEFS.map((d) => d.id);
+  const pcts = [34, 33, 33]; // even thirds, sum 100
+  for (const c of R.listCompetitions(db)) {
+    R.clearShares(db, c.id);
+    trio.forEach((sid, i) => R.setShare(db, { competition_id: c.id, strategy_id: sid, risk_profile_id: "medium", pct: pcts[i] }));
+  }
+  R.deleteStrategy(db, LEGACY_STRATEGY_ID); // removes wc + its shares/bets/versions everywhere
 }

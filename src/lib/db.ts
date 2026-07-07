@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { migrateCanonicalPrompts, migrateSeedStrategists } from "./seed.js";
+import { migrateCanonicalPrompts, migrateStrategyRoster } from "./seed.js";
 import { seedRiskProfiles } from "./riskConfig.js";
 
 // node:sqlite is experimental and not in @types/node, so require it
@@ -68,9 +68,10 @@ export function getDb(path = dbPath()): Database {
   // doesn't have them yet — idempotent, so a live prod DB gets them without a wipe.
   try { seedRiskProfiles(db, new Date().toISOString()); }
   catch { /* non-fatal */ }
-  // Ensure the two real strategists exist on an already-populated DB (seedMinimal
-  // won't re-run). Non-destructive; existing strategies + shares are untouched.
-  try { migrateSeedStrategists(db, new Date().toISOString()); }
+  // Ensure the three real strategists exist and, on the first boot after this
+  // ships, retire the legacy "wc" strategy and assign the trio (medium profile)
+  // to every competition. One-time (gated on wc existing); non-recurring.
+  try { migrateStrategyRoster(db, new Date().toISOString()); }
   catch { /* non-fatal */ }
   _db = db;
   return db;

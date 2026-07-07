@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { openDb } from "../src/lib/db.js";
-import { seedDatabase, seedMinimal, migrateCanonicalPrompts } from "../src/lib/seed.js";
+import { seedDatabase, seedMinimal, migrateCanonicalPrompts, migrateStrategyRoster } from "../src/lib/seed.js";
+import { seedRiskProfiles } from "../src/lib/riskConfig.js";
 import * as R from "../src/lib/repo.js";
 import {
   loadPolymarketConfig, getQuotes, fetchMidpointCents,
@@ -102,11 +103,11 @@ test("analyzeMatch tags proposed bets with the pair's risk profile", async () =>
   assert.ok(bets.every((b) => b.risk_profile_id === "aggressive"), "every bet carries the pair's profile");
 });
 
-test("seedMinimal seeds two two-phase strategists + three named risk profiles", () => {
+test("seedMinimal seeds three two-phase strategists + three named risk profiles", () => {
   const db = openDb(":memory:");
   seedMinimal(db);
   const strats = R.listStrategies(db, "football");
-  assert.deepEqual(strats.map((s) => s.id).sort(), ["overreaction", "prematch_value"]);
+  assert.deepEqual(strats.map((s) => s.id).sort(), ["live_xg", "overreaction", "prematch_value"]);
   for (const s of strats) {
     assert.ok(s.prompt && s.prompt.length > 50, `${s.id} has a prematch prompt`);
     assert.ok(s.prompt_live && s.prompt_live.length > 50, `${s.id} has a live prompt`);
@@ -118,7 +119,37 @@ test("seedMinimal seeds two two-phase strategists + three named risk profiles", 
   assert.deepEqual(R.listRiskProfiles(db).map((p) => p.id), ["aggressive", "medium", "conservative"]);
   // idempotent: seedMinimal on a populated DB is a no-op (doesn't duplicate)
   seedMinimal(db);
-  assert.equal(R.listStrategies(db, "football").length, 2);
+  assert.equal(R.listStrategies(db, "football").length, 3);
+});
+
+test("migrateStrategyRoster: retires legacy wc, assigns the trio (medium) to every comp, once", () => {
+  const db = openDb(":memory:");
+  seedRiskProfiles(db, "t");
+  // simulate the pre-transition prod state: only the legacy strategy, funded comps
+  R.upsertSport(db, "football", "Футбол");
+  R.insertStrategy(db, { id: "wc", sport_id: "football", name: "Мундиаль", tag: null, color: "#e8a838", version: 1, model: null, prompt: "x", prompt_live: null, params: {}, created_at: "t" });
+  for (const id of ["pm-a", "pm-b"]) {
+    R.upsertCompetition(db, { id, sport_id: "football", name: id, budget: 100, external_league: null, created_at: "t" });
+    R.setShare(db, { competition_id: id, strategy_id: "wc", pct: 100 });
+  }
+
+  migrateStrategyRoster(db, "t");
+
+  // wc gone, three strategists present
+  assert.equal(R.getStrategy(db, "wc"), null, "legacy strategy removed");
+  assert.deepEqual(R.listStrategies(db, "football").map((s) => s.id).sort(), ["live_xg", "overreaction", "prematch_value"]);
+  // every comp now carries the trio on the medium profile, summing to 100
+  for (const id of ["pm-a", "pm-b"]) {
+    const rows = R.sharesForComp(db, id);
+    assert.equal(rows.length, 3, `${id} has three pairs`);
+    assert.ok(rows.every((r) => r.risk_profile_id === "medium"), "all on medium");
+    assert.equal(rows.reduce((a, r) => a + r.pct, 0), 100, "shares sum to 100");
+    assert.ok(!rows.some((r) => r.strategy_id === "wc"), "no wc share");
+  }
+  // idempotent: re-run does nothing (wc already gone), doesn't re-clobber shares
+  R.setShare(db, { competition_id: "pm-a", strategy_id: "overreaction", risk_profile_id: "medium", pct: 50 });
+  migrateStrategyRoster(db, "t");
+  assert.equal(R.sharesForComp(db, "pm-a").find((r) => r.strategy_id === "overreaction")!.pct, 50, "manual edit preserved after transition");
 });
 
 test("two-phase strategy: prompt_live persists through insert, version bump keeps it", () => {
