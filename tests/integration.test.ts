@@ -23,6 +23,22 @@ function mockLLM(assessment: unknown) {
   return async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify(assessment) }] }) }) as any;
 }
 
+test("assessMatchLLM is price-blind — analysis prompt carries labels, never Polymarket quotes", async () => {
+  const { assessMatchLLM } = await import("../src/lib/llm.js");
+  let sent = "";
+  const fetchImpl = (async (_url: any, init: any) => {
+    sent = init.body;
+    return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ confidence: "средняя", short: "s", body: "b", verdict: "v", markets: [{ label: "Over 2.5", prob: 0.6 }] }) }] }) };
+  }) as unknown as typeof fetch;
+  await assessMatchLLM(
+    { home: "A", away: "B", sport: "football", state: "lineup", analyticsPrompt: "оцени объективно", markets: [{ label: "Over 2.5" }, { label: "Both Teams to Score" }] },
+    "Claude Opus 4.8", { fetchImpl, env: { ANTHROPIC_API_KEY: "k" } },
+  );
+  assert.match(sent, /Over 2\.5/, "market label present for the analyst to estimate");
+  assert.ok(!/¢/.test(sent), "no price cents leak into the analysis prompt");
+  assert.ok(!/рынок:\s*\d/.test(sent), "no market quote fed to the analyst (edge stays independent)");
+});
+
 // ---------------- DB + seed + repo (§2) ----------------
 test("seed populates the full slice", () => {
   const db = openDb(":memory:");

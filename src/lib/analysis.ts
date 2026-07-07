@@ -60,7 +60,7 @@ export async function analyzeMatch(
   const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
   const ctx = matchContext(db, matchId); // real lineups + events, if enriched from ESPN
   const a = await assessMatchLLM(
-    { home: match.home, away: match.away, sport, state: match.state, analyticsPrompt: prompt.body, markets: markets.map((m) => ({ label: m.label, price: m.price })), context: ctx },
+    { home: match.home, away: match.away, sport, state: match.state, analyticsPrompt: prompt.body, markets: markets.map((m) => ({ label: m.label })), context: ctx },
     model,
     { fetchImpl: deps.fetchImpl, env },
   );
@@ -223,7 +223,9 @@ export function matchContext(db: Database, matchId: string): string | undefined 
       if (al) parts.push(`Статистика (гости, ${s.away?.team ?? "?"}): ${al}`);
     } catch { /* ignore malformed stats */ }
   }
-  const events = R.eventsForMatch(db, matchId).filter((e) => e.type !== "other");
+  // Real match events only — drop our own "stats"/"other" market-price snapshots so
+  // no quote-derived noise reaches the (price-blind) analyst or the strategist.
+  const events = R.eventsForMatch(db, matchId).filter((e) => e.type !== "other" && e.type !== "stats");
   if (events.length) parts.push("События: " + events.map((e) => `${e.minute ?? "?"}' ${e.type}${e.team ? " " + e.team : ""}`).join("; "));
   return parts.length ? parts.join("\n") : undefined;
 }

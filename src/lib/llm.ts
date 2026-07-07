@@ -327,7 +327,10 @@ export function heuristicReassess(ctx: ReassessContext): string {
 export interface AssessInput {
   home: string; away: string; sport: string; state: string;
   analyticsPrompt: string;
-  markets: { label: string; price: number }[]; // price in cents
+  // Market LABELS only — NO prices. The analyst estimates probabilities blind to
+  // the market (§9.5); the engine computes edge = model prob vs price in code.
+  // Feeding the quote here would anchor the estimate and make "edge" circular.
+  markets: { label: string }[];
   context?: string; // real lineups + in-match events (from ESPN), if available
 }
 export interface MatchAssessment {
@@ -346,14 +349,14 @@ export interface MatchAssessment {
 export async function assessMatchLLM(
   input: AssessInput, model: string, deps: Deps = {},
 ): Promise<MatchAssessment> {
-  const marketList = input.markets.map((m) => `- ${m.label} (рынок: ${m.price}¢)`).join("\n");
+  const marketList = input.markets.map((m) => `- ${m.label}`).join("\n");
   const res = await callLLM({
     model,
     system:
-      "Ты — объективный спортивный аналитик. Оцени матч по методологии из инструкции. НЕ думай про деньги/ставки — только вероятности и разбор. " +
+      "Ты — объективный спортивный аналитик. Оцени матч по методологии из инструкции. НЕ думай про деньги/ставки/котировки — их ты НЕ видишь и видеть не должен. Дай ЧЕСТНУЮ независимую вероятность от себя, а не подгонку под рынок. " +
       "ВАЖНО ПРО ФОРМАТ: инструкция аналитики описывает КАК думать, а не формат ответа. Что бы она ни говорила про формат — ты обязан вернуть ТОЛЬКО валидный JSON (без markdown-ограждений, без текста до/после): " +
       "{confidence:'низкая'|'средняя'|'высокая', short:'2-3 предложения', body:'сжатый разбор, ключевое', verdict:'итог одним абзацем', markets:[{label, prob}]}. " +
-      "body держи компактным (до ~600 слов). Для КАЖДОГО рынка из списка укажи prob — свою вероятность (0..1), что рынок сыграет ДА (используй ТОЧНЫЙ label из списка). Где видишь расхождение с ценой — покажи его.",
+      "body держи компактным (до ~600 слов). Для КАЖДОГО рынка из списка укажи prob — свою вероятность (0..1), что рынок сыграет ДА (используй ТОЧНЫЙ label из списка).",
     prompt: `Спорт: ${input.sport}. Матч: ${input.home} — ${input.away} (состояние: ${input.state}).\n\nМЕТОДОЛОГИЯ АНАЛИЗА (как думать):\n${input.analyticsPrompt}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы/события):\n${input.context}\n` : ""}\nРынки для оценки (дай prob для каждого):\n${marketList}\n\nОтветь СТРОГО одним JSON-объектом в описанном формате — без пояснений вне JSON.`,
     maxTokens: 6000,
   }, deps);
