@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive } from "./seed.js";
 import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
+import { migrateCategoryModifiers } from "./categoryModifiers.js";
 
 // node:sqlite is experimental and not in @types/node, so require it
 // dynamically and give it a minimal local type.
@@ -80,6 +81,10 @@ export function getDb(path = dbPath()): Database {
   // profile (and retag live bets). Marker-guarded, so it runs once and respects
   // later manual profile changes.
   try { migrateSharesToAggressive(db, new Date().toISOString()); }
+  catch { /* non-fatal */ }
+  // Seed each football category's Layer-2 modifier onto its matching competition
+  // (self-healing for newly-discovered leagues; never clobbers user/WC prompts).
+  try { migrateCategoryModifiers(db, new Date().toISOString()); }
   catch { /* non-fatal */ }
   _db = db;
   return db;
