@@ -858,7 +858,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                                 })}
                               </div>
                             )}
-                            <p style={S.decisionText}>{rationale || (items.length === 0 ? "Край недостаточен — стратегия воздерживается." : "—")}</p>
+                            <p style={S.decisionText}>{rationale || (items.length === 0 ? "Предматч-входов нет — стратегия ждёт своих условий (край / live-триггер)." : "—")}</p>
                           </div>
                         );
                       })}
@@ -906,7 +906,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, onRefreshOdds, on
                           );
                         })()}
                       </div>
-                      {items.length === 0 ? <div style={S.noBets}>ставок нет — край недостаточен, стратегия пропускает матч</div> : (
+                      {items.length === 0 ? <div style={S.noBets}>предматч-входов нет — стратегия ждёт своих условий (край / live-триггер)</div> : (
                         <div style={S.betList}>
                           {items.map((b: any, i: number) => {
                             const curPrice = curByLabel[b.market] ?? b.currentPrice ?? b.entryPrice; // freshest quote
@@ -1866,10 +1866,16 @@ function StrategyCard({ st, overall, availableModels, onSetModel, onGoModels, on
             <span style={S.modelPickLbl}>Модель стратегии:</span>
             <ModelSelect value={st.model || ""} models={availableModels} onChange={onSetModel} onGoModels={onGoModels} />
           </div>
-          <div style={S.promptLabel}>Промт стратегии</div>
+          <div style={S.promptLabel}>① Предматч-окно</div>
           <pre style={S.promptBox}>{st.prompt}</pre>
-          <div style={S.paramLabel}>Пороги, распознанные движком</div>
-          <div style={S.paramList}>{Object.entries(st.params).map(([k, v]) => { const d = describeParam(k, v); return <div key={k} style={S.paramItem}><span style={S.paramItemLabel}>{d.label}</span><span style={S.paramItemValue}>{d.value}</span></div>; })}</div>
+          <div style={S.promptLabel}>② Лайв-окно</div>
+          {st.promptLive
+            ? <pre style={S.promptBox}>{st.promptLive}</pre>
+            : <div style={S.noBets}>лайв-промпт не задан — в игре стратегия не сможет вести/выкупать позиции. Добавь его в «Редактировать».</div>}
+          {st.params && Object.keys(st.params).length > 0 && <>
+            <div style={S.paramLabel}>Пороги, распознанные движком (устар. — сайзинг из риск-профиля)</div>
+            <div style={S.paramList}>{Object.entries(st.params).map(([k, v]) => { const d = describeParam(k, v); return <div key={k} style={S.paramItem}><span style={S.paramItemLabel}>{d.label}</span><span style={S.paramItemValue}>{d.value}</span></div>; })}</div>
+          </>}
           <div style={S.stratEditRow}><button style={S.editBtn} onClick={onEdit}>Редактировать промт</button><button style={S.improveBtn} onClick={onImprove}>↻ Улучшить по данным</button><button style={S.deleteBtn} onClick={onDelete}>Удалить</button></div>
         </div>
       )}
