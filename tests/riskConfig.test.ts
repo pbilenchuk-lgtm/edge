@@ -112,6 +112,29 @@ safeguards:
   assert.ok(res.config!._defaults_used.includes("bankroll_limits.daily_loss_limit_pct"));
 });
 
+test("parseRiskProfile: parses the UI labels + percent notation (the «Lite» profile)", () => {
+  // exactly what the user typed into the «Новый риск-профиль» box
+  const text = `min_edge: 2.0% — входит даже на тонком крае (ниже 2% — уже зона ошибки очистки от vig)
+min_calibration: 0.30 — пускает модель действовать
+Kelly base: 0.5 — половина Kelly, практический потолок агрессии
+max позиция: 12%
+max на матч: 20%
+absurd edge: 25% — НЕ трогать (см. ниже)
+take-profit: 90% — даёт прибыли бежать дольше
+hard-stop: 75% — больше места тезису отыграться`;
+  const res = parseRiskProfile(text);
+  assert.ok(res.ok && res.config, res.errors?.join("; "));
+  const c = res.config!;
+  assert.equal(c.entry_thresholds.min_edge, 0.02, "2.0% → 0.02, not 2");
+  assert.equal(c.entry_thresholds.min_calibration, 0.30);
+  assert.equal(c.sizing.kelly_fraction_base, 0.5, "«Kelly base» label recognised");
+  assert.equal(c.sizing.max_position_pct, 0.12, "«max позиция» → 12% → 0.12");
+  assert.equal(c.sizing.max_match_exposure_pct, 0.20, "«max на матч» → 20% → 0.20");
+  assert.equal(c.safeguards.absurd_edge_block, 0.25, "«absurd edge» → 25% → 0.25");
+  assert.equal(c.exits.take_profit_pct, 0.90, "«take-profit» → 90% → 0.90");
+  assert.equal(c.exits.hard_stop_pct, 0.75, "«hard-stop» → 75% → 0.75");
+});
+
 test("parseRiskConfigHeuristic: an out-of-range value surfaces as a validation error", () => {
   const res = parseRiskProfile("min_edge = 1.5\nkelly_fraction_base = 0.2");
   assert.equal(res.ok, false);

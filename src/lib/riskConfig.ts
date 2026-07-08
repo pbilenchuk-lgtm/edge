@@ -253,40 +253,52 @@ export function getRiskConfig(db: Database): RiskConfig {
 // then loadRiskConfig VALIDATES it. Dependency-free regex over the known field
 // names (robust to "field: 0.05" / "field = 0.05" / "field 0.05" formats).
 // ============================================================
-const RISK_FIELD_PATHS: Record<string, string> = {
-  min_edge_low_liquidity: "entry_thresholds.min_edge_low_liquidity", // before min_edge (prefix)
-  min_edge: "entry_thresholds.min_edge",
-  min_calibration: "entry_thresholds.min_calibration",
-  min_market_liquidity: "entry_thresholds.min_market_liquidity",
-  kelly_fraction_base: "sizing.kelly_fraction_base",
-  calibration_ref: "sizing.calibration_ref",
-  max_position_pct: "sizing.max_position_pct",
-  max_match_exposure_pct: "sizing.max_match_exposure_pct",
-  daily_loss_limit_pct: "bankroll_limits.daily_loss_limit_pct",
-  max_concurrent_exposure_pct: "bankroll_limits.max_concurrent_exposure_pct",
-  max_concurrent_positions: "bankroll_limits.max_concurrent_positions",
-  global_drawdown_killswitch_pct: "safeguards.global_drawdown_killswitch_pct",
-  absurd_edge_block: "safeguards.absurd_edge_block",
-  max_quote_age_seconds: "safeguards.max_quote_age_seconds",
-  prob_sum_tolerance: "safeguards.prob_sum_tolerance",
-  take_profit_pct: "exits.take_profit_pct",
-  hard_stop_pct: "exits.hard_stop_pct",
-};
+// Each field lists the labels «вытащить» should recognise — the raw snake_case
+// key PLUS the human/RU labels the UI shows (Kelly base, max позиция, take-profit…)
+// and common Russian phrasings — so a profile described the way the cards read
+// parses, not only strict keys. Ordered so a prefix/longer name is claimed first
+// (min_edge_low_liquidity before min_edge). Aliases are regex fragments.
+const RISK_FIELDS: { path: string; aliases: string[] }[] = [
+  { path: "entry_thresholds.min_edge_low_liquidity", aliases: ["min_edge_low_liquidity", "min[\\s_]*edge[\\s_]*low", "край.{0,14}тонк\\w*ликвид", "тонк\\w*\\s*ликвид\\w*"] },
+  { path: "entry_thresholds.min_edge", aliases: ["min_edge", "min\\s*edge", "мин\\.?\\s*кра[йея]"] },
+  { path: "entry_thresholds.min_calibration", aliases: ["min_calibration", "min\\s*calibration", "мин\\.?\\s*калибров\\w*", "калибровк\\w*"] },
+  { path: "entry_thresholds.min_market_liquidity", aliases: ["min_market_liquidity", "мин\\.?\\s*ликвидн\\w*"] },
+  { path: "sizing.kelly_fraction_base", aliases: ["kelly_fraction_base", "kelly\\s*base", "доля\\s*kelly", "база\\s*kelly", "kelly", "келли"] },
+  { path: "sizing.calibration_ref", aliases: ["calibration_ref"] },
+  { path: "sizing.max_position_pct", aliases: ["max_position_pct", "max\\s*position", "max\\s*позиц\\w*", "макс\\.?\\s*позиц\\w*"] },
+  { path: "sizing.max_match_exposure_pct", aliases: ["max_match_exposure_pct", "max\\s*match", "max\\s*на\\s*матч", "макс\\.?\\s*на\\s*матч"] },
+  { path: "bankroll_limits.daily_loss_limit_pct", aliases: ["daily_loss_limit_pct", "дневн\\w*\\s*лимит\\w*", "дневн\\w*\\s*убыт\\w*"] },
+  { path: "bankroll_limits.max_concurrent_exposure_pct", aliases: ["max_concurrent_exposure_pct"] },
+  { path: "bankroll_limits.max_concurrent_positions", aliases: ["max_concurrent_positions"] },
+  { path: "safeguards.global_drawdown_killswitch_pct", aliases: ["global_drawdown_killswitch_pct", "killswitch", "килл[\\s-]*свитч"] },
+  { path: "safeguards.absurd_edge_block", aliases: ["absurd_edge_block", "absurd\\s*edge", "абсурд\\w*\\s*край", "абсурд\\w*"] },
+  { path: "safeguards.max_quote_age_seconds", aliases: ["max_quote_age_seconds", "возраст\\s*котир\\w*"] },
+  { path: "safeguards.prob_sum_tolerance", aliases: ["prob_sum_tolerance", "prob\\s*sum"] },
+  { path: "exits.take_profit_pct", aliases: ["take_profit_pct", "take[\\s-]*profit", "тейк[\\s-]*профит", "тейк[\\s-]*проф\\w*"] },
+  { path: "exits.hard_stop_pct", aliases: ["hard_stop_pct", "hard[\\s-]*stop", "хард[\\s-]*стоп", "стоп[\\s-]*лосс", "жёстк\\w*\\s*стоп"] },
+];
 /** Extract a raw risk config from free text (validated separately by loadRiskConfig). */
 export function parseRiskConfigHeuristic(text: string): Record<string, unknown> {
   const raw: any = {};
   const claimed: Array<[number, number]> = []; // char spans already consumed by a longer field name
   const clampM = text.match(/kelly_fraction_clamp\s*[:=]?\s*\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]/i);
   if (clampM) set(raw, "sizing.kelly_fraction_clamp", [parseFloat(clampM[1]), parseFloat(clampM[2])]);
-  for (const [field, path] of Object.entries(RISK_FIELD_PATHS)) {
-    const re = new RegExp(field + "\\s*[:=]?\\s*(-?\\d+(?:\\.\\d+)?)", "i");
+  for (const { path, aliases } of RISK_FIELDS) {
+    // alias  [: =]  number  [%] — a trailing «%» flags a percent value. `\w` in JS
+    // is ASCII-only, so widen it to also cover Cyrillic word chars — otherwise a
+    // stem like «позиц\w*» stops before «…ия» and the whole alias fails to match.
+    const aliasSrc = aliases.join("|").replace(/\\w/g, "[a-zа-яё0-9_]");
+    const re = new RegExp("(?:" + aliasSrc + ")\\s*[:=]?\\s*(-?\\d+(?:\\.\\d+)?)\\s*(%?)", "i");
     const m = re.exec(text);
     if (!m || m.index == null) continue;
     // skip a match that sits inside an already-claimed longer field (min_edge vs
     // min_edge_low_liquidity): the longer name is listed first and claims its span.
     if (claimed.some(([s, e]) => m.index >= s && m.index < e)) continue;
     claimed.push([m.index, m.index + m[0].length]);
-    set(raw, path, parseFloat(m[1]));
+    // «12%» → 0.12: a percent-written value is a fraction, so a number the user
+    // typed with «%» must be divided by 100 before validation (2% is 0.02, not 2).
+    const val = m[2] === "%" ? parseFloat(m[1]) / 100 : parseFloat(m[1]);
+    set(raw, path, val);
   }
   return raw;
 }
