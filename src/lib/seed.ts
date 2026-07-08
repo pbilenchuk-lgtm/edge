@@ -687,17 +687,24 @@ export function migrateSharesAllPairs(db: Database, now: string): void {
 // makes «I added a profile → put it on every strategy in every category, equal
 // budget» happen automatically.
 const GRID_MARK = "shares_grid_signature";
+const PER_PAIR_USD = 1000; // every (strategy, profile) pair is funded with this, on every football category
 export function migrateSharesGrid(db: Database, now: string): void {
   migrateSeedStrategists(db, now);
   const strategyIds = STRATEGIST_DEFS.map((d) => d.id);
   const profileIds = listRiskProfileViews(db).map((p) => p.id).sort();
   if (!strategyIds.length || !profileIds.length) return;
-  const signature = profileIds.join(",");
-  if (R.metaGet(db, GRID_MARK) === signature) return; // profile set unchanged → leave allocations alone
   const n = strategyIds.length * profileIds.length;
-  const pct = Math.round(10000 / n) / 100; // even split (e.g. 3×4 → 8.33% each)
+  // Signature includes the per-pair target, so introducing/altering budget
+  // management re-lays the grid even if the profile SET is unchanged.
+  const signature = `${PER_PAIR_USD}|${profileIds.join(",")}`;
+  if (R.metaGet(db, GRID_MARK) === signature) return; // nothing changed → leave allocations/budget alone
+  // Full-precision even split: pct=100/n with budget=n·PER_PAIR floors to EXACTLY
+  // PER_PAIR per pair (money.stratBudget = floor(budget·pct/100)); display rounds it.
+  const pct = 100 / n;
+  const budget = n * PER_PAIR_USD;
   for (const c of R.listCompetitions(db)) {
     if (c.sport_id !== "football") continue;
+    R.setCompetitionBudget(db, c.id, budget); // e.g. 12 pairs → $12 000 → $1 000 each
     R.clearShares(db, c.id);
     for (const sid of strategyIds)
       for (const pid of profileIds)

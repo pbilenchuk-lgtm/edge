@@ -23,6 +23,9 @@ const STATE_META: Record<string, { label: string; color: string; bg: string }> =
 const impliedProb = (o: number) => (o > 1 ? 1 / o : 0);
 const fmtMoney = (n: number) => (n < 0 ? "-$" : "$") + Math.abs(n).toFixed(2);
 const fmtMoney0 = (n: number) => (n < 0 ? "-$" : "$") + Math.abs(n).toFixed(0);
+// Share % can be a repeating fraction (even split 100/12 = 8.333…); show at most
+// one decimal and drop a trailing «.0», so «8.3%» not «8.333333333333334%».
+const fmtPct = (p: number) => String(Math.round((p || 0) * 10) / 10);
 // Compact liquidity: 10093.73 → "$10K", 1300 → "$1.3K", 300 → "$0.3K", 2.5e6 → "$2.5M".
 // Pre-formatted values (seed "$1.1M") pass through unchanged.
 const fmtLiq = (raw: string | null): string => {
@@ -654,7 +657,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
                   <span style={{ ...S.dot, background: p.color }} />
                   <span style={S.bankNm}>{p.name}</span>
                   <ProfileBadge id={p.profileId} name={p.profileName} />
-                  <span style={S.bankBudget}>{p.pct}% · {fmtMoney0(p.budget)}</span>
+                  <span style={S.bankBudget}>{fmtPct(p.pct)}% · {fmtMoney0(p.budget)}</span>
                   <span style={S.bankEq}>{fmtMoney(e.equity)}</span>
                   <span style={{ ...S.bankD, color: d >= 0 ? "#5fd08a" : "#ff6b6b" }}>{d >= 0 ? "▲" : "▼"}{fmtMoney(d)} ({d >= 0 ? "+" : ""}{p.budget ? ((d / p.budget) * 100).toFixed(1) : "0.0"}%)</span>
                 </div>
@@ -947,7 +950,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                       <div style={S.stratBlockHead}>
                         <span style={{ ...S.dot, background: p.color }} /><span style={S.stratName}>{p.name}</span>
                         <ProfileBadge id={p.profileId} name={p.profileName} />
-                        <span style={S.stratBudgetChip}>{p.pct}% · {fmtMoney0(budget)}</span>
+                        <span style={S.stratBudgetChip}>{fmtPct(p.pct)}% · {fmtMoney0(budget)}</span>
                         {/* Always-on run icon. Live → full reassessment (revisit
                             positions of ALL the strategy's pairs); pre-match/lineup →
                             analyze the match. Hidden once the match is finished. */}
@@ -1993,7 +1996,7 @@ function SharesModal({ comp, strats, profiles, budget, rows, onClose, onSave }: 
   const rmRow = (i: number) => setList((p) => p.filter((_, j) => j !== i));
   return (
     <Modal title={`Стратегия + профиль · ${comp.name}`} onClose={onClose}>
-      <div style={S.sharesHead}><span>Бюджет турнира: <b>{fmtMoney0(budget)}</b></span><span style={{ color: over ? "#ff6b6b" : total === 100 ? "#5fd08a" : "#e8a838" }}>распределено {total}% {over ? "(перебор!)" : `· свободно ${100 - total}%`}</span></div>
+      <div style={S.sharesHead}><span>Бюджет турнира: <b>{fmtMoney0(budget)}</b></span><span style={{ color: over ? "#ff6b6b" : Math.round(total) === 100 ? "#5fd08a" : "#e8a838" }}>распределено {fmtPct(total)}% {over ? "(перебор!)" : `· свободно ${fmtPct(Math.max(0, 100 - total))}%`}</span></div>
       {list.length === 0 && <div style={S.allocNote}>Пар пока нет. Добавь пару «стратегия + профиль» и задай ей долю бюджета.</div>}
       {list.map((r, i) => (
         <div key={i} style={{ ...S.shareRow, opacity: 1, borderBottom: dupe(i) ? "1px solid #ff6b6b" : undefined }}>
@@ -2004,7 +2007,7 @@ function SharesModal({ comp, strats, profiles, budget, rows, onClose, onSave }: 
           <select value={r.profileId} onChange={(e) => setRow(i, { profileId: e.target.value })} style={S.shareSelect} title="риск-профиль (пороги)">
             {profs.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
-          <div style={S.sharePctBox}><input type="number" min="0" max="100" value={r.pct} onChange={(e) => setRow(i, { pct: Math.max(0, Math.min(100, Math.round(+e.target.value))) })} style={S.sharePctInput} /><span style={S.sharePctSign}>%</span></div>
+          <div style={S.sharePctBox}><input type="number" min="0" max="100" value={fmtPct(r.pct)} onChange={(e) => setRow(i, { pct: Math.max(0, Math.min(100, Math.round(+e.target.value))) })} style={S.sharePctInput} /><span style={S.sharePctSign}>%</span></div>
           <span style={S.shareDollar}>{fmtMoney0(Math.floor(budget * (r.pct || 0) / 100))}</span>
           <button style={S.shareRmBtn} onClick={() => rmRow(i)} title="убрать">✕</button>
         </div>

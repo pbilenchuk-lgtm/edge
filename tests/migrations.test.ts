@@ -53,6 +53,10 @@ test("migrateSharesGrid: full strategist × ALL-profiles grid, even budget, re-l
   assert.equal([...new Set(rows.map((r) => r.risk_profile_id))].length, 4, "all four profiles present");
   assert.ok(rows.every((r) => r.pct === rows[0].pct), "budget split evenly");
   assert.ok(rows[0].pct > 8 && rows[0].pct < 9, `~8.33% each, got ${rows[0].pct}`);
+  // budget set to pairs × $1000, and each pair floors to EXACTLY $1000
+  const comp = R.listCompetitions(db).find((c) => c.id === "pm-a")!;
+  assert.equal(comp.budget, 12000, "budget = 12 pairs × $1000");
+  assert.equal(Math.floor(comp.budget * rows[0].pct / 100), 1000, "every pair funded with exactly $1000");
 
   // stable profile set → a manual reallocation survives (no re-run)
   R.setShare(db, { competition_id: "pm-a", strategy_id: "overreaction", risk_profile_id: "lite", pct: 40 });

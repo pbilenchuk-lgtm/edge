@@ -508,6 +508,10 @@ const SERIES_ESPN_LEAGUE: Record<string, string> = {
 // and it still gates every enrich on a team-name match, so a loose guess here is
 // safe — worst case it finds nothing). Extend as more leagues are traded.
 const LEAGUE_NAME_ESPN: [RegExp, string][] = [
+  // CONMEBOL club cups — discovered from Polymarket but had no ESPN league, so a
+  // live match went dark (no scores/events → no in-play management, no bets).
+  [/copa\s*sudamericana|sudamericana/i, "conmebol.sudamericana"],
+  [/copa\s*libertadores|libertadores/i, "conmebol.libertadores"],
   [/allsvenskan/i, "swe.1"], [/superettan/i, "swe.2"],
   [/eliteserien/i, "nor.1"],
   [/eredivisie/i, "ned.1"], [/eerste divisie/i, "ned.2"],
