@@ -47,6 +47,21 @@ test("loadRiskConfig: out-of-range values are REJECTED, never silently fixed", (
   assert.ok(r.errors!.some((e) => e.includes("max_concurrent_positions")));
 });
 
+test("loadRiskConfig: kelly base must sit inside the clamp — derive default, reject explicit contradiction", () => {
+  // base only → the defaulted clamp widens to contain it (base = its ceiling)
+  const derived = loadRiskConfig({ sizing: { kelly_fraction_base: 0.5 } });
+  assert.ok(derived.ok && derived.config);
+  assert.deepEqual(derived.config!.sizing.kelly_fraction_clamp, [0.05, 0.5]);
+  // base + an EXPLICIT clamp that excludes it → hard error, not a silent cap
+  const bad = loadRiskConfig({ sizing: { kelly_fraction_base: 0.5, kelly_fraction_clamp: [0.05, 0.33] } });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors!.some((e) => e.includes("kelly_fraction_base")), "flags the base/clamp contradiction");
+  // a coherent explicit pair passes untouched
+  const ok = loadRiskConfig({ sizing: { kelly_fraction_base: 0.33, kelly_fraction_clamp: [0.05, 0.4] } });
+  assert.ok(ok.ok && ok.config);
+  assert.deepEqual(ok.config!.sizing.kelly_fraction_clamp, [0.05, 0.4]);
+});
+
 test("loadRiskConfig: kelly_fraction_clamp must be an ordered [lo,hi] in (0,1]", () => {
   assert.equal(loadRiskConfig({ sizing: { kelly_fraction_clamp: [0.3, 0.1] } }).ok, false, "lo>hi rejected");
   assert.equal(loadRiskConfig({ sizing: { kelly_fraction_clamp: [0, 0.3] } }).ok, false, "lo=0 rejected");
@@ -128,6 +143,7 @@ hard-stop: 75% — больше места тезису отыграться`;
   assert.equal(c.entry_thresholds.min_edge, 0.02, "2.0% → 0.02, not 2");
   assert.equal(c.entry_thresholds.min_calibration, 0.30);
   assert.equal(c.sizing.kelly_fraction_base, 0.5, "«Kelly base» label recognised");
+  assert.deepEqual(c.sizing.kelly_fraction_clamp, [0.05, 0.5], "defaulted clamp widened to contain the base (0.5 is the ceiling, not dead)");
   assert.equal(c.sizing.max_position_pct, 0.12, "«max позиция» → 12% → 0.12");
   assert.equal(c.sizing.max_match_exposure_pct, 0.20, "«max на матч» → 20% → 0.20");
   assert.equal(c.safeguards.absurd_edge_block, 0.25, "«absurd edge» → 25% → 0.25");

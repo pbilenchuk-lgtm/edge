@@ -125,14 +125,28 @@ export function loadRiskConfig(raw: unknown): RiskConfigLoad {
     set(cfg, path, v);
   }
 
-  // kelly_fraction_clamp: validate the pair or default it.
+  // kelly_fraction_clamp: validate the pair or default it. The scaled Kelly is
+  // clamped to [lo, hi] (strategist §5), so the base MUST lie inside the clamp —
+  // a base above hi is dead (capped even at reference calibration), below lo it's
+  // floored up. Keep the two coherent.
+  const kb = cfg.sizing.kelly_fraction_base;
   const clamp = get(r, "sizing.kelly_fraction_clamp");
-  if (clamp == null) { defaultsUsed.push("sizing.kelly_fraction_clamp"); }
+  if (clamp == null) {
+    // Clamp not given → derive a DEFAULT that contains the base, so «base» is
+    // realizable (its ceiling of aggression) instead of being silently capped
+    // by a default ceiling below it. Only widens; a small base keeps defaults.
+    defaultsUsed.push("sizing.kelly_fraction_clamp");
+    const [dlo, dhi] = cfg.sizing.kelly_fraction_clamp;
+    cfg.sizing.kelly_fraction_clamp = [Math.min(dlo, kb), Math.max(dhi, kb)];
+  }
   else if (!Array.isArray(clamp) || clamp.length !== 2 || !clamp.every((x) => typeof x === "number" && Number.isFinite(x))) {
     errors.push("sizing.kelly_fraction_clamp: нужен [lo, hi] из двух чисел");
   } else {
     const [lo, hi] = clamp as [number, number];
     if (lo <= 0 || hi > 1 || lo > hi) errors.push(`sizing.kelly_fraction_clamp: [${lo}, ${hi}] должно быть 0 < lo ≤ hi ≤ 1`);
+    // Both base and clamp are user-set: an incoherent pair is a real error, not
+    // something to silently fix — tell them which knob to move.
+    else if (kb < lo || kb > hi) errors.push(`sizing.kelly_fraction_base: ${kb} вне kelly_fraction_clamp [${lo}, ${hi}] — база должна лежать внутри клэмпа (подними потолок клэмпа или опусти базу)`);
     else cfg.sizing.kelly_fraction_clamp = [lo, hi];
   }
 
