@@ -316,7 +316,18 @@ export function parseRiskConfigHeuristic(text: string): Record<string, unknown> 
   }
   return raw;
 }
-/** Parse free text → validated config (or errors), for the profile «вытащить» button. */
+/** Parse free text → validated config (or errors), for the profile «вытащить» button.
+ *  A pasted JSON config (exported/AI-generated) is validated as-is; otherwise the
+ *  free-text heuristic pulls values from human/RU labels. JSON first, because the
+ *  heuristic can't read `"min_edge": 0.02` (the quote before the colon breaks the
+ *  label→number regex, so every field would silently fall to its default). */
 export function parseRiskProfile(text: string): RiskConfigLoad {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{")) {
+    let obj: unknown;
+    try { obj = JSON.parse(trimmed); }
+    catch { return { ok: false, errors: ["похоже на JSON, но он не парсится — проверь синтаксис (запятые, кавычки, скобки)"] }; }
+    return loadRiskConfig(obj);
+  }
   return loadRiskConfig(parseRiskConfigHeuristic(text));
 }

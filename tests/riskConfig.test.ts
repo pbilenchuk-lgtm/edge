@@ -127,6 +127,26 @@ safeguards:
   assert.ok(res.config!._defaults_used.includes("bankroll_limits.daily_loss_limit_pct"));
 });
 
+test("parseRiskProfile: a pasted JSON config validates as-is (no silent defaulting)", () => {
+  const json = JSON.stringify({
+    config_version: "1.0",
+    entry_thresholds: { min_edge: 0.02, min_edge_low_liquidity: 0.05, min_calibration: 0.3, min_market_liquidity: 300 },
+    sizing: { kelly_fraction_base: 0.5, calibration_ref: 0.6, kelly_fraction_clamp: [0.05, 0.5], max_position_pct: 0.2, max_match_exposure_pct: 0.4 },
+    bankroll_limits: { daily_loss_limit_pct: 0.15, max_concurrent_exposure_pct: 0.5, max_concurrent_positions: 8 },
+    safeguards: { global_drawdown_killswitch_pct: 0.3, absurd_edge_block: 0.25, max_quote_age_seconds: 30, prob_sum_tolerance: 0.02 },
+    exits: { take_profit_pct: 1.0, hard_stop_pct: 1.0 },
+  });
+  const res = parseRiskProfile(json);
+  assert.ok(res.ok && res.config, res.errors?.join("; "));
+  assert.equal(res.config!._defaults_used.length, 0, "every field taken from the JSON, nothing defaulted");
+  assert.equal(res.config!.entry_thresholds.min_edge, 0.02);
+  assert.equal(res.config!.sizing.kelly_fraction_base, 0.5);
+  assert.deepEqual(res.config!.sizing.kelly_fraction_clamp, [0.05, 0.5]);
+  assert.equal(res.config!.exits.take_profit_pct, 1.0);
+  // malformed JSON → a clear parse error, not a heuristic mis-read
+  assert.equal(parseRiskProfile('{ "sizing": { "kelly_fraction_base": 0.2, } }').ok, false);
+});
+
 test("parseRiskProfile: parses the UI labels + percent notation (the «Lite» profile)", () => {
   // exactly what the user typed into the «Новый риск-профиль» box
   const text = `min_edge: 2.0% — входит даже на тонком крае (ниже 2% — уже зона ошибки очистки от vig)
