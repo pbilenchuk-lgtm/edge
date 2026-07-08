@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
-import { seedDatabase, migrateSharesToAggressive, migrateSharesAllPairs } from "../src/lib/seed.js";
+import { seedDatabase, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid } from "../src/lib/seed.js";
+import { seedRiskProfiles } from "../src/lib/riskConfig.js";
 import { loadPolymarketConfig } from "../src/lib/polymarket.js";
 import * as R from "../src/lib/repo.js";
 
@@ -32,6 +33,31 @@ test("migrateSharesAllPairs: every football category gets all 3×3 pairs, evenly
   R.clearShares(db, "pm-a");
   migrateSharesAllPairs(db, "t2");
   assert.equal(R.sharesForComp(db, "pm-a").length, 0, "re-run no-ops after the marker is set");
+});
+
+test("migrateSharesGrid: full strategist × ALL-profiles grid, even budget, re-lays on profile-set change", () => {
+  const db = openDb(":memory:");
+  R.upsertSport(db, "football", "Футбол");
+  R.upsertCompetition(db, { id: "pm-a", sport_id: "football", name: "A", budget: 1200, external_league: null, created_at: "t" });
+  seedRiskProfiles(db, "t"); // 3 presets
+
+  migrateSharesGrid(db, "t");
+  let rows = R.sharesForComp(db, "pm-a");
+  assert.equal(rows.length, 9, "3 strategists × 3 profiles");
+
+  // user adds a 4th custom profile («Lite») → next boot re-lays the grid as 12
+  R.upsertRiskProfile(db, { id: "lite", name: "Lite", content: JSON.stringify({}), sort: 9, created_at: "t" });
+  migrateSharesGrid(db, "t2");
+  rows = R.sharesForComp(db, "pm-a");
+  assert.equal(rows.length, 12, "3 strategists × 4 profiles = 12 pairs");
+  assert.equal([...new Set(rows.map((r) => r.risk_profile_id))].length, 4, "all four profiles present");
+  assert.ok(rows.every((r) => r.pct === rows[0].pct), "budget split evenly");
+  assert.ok(rows[0].pct > 8 && rows[0].pct < 9, `~8.33% each, got ${rows[0].pct}`);
+
+  // stable profile set → a manual reallocation survives (no re-run)
+  R.setShare(db, { competition_id: "pm-a", strategy_id: "overreaction", risk_profile_id: "lite", pct: 40 });
+  migrateSharesGrid(db, "t3");
+  assert.equal(R.sharesForComp(db, "pm-a").find((r) => r.strategy_id === "overreaction" && r.risk_profile_id === "lite")!.pct, 40, "manual edit preserved while profile set unchanged");
 });
 
 test("migrateSharesToAggressive: every share → aggressive, live bets retagged, idempotent", () => {

@@ -9,7 +9,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { extractThresholdsHeuristic } from "./thresholds.js";
-import { seedRiskProfiles, RISK_PROFILE_DEFS } from "./riskConfig.js";
+import { seedRiskProfiles, RISK_PROFILE_DEFS, listRiskProfileViews } from "./riskConfig.js";
 import { SPORT_LABELS } from "./polymarket.js";
 import type { Bet, Market } from "./types.js";
 
@@ -676,4 +676,32 @@ export function migrateSharesAllPairs(db: Database, now: string): void {
         R.setShare(db, { competition_id: c.id, strategy_id: sid, risk_profile_id: pid, pct });
   }
   R.metaSet(db, ALL_PAIRS_MARK, now, now);
+}
+
+// Keep the full grid current as the PROFILE SET changes: every football category
+// carries all strategists × ALL risk profiles present in the DB (incl. custom
+// ones the user adds), funds split evenly. Unlike the v1 pass above this reads
+// the profiles from the DB, and its marker is the profile-set signature — so it
+// re-lays the grid (3×N pairs, even) whenever a profile is added/removed, and
+// otherwise no-ops (a stable set → manual reallocations survive). This is what
+// makes «I added a profile → put it on every strategy in every category, equal
+// budget» happen automatically.
+const GRID_MARK = "shares_grid_signature";
+export function migrateSharesGrid(db: Database, now: string): void {
+  migrateSeedStrategists(db, now);
+  const strategyIds = STRATEGIST_DEFS.map((d) => d.id);
+  const profileIds = listRiskProfileViews(db).map((p) => p.id).sort();
+  if (!strategyIds.length || !profileIds.length) return;
+  const signature = profileIds.join(",");
+  if (R.metaGet(db, GRID_MARK) === signature) return; // profile set unchanged → leave allocations alone
+  const n = strategyIds.length * profileIds.length;
+  const pct = Math.round(10000 / n) / 100; // even split (e.g. 3×4 → 8.33% each)
+  for (const c of R.listCompetitions(db)) {
+    if (c.sport_id !== "football") continue;
+    R.clearShares(db, c.id);
+    for (const sid of strategyIds)
+      for (const pid of profileIds)
+        R.setShare(db, { competition_id: c.id, strategy_id: sid, risk_profile_id: pid, pct });
+  }
+  R.metaSet(db, GRID_MARK, signature, now);
 }

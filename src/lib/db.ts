@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs } from "./seed.js";
+import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid } from "./seed.js";
 import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
 
@@ -85,6 +85,11 @@ export function getDb(path = dbPath()): Database {
   // One-time: lay down the full 3×3 pair grid (every strategist × every profile,
   // funds split evenly) on each football category — runs once, marker-guarded.
   try { migrateSharesAllPairs(db, new Date().toISOString()); }
+  catch { /* non-fatal */ }
+  // Re-lay the full strategist × ALL-profiles grid (even budget) whenever the set
+  // of risk profiles changes — so a newly-added profile lands on every strategy in
+  // every category automatically. No-ops while the profile set is stable.
+  try { migrateSharesGrid(db, new Date().toISOString()); }
   catch { /* non-fatal */ }
   // Seed each football category's Layer-2 modifier onto its matching competition
   // (self-healing for newly-discovered leagues; never clobbers user/WC prompts).
