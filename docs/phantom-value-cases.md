@@ -39,14 +39,28 @@ priced the Morocco-2022 / Bounou / low-block story into the 22% price. The model
 re-applied it → **double-count → phantom edge on the underdog.** For France to
 advance ~77% (market), its 90-min win must be ~63%, needing xG ≈ 2.0 / 0.9.
 
-### Outcome (fill after full time)
-- Result 90': `___`  | ET/pens: `___`  | Advanced: `___`
-- Who was closer to reality (model 32% vs market 22% Morocco-advance): `___`
-- Morocco scored (Over 0.5)? `___`
-- Verdict: `[ ] confirms phantom value  [ ] model was right (real value)  [ ] inconclusive`
+### Outcome (filled after full time)
+- Result 90': **France 2 : 0 Morocco** | ET/pens: none (decided in 90) | Advanced: **France**.
+- Who was closer to reality (model 32% vs market 22% Morocco-advance): **the MARKET.**
+  France advanced cleanly; the market's 22% Morocco price was nearer the truth than
+  the model's 32%. The model's +9.6% "edge" on Morocco-advance was the wrong side.
+- Morocco scored (Over 0.5)? **No** (0 goals). The model's +5.5% edge on Morocco
+  Over 0.5 also lost — same underdog-optimism direction.
+- xG reality vs model: France dominated (the live xG feed climbed steadily for
+  France; Morocco created little) — consistent with France's real xG being ABOVE
+  the compressed 1.75 the model used, exactly as the hypothesis predicted.
+- **Verdict: `[x] confirms phantom value`** — the suspected double-counted underdog
+  narrative produced edge on the wrong side of a liquid, efficient market, and the
+  market was right. P&L echoed it: Pre-match Value (the Morocco bets) **−$47.30**;
+  Live xG Momentum (rode France's dominance) **+$71.50**; Overreaction correctly
+  **abstained**.
 
-> One outcome proves nothing — this is data point #1. Its value is as a clean,
-> pre-registered example of the suspected defect to anchor the sample.
+> One outcome proves nothing — this is data point #1 (well, #2 counting the earlier
+> unlabeled case). Its value is as a clean, pre-registered example of the suspected
+> defect to anchor the sample. Do NOT tune shrinkage off this single result — the
+> magnitude fix stays data-gated (see `model-vs-market-measurement.md`). What IS
+> actioned now: the deterministic bugs below and the base/category narrative
+> separation (the mechanism that manufactured this edge).
 
 ### ⚠️ Confounds — MUST account for these in the post-match review
 This match's live decision log has infra artifacts that are NOT strategy behaviour.
@@ -60,21 +74,35 @@ Do not read them as defects.
    the strategy. **EXCLUDE (or flag) 72'–85' from any timing / responsiveness metric.**
    - Detection heuristic for the review script: a reassessment gap ≫ the 5-min cadence
      on a live, funded match with open positions ⇒ probable LLM outage window.
-   - Data gap to close (follow-up): LLM-call failures are currently SILENT — the outage
-     is only visible as an ABSENCE. Log strategist/analyze failures explicitly (an
-     error row) so outages are first-class, not inferred from gaps.
+   - Data gap to close (follow-up): LLM-call failures were SILENT — the outage was
+     only visible as an ABSENCE. **FIXED:** a failed strategist call now records a
+     `skip` trade-log row in the match timeline and increments a run-level counter
+     surfaced in the cron log (`ИИ-сбои n/m`, pass flagged not-ok). Outages are now
+     first-class, not inferred from gaps. (`lifecycle.ts` reassess loop; `analysis.ts`
+     pre-match path; `scheduler.ts` summaries.)
 
 2. **Edge display −29/−30% on live-entered positions** (France Over 2.5, France (-2.5)):
-   the UI edge uses the stale pre-match `market.aiProb`, but these were entered on the
+   the UI edge used the stale pre-match `market.aiProb`, but these were entered on the
    live strategist's own estimate stored on the bet (`bet.ai_prob` 0.5–0.6). Cosmetic;
-   fully reconstructable (bet.ai_prob + market ai_prob + price all logged). Real fix:
-   live reassessment should update `market.aiProb`, or the display should prefer
-   `bet.ai_prob` for in-match entries.
+   fully reconstructable. **FIXED:** the edge computation now detects a live entry
+   (`entered_minute` holds a minute, not "предматч") and uses `bet.aiProb` for those;
+   pre-match entries keep the shared current market ai_prob. (`EdgeLab.tsx`, both edge
+   sites.)
 
 3. **Correlated / competing bets** (France Over 2.5 + France (-2.5), both need a 3rd
    goal): the sizing/entry didn't account for cross-market correlation → overlapping
-   exposure on one event. Logged with ai_prob + rationale per bet. Design fix: dedup /
-   correlation cap across markets that resolve on the same event.
+   exposure on one event. **FIXED (deterministic, not data-gated — per the review):**
+   `correlationKey()` clusters same-team "more goals" markets (team-total Over /
+   negative handicap) and match-total Over; `sizePrematch` caps each cluster like a
+   single position (`max_position_pct`). Applied in both the pre-match and live-entry
+   sizing loops, seeded from held positions. (`strategist.ts`, `analysis.ts`,
+   `lifecycle.ts`.)
 
-All three are fully reconstructable from the logs (bets, 200+ reassessments, trade_log,
-1100+ provider snapshots). Fix ROOTS in a batch post-match, not symptoms mid-match.
+All three were fully reconstructable from the logs (bets, 200+ reassessments, trade_log,
+1100+ provider snapshots), and all three are now fixed in code (deploy branch). The one
+thing deliberately NOT patched on this sample: the shrinkage-to-market magnitude — that
+is a function of (liquidity × phase × category) to be MEASURED across matches, not tuned
+on two. The narrative double-count that CREATED the phantom edge (base + category both
+applying the underdog story) is the root, and it is fixed via layer separation in
+`llm.ts` (`assessFootballStructured` scoped to fundamentals; `assessCategoryModifier`
+made sole owner of tournament-context narrative).
