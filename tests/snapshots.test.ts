@@ -76,3 +76,16 @@ test("collectSnapshots: no providers + polymarket off is a no-op", async () => {
   const n = await collectSnapshots(db, { env: {}, now: () => "2026-07-09T20:57:00Z" });
   assert.equal(n, 0);
 });
+
+test("pruneStaleMatches: a match with snapshots is kept, not FK-crashed", () => {
+  const db = seed();
+  // finished, no bets → normally a prune target
+  R.insertMatch(db, { id: "old", competition_id: "wc", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "2026-06-01T00:00:00Z", minute: 90, score_home: 1, score_away: 0, final_score: "1:0", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: null, clock: null } as any);
+  R.insertProviderSnapshot(db, { match_id: "old", batch_at: "2026-06-01T00:30:00Z", provider: "sportmonks", phase: "live", ok: true, http_status: 200, provider_ref: "1", minute: 45, latency_ms: 300, extracted: { xg: { present: true } }, raw: '{"x":1}' });
+  R.setProviderRef(db, "old", "sportmonks", "1");
+  // Must NOT throw (the FK regression) and must KEEP the snapshotted match.
+  const removed = R.pruneStaleMatches(db, { staleBeforeMs: Date.parse("2030-01-01T00:00:00Z") });
+  assert.ok(R.getMatch(db, "old"), "snapshotted match is retained for research");
+  assert.equal(R.snapshotCount(db, "old"), 1, "its snapshots are preserved");
+  assert.ok(removed >= 0);
+});

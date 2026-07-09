@@ -487,7 +487,11 @@ export function pruneMarketSnapshots(db: Database, keepPerLabel = 8): number {
 }
 
 // Child tables that reference matches(id) (no ON DELETE CASCADE — delete explicitly).
-const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "markets", "bets", "reassessments", "trade_log", "analysis_jobs", "match_live", "match_events", "market_open"];
+// provider_match_map is a disposable id cache → safe to delete with a pruned
+// match. provider_snapshots is NOT here on purpose: it's long-retention research
+// data, and the prune queries below EXCLUDE any match that has snapshots, so a
+// snapshotted match is never deleted (protects the data AND avoids the FK error).
+const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "markets", "bets", "reassessments", "trade_log", "analysis_jobs", "match_live", "match_events", "market_open", "provider_match_map"];
 
 /**
  * Prune bloat matches to keep the DB (and every `buildAppData` scan) bounded.
@@ -502,7 +506,8 @@ export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number }
   const rows = db.prepare(
     `SELECT m.id AS id, m.state AS state, m.kickoff_at AS kickoff_at, c.budget AS budget FROM matches m
        JOIN competitions c ON c.id = m.competition_id
-       WHERE NOT EXISTS (SELECT 1 FROM bets b WHERE b.match_id = m.id)`,
+       WHERE NOT EXISTS (SELECT 1 FROM bets b WHERE b.match_id = m.id)
+         AND NOT EXISTS (SELECT 1 FROM provider_snapshots ps WHERE ps.match_id = m.id)`,
   ).all() as { id: string; state: string; kickoff_at: string | null; budget: number }[];
   const doomed: string[] = [];
   const stale = (k: string | null) => opts.staleBeforeMs != null && k != null && /^\d{4}-\d\d-\d\dT/.test(k) && !isNaN(Date.parse(k)) && Date.parse(k) < opts.staleBeforeMs;
