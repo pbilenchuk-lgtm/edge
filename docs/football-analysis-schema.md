@@ -124,23 +124,40 @@ is at most two levels: a scalar leaf (`btts`) or `group.key` (`totals_match.2.5`
 
 The engine also emits an outcome tree in `derived` — the analyst never fills it.
 Built from the FINAL score matrix (post-category core adjustments), it partitions
-all final scores into 5 mutually-exclusive branches whose weights sum to 1:
+every final score into **6 MECE branches over (winner × BTTS)** whose weights sum
+to 1. No priority order: each score maps to exactly one branch by who won and
+whether both teams scored.
 
-| id | meaning |
-|---|---|
-| `fav_grinds` | favourite wins by 1, low total (1:0, 2:1) |
-| `fav_comfortable` | favourite wins by ≥2 |
-| `open_both_score` | both scored, margin ≤1 (any winner) — open game |
-| `dog_result` | underdog wins to nil or by ≥2 — the rare edge branch |
-| `tight_low_or_draw` | 0:0 (group) / **all draws** (knockout → `leads_to_extra_time`, weight ≈ P(draw 90)) |
+| id | winner_side | btts | meaning / example scores |
+|---|---|---|---|
+| `fav_clean` | fav | no | favourite wins, dog blank (1:0, 2:0, 3:0) |
+| `fav_concedes` | fav | yes | favourite wins but concedes (2:1, 3:1, 3:2) |
+| `draw_0_0` | draw | no | 0:0 |
+| `draw_scoring` | draw | yes | scoring draw (1:1, 2:2, 3:3) |
+| `dog_clean` | dog | no | underdog wins, fav blank (0:1, 0:2) |
+| `dog_concedes` | dog | yes | underdog wins but concedes (1:2, 2:3) |
 
-Each branch carries `favorite`, a `score_cluster` (heaviest scores), and
-`bets_that_live` (market shorthands that win inside it). `match_shape` is a scalar
-(`A` favourite grinds / `B` open / `C` tight-even / `mixed`) derived from the branch
+Because the split is homogeneous on winner and BTTS, three markets fall out of the
+tree **cleanly** (asserted to match the independent Poisson within 1e-6, else throw):
+- **BTTS Yes** = `fav_concedes + draw_scoring + dog_concedes` = `derived.btts`.
+- **P(draw 90) / Extra Time** = `draw_0_0 + draw_scoring` = `derived.extra_time_prob`
+  (in a knockout both draw branches carry `leads_to_extra_time: true`).
+- **Winner/advance sides** = sum branches by `winner_side` (fav / draw / dog).
+
+Each branch also carries `favorite`, a `score_cluster` (heaviest scores), and
+`bets_that_live` (market shorthands that win inside it, derived from winner_side +
+btts). The two `*_concedes` branches add `total_note` — their TOTAL is not
+homogeneous (2:1 vs 3:2), so the note gives the within-branch Over-2.5/Over-3.5
+split for a consumer sitting on a borderline total. `match_shape` (`A` class
+favourite / `B` open / `C` tight-even / `mixed`) is derived from the branch
 weights — a deterministic replacement for asking the LLM to "type" the match.
+
 Pre-match Value reads this to build anchor+satellite portfolios and to see which
-branches kill two legs at once. Clustering thresholds live in named constants in
-`poisson.ts` for calibration.
+branches kill two legs at once. Clustering + shape thresholds live in named
+constants in `poisson.ts` for calibration. **Split rule** (guard against sprawl):
+split a branch only if the new edge opens a tradeable market not already in the
+tree or flips a bet's sign — these 6 already cover advance, BTTS, totals, Extra
+Time and handicaps, so finer splits add weight-estimation noise, not signal.
 
 ---
 

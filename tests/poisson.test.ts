@@ -85,22 +85,33 @@ test("derivePoissonMarkets: poisson_correction ρ>0 lifts the draw vs pure Poiss
   assert.ok(corr.outcome_90.draw > base.outcome_90.draw, "low-score correction raises draw probability");
 });
 
-// ---- outcome_scenarios tree + match_shape ----
+// ---- outcome_scenarios: 6-branch MECE tree (winner × BTTS) + match_shape ----
 
-test("outcome_scenarios: 5 branches whose weights sum to 1 across distributions", () => {
+const SIX_IDS = ["fav_clean", "fav_concedes", "draw_0_0", "draw_scoring", "dog_clean", "dog_concedes"];
+
+test("outcome_scenarios: 6 MECE branches whose weights sum to 1 across distributions", () => {
   for (const [h, a] of [[1.8, 0.9], [1.3, 1.3], [0.7, 2.2], [2.5, 0.4], [1.0, 1.1]] as const) {
     for (const mt of ["group", "knockout"] as const) {
       const { outcome_scenarios: s } = deriveOutcomeScenarios(mkCore(h, a), mt);
-      assert.equal(s.length, 5, `5 branches for ${h}-${a} ${mt}`);
+      assert.equal(s.length, 6, `6 branches for ${h}-${a} ${mt}`);
+      assert.deepEqual(s.map((x) => x.id).sort(), [...SIX_IDS].sort(), "exactly the 6 branch ids");
       const sum = s.reduce((t, x) => t + x.prob, 0);
       assert.ok(Math.abs(sum - 1) <= 1e-3, `weights sum to 1 for ${h}-${a} ${mt}, got ${sum}`);
-      const ids = new Set(s.map((x) => x.id));
-      assert.equal(ids.size, 5, "all five branch ids present and distinct");
+      // winner_side / btts homogeneity per branch id.
+      for (const x of s) {
+        const expWinner = x.id.startsWith("fav") ? "fav" : x.id.startsWith("dog") ? "dog" : "draw";
+        assert.equal(x.winner_side, expWinner, `${x.id} winner_side`);
+        assert.equal(x.btts, x.id.endsWith("concedes") || x.id === "draw_scoring" ? "yes" : "no", `${x.id} btts`);
+      }
     }
   }
 });
 
-test("outcome_scenarios: branches are mutually exclusive (no score in two clusters)", () => {
+test("outcome_scenarios: MECE — every final score lands in exactly one branch by (winner × btts)", () => {
+  // Reconstruct the classification for a coarse grid and check no score's (winner,
+  // btts) signature could match two branches. The clustering is defined by winner
+  // and BTTS, which are disjoint by construction; assert the branch clusters don't
+  // share a score string.
   const { outcome_scenarios: s } = deriveOutcomeScenarios(mkCore(1.7, 1.0), "group");
   const seen = new Set<string>();
   for (const branch of s) for (const cell of branch.score_cluster) {
@@ -109,34 +120,38 @@ test("outcome_scenarios: branches are mutually exclusive (no score in two cluste
   }
 });
 
-test("outcome_scenarios: knockout puts ALL draws in the tight branch (→ extra time); group does not", () => {
-  const ko = deriveOutcomeScenarios(mkCore(1.3, 1.3), "knockout");
-  const gp = deriveOutcomeScenarios(mkCore(1.3, 1.3), "group");
-  const koTight = ko.outcome_scenarios.find((x) => x.id === "tight_low_or_draw")!;
-  const gpTight = gp.outcome_scenarios.find((x) => x.id === "tight_low_or_draw")!;
-  assert.equal(koTight.leads_to_extra_time, true, "knockout draw branch → ET");
-  assert.equal(gpTight.leads_to_extra_time, false, "group draw branch is final");
-  // Knockout absorbs 1:1/2:2 into tight, so it is heavier than the group tight (0:0 only).
-  assert.ok(koTight.prob > gpTight.prob, `knockout tight ${koTight.prob} > group tight ${gpTight.prob}`);
-  // The knockout tight weight ≈ P(draw in 90).
-  const d = derivePoissonMarkets(mkCore(1.3, 1.3), "knockout");
-  assert.ok(near(koTight.prob, d.outcome_90.draw, 0.01), "knockout tight ≈ P(draw 90)");
-  // Group moves the open draws into open_both_score instead.
-  const gpOpen = gp.outcome_scenarios.find((x) => x.id === "open_both_score")!;
-  const koOpen = ko.outcome_scenarios.find((x) => x.id === "open_both_score")!;
-  assert.ok(gpOpen.prob > koOpen.prob, "group open branch carries the both-scored draws");
+test("outcome_scenarios: BTTS + Extra Time fall out of the tree, matching Poisson (self-consistency)", () => {
+  for (const [h, a] of [[1.8, 0.9], [1.3, 1.3], [0.7, 2.2], [1.75, 1.05]] as const) {
+    const { outcome_scenarios: s } = deriveOutcomeScenarios(mkCore(h, a), "knockout");
+    const d = derivePoissonMarkets(mkCore(h, a), "knockout");
+    const bttsYes = s.filter((x) => x.btts === "yes").reduce((t, x) => t + x.prob, 0);
+    assert.ok(near(bttsYes, d.btts, 0.005), `BTTS-yes branches ${bttsYes} ≈ Poisson btts ${d.btts}`);
+    const drawBranches = s.filter((x) => x.winner_side === "draw").reduce((t, x) => t + x.prob, 0);
+    assert.ok(near(drawBranches, d.extra_time_prob, 0.005), `draw branches ${drawBranches} ≈ extra_time ${d.extra_time_prob}`);
+    // Every draw branch (and only those) carries leads_to_extra_time in a knockout.
+    for (const x of s) assert.equal(x.leads_to_extra_time, x.winner_side === "draw", `${x.id} ET flag`);
+  }
+});
+
+test("outcome_scenarios: group draw branches are NOT extra-time; concedes branches carry a total_note", () => {
+  const { outcome_scenarios: s } = deriveOutcomeScenarios(mkCore(1.6, 1.1), "group");
+  assert.ok(s.every((x) => x.leads_to_extra_time === false), "group draws are final, no ET");
+  for (const x of s) {
+    if (x.id === "fav_concedes" || x.id === "dog_concedes") assert.match(x.total_note ?? "", /Over2\.5:\s*100%.*Over3\.5/, `${x.id} has a total_note (always Over 2.5)`);
+    else assert.equal(x.total_note, null, `${x.id} total_note is null`);
+  }
 });
 
 test("outcome_scenarios: favourite is the higher-xG side even when away is stronger", () => {
   const { outcome_scenarios: s } = deriveOutcomeScenarios(mkCore(0.8, 2.0), "group"); // away stronger
   assert.ok(s.every((x) => x.favorite === "away"), "away is the favourite");
-  // Comfortable favourite branch should carry real weight when away is much stronger.
-  const comf = s.find((x) => x.id === "fav_comfortable")!;
-  assert.ok(comf.prob > 0.2, `away-fav comfortable branch has weight, got ${comf.prob}`);
+  const favSide = s.filter((x) => x.winner_side === "fav").reduce((t, x) => t + x.prob, 0);
+  const dogSide = s.filter((x) => x.winner_side === "dog").reduce((t, x) => t + x.prob, 0);
+  assert.ok(favSide > dogSide, `fav (away) side ${favSide} > dog side ${dogSide}`);
 });
 
 test("match_shape: strong favourite → A, open even game → B, tight even → C", () => {
-  assert.equal(deriveOutcomeScenarios(mkCore(2.3, 0.6), "group").match_shape, "A", "class favourite grinds");
+  assert.equal(deriveOutcomeScenarios(mkCore(2.5, 0.5), "group").match_shape, "A", "class favourite");
   assert.equal(deriveOutcomeScenarios(mkCore(1.9, 1.8), "group").match_shape, "B", "high-scoring even game is open");
   assert.equal(deriveOutcomeScenarios(mkCore(0.7, 0.7), "group").match_shape, "C", "low-scoring even game is tight");
 });

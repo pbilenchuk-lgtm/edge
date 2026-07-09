@@ -23,16 +23,27 @@ export interface CoreAdjustment { target: string; op: "multiply" | "add"; value:
 export type MatchType = "group" | "knockout" | "uncertain";
 
 /** A mutually-exclusive branch of the outcome tree (see deriveOutcomeScenarios).
- *  Pre-match Value reads these to pick bets that live in the heaviest branches
- *  and to see which branches kill two legs at once. */
+ *  The 6 branches are MECE over (winner × BTTS): {fav|draw|dog} × {no|yes}. No
+ *  priority order — each final score maps to exactly one branch by who won and
+ *  whether both teams scored. Because the split is homogeneous on BTTS and winner,
+ *  BTTS/Extra-Time/advance fall out of the tree cleanly (self-consistency guards
+ *  below). Pre-match Value reads these to pick bets that live in the heaviest
+ *  branches and to see which branches kill two legs at once. */
 export interface OutcomeScenario {
-  id: "fav_grinds" | "fav_comfortable" | "open_both_score" | "dog_result" | "tight_low_or_draw";
+  id: "fav_clean" | "fav_concedes" | "draw_0_0" | "draw_scoring" | "dog_clean" | "dog_concedes";
   label: string;
   prob: number;                       // Σ P of every final score in this branch
   favorite: "home" | "away";
+  winner_side: "fav" | "draw" | "dog"; // for advance/winner by summing sides
+  btts: "no" | "yes";                  // branch is homogeneous on BTTS
   score_cluster: string[];            // heaviest "i:j" scores in the branch (readability)
   bets_that_live: string[];           // market shorthands that win inside this branch
-  leads_to_extra_time: boolean;       // knockout + draw branch → ET
+  leads_to_extra_time: boolean;       // knockout + a draw branch (draw_0_0 / draw_scoring) → ET
+  /** Only for the *_concedes branches, whose TOTAL is not homogeneous (2:1 is
+   *  Under 3.5 but Over 1.5; 3:2 is Over 2.5): the within-branch split around the
+   *  2.5 line, so a consumer on a borderline total checks the scores, not the
+   *  raw branch weight. null for the other four (homogeneous-enough) branches. */
+  total_note: string | null;
 }
 
 /** Deterministic match shape from the branch weights — replaces asking the LLM to
@@ -52,16 +63,20 @@ export interface DerivedMarkets {
   btts: number;
   btts_2h: number;
   handicap: Record<string, number>; // home_-1.5 = P(home wins by ≥2), etc.
-  outcome_scenarios: OutcomeScenario[]; // 5 exclusive branches, Σ prob = 1
+  outcome_scenarios: OutcomeScenario[]; // 6 MECE branches (winner × BTTS), Σ prob = 1
   match_shape: MatchShape;
 }
 
 // ---- outcome-scenario clustering + match_shape thresholds (named for calibration) ----
-const FAV_GRINDS_MAX_TOTAL = 3;     // fav wins by 1 with total ≤ this → "grind" (1:0, 2:1)
-const SHAPE_COMFORTABLE_MIN = 0.35; // fav_comfortable weight above this → shape A
-const SHAPE_OPEN_MIN = 0.35;        // open_both_score weight above this → shape B
-const SHAPE_TIGHT_DOG_MIN = 0.40;   // tight + dog_result combined above this → candidate C
-const SHAPE_FAV_WEAK_MAX = 0.45;    // fav-wins weight below this = favourite weakly expressed (C)
+// SPLIT RULE (guard against branch sprawl): split a branch into sub-branches ONLY
+// if the new edge (a) opens a tradeable market not already in the tree, OR (b)
+// flips the sign of a bet. Do NOT split for matrix "tidiness". These 6 branches
+// already cover every tradeable market (advance, BTTS, totals, Extra Time,
+// handicaps) — further splitting adds weight-estimation noise without new signal.
+const SHAPE_FAV_MIN = 0.55;      // fav_clean + fav_concedes above this → shape A (class favourite)
+const SHAPE_SCORING_MIN = 0.55;  // scoring branches (fav_concedes + draw_scoring + dog_concedes) above → shape B (open)
+const SHAPE_TIGHT_DOG_MIN = 0.45; // draws + dog_* above this → candidate C (tight/even)
+const SHAPE_FAV_WEAK_MAX = 0.45;  // fav-side weight below this = favourite weakly expressed (C)
 
 const K = 12; // score-matrix ceiling — P(≥12 goals a side) is negligible
 const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
@@ -175,84 +190,107 @@ export function derivePoissonMarkets(core: AnalysisCore, matchType: MatchType = 
 }
 
 const SCENARIO_LABELS: Record<OutcomeScenario["id"], string> = {
-  fav_grinds: "фаворит побеждает малым счётом",
-  fav_comfortable: "фаворит уверенно (2+ гола)",
-  open_both_score: "открытый, обе забили",
-  dog_result: "аутсайдер не проигрывает",
-  tight_low_or_draw: "тесно, мало голов / ничья",
+  fav_clean: "фаворит побеждает всухую",
+  fav_concedes: "фаворит выигрывает, пропустив",
+  draw_0_0: "ничья 0:0",
+  draw_scoring: "результативная ничья",
+  dog_clean: "аутсайдер побеждает всухую",
+  dog_concedes: "аутсайдер выигрывает, пропустив",
 };
+const WINNER_SIDE: Record<OutcomeScenario["id"], "fav" | "draw" | "dog"> = {
+  fav_clean: "fav", fav_concedes: "fav", draw_0_0: "draw", draw_scoring: "draw", dog_clean: "dog", dog_concedes: "dog",
+};
+const BRANCH_BTTS: Record<OutcomeScenario["id"], "no" | "yes"> = {
+  fav_clean: "no", fav_concedes: "yes", draw_0_0: "no", draw_scoring: "yes", dog_clean: "no", dog_concedes: "yes",
+};
+const SCENARIO_IDS: OutcomeScenario["id"][] = ["fav_clean", "fav_concedes", "draw_0_0", "draw_scoring", "dog_clean", "dog_concedes"];
 
-/** Which final score (i home, j away) belongs to which branch. EXACTLY one branch
- *  per score (checked top-to-bottom), so the branches partition the whole matrix.
- *  fav/dog are by xG; `d` is the favourite's goal margin. */
-function scenarioFor(i: number, j: number, favHome: boolean, knockout: boolean): OutcomeScenario["id"] {
+/** MECE classification by (winner × BTTS): exactly one branch per final score, no
+ *  priority order. winner is fav/draw/dog (fav/dog by xG); BTTS = both teams scored.
+ *  fav won → dog=0 is fav_clean, dog≥1 is fav_concedes; symmetric for dog; a draw
+ *  is 0:0 or a scoring draw. */
+function scenarioFor(i: number, j: number, favHome: boolean): OutcomeScenario["id"] {
   const favG = favHome ? i : j, dogG = favHome ? j : i;
-  const d = favG - dogG, total = i + j;
-  // Priority top-to-bottom, first match wins (guarantees a clean partition):
-  // Draws first. In a knockout ALL draws go to extra time → the tight branch (so
-  // its weight ≈ P(draw in 90)). In a group, 0:0 is the tight/low draw; an open
-  // draw where both scored (1:1, 2:2) is an open game.
-  if (d === 0) {
-    if (knockout) return "tight_low_or_draw";
-    return total === 0 ? "tight_low_or_draw" : "open_both_score";
-  }
-  if (d === 1 && total <= FAV_GRINDS_MAX_TOTAL) return "fav_grinds";      // 1) fav by 1, low total
-  if (d >= 2) return "fav_comfortable";                                   // 2) fav by ≥2
-  if (i >= 1 && j >= 1 && Math.abs(i - j) <= 1) return "open_both_score"; // 3) both scored, close — any winner (incl dog by 1)
-  if (d <= -1) return "dog_result";                                       // 4) dog wins to nil / by ≥2 (the rare edge branch)
-  return "tight_low_or_draw";                                            // 5) safety net (fav by 1, high total, one side blanked)
+  const bothScored = i >= 1 && j >= 1;
+  if (favG > dogG) return bothScored ? "fav_concedes" : "fav_clean";
+  if (favG < dogG) return bothScored ? "dog_concedes" : "dog_clean";
+  return i === 0 ? "draw_0_0" : "draw_scoring"; // draw (i===j)
 }
 
+/** bets_that_live from winner_side + btts (+ knockout for the draw branches). */
 function betsThatLive(id: OutcomeScenario["id"], knockout: boolean): string[] {
   switch (id) {
-    case "fav_grinds": return ["under_2.5", "btts_no", "fav_win", "fav_-0.5"];
-    case "fav_comfortable": return ["fav_win", "fav_-1.5", "over_2.5", "fav_team_over_1.5"];
-    case "open_both_score": return ["btts_yes", "over_2.5"];
-    case "dog_result": return ["dog_win", "dog_+0.5", "btts_yes"];
-    case "tight_low_or_draw": return knockout ? ["under_2.5", "extra_time_yes", "btts_no"] : ["under_2.5", "draw", "btts_no"];
+    case "fav_clean": return ["fav_win", "fav_-0.5", "btts_no"];
+    case "fav_concedes": return ["fav_win", "btts_yes", "over_1.5"];
+    case "draw_0_0": return knockout ? ["extra_time_yes", "under_2.5", "btts_no"] : ["draw", "under_2.5", "btts_no"];
+    case "draw_scoring": return knockout ? ["extra_time_yes", "btts_yes", "over_1.5"] : ["draw", "btts_yes", "over_1.5"];
+    case "dog_clean": return ["dog_win", "dog_+0.5", "btts_no"];
+    case "dog_concedes": return ["dog_win", "dog_+0.5", "btts_yes"];
   }
 }
 
-/** Cluster a normalised score matrix into the 5-branch outcome tree + match_shape.
+/** Within-branch total distribution for the *_concedes branches, whose total is
+ *  NOT homogeneous (2:1 is Over 2.5 but Under 3.5; 3:2 is Over 3.5). A win with
+ *  both teams scoring is always ≥3 goals, so the 2.5 line is degenerate — the
+ *  useful split is the 3.5 line. We report both Over shares so a consumer on a
+ *  borderline total checks the scores, not the raw branch weight. null if empty. */
+function totalNote(cells: { s: string; p: number }[], branchProb: number): string | null {
+  if (branchProb <= 0) return null;
+  let o25 = 0, o35 = 0;
+  for (const c of cells) { const [hi, aj] = c.s.split(":").map(Number); const t = hi + aj; if (t >= 3) o25 += c.p; if (t >= 4) o35 += c.p; }
+  return `Over2.5: ${Math.round((o25 / branchProb) * 100)}%, Over3.5: ${Math.round((o35 / branchProb) * 100)}% внутри ветки`;
+}
+
+/** Cluster a normalised score matrix into the 6-branch MECE tree + match_shape.
  *  Pure; the sole source of truth for both derivePoissonMarkets and the exported
- *  deriveOutcomeScenarios wrapper. Throws if the branch weights don't sum to 1
- *  (a partition bug — never fail silently). */
+ *  deriveOutcomeScenarios wrapper. Because the split is homogeneous on (winner,
+ *  BTTS), the tree must reproduce the independent Poisson BTTS and draw/ET masses
+ *  exactly — a mismatch is a clustering bug, so we throw (never fail silently). */
 function outcomeScenariosFromMatrix(M: number[][], favHome: boolean, knockout: boolean): { outcome_scenarios: OutcomeScenario[]; match_shape: MatchShape } {
-  const ids: OutcomeScenario["id"][] = ["fav_grinds", "fav_comfortable", "open_both_score", "dog_result", "tight_low_or_draw"];
   const acc: Record<string, { prob: number; cells: { s: string; p: number }[] }> = {};
-  for (const id of ids) acc[id] = { prob: 0, cells: [] };
+  for (const id of SCENARIO_IDS) acc[id] = { prob: 0, cells: [] };
   let raw = 0;
   for (let i = 0; i <= K; i++) for (let j = 0; j <= K; j++) {
     const p = M[i][j]; raw += p;
-    const id = scenarioFor(i, j, favHome, knockout);
+    const id = scenarioFor(i, j, favHome);
     acc[id].prob += p;
     if (p > 0) acc[id].cells.push({ s: `${i}:${j}`, p });
   }
-  // Every cell landed in exactly one branch, so the branch weights must sum to the
-  // matrix mass (≈1). A drift means the partition developed a hole/overlap.
-  const branchSum = ids.reduce((s, id) => s + acc[id].prob, 0);
+  // (1) Partition: every cell landed in exactly one branch → weights sum to the mass.
+  const branchSum = SCENARIO_IDS.reduce((s, id) => s + acc[id].prob, 0);
   if (Math.abs(branchSum - raw) > 1e-6) throw new Error(`outcome_scenarios: branches sum ${branchSum} ≠ matrix mass ${raw}`);
+  // (2) BTTS falls out of the tree cleanly: the three "yes" branches must equal the
+  //     independent Poisson BTTS mass. Only a MECE-by-BTTS split guarantees this.
+  const rawBtts = sumWhere(M, (i, j) => i >= 1 && j >= 1);
+  const bttsYes = acc.fav_concedes.prob + acc.draw_scoring.prob + acc.dog_concedes.prob;
+  if (Math.abs(bttsYes - rawBtts) > 1e-6) throw new Error(`outcome_scenarios: BTTS-yes branches ${bttsYes} ≠ Poisson btts ${rawBtts}`);
+  // (3) Extra time (draws) falls out cleanly too: both draw branches = P(draw 90).
+  const rawDraw = sumWhere(M, (i, j) => i === j);
+  const drawBranches = acc.draw_0_0.prob + acc.draw_scoring.prob;
+  if (Math.abs(drawBranches - rawDraw) > 1e-6) throw new Error(`outcome_scenarios: draw branches ${drawBranches} ≠ Poisson draw ${rawDraw}`);
   const favorite = favHome ? "home" : "away";
-  const outcome_scenarios: OutcomeScenario[] = ids.map((id) => ({
+  const outcome_scenarios: OutcomeScenario[] = SCENARIO_IDS.map((id) => ({
     id,
     label: SCENARIO_LABELS[id],
     prob: round4(acc[id].prob),
     favorite,
+    winner_side: WINNER_SIDE[id],
+    btts: BRANCH_BTTS[id],
     score_cluster: acc[id].cells.sort((a, b) => b.p - a.p).slice(0, 4).map((c) => c.s),
     bets_that_live: betsThatLive(id, knockout),
-    leads_to_extra_time: id === "tight_low_or_draw" && knockout,
+    leads_to_extra_time: knockout && (id === "draw_0_0" || id === "draw_scoring"),
+    total_note: (id === "fav_concedes" || id === "dog_concedes") ? totalNote(acc[id].cells, acc[id].prob) : null,
   }));
   return { outcome_scenarios, match_shape: matchShapeFrom(acc) };
 }
 
 function matchShapeFrom(acc: Record<string, { prob: number }>): MatchShape {
-  const comfortable = acc.fav_comfortable.prob;
-  const open = acc.open_both_score.prob;
-  const tightDog = acc.tight_low_or_draw.prob + acc.dog_result.prob;
-  const favWins = acc.fav_grinds.prob + acc.fav_comfortable.prob;
-  if (comfortable >= SHAPE_COMFORTABLE_MIN) return "A";       // class favourite grinds
-  if (open >= SHAPE_OPEN_MIN) return "B";                     // open game
-  if (tightDog >= SHAPE_TIGHT_DOG_MIN && favWins < SHAPE_FAV_WEAK_MAX) return "C"; // tight, even
+  const favSide = acc.fav_clean.prob + acc.fav_concedes.prob;
+  const scoring = acc.fav_concedes.prob + acc.draw_scoring.prob + acc.dog_concedes.prob;
+  const tightDog = acc.draw_0_0.prob + acc.draw_scoring.prob + acc.dog_clean.prob + acc.dog_concedes.prob;
+  if (favSide >= SHAPE_FAV_MIN) return "A";                                       // class favourite
+  if (scoring >= SHAPE_SCORING_MIN) return "B";                                   // open, goals-y
+  if (tightDog >= SHAPE_TIGHT_DOG_MIN && favSide < SHAPE_FAV_WEAK_MAX) return "C"; // tight, even
   return "mixed";
 }
 
