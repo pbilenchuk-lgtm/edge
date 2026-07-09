@@ -120,6 +120,30 @@ is at most two levels: a scalar leaf (`btts`) or `group.key` (`totals_match.2.5`
 
 ---
 
+## Derived-only: `outcome_scenarios` + `match_shape` (engine, not analyst)
+
+The engine also emits an outcome tree in `derived` — the analyst never fills it.
+Built from the FINAL score matrix (post-category core adjustments), it partitions
+all final scores into 5 mutually-exclusive branches whose weights sum to 1:
+
+| id | meaning |
+|---|---|
+| `fav_grinds` | favourite wins by 1, low total (1:0, 2:1) |
+| `fav_comfortable` | favourite wins by ≥2 |
+| `open_both_score` | both scored, margin ≤1 (any winner) — open game |
+| `dog_result` | underdog wins to nil or by ≥2 — the rare edge branch |
+| `tight_low_or_draw` | 0:0 (group) / **all draws** (knockout → `leads_to_extra_time`, weight ≈ P(draw 90)) |
+
+Each branch carries `favorite`, a `score_cluster` (heaviest scores), and
+`bets_that_live` (market shorthands that win inside it). `match_shape` is a scalar
+(`A` favourite grinds / `B` open / `C` tight-even / `mixed`) derived from the branch
+weights — a deterministic replacement for asking the LLM to "type" the match.
+Pre-match Value reads this to build anchor+satellite portfolios and to see which
+branches kill two legs at once. Clustering thresholds live in named constants in
+`poisson.ts` for calibration.
+
+---
+
 ## Consistency check (this file vs code)
 
 Verified coherent across the three coupled sites: the enforced schema string in

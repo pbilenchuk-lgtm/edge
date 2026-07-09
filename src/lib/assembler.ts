@@ -47,7 +47,9 @@ export function assembleFootball(base: FootballAnalysis, category: CategoryDelta
   const { core, log: coreLog } = useCat ? applyCoreAdjustments(base.core, category!.coreAdjustments) : { core: base.core, log: [] as CoreAdjustLog[] };
 
   // 2) derive the whole market from the final core; 3) merge + apply overrides.
-  const derived = derivePoissonMarkets(core);
+  //    matchType flows in so the outcome-scenario tree labels the draw branch as
+  //    extra-time for knockouts (its weight ≈ P(draw in 90)).
+  const derived = derivePoissonMarkets(core, base.matchType);
   const overrides: AnalysisOverride[] = [...base.overrides, ...(useCat ? category!.overrideAdjustments : [])];
   applyOverrides(derived, overrides);
 

@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { derivePoissonMarkets, applyOverrides, applyCoreAdjustments } from "../src/lib/poisson.js";
+import { derivePoissonMarkets, applyOverrides, applyCoreAdjustments, deriveOutcomeScenarios } from "../src/lib/poisson.js";
 
 const near = (a: number, b: number, eps = 0.01) => Math.abs(a - b) <= eps;
+const mkCore = (xg_home: number, xg_away: number, poisson_correction = 0) => ({ xg_home, xg_away, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction });
 
 test("derivePoissonMarkets: 1X2 sums to 1 and favours the stronger side", () => {
   const d = derivePoissonMarkets({ xg_home: 1.6, xg_away: 1.0, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 });
@@ -82,4 +83,60 @@ test("derivePoissonMarkets: poisson_correction ρ>0 lifts the draw vs pure Poiss
   const base = derivePoissonMarkets({ xg_home: 1.3, xg_away: 1.3, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 });
   const corr = derivePoissonMarkets({ xg_home: 1.3, xg_away: 1.3, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0.08 });
   assert.ok(corr.outcome_90.draw > base.outcome_90.draw, "low-score correction raises draw probability");
+});
+
+// ---- outcome_scenarios tree + match_shape ----
+
+test("outcome_scenarios: 5 branches whose weights sum to 1 across distributions", () => {
+  for (const [h, a] of [[1.8, 0.9], [1.3, 1.3], [0.7, 2.2], [2.5, 0.4], [1.0, 1.1]] as const) {
+    for (const mt of ["group", "knockout"] as const) {
+      const { outcome_scenarios: s } = deriveOutcomeScenarios(mkCore(h, a), mt);
+      assert.equal(s.length, 5, `5 branches for ${h}-${a} ${mt}`);
+      const sum = s.reduce((t, x) => t + x.prob, 0);
+      assert.ok(Math.abs(sum - 1) <= 1e-3, `weights sum to 1 for ${h}-${a} ${mt}, got ${sum}`);
+      const ids = new Set(s.map((x) => x.id));
+      assert.equal(ids.size, 5, "all five branch ids present and distinct");
+    }
+  }
+});
+
+test("outcome_scenarios: branches are mutually exclusive (no score in two clusters)", () => {
+  const { outcome_scenarios: s } = deriveOutcomeScenarios(mkCore(1.7, 1.0), "group");
+  const seen = new Set<string>();
+  for (const branch of s) for (const cell of branch.score_cluster) {
+    assert.ok(!seen.has(cell), `score ${cell} appears in more than one branch`);
+    seen.add(cell);
+  }
+});
+
+test("outcome_scenarios: knockout puts ALL draws in the tight branch (→ extra time); group does not", () => {
+  const ko = deriveOutcomeScenarios(mkCore(1.3, 1.3), "knockout");
+  const gp = deriveOutcomeScenarios(mkCore(1.3, 1.3), "group");
+  const koTight = ko.outcome_scenarios.find((x) => x.id === "tight_low_or_draw")!;
+  const gpTight = gp.outcome_scenarios.find((x) => x.id === "tight_low_or_draw")!;
+  assert.equal(koTight.leads_to_extra_time, true, "knockout draw branch → ET");
+  assert.equal(gpTight.leads_to_extra_time, false, "group draw branch is final");
+  // Knockout absorbs 1:1/2:2 into tight, so it is heavier than the group tight (0:0 only).
+  assert.ok(koTight.prob > gpTight.prob, `knockout tight ${koTight.prob} > group tight ${gpTight.prob}`);
+  // The knockout tight weight ≈ P(draw in 90).
+  const d = derivePoissonMarkets(mkCore(1.3, 1.3), "knockout");
+  assert.ok(near(koTight.prob, d.outcome_90.draw, 0.01), "knockout tight ≈ P(draw 90)");
+  // Group moves the open draws into open_both_score instead.
+  const gpOpen = gp.outcome_scenarios.find((x) => x.id === "open_both_score")!;
+  const koOpen = ko.outcome_scenarios.find((x) => x.id === "open_both_score")!;
+  assert.ok(gpOpen.prob > koOpen.prob, "group open branch carries the both-scored draws");
+});
+
+test("outcome_scenarios: favourite is the higher-xG side even when away is stronger", () => {
+  const { outcome_scenarios: s } = deriveOutcomeScenarios(mkCore(0.8, 2.0), "group"); // away stronger
+  assert.ok(s.every((x) => x.favorite === "away"), "away is the favourite");
+  // Comfortable favourite branch should carry real weight when away is much stronger.
+  const comf = s.find((x) => x.id === "fav_comfortable")!;
+  assert.ok(comf.prob > 0.2, `away-fav comfortable branch has weight, got ${comf.prob}`);
+});
+
+test("match_shape: strong favourite → A, open even game → B, tight even → C", () => {
+  assert.equal(deriveOutcomeScenarios(mkCore(2.3, 0.6), "group").match_shape, "A", "class favourite grinds");
+  assert.equal(deriveOutcomeScenarios(mkCore(1.9, 1.8), "group").match_shape, "B", "high-scoring even game is open");
+  assert.equal(deriveOutcomeScenarios(mkCore(0.7, 0.7), "group").match_shape, "C", "low-scoring even game is tight");
 });

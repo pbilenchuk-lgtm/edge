@@ -20,6 +20,26 @@ export interface AnalysisCore {
 export interface AnalysisOverride { target: string; adjust: number; reason?: string }
 export interface CoreAdjustment { target: string; op: "multiply" | "add"; value: number; reason?: string }
 
+export type MatchType = "group" | "knockout" | "uncertain";
+
+/** A mutually-exclusive branch of the outcome tree (see deriveOutcomeScenarios).
+ *  Pre-match Value reads these to pick bets that live in the heaviest branches
+ *  and to see which branches kill two legs at once. */
+export interface OutcomeScenario {
+  id: "fav_grinds" | "fav_comfortable" | "open_both_score" | "dog_result" | "tight_low_or_draw";
+  label: string;
+  prob: number;                       // Σ P of every final score in this branch
+  favorite: "home" | "away";
+  score_cluster: string[];            // heaviest "i:j" scores in the branch (readability)
+  bets_that_live: string[];           // market shorthands that win inside this branch
+  leads_to_extra_time: boolean;       // knockout + draw branch → ET
+}
+
+/** Deterministic match shape from the branch weights — replaces asking the LLM to
+ *  "type" the match. A = class favourite grinds it out; B = open game; C = tight,
+ *  evenly-matched; mixed = none dominant. */
+export type MatchShape = "A" | "B" | "C" | "mixed";
+
 export interface DerivedMarkets {
   outcome_90: { home: number; draw: number; away: number };
   advance: { home: number; away: number };
@@ -32,7 +52,16 @@ export interface DerivedMarkets {
   btts: number;
   btts_2h: number;
   handicap: Record<string, number>; // home_-1.5 = P(home wins by ≥2), etc.
+  outcome_scenarios: OutcomeScenario[]; // 5 exclusive branches, Σ prob = 1
+  match_shape: MatchShape;
 }
+
+// ---- outcome-scenario clustering + match_shape thresholds (named for calibration) ----
+const FAV_GRINDS_MAX_TOTAL = 3;     // fav wins by 1 with total ≤ this → "grind" (1:0, 2:1)
+const SHAPE_COMFORTABLE_MIN = 0.35; // fav_comfortable weight above this → shape A
+const SHAPE_OPEN_MIN = 0.35;        // open_both_score weight above this → shape B
+const SHAPE_TIGHT_DOG_MIN = 0.40;   // tight + dog_result combined above this → candidate C
+const SHAPE_FAV_WEAK_MAX = 0.45;    // fav-wins weight below this = favourite weakly expressed (C)
 
 const K = 12; // score-matrix ceiling — P(≥12 goals a side) is negligible
 const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
@@ -95,7 +124,7 @@ function overs(M: number[][], lines: number[], total: (i: number, j: number) => 
  * (Dixon–Coles corrected) — no quotes, no overrides yet. All probabilities are
  * OVER/YES/side probabilities in 0..1.
  */
-export function derivePoissonMarkets(core: AnalysisCore): DerivedMarkets {
+export function derivePoissonMarkets(core: AnalysisCore, matchType: MatchType = "uncertain"): DerivedMarkets {
   const lh = clamp(core.xg_home, 0.01, 8), la = clamp(core.xg_away, 0.01, 8);
   const rho = Number.isFinite(core.poisson_correction) ? clamp(core.poisson_correction, -0.1, 0.1) : 0;
   const sH = clamp(core.home_share_1h ?? 0.44, 0.1, 0.9), sA = clamp(core.away_share_1h ?? 0.44, 0.1, 0.9);
@@ -137,7 +166,103 @@ export function derivePoissonMarkets(core: AnalysisCore): DerivedMarkets {
     btts,
     btts_2h: btts2h,
     handicap,
+    // Built from the SAME final-core matrix M as everything above — so category
+    // core_adjustments already fold into the tree. Overrides are post-hoc nudges
+    // to specific market probs (not the score matrix), so they leave the branch
+    // weights unchanged; building here vs after applyOverrides is equivalent.
+    ...outcomeScenariosFromMatrix(M, lh >= la, matchType === "knockout"),
   };
+}
+
+const SCENARIO_LABELS: Record<OutcomeScenario["id"], string> = {
+  fav_grinds: "фаворит побеждает малым счётом",
+  fav_comfortable: "фаворит уверенно (2+ гола)",
+  open_both_score: "открытый, обе забили",
+  dog_result: "аутсайдер не проигрывает",
+  tight_low_or_draw: "тесно, мало голов / ничья",
+};
+
+/** Which final score (i home, j away) belongs to which branch. EXACTLY one branch
+ *  per score (checked top-to-bottom), so the branches partition the whole matrix.
+ *  fav/dog are by xG; `d` is the favourite's goal margin. */
+function scenarioFor(i: number, j: number, favHome: boolean, knockout: boolean): OutcomeScenario["id"] {
+  const favG = favHome ? i : j, dogG = favHome ? j : i;
+  const d = favG - dogG, total = i + j;
+  // Priority top-to-bottom, first match wins (guarantees a clean partition):
+  // Draws first. In a knockout ALL draws go to extra time → the tight branch (so
+  // its weight ≈ P(draw in 90)). In a group, 0:0 is the tight/low draw; an open
+  // draw where both scored (1:1, 2:2) is an open game.
+  if (d === 0) {
+    if (knockout) return "tight_low_or_draw";
+    return total === 0 ? "tight_low_or_draw" : "open_both_score";
+  }
+  if (d === 1 && total <= FAV_GRINDS_MAX_TOTAL) return "fav_grinds";      // 1) fav by 1, low total
+  if (d >= 2) return "fav_comfortable";                                   // 2) fav by ≥2
+  if (i >= 1 && j >= 1 && Math.abs(i - j) <= 1) return "open_both_score"; // 3) both scored, close — any winner (incl dog by 1)
+  if (d <= -1) return "dog_result";                                       // 4) dog wins to nil / by ≥2 (the rare edge branch)
+  return "tight_low_or_draw";                                            // 5) safety net (fav by 1, high total, one side blanked)
+}
+
+function betsThatLive(id: OutcomeScenario["id"], knockout: boolean): string[] {
+  switch (id) {
+    case "fav_grinds": return ["under_2.5", "btts_no", "fav_win", "fav_-0.5"];
+    case "fav_comfortable": return ["fav_win", "fav_-1.5", "over_2.5", "fav_team_over_1.5"];
+    case "open_both_score": return ["btts_yes", "over_2.5"];
+    case "dog_result": return ["dog_win", "dog_+0.5", "btts_yes"];
+    case "tight_low_or_draw": return knockout ? ["under_2.5", "extra_time_yes", "btts_no"] : ["under_2.5", "draw", "btts_no"];
+  }
+}
+
+/** Cluster a normalised score matrix into the 5-branch outcome tree + match_shape.
+ *  Pure; the sole source of truth for both derivePoissonMarkets and the exported
+ *  deriveOutcomeScenarios wrapper. Throws if the branch weights don't sum to 1
+ *  (a partition bug — never fail silently). */
+function outcomeScenariosFromMatrix(M: number[][], favHome: boolean, knockout: boolean): { outcome_scenarios: OutcomeScenario[]; match_shape: MatchShape } {
+  const ids: OutcomeScenario["id"][] = ["fav_grinds", "fav_comfortable", "open_both_score", "dog_result", "tight_low_or_draw"];
+  const acc: Record<string, { prob: number; cells: { s: string; p: number }[] }> = {};
+  for (const id of ids) acc[id] = { prob: 0, cells: [] };
+  let raw = 0;
+  for (let i = 0; i <= K; i++) for (let j = 0; j <= K; j++) {
+    const p = M[i][j]; raw += p;
+    const id = scenarioFor(i, j, favHome, knockout);
+    acc[id].prob += p;
+    if (p > 0) acc[id].cells.push({ s: `${i}:${j}`, p });
+  }
+  // Every cell landed in exactly one branch, so the branch weights must sum to the
+  // matrix mass (≈1). A drift means the partition developed a hole/overlap.
+  const branchSum = ids.reduce((s, id) => s + acc[id].prob, 0);
+  if (Math.abs(branchSum - raw) > 1e-6) throw new Error(`outcome_scenarios: branches sum ${branchSum} ≠ matrix mass ${raw}`);
+  const favorite = favHome ? "home" : "away";
+  const outcome_scenarios: OutcomeScenario[] = ids.map((id) => ({
+    id,
+    label: SCENARIO_LABELS[id],
+    prob: round4(acc[id].prob),
+    favorite,
+    score_cluster: acc[id].cells.sort((a, b) => b.p - a.p).slice(0, 4).map((c) => c.s),
+    bets_that_live: betsThatLive(id, knockout),
+    leads_to_extra_time: id === "tight_low_or_draw" && knockout,
+  }));
+  return { outcome_scenarios, match_shape: matchShapeFrom(acc) };
+}
+
+function matchShapeFrom(acc: Record<string, { prob: number }>): MatchShape {
+  const comfortable = acc.fav_comfortable.prob;
+  const open = acc.open_both_score.prob;
+  const tightDog = acc.tight_low_or_draw.prob + acc.dog_result.prob;
+  const favWins = acc.fav_grinds.prob + acc.fav_comfortable.prob;
+  if (comfortable >= SHAPE_COMFORTABLE_MIN) return "A";       // class favourite grinds
+  if (open >= SHAPE_OPEN_MIN) return "B";                     // open game
+  if (tightDog >= SHAPE_TIGHT_DOG_MIN && favWins < SHAPE_FAV_WEAK_MAX) return "C"; // tight, even
+  return "mixed";
+}
+
+/** Public wrapper: the outcome tree from a CORE (recomputes the matrix). Used by
+ *  callers that have the final core but not the matrix. Identical result to the
+ *  copy derivePoissonMarkets embeds. */
+export function deriveOutcomeScenarios(core: AnalysisCore, matchType: MatchType = "uncertain"): { outcome_scenarios: OutcomeScenario[]; match_shape: MatchShape } {
+  const lh = clamp(core.xg_home, 0.01, 8), la = clamp(core.xg_away, 0.01, 8);
+  const rho = Number.isFinite(core.poisson_correction) ? clamp(core.poisson_correction, -0.1, 0.1) : 0;
+  return outcomeScenariosFromMatrix(scoreMatrix(lh, la, rho), lh >= la, matchType === "knockout");
 }
 
 /**
