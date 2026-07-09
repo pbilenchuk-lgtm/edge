@@ -13,6 +13,7 @@ export type BetStatus =
 export type ReassessTrigger =
   | "goal"
   | "red_card"
+  | "penalty"
   | "price_move"
   | "time"
   | "manual";

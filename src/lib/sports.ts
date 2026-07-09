@@ -32,7 +32,7 @@ export interface SportsMatchStatus {
 }
 
 export interface TeamLineup { team: string; formation: string | null; starters: string[] }
-export interface MatchEvent { key: string; minute: number | null; type: "goal" | "red_card" | "yellow_card" | "sub" | "other"; team: string | null; text: string }
+export interface MatchEvent { key: string; minute: number | null; type: "goal" | "red_card" | "yellow_card" | "sub" | "penalty" | "other"; team: string | null; text: string }
 /** Compact team match statistics (possession, shots, etc.) — the "how the game
  *  is actually going" signal beyond the score, fed to analysis/reassessment. */
 export interface TeamStats { team: string; items: { label: string; value: string }[] }
@@ -59,6 +59,11 @@ function eventType(text: string): MatchEvent["type"] {
   if (/red card/.test(t)) return "red_card";
   if (/yellow card/.test(t)) return "yellow_card";
   if (/goal/.test(t) && !/no goal|disallow/.test(t)) return "goal";
+  // Penalty NOT converted (saved / missed / awarded / VAR). A SCORED penalty
+  // already reads as "goal" above; this catches the rest — a high-impact event
+  // (a ~0.79 xG chance the scoreline doesn't reflect) that must not be dropped as
+  // "other". e.g. ESPN "Penalty - Saved: Mbappé ... saved by Bounou".
+  if (/penalty/.test(t)) return "penalty";
   if (/substitution|\bsub\b/.test(t)) return "sub";
   return "other";
 }

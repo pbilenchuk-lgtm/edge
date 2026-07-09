@@ -229,7 +229,7 @@ CREATE TABLE IF NOT EXISTS reassessments (
   minute      TEXT,
   body        TEXT NOT NULL,
   confidence  TEXT,
-  trigger     TEXT CHECK (trigger IN ('goal','red_card','price_move','time','manual')),
+  trigger     TEXT CHECK (trigger IN ('goal','red_card','penalty','price_move','time','manual')),
   created_at  TEXT NOT NULL
 );
 

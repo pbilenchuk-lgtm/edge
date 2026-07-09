@@ -162,6 +162,25 @@ export function initSchema(db: Database): void {
       db.exec("COMMIT");
     }
   } catch { try { db.exec("ROLLBACK"); } catch { /* ignore */ } }
+  // Same: relax reassessments.trigger CHECK to admit the 'penalty' trigger (a
+  // saved/missed penalty now fires a reassessment). Guarded: runs only on the old
+  // penalty-less CHECK; preserves all rows.
+  try {
+    const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='reassessments'").get() as { sql?: string } | undefined;
+    if (row?.sql && /CHECK/i.test(row.sql) && !/penalty/i.test(row.sql)) {
+      db.exec("BEGIN");
+      db.exec(`CREATE TABLE reassessments_new (
+        id TEXT PRIMARY KEY, match_id TEXT NOT NULL REFERENCES matches(id),
+        strategy_id TEXT NOT NULL REFERENCES strategies(id), minute TEXT,
+        body TEXT NOT NULL, confidence TEXT,
+        trigger TEXT CHECK (trigger IN ('goal','red_card','penalty','price_move','time','manual')),
+        created_at TEXT NOT NULL)`);
+      db.exec("INSERT INTO reassessments_new SELECT id,match_id,strategy_id,minute,body,confidence,trigger,created_at FROM reassessments");
+      db.exec("DROP TABLE reassessments");
+      db.exec("ALTER TABLE reassessments_new RENAME TO reassessments");
+      db.exec("COMMIT");
+    }
+  } catch { try { db.exec("ROLLBACK"); } catch { /* ignore */ } }
 }
 
 /** For tests: drop the memoized connection. */

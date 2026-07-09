@@ -785,7 +785,10 @@ export async function runAutoCycle(
 // High-impact events that warrant an immediate strategist reassessment (an LLM
 // call). Goals and red cards change the game state; yellows/subs are recorded
 // and shown, but don't burn a model call on the fast loop.
-const LIVE_TRIGGER_TYPES = new Set(["goal", "red_card"]);
+// A penalty (saved/missed/awarded) is a high-impact swing — the scoreline often
+// doesn't move but the game state does (a ~0.79 xG chance, momentum, emotion) —
+// so it fires an immediate reassessment like a goal / red card.
+const LIVE_TRIGGER_TYPES = new Set(["goal", "red_card", "penalty"]);
 
 // The strategist reassesses at LEAST this often on any live match with open risk,
 // regardless of on-pitch events — so positions are re-evaluated (full/partial
