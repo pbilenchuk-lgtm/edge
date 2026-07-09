@@ -422,7 +422,7 @@ export async function assessFootballStructured(
       "Ты оцениваешь ТОЛЬКО ядро (несколько чисел) и сценарии; весь рынок (тоталы/форы/BTTS/исход) посчитает код по Пуассону — сам их НЕ считай. Котировки НЕ используешь. " +
       "РАЗДЕЛЕНИЕ СЛОЁВ (важно): здесь ты оцениваешь ЧИСТУЮ силу матча — качество и форму команд, составы, фундаментальные xG. НЕ применяй нарративы КОНТЕКСТА ТУРНИРА: репутацию/престиж турнира, историческую сверх- или недо-результативность сборной на больших турнирах, шаблоны вроде «в плей-офф андердог осторожен / паркует автобус», мотивационные поправки на стадию. Эти корректировки — ИСКЛЮЧИТЕЛЬНО задача Слоя 2 (специалист категории). Если применить один и тот же нарратив и здесь, и в Слое 2, он посчитается дважды и раздует край (кейс France—Morocco: фаворит был занижен в обоих слоях). Тут — только фундамент. " +
       "СХЕМА: {match_type:'group'|'knockout'|'uncertain', match_type_reason:str, " +
-      "core:{xg_home:float, xg_away:float, home_share_1h:float 0..1, away_share_1h:float 0..1, poisson_correction:float (0=чистый Пуассон, >0 повышает ничьи)}, " +
+      "core:{xg_home:float, xg_away:float, home_share_1h:float 0..1, away_share_1h:float 0..1, poisson_correction:float (0=чистый Пуассон, >0 повышает ничьи; эффективный диапазон −0.1..0.1 — больше движок обрежет)}, " +
       "overrides:[{target:'напр. totals_match.2.5.over или outcome_90.draw', adjust:float (сдвиг вероятности), reason:str}] (пусто если нет; КАЖДЫЙ с reason), " +
       "drivers:[{factor:str, direction:str, magnitude:'small'|'medium'|'large', confidence:float 0..1}], " +
       "scenarios:[{trigger:str, prob:float 0..1, shifts:{outcome_90:{home,draw,away}, xg_remaining_home:float, xg_remaining_away:float, note:str}}] (МИНИМУМ 5 узлов), " +
