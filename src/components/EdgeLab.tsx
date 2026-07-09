@@ -802,6 +802,18 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
     const bare = mk.label.replace(/\s—\sYes$/, "");
     if (bare !== mk.label && !(bare in curByLabel)) curByLabel[bare] = mk.price;
   }
+  // Current model probability per market label. ai_prob is a MATCH-level estimate
+  // (one value per market, shared by every strategy/profile), so the displayed
+  // edge must read from THIS — not the per-bet ai_prob frozen at entry, which
+  // makes the SAME market show a different edge across profiles that entered on
+  // different analysis cycles (an entry-timing artefact, not a real difference).
+  const curAiProbByLabel: Record<string, number> = {};
+  for (const mk of (match.markets || [])) {
+    if (mk.aiProb == null) continue;
+    if (!(mk.label in curAiProbByLabel)) curAiProbByLabel[mk.label] = mk.aiProb;
+    const bare = mk.label.replace(/\s—\sYes$/, "");
+    if (bare !== mk.label && !(bare in curAiProbByLabel)) curAiProbByLabel[bare] = mk.aiProb;
+  }
   // One flash slot next to ↻, two meanings: GREEN when a price actually changed,
   // RED when a refresh failed (oddsErrKey bumped by the parent). `n` keys the
   // animation restart; `kind` picks the colour.
@@ -913,7 +925,8 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                               <div style={S.decisionBets}>
                                 {items.map((b: any, i: number) => {
                                   const price = curByLabel[b.market] ?? b.price ?? b.currentPrice ?? b.entryPrice;
-                                  const edge = b.aiProb != null && price ? (b.aiProb - price / 100) * 100 : null;
+                                  const modelProb = curAiProbByLabel[b.market] ?? b.aiProb;
+                                  const edge = modelProb != null && price ? (modelProb - price / 100) * 100 : null;
                                   const statusTxt = b.status === "open" ? "вошёл" : b.status === "proposed" ? "предлагается" : b.status === "not_filled" ? "не заполнилась" : b.status;
                                   return (
                                     <div key={i} style={S.decisionBetRow}>
@@ -979,7 +992,10 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                           {items.map((b: any, i: number) => {
                             const curPrice = curByLabel[b.market] ?? b.currentPrice ?? b.entryPrice; // freshest quote
                             const impl = b.price != null ? b.price / 100 : impliedProb(curPrice);
-                            const edge = b.aiProb != null ? (b.aiProb - impl) * 100 : null; // no model prob → no edge, don't show "NaN%"
+                            // CURRENT market ai_prob (shared per market) → same edge across profiles;
+                            // fall back to the bet's frozen ai_prob only if the market has no estimate.
+                            const modelProb = curAiProbByLabel[b.market] ?? b.aiProb;
+                            const edge = modelProb != null ? (modelProb - impl) * 100 : null; // no model prob → no edge, don't show "NaN%"
                             const stake = b.stake != null ? b.stake : Math.round(budget * (b.pct || 0));
                             const isOpen = b.status === "open";
                             const live = isOpen && curPrice != null && b.entryPrice != null && b.entryPrice > 0 ? b.stake * (curPrice / b.entryPrice) - b.stake : null;
