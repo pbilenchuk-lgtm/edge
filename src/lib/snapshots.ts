@@ -46,6 +46,8 @@ function relevantMatches(db: Database, nowMs: number): Active[] {
     if (la !== lb) return la - lb;
     return (Date.parse(a.match.kickoff_at ?? "") || Infinity) - (Date.parse(b.match.kickoff_at ?? "") || Infinity);
   });
+  // No silent cap: if more matches qualify than we snapshot this pass, say so.
+  if (out.length > MAX_MATCHES) console.warn(`[snapshots] ${out.length} relevant matches; capturing top ${MAX_MATCHES} (live-first). ${out.length - MAX_MATCHES} skipped this pass.`);
   return out.slice(0, MAX_MATCHES);
 }
 

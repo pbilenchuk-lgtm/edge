@@ -134,8 +134,18 @@ function smExtract(f: any): Extracted {
   const awayId = ps.find((p: any) => (p.meta?.location ?? p.meta?.data?.location) === "away")?.id;
   const minute = (f.periods?.data ?? f.periods ?? []).map((p: any) => p.minutes).filter((x: any) => x != null).at(-1) ?? null;
 
-  const xgRows = f.xgfixture?.data ?? f.xgfixture ?? f.xGFixture ?? [];
-  const xgFor = (pid: any) => { const r = (xgRows as any[]).find((x) => x.participant_id === pid); const v = r?.data?.value ?? r?.value; return v != null ? Number(v) : null; };
+  // xgfixture returns MANY rows per team (different xG metrics keyed by type_id:
+  // 5304 = Expected Goals, plus xGOT / on-target / momentum variants). Pin the
+  // convenience value to the canonical xG (5304); fall back to the first row if
+  // the schema changes. The full set is preserved in `raw` regardless.
+  const xgRows = (f.xgfixture?.data ?? f.xgfixture ?? f.xGFixture ?? []) as any[];
+  const XG_TYPE = 5304;
+  const xgFor = (pid: any) => {
+    const r = xgRows.find((x) => x.participant_id === pid && Number(x.type_id) === XG_TYPE)
+           ?? xgRows.find((x) => x.participant_id === pid);
+    const v = r?.data?.value ?? r?.value;
+    return v != null ? Number(v) : null;
+  };
   const xgHome = xgFor(homeId), xgAway = xgFor(awayId);
 
   const stats = (f.statistics?.data ?? f.statistics ?? []) as any[];
@@ -177,7 +187,9 @@ async function tsaResolve(cfg: ProvidersConfig, m: MatchRef, nowMs: number): Pro
   // NB: a bare `?date=` is ignored by the API (returns a default window); the
   // working filter is `date_from`/`date_to` (verified live). Try live first, then
   // each candidate day.
-  const paths = [`/api/football/matches?status=live`, ...candidateDates(m.kickoffIso, nowMs).map((d) => `/api/football/matches?date_from=${d}&date_to=${d}`)];
+  // limit=100: the default page is 20, which can truncate a busy date before the
+  // target match — verified the param is honored (30 rows on a 30-match day).
+  const paths = [`/api/football/matches?status=live&limit=100`, ...candidateDates(m.kickoffIso, nowMs).map((d) => `/api/football/matches?date_from=${d}&date_to=${d}&limit=100`)];
   for (const p of paths) {
     const { res } = await timedFetch(`${cfg.thestatsapi.base}${p}`, { headers: H }, cfg.timeoutMs);
     if (!res || !res.ok) continue;
