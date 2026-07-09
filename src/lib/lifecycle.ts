@@ -568,8 +568,17 @@ export async function strategistReassess(
     const impliedMap = impliedProbs(quotes);
     const calibration = liveCalibration(db, m.id, assess?.confidence ?? "средняя");
 
+    // The `max` budget bounds how many MATCHES a run touches (outer break), NOT
+    // how many strategies within a match. Capping per-pair here starved lower-
+    // ordered (strategy, profile) pairs: a match only ever reassessed its first
+    // `max` pairs (all of the first strategy), and the per-MATCH due-reset then
+    // blocked the rest forever — so Overreaction / Pre-match Value never got a
+    // live reassessment while Live xG (ordered first) ate the budget every run.
+    // Run ALL of a due match's pairs; a generous per-match cap only guards a
+    // pathological config.
+    const matchStart = calls;
     for (const { strat, profile, pct } of pairMap.values()) {
-      if (calls >= max) break;
+      if (calls - matchStart >= MAX_PAIRS_PER_MATCH) break;
       if (opts.onlyStrategyId && strat.id !== opts.onlyStrategyId) continue; // manual: one strategy only
       const sid = strat.id;
       const pairLabel = `${strat.name} · ${profile}`;
@@ -782,6 +791,10 @@ const LIVE_TRIGGER_TYPES = new Set(["goal", "red_card"]);
 // regardless of on-pitch events — so positions are re-evaluated (full/partial
 // exit) and fresh analytics land on a steady heartbeat, not only on goals.
 export const REASSESS_INTERVAL_MIN = 5;
+// Safety ceiling on (strategy, profile) pairs reassessed for ONE match per run —
+// high enough to cover every real pair (≈ strategies × profiles) so none is
+// starved, low enough to bound a pathological config.
+const MAX_PAIRS_PER_MATCH = 24;
 
 // Provider snapshots are the raw material for later strategy research (build
 // «свой» models once we've accrued ~50 matches), so we DON'T prune them on the
