@@ -149,6 +149,31 @@ export async function POST(req: Request) {
         const n = await collectSnapshots(db, {});
         return NextResponse.json({ ok: true, written: n });
       }
+      case "activeMatchRefs": {
+        // For the external Betfair collector (non-US host): which live/near
+        // football matches to price. Auth via the shared ingest token so the
+        // match list isn't world-readable.
+        const token = process.env.BETFAIR_INGEST_TOKEN ?? "";
+        if (!token || body.token !== token) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+        const { matchRefsForCollection } = await import("@/lib/snapshots");
+        return NextResponse.json({ ok: true, refs: matchRefsForCollection(db, Date.now()) });
+      }
+      case "ingestSnapshot": {
+        // Write a snapshot produced by the external collector (Betfair) into
+        // provider_snapshots. Shared-secret auth; batch_at is the collector's
+        // stamp so it aligns with its own poll cadence.
+        const token = process.env.BETFAIR_INGEST_TOKEN ?? "";
+        if (!token || body.token !== token) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+        if (!body.matchId || !R.getMatch(db, body.matchId)) return NextResponse.json({ ok: false, error: "unknown matchId" }, { status: 400 });
+        R.insertProviderSnapshot(db, {
+          match_id: body.matchId, batch_at: body.batchAt ?? new Date().toISOString(),
+          provider: body.provider ?? "betfair", phase: body.phase ?? "live",
+          ok: body.ok !== false, http_status: body.httpStatus ?? null, provider_ref: body.providerRef ?? null,
+          minute: body.minute ?? null, latency_ms: body.latencyMs ?? null,
+          extracted: body.extracted ?? null, raw: body.raw != null ? (typeof body.raw === "string" ? body.raw : JSON.stringify(body.raw)) : null,
+        });
+        return NextResponse.json({ ok: true });
+      }
       default:
         return NextResponse.json({ ok: false, error: `неизвестное действие: ${body.action}` }, { status: 400 });
     }

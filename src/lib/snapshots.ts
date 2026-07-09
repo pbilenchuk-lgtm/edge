@@ -51,6 +51,14 @@ function relevantMatches(db: Database, nowMs: number): Active[] {
   return out.slice(0, MAX_MATCHES);
 }
 
+/** Match refs the external Betfair collector should cover (live/near football),
+ *  exposed via the API so a non-US host knows what to price. */
+export function matchRefsForCollection(db: Database, nowMs: number): { matchId: string; home: string; away: string; kickoffIso: string | null; state: string }[] {
+  return relevantMatches(db, nowMs).map(({ match: m }) => ({
+    matchId: m.id, home: m.home, away: m.away, kickoffIso: m.kickoff_at ?? m.kickoff_time ?? null, state: m.state,
+  }));
+}
+
 function phaseFor(state: string): "pre" | "live" | "post" {
   if (state === "live") return "live";
   if (state === "finished") return "post";
