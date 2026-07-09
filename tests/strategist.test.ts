@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { siblingLabel, impliedProbs, sizePrematch, probSumFlags } from "../src/lib/strategist.js";
+import { siblingLabel, impliedProbs, sizePrematch, probSumFlags, correlationKey } from "../src/lib/strategist.js";
 import { getProfileConfig, seedRiskProfiles, loadRiskConfig } from "../src/lib/riskConfig.js";
 import { openDb } from "../src/lib/db.js";
 
@@ -89,6 +89,33 @@ test("sizePrematch: match-exposure cap limits the stake", () => {
   // already near the match cap (medium max_match_exposure_pct = 10% of 1000 = 100)
   const r = sizePrematch({ ourProb: 0.7, priceCents: 55, implied: 0.55, calibration: 0.8, budget: 1000, matchExposure: 95, cfg: MED });
   assert.ok(r.stake <= 5, `only the remaining $5 of match room can be staked, got ${r.stake}`);
+});
+
+test("correlationKey: same-team 'more goals' markets share a cluster", () => {
+  const home = "France", away = "Morocco";
+  // France team-total Over and France negative handicap both need France's next
+  // goal → one cluster.
+  const a = correlationKey("France Over 2.5", home, away);
+  const b = correlationKey("France -2.5", home, away);
+  assert.ok(a && a === b, `France Over 2.5 and France -2.5 should cluster (${a} vs ${b})`);
+  // Match total Over (no team qualifier) is a different cluster.
+  assert.equal(correlationKey("Over 3.5", home, away), "total:over");
+  assert.notEqual(correlationKey("Over 3.5", home, away), a);
+  // Underdog positive handicap / opponent-side markets don't join France's cluster.
+  assert.equal(correlationKey("Morocco +1.5", home, away), null);
+  // A plain moneyline isn't clustered (resolves on the result, not a goal count).
+  assert.equal(correlationKey("France to win", home, away), null);
+});
+
+test("sizePrematch: correlated cluster is capped like a single position", () => {
+  // medium max_position_pct = 5% of 1000 = $50. A cluster already holding $48
+  // leaves only $2 of correlated room even though match/comp room is ample.
+  const r = sizePrematch({ ourProb: 0.7, priceCents: 55, implied: 0.55, calibration: 0.8, budget: 1000, clusterExposure: 48, cfg: MED });
+  assert.ok(r.stake <= 2, `only $2 of correlated room left, got ${r.stake}`);
+  // A full cluster blocks the entry with the correlation reason.
+  const full = sizePrematch({ ourProb: 0.7, priceCents: 55, implied: 0.55, calibration: 0.8, budget: 1000, clusterExposure: 50, cfg: MED });
+  assert.equal(full.status, "skip");
+  assert.match(full.reason, /коррелирован/);
 });
 
 test("probSumFlags: flags a group whose raw sum drifts beyond tolerance", () => {

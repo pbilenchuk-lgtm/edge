@@ -549,7 +549,7 @@ test("runLiveCycle is a cheap no-op when nothing is in play", async () => {
   seedDatabase(db);
   db.exec("UPDATE matches SET state='finished'");
   const r = await runLiveCycle(db, null, {});
-  assert.deepEqual(r, { live: 0, oddsUpdated: 0, enriched: 0, triggers: 0, exits: 0, entries: 0 });
+  assert.deepEqual(r, { live: 0, oddsUpdated: 0, enriched: 0, triggers: 0, exits: 0, entries: 0, llmCalls: 0, llmFail: 0 });
 });
 
 test("analyzeMatch re-run doesn't re-propose on an already-open market or breach budget (§9.3)", async () => {

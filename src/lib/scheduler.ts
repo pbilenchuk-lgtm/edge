@@ -51,9 +51,13 @@ export function startScheduler(env: Record<string, string | undefined> = process
       const provider = loadSportsProvider(loadSportsConfig(env));
       if (discover) lastDiscover = nowMs;
       const r = await runAutoCycle(db, provider, {}, { linkOdds, discover });
-      const summary = `sync ${r.synced} · discover ${r.discovered} · составы ${r.enriched} · котировки ${r.oddsUpdated} · анализ ${r.analyzed.length} · входы ${r.entered.length} · выходы ${r.exited.length}`;
+      const llmNote = r.llmFail > 0 ? ` · ИИ-сбои ${r.llmFail}/${r.llmCalls}` : "";
+      const summary = `sync ${r.synced} · discover ${r.discovered} · составы ${r.enriched} · котировки ${r.oddsUpdated} · анализ ${r.analyzed.length} · входы ${r.entered.length} · выходы ${r.exited.length}${llmNote}`;
       console.log(`[scheduler] ${summary}`);
-      try { R.insertCronLog(db, { id: R.uid(), at, kind: discover ? "discover" : "tick", ok: 1, summary, created_at: at }); } catch {}
+      // Flag a pass with strategist outages as not-ok so the outage window is
+      // visible at a glance in the cron journal (the France–Morocco 15-min budget
+      // gap otherwise read as a normal quiet period).
+      try { R.insertCronLog(db, { id: R.uid(), at, kind: discover ? "discover" : "tick", ok: r.llmFail > 0 ? 0 : 1, summary, created_at: at }); } catch {}
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("[scheduler] error:", msg);
@@ -74,10 +78,14 @@ export function startScheduler(env: Record<string, string | undefined> = process
       db = getDb();
       const provider = loadSportsProvider(loadSportsConfig(env));
       const r = await runLiveCycle(db, provider, {});
-      if (r.live > 0 && (r.triggers || r.exits || r.entries)) {
-        const summary = `live ${r.live} · триггеры ${r.triggers} · котировки ${r.oddsUpdated} · выходы ${r.exits} · входы ${r.entries}`;
+      // Log when something happened OR when the strategist was unreachable — an
+      // outage during a live match is exactly what we need in the journal, even
+      // though nothing was entered/exited that tick.
+      if (r.live > 0 && (r.triggers || r.exits || r.entries || r.llmFail)) {
+        const llmNote = r.llmFail > 0 ? ` · ИИ-сбои ${r.llmFail}/${r.llmCalls}` : "";
+        const summary = `live ${r.live} · триггеры ${r.triggers} · котировки ${r.oddsUpdated} · выходы ${r.exits} · входы ${r.entries}${llmNote}`;
         console.log(`[scheduler:live] ${summary}`);
-        try { R.insertCronLog(db, { id: R.uid(), at, kind: "live", ok: 1, summary, created_at: at }); } catch {}
+        try { R.insertCronLog(db, { id: R.uid(), at, kind: "live", ok: r.llmFail > 0 ? 0 : 1, summary, created_at: at }); } catch {}
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

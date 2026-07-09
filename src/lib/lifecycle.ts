@@ -23,7 +23,7 @@ import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, 
 import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, matchContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision } from "./thresholds.js";
-import { impliedProbs, sizePrematch } from "./strategist.js";
+import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -473,7 +473,7 @@ function captureLiveOpens(db: Database, deps: EngineDeps): void {
 }
 
 export interface ReassessEntry { matchId: string; strategyId: string; market: string; stake: number }
-export interface ReassessResult { exits: ExitItem[]; entries: ReassessEntry[] }
+export interface ReassessResult { exits: ExitItem[]; entries: ReassessEntry[]; llmCalls: number; llmFail: number }
 
 /**
  * Strategist-driven in-match reassessment. For funded matches that either hold
@@ -517,7 +517,7 @@ export async function strategistReassess(
   const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
   const poly = deps.polymarket ?? loadPolymarketConfig(env);
   const comps = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
-  const out: ReassessResult = { exits: [], entries: [] };
+  const out: ReassessResult = { exits: [], entries: [], llmCalls: 0, llmFail: 0 };
   const touched = new Set<string>();
   let calls = 0;
   // Process on-pitch event triggers (goal / red card — anything NOT labelled
@@ -596,7 +596,17 @@ export async function strategistReassess(
         openPositions: myOpen.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
         context: ctx + (battleSheet ? `\n\nБОЕВОЙ ЛИСТ (план из предматча — исполняй его, не переизобретай):\n${battleSheet}` : ""),
       }, strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
-      if (!dec.ok) continue;
+      out.llmCalls++;
+      if (!dec.ok) {
+        // The reassessment could NOT be produced (LLM/budget outage, invalid JSON).
+        // Record it as a first-class SKIP in the match timeline — otherwise an
+        // outage window looks identical to a quiet period (no reassessments), and
+        // post-match analysis can't tell "model chose to hold" from "model was
+        // unreachable". The run-level count (out.llmFail) surfaces in the cron log.
+        out.llmFail++;
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "skip", text: `переоценка не выполнена — стратег недоступен (${dec.error || "нет ответа ИИ"})`, created_at: now });
+        continue;
+      }
       touched.add(sid);
       // Track what ACTUALLY happened, so the reassessment note (written AFTER the
       // exits/entries below) states reality — not the LLM's intent. Otherwise the
@@ -637,10 +647,15 @@ export async function strategistReassess(
       if (pct > 0 && dec.picks.length) {
         const budget = stratBudget(c.budget, pct);
         const cfg = getProfileConfig(db, profile);
-        const held = new Set(R.betsForMatch(db, m.id, sid).filter((b) => (b.status === "open" || b.status === "proposed") && (b.risk_profile_id ?? "medium") === profile).map((b) => norm(b.market_label)));
+        const liveHeld = R.betsForMatch(db, m.id, sid).filter((b) => (b.status === "open" || b.status === "proposed") && (b.risk_profile_id ?? "medium") === profile);
+        const held = new Set(liveHeld.map((b) => norm(b.market_label)));
         // §9.3 cap is per-COMPETITION and per-pair (open + proposed − realized).
         let exposure = strategyCompExposure(db, comp, sid, profile) - strategyCompRealized(db, comp, sid, profile);
         let matchExposure = myOpen.reduce((s, b) => s + (b.stake ?? 0), 0);
+        // Same-event correlation exposure, seeded from held/proposed positions so
+        // a live add to a correlated market stacks against them (see correlationKey).
+        const clusterExp = new Map<string, number>();
+        for (const b of liveHeld) { const k = correlationKey(b.market_label, m.home, m.away); if (k) clusterExp.set(k, (clusterExp.get(k) ?? 0) + (b.stake ?? 0)); }
         for (const pick of dec.picks) {
           const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
           if (!mk || mk.price == null) { unfilled.push(`«${pick.label}» — нет рынка`); continue; }
@@ -653,9 +668,11 @@ export async function strategistReassess(
           if (pick.prob != null) R.setMarketAiProb(db, mk.id, pick.prob);
           if (held.has(norm(mk.label))) continue;                       // already in this market
           const implied = impliedMap.get(mk.label)?.implied ?? mk.price / 100;
-          const r = sizePrematch({ ourProb, priceCents: mk.price, implied, calibration, liquidity: liqNum(mk.liquidity), budget, matchExposure, compExposure: exposure, cfg, allowLargeEdge: true });
+          const cKey = correlationKey(mk.label, m.home, m.away);
+          const r = sizePrematch({ ourProb, priceCents: mk.price, implied, calibration, liquidity: liqNum(mk.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg, allowLargeEdge: true });
           if (r.status !== "enter") { unfilled.push(`«${mk.label}» — ${r.reason}`); continue; }
           exposure += r.stake; matchExposure += r.stake;
+          if (cKey) clusterExp.set(cKey, (clusterExp.get(cKey) ?? 0) + r.stake);
           held.add(norm(mk.label));
           R.insertBet(db, {
             id: R.uid(), match_id: m.id, strategy_id: sid, risk_profile_id: profile, market_label: mk.label,
@@ -697,6 +714,9 @@ export interface AutoCycleResult {
   synced: number; imported: number; discovered: number; oddsMatches: number; oddsUpdated: number;
   enriched: number; triggers: number;
   analyzed: AutoAnalyzeItem[]; entered: AutoEnterItem[]; exited: ExitItem[]; reassessEntries: ReassessEntry[];
+  /** strategist LLM calls made this pass and how many failed (outage/budget/parse).
+   *  Surfaced in the cron log so an outage window is data, not an inferred gap. */
+  llmCalls: number; llmFail: number;
 }
 
 /**
@@ -758,7 +778,7 @@ export async function runAutoCycle(
   // capture for the post-match provider comparison; isolated so a provider blip
   // never aborts the money steps below.
   await step("snapshots", () => collectSnapshots(db, deps), 0);
-  const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [] } as ReassessResult);
+  const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [], llmCalls: 0, llmFail: 0 } as ReassessResult);
   const exited = [...await step("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
   const entered = await step("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
   stepSync("prune", () => R.pruneMarketSnapshots(db), 0); // keep the snapshot history bounded (persistent DB)
@@ -779,6 +799,7 @@ export async function runAutoCycle(
     oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),
     enriched: enrich.enriched, triggers: triggers.size,
     analyzed, entered, exited, reassessEntries: reassess.entries,
+    llmCalls: reassess.llmCalls, llmFail: reassess.llmFail,
   };
 }
 
@@ -913,7 +934,7 @@ function periodicReassessMatches(db: Database, deps: EngineDeps): Set<string> {
   return due;
 }
 
-export interface LiveCycleResult { live: number; oddsUpdated: number; enriched: number; triggers: number; exits: number; entries: number }
+export interface LiveCycleResult { live: number; oddsUpdated: number; enriched: number; triggers: number; exits: number; entries: number; llmCalls: number; llmFail: number }
 
 /**
  * FAST live loop — runs on a short cadence (every LIVE_TICK_SEC, default 90s)
@@ -937,7 +958,7 @@ export async function runLiveCycle(
     try { return fn(); } catch (e) { console.error(`[liveCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
   };
   const inPlay = activeMatches(db).filter(({ match: m }) => m.state === "live" || m.state === "lineup" || m.lineup_out);
-  if (!inPlay.length) { stepSyncLive("settleStale", () => settleStaleOpenBets(db, deps), 0); return { live: 0, oddsUpdated: 0, enriched: 0, triggers: 0, exits: 0, entries: 0 }; }
+  if (!inPlay.length) { stepSyncLive("settleStale", () => settleStaleOpenBets(db, deps), 0); return { live: 0, oddsUpdated: 0, enriched: 0, triggers: 0, exits: 0, entries: 0, llmCalls: 0, llmFail: 0 }; }
 
   // Each stage isolated: a transient throw in one (a DB/JSON error inside enrich,
   // a settleMatch throw) must NOT abort the deterministic exits / autoEnter below.
@@ -959,12 +980,13 @@ export async function runLiveCycle(
   const reassessIds = new Set(labelFor.keys());
 
   const detExits = await stepLive("exits", () => evaluateExits(db, deps), [] as ExitItem[]); // cheap TP/stop, reacts to price every tick
-  const reassess = await stepLive("reassess", () => strategistReassess(db, deps, { newEventMatchIds: reassessIds, triggeredOnly: true, labelFor }), { exits: [], entries: [] } as ReassessResult);
+  const reassess = await stepLive("reassess", () => strategistReassess(db, deps, { newEventMatchIds: reassessIds, triggeredOnly: true, labelFor }), { exits: [], entries: [], llmCalls: 0, llmFail: 0 } as ReassessResult);
   await stepLive("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fill any positions the strategist just opened
 
   return {
     live: inPlay.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),
     enriched: enrich.enriched, triggers: eventTriggers.size, // on-pitch events only (periodic reassess is separate)
     exits: detExits.length + reassess.exits.length, entries: reassess.entries.length,
+    llmCalls: reassess.llmCalls, llmFail: reassess.llmFail,
   };
 }

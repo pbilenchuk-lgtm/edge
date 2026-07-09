@@ -73,6 +73,35 @@ export function impliedProbs(markets: MarketQuote[]): Map<string, ImpliedInfo> {
   return out;
 }
 
+/**
+ * Correlation cluster for a market, or null if it stands alone. Markets in the
+ * same cluster resolve on the SAME on-pitch event, so their exposure must be
+ * capped together — otherwise a pair can stack "France Over 2.5" + "France -2.5"
+ * (both need France's next goal) and carry double the intended risk on one event
+ * while each passes the per-position cap individually.
+ *
+ * Conservative on purpose: only clusters markets that clearly pay off from the
+ * SAME team's goals (team-total Over or a negative handicap → that team scores
+ * more) and, separately, match-total Over (a further goal by either side).
+ * Anything ambiguous returns null (its own singleton) — a false negative just
+ * keeps today's behaviour; a false positive would wrongly suppress genuine
+ * diversification, so we avoid it.
+ */
+export function correlationKey(label: string, home: string, away: string): string | null {
+  const n = norm(label);
+  const h = norm(home), a = norm(away);
+  const hasH = h.length > 1 && n.includes(h);
+  const hasA = a.length > 1 && n.includes(a);
+  const over = /\bover\b/.test(n);
+  const negH = /[-−–]\s*\d/.test(n); // negative handicap → favourite's margin
+  // Exactly one team named + (Over team-total OR negative handicap): that team
+  // putting more goals in resolves it. Both such markets share the event.
+  if (hasH !== hasA && (over || negH)) return `dom:${hasH ? "home" : "away"}`;
+  // Match-total Over with no single-team qualifier: a further goal by either side.
+  if (over && hasH === hasA) return "total:over";
+  return null;
+}
+
 export type SizeStatus = "enter" | "skip" | "flag";
 export interface SizeResult {
   status: SizeStatus;
@@ -93,6 +122,11 @@ export interface SizeInput {
   budget: number;          // the (strategy, profile) pair's $ budget
   matchExposure?: number;  // $ already committed by this pair ON THIS MATCH
   compExposure?: number;   // $ already committed by this pair across the comp
+  /** $ already committed by this pair to markets in the SAME correlation cluster
+   *  (see correlationKey). Correlated markets resolve on one event, so the whole
+   *  cluster is capped like a single position (max_position_pct). Omit/0 for an
+   *  uncorrelated market → no extra constraint. */
+  clusterExposure?: number;
   cfg: RiskConfig;
   /** LIVE: skip the absurd_edge_block flag. In-play a huge edge is REAL, not a
    *  data bug — a resolved market (Over 1.5 at 0:2 ≈ 98%) legitimately sits far
@@ -149,10 +183,15 @@ export function sizePrematch(inp: SizeInput): SizeResult {
   fraction = Math.min(fraction, cfg.sizing.max_position_pct);
   // Correlation cap: total staked on THIS match by this pair ≤ max_match_exposure_pct.
   const matchRoom = Math.max(0, cfg.sizing.max_match_exposure_pct * budget - matchExposure);
+  // Same-event correlation cap: a cluster of markets that resolve on one on-pitch
+  // event (correlationKey) is capped together at max_position_pct — the group
+  // carries the risk of a single position, not one per correlated market.
+  const clusterRoom = Math.max(0, cfg.sizing.max_position_pct * budget - (inp.clusterExposure ?? 0));
   // Budget room across the whole comp (existing §9.3 invariant).
   const compRoom = Math.max(0, budget - compExposure);
-  const capped = Math.min(fraction * budget, matchRoom, compRoom);
+  const capped = Math.min(fraction * budget, matchRoom, clusterRoom, compRoom);
   if (capped <= 0) {
+    if (clusterRoom <= 0) return skip("исчерпан кэп коррелированной группы");
     if (matchRoom <= 0) return skip("исчерпан кэп экспозиции на матч");
     return skip("бюджет пары исчерпан");
   }

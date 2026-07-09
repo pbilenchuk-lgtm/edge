@@ -925,7 +925,14 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                               <div style={S.decisionBets}>
                                 {items.map((b: any, i: number) => {
                                   const price = curByLabel[b.market] ?? b.price ?? b.currentPrice ?? b.entryPrice;
-                                  const modelProb = curAiProbByLabel[b.market] ?? b.aiProb;
+                                  // A live-entered bet (entered_minute holds a minute, not "предматч")
+                                  // was priced against the STRATEGIST'S live estimate, which is frozen
+                                  // on the bet (b.aiProb). The market's ai_prob is still the stale
+                                  // pre-match distribution value — using it here showed nonsense edges
+                                  // (e.g. −29%) on live entries. Pre-match bets keep the shared current
+                                  // market ai_prob so the same market reads one edge across profiles.
+                                  const liveEntry = !!b.entered && /\d/.test(b.entered);
+                                  const modelProb = liveEntry ? (b.aiProb ?? curAiProbByLabel[b.market]) : (curAiProbByLabel[b.market] ?? b.aiProb);
                                   const edge = modelProb != null && price ? (modelProb - price / 100) * 100 : null;
                                   const statusTxt = b.status === "open" ? "вошёл" : b.status === "proposed" ? "предлагается" : b.status === "not_filled" ? "не заполнилась" : b.status;
                                   return (
@@ -994,7 +1001,11 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                             const impl = b.price != null ? b.price / 100 : impliedProb(curPrice);
                             // CURRENT market ai_prob (shared per market) → same edge across profiles;
                             // fall back to the bet's frozen ai_prob only if the market has no estimate.
-                            const modelProb = curAiProbByLabel[b.market] ?? b.aiProb;
+                            // EXCEPT live entries: those were priced against the strategist's live
+                            // estimate (frozen on the bet). The market ai_prob is a stale pre-match
+                            // value there, so use the bet's own aiProb to avoid phantom negative edges.
+                            const liveEntry = !!b.entered && /\d/.test(b.entered);
+                            const modelProb = liveEntry ? (b.aiProb ?? curAiProbByLabel[b.market]) : (curAiProbByLabel[b.market] ?? b.aiProb);
                             const edge = modelProb != null ? (modelProb - impl) * 100 : null; // no model prob → no edge, don't show "NaN%"
                             const stake = b.stake != null ? b.stake : Math.round(budget * (b.pct || 0));
                             const isOpen = b.status === "open";

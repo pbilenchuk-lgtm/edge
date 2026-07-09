@@ -15,7 +15,7 @@ import * as R from "./repo.js";
 import { assessMatchLLM, assessFootballStructured, assessCategoryModifier, effectiveEnv, strategistDecide, resolveModel, type MatchAssessment, type FootballAnalysis, type CategoryDelta } from "./llm.js";
 import { assembleFootball, type AssembledAnalysis } from "./assembler.js";
 import { footballLabelProb } from "./footballMarkets.js";
-import { impliedProbs, probSumFlags, sizePrematch } from "./strategist.js";
+import { impliedProbs, probSumFlags, sizePrematch, correlationKey } from "./strategist.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
 
@@ -249,12 +249,24 @@ export async function runStrategists(
     }, stratModel, { fetchImpl: deps.fetchImpl, env });
     const picksArr = dec.ok ? dec.picks : null;
     try { R.saveArtifact(db, { match_id: matchId, kind: "strategist", label: pairLabel, stage, content: JSON.stringify(dec, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
+    // Make a strategist outage first-class: when the call fails, picksArr is null
+    // and the loop below degrades to sizing on the raw base-model edge (no
+    // strategist gating). Record it so post-match analysis sees "ran without the
+    // strategist" instead of silently attributing those entries to a full plan.
+    if (!dec.ok) {
+      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `стратег недоступен (${dec.error || "нет ответа ИИ"}) — сайзинг по базовой модели`, created_at: now() });
+    }
 
     const held = new Set(openPos.map((b) => norm(b.market_label)));
     let exposure = strategyCompExposure(db, match.competition_id, strat.id, profile) - strategyCompRealized(db, match.competition_id, strat.id, profile);
     const cfg = getProfileConfig(db, profile);
     const psFlags = probSumFlags(quotes, cfg);
     let matchExposure = openPos.reduce((s, b) => s + (b.stake ?? 0), 0);
+    // Same-event correlation exposure, seeded from positions this pair already
+    // holds so a fresh correlated market sizes against the existing stack, not
+    // from zero (see correlationKey / the cluster cap in sizePrematch).
+    const clusterExp = new Map<string, number>();
+    for (const b of openPos) { const k = correlationKey(b.market_label, match.home, match.away); if (k) clusterExp.set(k, (clusterExp.get(k) ?? 0) + (b.stake ?? 0)); }
     let entries = 0, skipped = 0, flagged = 0;
     const battle: any[] = [];
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
@@ -267,11 +279,13 @@ export async function runStrategists(
       const ourProb = pick?.prob != null ? pick.prob : (m.ai_prob as number);
       if (pick?.prob != null) R.setMarketAiProb(db, m.id, pick.prob);
       if (psFlags.has(m.label)) { flagged++; battle.push({ market: m.label, status: "flag", reason: "prob_sum вне допуска" }); continue; }
-      const r = sizePrematch({ ourProb, priceCents: m.price, implied, calibration, liquidity: parseLiq(m.liquidity), budget, matchExposure, compExposure: exposure, cfg });
+      const cKey = correlationKey(m.label, match.home, match.away);
+      const r = sizePrematch({ ourProb, priceCents: m.price, implied, calibration, liquidity: parseLiq(m.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg });
       battle.push({ market: m.label, our_prob: round3(ourProb), implied: round3(implied), edge_pct: round3(r.edge * 100), status: r.status, stake: r.stake, kelly_fraction: round3(r.kellyFraction), reason: r.reason });
       if (r.status === "flag") { flagged++; continue; }
       if (r.status !== "enter") { skipped++; continue; }
       exposure += r.stake; matchExposure += r.stake; entries++;
+      if (cKey) clusterExp.set(cKey, (clusterExp.get(cKey) ?? 0) + r.stake);
       R.insertBet(db, {
         id: R.uid(), match_id: matchId, strategy_id: strat.id, risk_profile_id: profile, market_label: m.label,
         status: "proposed", proposed_price: m.price, entry_price: null, current_price: null,
