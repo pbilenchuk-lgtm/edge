@@ -4,7 +4,7 @@
 // Docs: https://docs.sportmonks.com/football  (v3, auth via ?api_token=)
 import "../src/lib/http.js"; // proxy-aware fetch
 
-const KEY = process.env.SPORTMONKS_KEY ?? process.env.SPORTMONKS_API_KEY ?? "";
+const KEY = process.env.SPORTMONKS_KEY ?? process.env.SPORTMONKS_API_KEY ?? process.env.Sportmonks ?? process.env.SPORTMONKS ?? "";
 const BASE = process.env.SPORTMONKS_BASE ?? "https://api.sportmonks.com/v3/football";
 if (!KEY) {
   console.error("✗ Нет ключа. Задай SPORTMONKS_KEY в окружении (env этой сессии, не Render).");
