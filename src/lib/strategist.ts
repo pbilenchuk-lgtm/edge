@@ -132,9 +132,15 @@ export function sizePrematch(inp: SizeInput): SizeResult {
   if (edge < minEdge) return skip(`edge ${(edge * 100).toFixed(1)}% < порога ${(minEdge * 100).toFixed(1)}%${thin ? " (тонкий рынок)" : ""}`);
 
   // Fractional Kelly for buying a binary at price p with model prob q:
-  //   f_kelly = (q − p) / (1 − p),  scaled by the profile's Kelly fraction, which
-  // is itself scaled by how calibrated the analysis is (calibration / ref).
-  const kFrac = clamp(cfg.sizing.kelly_fraction_base * (calibration / cfg.sizing.calibration_ref), cfg.sizing.kelly_fraction_clamp[0], cfg.sizing.kelly_fraction_clamp[1]);
+  //   f_kelly = (q − p) / (1 − p),  scaled by the profile's Kelly fraction.
+  // We deliberately do NOT scale the stake by the analysis xg_confidence: that
+  // self-reported number is not a calibrated probability (LLM confidence clusters
+  // ~0.5 and defaults to 0.5 when absent), so multiplying every stake by it adds
+  // NOISE dressed up as risk management — distorting both the sizes and the later
+  // interpretation of test results. Size on the real edge only; the profile's
+  // kelly_fraction_base is the risk dial. (calibration still acts as a hard ENTRY
+  // gate below via min_calibration; it just no longer modulates size.)
+  const kFrac = clamp(cfg.sizing.kelly_fraction_base, cfg.sizing.kelly_fraction_clamp[0], cfg.sizing.kelly_fraction_clamp[1]);
   const kellyEdge = (ourProb - p) / (1 - p);
   if (kellyEdge <= 0) return skip("Kelly-край по фактической цене ≤ 0");
   let fraction = kFrac * kellyEdge;
