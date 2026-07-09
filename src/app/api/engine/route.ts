@@ -128,6 +128,30 @@ export async function POST(req: Request) {
         const results = await engine.syncCompetitions(db, provider, {}, { linkOdds });
         return NextResponse.json({ ok: true, synced: results.length, imported: results.filter((r) => r.created).length, results });
       }
+      case "snapshots": {
+        // Provider-snapshot metadata for a match (NO raw payload — light for the
+        // Анализ tab). Newest batch first; extracted labels parsed to JSON.
+        if (!body.matchId) return NextResponse.json({ ok: false, error: "нет matchId" }, { status: 400 });
+        const rows = R.snapshotMetaForMatch(db, body.matchId, body.limit ?? 500).map((r) => ({
+          id: r.id, at: r.batch_at, provider: r.provider, phase: r.phase, ok: !!r.ok,
+          httpStatus: r.http_status, ref: r.provider_ref, minute: r.minute, latencyMs: r.latency_ms,
+          extracted: r.extracted ? JSON.parse(r.extracted) : null,
+        }));
+        return NextResponse.json({ ok: true, snapshots: rows });
+      }
+      case "snapshotRaw": {
+        // The full raw payload of one snapshot, for the raw-JSON view / export.
+        if (!body.id) return NextResponse.json({ ok: false, error: "нет id" }, { status: 400 });
+        const r = R.snapshotRaw(db, body.id);
+        if (!r) return NextResponse.json({ ok: false, error: "снимок не найден" }, { status: 404 });
+        return NextResponse.json({ ok: true, provider: r.provider, at: r.batch_at, raw: r.raw });
+      }
+      case "snapshotNow": {
+        // Force one capture pass now (manual — for testing before/around a match).
+        const { collectSnapshots } = await import("@/lib/snapshots");
+        const n = await collectSnapshots(db, {});
+        return NextResponse.json({ ok: true, written: n });
+      }
       default:
         return NextResponse.json({ ok: false, error: `неизвестное действие: ${body.action}` }, { status: 400 });
     }

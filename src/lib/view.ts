@@ -53,6 +53,8 @@ export interface MatchView {
   lineups: { home: LineupView | null; away: LineupView | null } | null;
   /** real in-match events (ESPN): goals / cards / subs, newest last */
   events: { minute: number | null; type: string; team: string | null; text: string }[];
+  /** number of provider/Polymarket raw snapshots captured for this match (Анализ tab) */
+  snapshotCount: number;
 }
 export interface LineupView { team: string; formation: string | null; starters: string[] }
 export interface StrategyView {
@@ -284,6 +286,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
         assessmentHistory,
         artifacts: R.artifactsForMatch(db, m.id).map((x) => ({ kind: x.kind, label: x.label, stage: x.stage, model: x.model, at: x.created_at, content: x.content })),
         markets: orderMarkets(markets), bets, reassessByStrat, logByStrat, settledBets, result, lineups, events,
+        snapshotCount: R.snapshotCount(db, m.id),
       };
     }
   }

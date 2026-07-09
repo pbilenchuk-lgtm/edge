@@ -40,8 +40,16 @@ services:
       # lost. Never commit the key to the repo.
       - key: ANTHROPIC_API_KEY
         sync: false
-      # StatPal (paid, self-serve) — live tennis / esports / cricket, the sports
-      # ESPN has no per-match feed for. sync:false → set the value in the Render
-      # dashboard; the key alone activates the StatPal+ESPN composite provider.
+      # Provider raw-snapshot logging (Анализ tab): capture what each data
+      # provider returns per match — pre-match + live — for post-match comparison.
+      # Each key is optional; a provider with no key is simply skipped. sync:false
+      # → set the value in the Render dashboard (kept across redeploys).
+      - key: SPORTMONKS_KEY      # Sportmonks v3 (World Cup All-in plan → live xG)
+        sync: false
+      - key: THESTATSAPI_KEY     # TheStatsAPI (Bearer; fapi_… key)
+        sync: false
+      # StatPal (paid, self-serve) — also powers the live StatPal+ESPN composite
+      # provider for sports ESPN has no per-match feed for. sync:false → set in the
+      # Render dashboard; the key activates both the composite provider and its snapshot.
       - key: STATPAL_KEY
         sync: false

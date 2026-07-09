@@ -933,6 +933,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                   </div>
                 )}
                 <ArtifactsPanel artifacts={match.artifacts} />
+                <ProviderSnapshots matchId={match.id} count={match.snapshotCount} />
                 <PastAssessments history={match.assessmentHistory} />
               </div>
               );
@@ -1194,6 +1195,104 @@ function PastAssessments({ history }: { history?: any[] }) {
                   {h.verdict && <div style={S.verdict}><span style={{ color: "#e8a838" }}>&#9656;</span> {h.verdict}</div>}
                 </div>
               )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Снимки провайдеров ─────────────────────────────────────────────
+// Lazy-loaded panel in the «Анализ» tab: what each data provider + Polymarket
+// returned for this match, at a common timestamp, with extracted labels and the
+// full raw JSON on demand — the material for the post-match provider comparison.
+function snapChip(label: string, on: boolean | null, detail?: string) {
+  const color = on == null ? MUTE : on ? "#5fd08a" : "#ff6b6b";
+  return <span style={{ fontSize: 11, padding: "1px 6px", borderRadius: 6, border: `1px solid ${LINE}`, color }}>{label}{detail ? ` ${detail}` : ""}</span>;
+}
+function SnapshotRow({ s }: { s: any }) {
+  const [raw, setRaw] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const e = s.extracted || {};
+  const loadRaw = async () => {
+    if (raw != null) { setRaw(null); return; }
+    setLoading(true);
+    try {
+      const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "snapshotRaw", id: s.id }) }).then((x) => x.json());
+      setRaw(r.ok ? (r.raw ?? "нет данных") : (r.error || "ошибка"));
+    } catch { setRaw("ошибка сети"); } finally { setLoading(false); }
+  };
+  const download = () => {
+    if (raw == null) return;
+    const blob = new Blob([raw], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = `${s.provider}-${s.at}.json`; a.click();
+    URL.revokeObjectURL(url);
+  };
+  return (
+    <div style={{ borderTop: `1px solid ${LINE}`, padding: "6px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: TEXT, minWidth: 92 }}>{s.provider}</span>
+        <span style={{ fontSize: 11, color: MUTE }}>{s.phase}{s.minute != null ? ` · ${s.minute}'` : ""}{s.latencyMs != null ? ` · ${s.latencyMs}ms` : ""}</span>
+        {snapChip(s.ok ? "ok" : "нет", s.ok)}
+        {s.provider === "polymarket"
+          ? <span style={{ fontSize: 11, color: MUTE }}>{(e.markets || []).length} рынк.</span>
+          : <>
+              {snapChip("xG", e.xg?.present ?? null, e.xg?.present && (e.xg.home != null || e.xg.away != null) ? `${e.xg.home ?? "—"}/${e.xg.away ?? "—"}` : "")}
+              {snapChip("удары", e.shots?.present ?? null, e.shots?.present ? (e.shots.withCoords ? "x/y" : e.shots.counterOnly ? "счётчик" : "события") : "")}
+              {snapChip("владение", e.liveStats?.possession ?? null)}
+              {snapChip("в створ", e.liveStats?.shotsOnTarget ?? null)}
+              {snapChip("углы", e.liveStats?.corners ?? null)}
+              {snapChip("составы", e.lineups?.confirmed ?? null)}
+              {snapChip("события", (e.events?.mode ?? "none") !== "none", e.events?.count != null ? `${e.events.mode}·${e.events.count}` : "")}
+              {snapChip("коэф", e.odds?.present ?? null, e.odds?.live ? "live" : "")}
+            </>}
+        <button onClick={loadRaw} style={{ marginLeft: "auto", fontSize: 11, background: "transparent", color: "#5b9bd5", border: "none", cursor: "pointer" }}>{loading ? "…" : raw != null ? "скрыть raw" : "raw JSON"}</button>
+      </div>
+      {e.note && s.provider !== "polymarket" && <div style={{ fontSize: 10.5, color: MUTE, marginTop: 3 }}>{e.note}</div>}
+      {e.error && <div style={{ fontSize: 10.5, color: "#ff6b6b", marginTop: 3 }}>{e.error}</div>}
+      {raw != null && (
+        <div style={{ marginTop: 6 }}>
+          <button onClick={download} style={{ fontSize: 11, color: "#5fd08a", background: "transparent", border: `1px solid ${LINE}`, borderRadius: 6, padding: "2px 8px", cursor: "pointer" }}>скачать .json</button>
+          <pre style={{ marginTop: 6, maxHeight: 320, overflow: "auto", background: "#0d1117", border: `1px solid ${LINE}`, borderRadius: 8, padding: 10, fontSize: 11, lineHeight: 1.4, color: "#c9d1d9", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{(() => { try { return JSON.stringify(JSON.parse(raw), null, 2); } catch { return raw; } })()}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+function ProviderSnapshots({ matchId, count }: { matchId: string; count: number }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState<any[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const load = async () => {
+    setLoading(true);
+    try {
+      const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "snapshots", matchId }) }).then((x) => x.json());
+      setRows(r.ok ? r.snapshots : []);
+    } catch { setRows([]); } finally { setLoading(false); }
+  };
+  const toggle = () => { const n = !open; setOpen(n); if (n && rows == null) load(); };
+  if (!count) return null;
+  // group by batch timestamp so each capture pass reads as one row of providers
+  const groups: Record<string, any[]> = {};
+  for (const s of rows || []) (groups[s.at] ||= []).push(s);
+  const batches = Object.keys(groups).sort((a, b) => (a < b ? 1 : -1));
+  return (
+    <div style={S.pastWrap}>
+      <button style={S.pastToggle} onClick={toggle}>{open ? "▾" : "▸"} Снимки провайдеров ({count})</button>
+      {open && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <button onClick={load} style={{ fontSize: 11, color: "#5b9bd5", background: "transparent", border: `1px solid ${LINE}`, borderRadius: 6, padding: "2px 8px", cursor: "pointer" }}>{loading ? "…" : "обновить"}</button>
+            <span style={{ fontSize: 11, color: MUTE, alignSelf: "center" }}>сырой JSON + метки каждого провайдера на общий момент — для сверки после матча</span>
+          </div>
+          {loading && rows == null && <div style={{ fontSize: 12, color: MUTE }}>загрузка…</div>}
+          {rows && rows.length === 0 && <div style={{ fontSize: 12, color: MUTE }}>снимков пока нет — появятся на ближайшем тике (до матча и в лайве)</div>}
+          {batches.map((at) => (
+            <div key={at} style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: "6px 12px", marginBottom: 8 }}>
+              <div style={{ fontSize: 11, color: MUTE, fontWeight: 700 }}>{new Date(at).toLocaleString("ru-RU", { hour12: false })}</div>
+              {groups[at].map((s: any) => <SnapshotRow key={s.id} s={s} />)}
             </div>
           ))}
         </div>

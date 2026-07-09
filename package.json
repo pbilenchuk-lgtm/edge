@@ -15,6 +15,8 @@
     "smoke": "node --experimental-sqlite --import tsx scripts/smoke.ts",
     "pm:probe": "node --import tsx scripts/polymarket-probe.ts",
     "sports:probe": "node --import tsx scripts/sports-probe.ts",
+    "sm:probe": "node --import tsx scripts/probe-sportmonks.ts",
+    "tsa:probe": "node --import tsx scripts/probe-thestatsapi.ts",
     "reassess:probe": "node --experimental-sqlite --import tsx scripts/reassess-probe.ts",
     "simulate": "node --experimental-sqlite --import tsx scripts/simulate.ts",
     "sync:once": "node --experimental-sqlite --import tsx scripts/sync-once.ts",

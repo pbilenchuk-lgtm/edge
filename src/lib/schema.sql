@@ -325,5 +325,39 @@ CREATE TABLE IF NOT EXISTS cron_log (
   created_at TEXT NOT NULL
 );
 
+-- provider_snapshots — сырой + извлечённый снимок того, что КАЖДЫЙ провайдер
+-- данных (Sportmonks / TheStatsAPI / StatPal / ESPN) и Polymarket отдают по
+-- матчу на ОБЩИЙ момент времени (batch_at). Append-only, для пост-матч разбора:
+-- сравнить xG/удары/события/коэффициенты/задержку между провайдерами. `raw`
+-- хранит ВЕСЬ JSON целиком (не выборочные поля), `extracted` — нормализованные
+-- ключевые метки (минута/xG/удары/лайв-стата/составы/события/коэффициенты).
+CREATE TABLE IF NOT EXISTS provider_snapshots (
+  id           TEXT PRIMARY KEY,
+  match_id     TEXT NOT NULL REFERENCES matches(id),
+  batch_at     TEXT NOT NULL,   -- общий ISO-таймстемп прохода сбора (одинаков для всех провайдеров)
+  provider     TEXT NOT NULL,   -- 'sportmonks'|'thestatsapi'|'statpal'|'espn'|'polymarket'
+  phase        TEXT NOT NULL,   -- 'pre'|'live'|'post'
+  ok           INTEGER NOT NULL DEFAULT 0,
+  http_status  INTEGER,
+  provider_ref TEXT,            -- разрешённый id матча/фикстуры у провайдера
+  minute       INTEGER,         -- минута матча по версии провайдера (извлечено)
+  latency_ms   INTEGER,         -- round-trip запроса
+  extracted    TEXT,            -- JSON: нормализованные метки
+  raw          TEXT,            -- ВЕСЬ сырой ответ (строка JSON), без обрезки
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_snap_match ON provider_snapshots(match_id, batch_at);
+
+-- provider_match_map — кэш разрешённого внешнего id матча у провайдера, чтобы не
+-- искать в расписании каждый проход. provider_ref IS NULL = искали, не нашли
+-- (негативный кэш, чтобы не долбить поиск повторно слишком часто).
+CREATE TABLE IF NOT EXISTS provider_match_map (
+  match_id     TEXT NOT NULL REFERENCES matches(id),
+  provider     TEXT NOT NULL,
+  provider_ref TEXT,
+  resolved_at  TEXT NOT NULL,
+  PRIMARY KEY (match_id, provider)
+);
+
 -- §2.15 event_feed — агрегируется из bets/reassessments/trade_log/matches (view),
 -- поэтому отдельной таблицы нет: строится в репозитории по времени.
