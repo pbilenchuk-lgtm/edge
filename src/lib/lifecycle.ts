@@ -24,6 +24,7 @@ import { exitDecision, sizeBet } from "./thresholds.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
 import { hoursUntil } from "./time.js";
+import { collectSnapshots } from "./snapshots.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
 
 // Timing gates (hours before kickoff). Pre-match assessment opens ~12h out;
@@ -490,10 +491,15 @@ export async function runAutoCycle(
   const analyzed = await step("analyze", () => autoAnalyze(db, deps), [] as AutoAnalyzeItem[]);
   // deterministic safety-net exits, then strategist-driven reassessment (exits +
   // fresh entries) on matches with risk or a fresh live trigger.
+  // Raw provider + Polymarket snapshots (pre-match on the slow tick) — additive
+  // capture for the post-match provider comparison; isolated so a provider blip
+  // never aborts the money steps below.
+  await step("snapshots", () => collectSnapshots(db, deps), 0);
   const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [] } as ReassessResult);
   const exited = [...stepSync("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
   const entered = stepSync("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
   stepSync("prune", () => R.pruneMarketSnapshots(db), 0); // keep the snapshot history bounded (persistent DB)
+  stepSync("pruneProviderSnapshots", () => R.pruneSnapshots(db, new Date((Date.parse(nowFn(deps)()) || Date.now()) - 14 * 86400_000).toISOString()), 0); // 14-day retention for raw provider snapshots
   // Bound the matches table: drop finished/stale matches that carry NO bets (the
   // Polymarket discovery flood). Never touches a match with betting history, so
   // metrics/P&L are preserved. Keeps buildAppData's per-poll scan bounded (§502).
@@ -663,6 +669,7 @@ export async function runLiveCycle(
   stepSyncLive("settleStale", () => settleStaleOpenBets(db, deps), 0); // re-settle a finish that raced ahead of the score
   stepSyncLive("stats", () => recordMatchStats(db, deps), 0); // 5-min match-stats snapshot into the events feed
   stepSyncLive("captureLiveOpens", () => captureLiveOpens(db, deps), undefined); // snapshot kickoff prices the first time a match is live
+  await stepLive("snapshots", () => collectSnapshots(db, deps), 0); // raw provider + Polymarket capture on the live cadence
   // Reassessment fires on TWO conditions, unioned: (1) a high-impact on-pitch
   // event (goal / red card) — labelled by its type; (2) the periodic 5-min
   // heartbeat on any match with open risk — labelled "time". Both hand the

@@ -583,3 +583,56 @@ function safeJson<T>(s: unknown, fallback: T): T {
     return fallback;
   }
 }
+
+// ---------- provider snapshots (raw + extracted per provider) ----------
+export interface ProviderSnapshotRow {
+  id: string; match_id: string; batch_at: string; provider: string; phase: string;
+  ok: number; http_status: number | null; provider_ref: string | null;
+  minute: number | null; latency_ms: number | null; extracted: string | null; raw: string | null; created_at: string;
+}
+export interface SnapshotInput {
+  match_id: string; batch_at: string; provider: string; phase: string;
+  ok: boolean; http_status: number | null; provider_ref: string | null;
+  minute: number | null; latency_ms: number | null; extracted: unknown; raw: string | null;
+}
+export function insertProviderSnapshot(db: Database, s: SnapshotInput): void {
+  db.prepare(
+    `INSERT INTO provider_snapshots(id,match_id,batch_at,provider,phase,ok,http_status,provider_ref,minute,latency_ms,extracted,raw,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(uid(), s.match_id, s.batch_at, s.provider, s.phase, s.ok ? 1 : 0, s.http_status, s.provider_ref, s.minute,
+        s.latency_ms, s.extracted == null ? null : JSON.stringify(s.extracted), s.raw, nowIso());
+}
+/** Snapshot metadata for a match (NO raw payload — keeps the view light), newest first. */
+export function snapshotMetaForMatch(db: Database, matchId: string, limit = 400): Omit<ProviderSnapshotRow, "raw">[] {
+  return db.prepare(
+    `SELECT id,match_id,batch_at,provider,phase,ok,http_status,provider_ref,minute,latency_ms,extracted,created_at
+     FROM provider_snapshots WHERE match_id=? ORDER BY batch_at DESC, provider LIMIT ?`,
+  ).all(matchId, limit) as Omit<ProviderSnapshotRow, "raw">[];
+}
+/** One snapshot's FULL raw payload, by id (for the raw-JSON view / export). */
+export function snapshotRaw(db: Database, id: string): { provider: string; batch_at: string; raw: string | null } | null {
+  const r = db.prepare(`SELECT provider,batch_at,raw FROM provider_snapshots WHERE id=?`).get(id);
+  return r ?? null;
+}
+/** Count of snapshots per match (for the Анализ tab badge). */
+export function snapshotCount(db: Database, matchId: string): number {
+  const r = db.prepare(`SELECT COUNT(*) n FROM provider_snapshots WHERE match_id=?`).get(matchId) as { n: number };
+  return r?.n ?? 0;
+}
+/** Keep the snapshot table bounded on the persistent disk: drop rows older than N days. */
+export function pruneSnapshots(db: Database, olderThanIso: string): number {
+  return db.prepare(`DELETE FROM provider_snapshots WHERE batch_at < ?`).run(olderThanIso).changes ?? 0;
+}
+
+// provider_match_map — resolved external match id per provider (cache).
+export function getProviderRef(db: Database, matchId: string, provider: string): { provider_ref: string | null; resolved_at: string } | null {
+  const r = db.prepare(`SELECT provider_ref,resolved_at FROM provider_match_map WHERE match_id=? AND provider=?`).get(matchId, provider);
+  return r ?? null;
+}
+export function setProviderRef(db: Database, matchId: string, provider: string, ref: string | null): void {
+  db.prepare(
+    `INSERT INTO provider_match_map(match_id,provider,provider_ref,resolved_at)
+     VALUES(?,?,?,?)
+     ON CONFLICT(match_id,provider) DO UPDATE SET provider_ref=excluded.provider_ref, resolved_at=excluded.resolved_at`,
+  ).run(matchId, provider, ref, nowIso());
+}
