@@ -234,6 +234,9 @@ export async function runStrategists(
 
   let betsCreated = 0;
   const decisions: AnalyzeResult["decisions"] = [];
+  // Strategist context = match facts (lineups/events) + the outcome tree the
+  // strategist reasons over. Same for every pair, so build it once.
+  const stratCtx = [ctx, distributionContext(db, matchId)].filter(Boolean).join("\n\n") || undefined;
   for (const { strat, profile, pct } of pairs) {
     const budget = stratBudget(comp!.budget, pct);
     const pairLabel = `${strat.name} · ${profile}`;
@@ -245,7 +248,7 @@ export async function runStrategists(
       assessment: { confidence: assessment.confidence ?? "средняя", short: assessment.short ?? "", verdict: assessment.verdict ?? "" },
       markets: freshMarkets.map((m) => ({ label: m.label, priceCents: m.price, aiProb: m.ai_prob })),
       openPositions: openPos.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
-      context: ctx,
+      context: stratCtx,
     }, stratModel, { fetchImpl: deps.fetchImpl, env });
     const picksArr = dec.ok ? dec.picks : null;
     try { R.saveArtifact(db, { match_id: matchId, kind: "strategist", label: pairLabel, stage, content: JSON.stringify(dec, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
@@ -370,6 +373,35 @@ export function matchContext(db: Database, matchId: string): string | undefined 
   const events = R.eventsForMatch(db, matchId).filter((e) => e.type !== "other" && e.type !== "stats");
   if (events.length) parts.push("События: " + events.map((e) => `${e.minute ?? "?"}' ${e.type}${e.team ? " " + e.team : ""}`).join("; "));
   return parts.length ? parts.join("\n") : undefined;
+}
+/** The 6-branch outcome tree (+ match_shape + event scenarios) formatted for the
+ *  STRATEGIST context, read from the saved `distribution` artifact. This is what
+ *  Pre-match Value v3 reasons over ("в каких ветвях живёт ставка"). Kept OUT of
+ *  matchContext so it never leaks into the price-blind analyst (which produces the
+ *  tree). Football-only (no distribution artifact otherwise) → undefined. */
+export function distributionContext(db: Database, matchId: string): string | undefined {
+  const art = R.artifactsForMatch(db, matchId).find((x) => x.kind === "distribution");
+  if (!art) return undefined;
+  let a: any;
+  try { a = JSON.parse(art.content); } catch { return undefined; }
+  const d = a?.derived;
+  const tree = d?.outcome_scenarios;
+  if (!Array.isArray(tree) || !tree.length) return undefined;
+  const lines: string[] = [
+    `ДЕРЕВО ИСХОДОВ (outcome_scenarios · 6 MECE-веток по победитель×BTTS, сумма весов=1; match_shape=${d.match_shape ?? "?"}; фаворит=${tree[0]?.favorite ?? "?"}):`,
+  ];
+  for (const b of tree) {
+    const scores = Array.isArray(b.score_cluster) && b.score_cluster.length ? ` счета=[${b.score_cluster.join(",")}]` : "";
+    const lives = Array.isArray(b.bets_that_live) && b.bets_that_live.length ? ` живут=[${b.bets_that_live.join(",")}]` : "";
+    const et = b.leads_to_extra_time ? " →ET" : "";
+    const tn = b.total_note ? ` total_note="${b.total_note}"` : "";
+    lines.push(`- ${b.id} «${b.label}» вес=${b.prob} winner=${b.winner_side} btts=${b.btts}${et}${scores}${lives}${tn}`);
+  }
+  const scen = a?.scenarios;
+  if (Array.isArray(scen) && scen.length) {
+    lines.push("Событийные сценарии (scenarios): " + scen.map((s: any) => `• ${s.trigger}${Number.isFinite(s.prob) ? ` (P≈${Math.round(s.prob * 100)}%)` : ""}${s.note ? ` — ${s.note}` : ""}`).join("; "));
+  }
+  return lines.join("\n");
 }
 const tokenSet = (s: string) => new Set(norm(s).split(" ").filter(Boolean));
 // Numbers a label carries (e.g. "over 2.5 goals" → "2.5"). Two labels can only

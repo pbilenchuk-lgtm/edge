@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
-import { seedDatabase, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid } from "../src/lib/seed.js";
+import { seedDatabase, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migrateSeedStrategists, migratePrematchValueV3 } from "../src/lib/seed.js";
+import { assembleFootball } from "../src/lib/assembler.js";
+import { distributionContext } from "../src/lib/analysis.js";
 import { seedRiskProfiles } from "../src/lib/riskConfig.js";
 import { loadPolymarketConfig } from "../src/lib/polymarket.js";
 import * as R from "../src/lib/repo.js";
@@ -93,4 +95,43 @@ test("migrateSharesToAggressive: every share → aggressive, live bets retagged,
   R.setShare(db, { competition_id: comp.id, strategy_id: strat, risk_profile_id: "medium", pct: 5 });
   migrateSharesToAggressive(db, "2026-07-08T00:00:00Z");
   assert.ok(R.sharesForComp(db, comp.id).some((s) => s.risk_profile_id === "medium"), "re-run is a no-op after the marker is set");
+});
+
+test("migratePrematchValueV3: brings prompts to v3 once, bumps version, idempotent", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  migrateSeedStrategists(db, "2026-01-01T00:00:00Z"); // ensure the roster exists
+  // Simulate an existing DB carrying pre-v3 prompts.
+  R.updateStrategy(db, "prematch_value", { prompt: "СТАРЫЙ предматч промпт", prompt_live: "СТАРЫЙ live промпт" });
+  const v0 = R.getStrategy(db, "prematch_value")!.version;
+
+  migratePrematchValueV3(db);
+  const s = R.getStrategy(db, "prematch_value")!;
+  assert.ok(s.prompt.includes("v3 · 6-branch"), "prematch prompt updated to v3");
+  assert.ok((s.prompt_live ?? "").includes("v3 · 6-branch"), "live prompt updated to v3");
+  assert.ok(s.prompt.includes("outcome_scenarios"), "v3 references the 6-branch tree");
+  assert.equal(s.version, v0 + 1, "version bumped once (prior archived)");
+
+  migratePrematchValueV3(db); // marker present now → no-op
+  assert.equal(R.getStrategy(db, "prematch_value")!.version, v0 + 1, "idempotent: no re-bump on re-run");
+});
+
+test("distributionContext: formats the 6-branch tree + scenarios for the strategist", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db)[0]!;
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "France", away: "Morocco", state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  assert.equal(distributionContext(db, mid), undefined, "no artifact → undefined");
+
+  const base = { ok: true, matchType: "knockout" as const, matchTypeReason: "", core: { xg_home: 1.75, xg_away: 1.05, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0.03 }, overrides: [], drivers: [], scenarios: [{ trigger: "ранний гол фаворита", prob: 0.3, shifts: null, note: "рынок переоценивает" }], calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 0, notes: "" }, unknowns: [] };
+  const as = assembleFootball(base, null);
+  R.saveArtifact(db, { match_id: mid, kind: "distribution", stage: "pre_lineup", content: JSON.stringify(as), model: "x", created_at: "2026-01-01T00:00:00Z" });
+
+  const ctx = distributionContext(db, mid)!;
+  assert.match(ctx, /match_shape=/, "carries match_shape");
+  for (const id of ["fav_clean", "fav_concedes", "draw_0_0", "draw_scoring", "dog_clean", "dog_concedes"]) assert.ok(ctx.includes(id), `mentions ${id}`);
+  assert.match(ctx, /→ET/, "marks the extra-time draw branches");
+  assert.match(ctx, /total_note=/, "carries the concedes total_note");
+  assert.match(ctx, /ранний гол фаворита/, "carries the event scenarios");
 });

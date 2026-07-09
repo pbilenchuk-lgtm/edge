@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid } from "./seed.js";
+import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3 } from "./seed.js";
 import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
 
@@ -77,6 +77,10 @@ export function getDb(path = dbPath()): Database {
   // to every competition. One-time (gated on wc existing); non-recurring.
   try { migrateStrategyRoster(db, new Date().toISOString()); }
   catch { /* non-fatal */ }
+  // Bring the Pre-match Value strategist prompts to v3 (6-branch outcome tree) on
+  // an existing DB. Marker-guarded, archives the prior version, respects user edits.
+  try { migratePrematchValueV3(db); }
+  catch { /* non-fatal: strategy runs on whatever prompt is stored */ }
   // One-time: move every (category × strategy) allocation onto the AGGRESSIVE
   // profile (and retag live bets). Marker-guarded, so it runs once and respects
   // later manual profile changes.

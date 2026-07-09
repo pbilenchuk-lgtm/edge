@@ -21,7 +21,7 @@ import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarket
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBook, type PolymarketConfig } from "./polymarket.js";
 import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents, liquidationCents } from "./execution.js";
 import type { Bet, Market, Strategy } from "./types.js";
-import { analyzeMatch, runStrategists, jobActive, matchContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
+import { analyzeMatch, runStrategists, jobActive, matchContext, distributionContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision } from "./thresholds.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
 import { getProfileConfig } from "./riskConfig.js";
@@ -553,7 +553,9 @@ export async function strategistReassess(
       ? Math.min(maxLiveMinutes(sport), Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at as string)) / 60000)))
       : null;
     const assess = R.assessmentsForMatch(db, m.id).filter((a) => a.status === "ok").sort((a, b) => (a.created_at >= b.created_at ? -1 : 1))[0];
-    const ctx = matchContext(db, m.id); // real lineups + stats + events
+    // Match facts + the outcome tree the strategist reasons over (Pre-match Value
+    // v3 executes its plan by the same 6-branch tree it built the portfolio on).
+    const ctx = [matchContext(db, m.id), distributionContext(db, m.id)].filter(Boolean).join("\n\n") || undefined;
 
     // PAIRS to run (LIVE branch of the unified engine — same (strategy, profile)
     // unit as the prematch pass): pairs with an active share (can enter) plus any
