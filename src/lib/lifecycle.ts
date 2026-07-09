@@ -499,7 +499,7 @@ export async function runAutoCycle(
   const exited = [...stepSync("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
   const entered = stepSync("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
   stepSync("prune", () => R.pruneMarketSnapshots(db), 0); // keep the snapshot history bounded (persistent DB)
-  stepSync("pruneProviderSnapshots", () => R.pruneSnapshots(db, new Date((Date.parse(nowFn(deps)()) || Date.now()) - 14 * 86400_000).toISOString()), 0); // 14-day retention for raw provider snapshots
+  stepSync("pruneProviderSnapshots", () => R.pruneSnapshots(db, new Date((Date.parse(nowFn(deps)()) || Date.now()) - SNAPSHOT_RETENTION_DAYS * 86400_000).toISOString()), 0); // provider-snapshot retention (long — we accrue matches for later strategy research)
   // Bound the matches table: drop finished/stale matches that carry NO bets (the
   // Polymarket discovery flood). Never touches a match with betting history, so
   // metrics/P&L are preserved. Keeps buildAppData's per-poll scan bounded (§502).
@@ -525,6 +525,11 @@ const LIVE_TRIGGER_TYPES = new Set(["goal", "red_card"]);
 // regardless of on-pitch events — so positions are re-evaluated (full/partial
 // exit) and fresh analytics land on a steady heartbeat, not only on goals.
 export const REASSESS_INTERVAL_MIN = 5;
+
+// Provider snapshots are the raw material for later strategy research (build
+// «свой» models once we've accrued ~50 matches), so we DON'T prune them on the
+// short retention the market snapshots use — keep them for years. Env-overridable.
+export const SNAPSHOT_RETENTION_DAYS = Math.max(1, Number(process.env.SNAPSHOT_RETENTION_DAYS ?? 1095));
 
 // Match-stats snapshots land on the SAME cadence as the periodic reassessment
 // (user: «статистику каждые 5 минут, так же как и переоценку»).

@@ -107,7 +107,10 @@ export interface MatchRef { home: string; away: string; kickoffIso: string | nul
 // ============================================================
 // Sportmonks (v3)
 // ============================================================
-const SM_INCLUDE = "participants;scores;state;periods;events;statistics.type;lineups;xgfixture";
+const SM_INCLUDE = "participants;scores;state;periods;events.type;statistics.type;lineups;xgfixture";
+// Sportmonks event type_ids that are a GOAL of some kind (open play / own goal /
+// penalty / shootout) — used to count goals for the post-match latency check.
+const SM_GOAL_TYPE_IDS = new Set([14, 15, 16, 23]);
 
 async function smResolve(cfg: ProvidersConfig, m: MatchRef, nowMs: number): Promise<string | null> {
   for (const d of candidateDates(m.kickoffIso, nowMs)) {
@@ -141,7 +144,10 @@ function smExtract(f: any): Extracted {
   const shotsTotal = shotsTotalRow ? Number(shotsTotalRow.data?.value ?? shotsTotalRow.value) : null;
 
   const events = (f.events?.data ?? f.events ?? []) as any[];
-  const goals = events.filter((e) => /goal/i.test(String(e.type_id ?? "")) || e.addition === "Goal" || /goal/i.test(String(e.info ?? ""))).length;
+  const goals = events.filter((e) =>
+    SM_GOAL_TYPE_IDS.has(Number(e.type_id)) ||
+    /goal/i.test(String(e.type?.name ?? e.type?.developer_name ?? e.addition ?? ""))
+  ).length;
 
   const lineups = (f.lineups?.data ?? f.lineups ?? []) as any[];
 
