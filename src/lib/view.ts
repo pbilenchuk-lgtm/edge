@@ -47,6 +47,8 @@ export interface MatchView {
   lineups: { home: LineupView | null; away: LineupView | null } | null;
   /** real in-match events (ESPN): goals / cards / subs, newest last */
   events: { minute: number | null; type: string; team: string | null; text: string }[];
+  /** number of provider/Polymarket raw snapshots captured for this match (Анализ tab) */
+  snapshotCount: number;
 }
 export interface LineupView { team: string; formation: string | null; starters: string[] }
 export interface StrategyView {
@@ -228,6 +230,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
         preLineup: pre ? view(pre) : null, postLineup: post ? view(post) : null,
         assessmentHistory,
         markets, bets, reassessByStrat, logByStrat, settledBets, result, lineups, events,
+        snapshotCount: R.snapshotCount(db, m.id),
       };
     }
   }
