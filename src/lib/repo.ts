@@ -836,6 +836,23 @@ export function snapshotCount(db: Database, matchId: string): number {
   const r = db.prepare(`SELECT COUNT(*) n FROM provider_snapshots WHERE match_id=?`).get(matchId) as { n: number };
   return r?.n ?? 0;
 }
+/** Latest LIVE xG (home/away) captured for a match — from the freshest provider
+ *  snapshot that actually carries xG values (Sportmonks). Feeds the Live xG
+ *  Momentum strategist, which is dead without a live-xG flow. Null if none yet. */
+export function latestLiveXg(db: Database, matchId: string): { home: number; away: number; minute: number | null; provider: string; at: string } | null {
+  const rows = db.prepare(
+    `SELECT provider, minute, batch_at, extracted FROM provider_snapshots
+       WHERE match_id=? AND ok=1 AND extracted IS NOT NULL ORDER BY batch_at DESC LIMIT 12`,
+  ).all(matchId) as { provider: string; minute: number | null; batch_at: string; extracted: string }[];
+  for (const r of rows) {
+    try {
+      const e = JSON.parse(r.extracted);
+      if (e?.xg?.present && e.xg.home != null && e.xg.away != null)
+        return { home: Number(e.xg.home), away: Number(e.xg.away), minute: r.minute, provider: r.provider, at: r.batch_at };
+    } catch { /* skip malformed */ }
+  }
+  return null;
+}
 /** Keep the snapshot table bounded on the persistent disk: drop rows older than N days. */
 export function pruneSnapshots(db: Database, olderThanIso: string): number {
   return db.prepare(`DELETE FROM provider_snapshots WHERE batch_at < ?`).run(olderThanIso).changes ?? 0;

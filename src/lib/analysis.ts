@@ -339,6 +339,18 @@ export function matchContext(db: Database, matchId: string): string | undefined 
       if (al) parts.push(`Статистика (гости, ${s.away?.team ?? "?"}): ${al}`);
     } catch { /* ignore malformed stats */ }
   }
+  // Live xG flow (Sportmonks) — the signal the Live xG Momentum strategist REQUIRES
+  // ("без потока live-xG стратег не действует"). ESPN gives possession/shots but NO
+  // xG, so without this line that strategist is permanently blind. Captured every
+  // tick into provider_snapshots; surfaced here so the strategist can actually read
+  // live_xg_home/away and the gap.
+  if (m?.state === "live") {
+    const xg = R.latestLiveXg(db, matchId);
+    if (xg) {
+      const gap = Math.abs(xg.home - xg.away).toFixed(2);
+      parts.push(`Live xG (${xg.provider}${xg.minute != null ? ", " + xg.minute + "'" : ""}): дом ${xg.home.toFixed(2)} – ${xg.away.toFixed(2)} гости · перекос ${gap}`);
+    }
+  }
   // Real match events only — drop our own "stats"/"other" market-price snapshots so
   // no quote-derived noise reaches the (price-blind) analyst or the strategist.
   const events = R.eventsForMatch(db, matchId).filter((e) => e.type !== "other" && e.type !== "stats");
