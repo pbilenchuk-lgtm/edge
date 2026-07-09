@@ -47,3 +47,34 @@ advance ~77% (market), its 90-min win must be ~63%, needing xG ≈ 2.0 / 0.9.
 
 > One outcome proves nothing — this is data point #1. Its value is as a clean,
 > pre-registered example of the suspected defect to anchor the sample.
+
+### ⚠️ Confounds — MUST account for these in the post-match review
+This match's live decision log has infra artifacts that are NOT strategy behaviour.
+Do not read them as defects.
+
+1. **LLM-budget outage ≈ 72'–85' (Claude credits ran out).** Detected in the data as
+   a **14-minute gap between reassessments** (23:36 / 72' → 23:50 / 85'), against a
+   normal ~5-min periodic cadence everywhere else. During this window the strategist
+   was BLIND (LLM calls failed silently → `continue`, no note/exit/entry). Any
+   apparent lag / missed reaction to price or xG in 72'–85' is the credit outage, not
+   the strategy. **EXCLUDE (or flag) 72'–85' from any timing / responsiveness metric.**
+   - Detection heuristic for the review script: a reassessment gap ≫ the 5-min cadence
+     on a live, funded match with open positions ⇒ probable LLM outage window.
+   - Data gap to close (follow-up): LLM-call failures are currently SILENT — the outage
+     is only visible as an ABSENCE. Log strategist/analyze failures explicitly (an
+     error row) so outages are first-class, not inferred from gaps.
+
+2. **Edge display −29/−30% on live-entered positions** (France Over 2.5, France (-2.5)):
+   the UI edge uses the stale pre-match `market.aiProb`, but these were entered on the
+   live strategist's own estimate stored on the bet (`bet.ai_prob` 0.5–0.6). Cosmetic;
+   fully reconstructable (bet.ai_prob + market ai_prob + price all logged). Real fix:
+   live reassessment should update `market.aiProb`, or the display should prefer
+   `bet.ai_prob` for in-match entries.
+
+3. **Correlated / competing bets** (France Over 2.5 + France (-2.5), both need a 3rd
+   goal): the sizing/entry didn't account for cross-market correlation → overlapping
+   exposure on one event. Logged with ai_prob + rationale per bet. Design fix: dedup /
+   correlation cap across markets that resolve on the same event.
+
+All three are fully reconstructable from the logs (bets, 200+ reassessments, trade_log,
+1100+ provider snapshots). Fix ROOTS in a batch post-match, not symptoms mid-match.
