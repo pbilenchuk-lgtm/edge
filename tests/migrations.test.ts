@@ -127,6 +127,32 @@ test("reconcileFootballCategories: backfills mapping, funds covered-unfunded, de
   assert.deepEqual(r2, { backfilled: 0, funded: 0, deleted: 0 }, "second run is a no-op");
 });
 
+test("duplicateOutcomeConflicts: flags same-outcome markets priced apart, ignores agreeing/distinct ones", async () => {
+  const { duplicateOutcomeConflicts } = await import("../src/lib/analysis.js");
+  // The Spain–Belgium case: "Draw" listed twice, prices 41.5¢ vs 24.6¢ → conflict.
+  const flagged = duplicateOutcomeConflicts([
+    { label: "Draw — Yes", priceCents: 41.5 },
+    { label: "Draw (Spain vs. Belgium) — Yes", priceCents: 24.6 },
+    { label: "Draw — No", priceCents: 58.5 },
+    { label: "Draw (Spain vs. Belgium) — No", priceCents: 75.4 },
+    { label: "Over 2.5", priceCents: 55.1 },              // unique → no conflict
+    { label: "Spain (-1.5)", priceCents: 33.4 },          // parenthetical is a handicap, not "(A vs B)"
+  ]);
+  assert.ok(flagged.has("Draw — Yes"), "cheap Draw twin flagged");
+  assert.ok(flagged.has("Draw (Spain vs. Belgium) — Yes"), "expensive Draw twin flagged");
+  assert.ok(flagged.has("Draw — No") && flagged.has("Draw (Spain vs. Belgium) — No"), "the No side conflicts too");
+  assert.ok(flagged.get("Draw — Yes")!.includes("41.5") && flagged.get("Draw — Yes")!.includes("24.6"), "note names both prices");
+  assert.ok(!flagged.has("Over 2.5"), "a unique outcome is never flagged");
+  assert.ok(!flagged.has("Spain (-1.5)"), "a handicap parenthetical is not treated as a team qualifier");
+
+  // Same outcome listed twice but prices AGREE (within tolerance) → genuine, no flag.
+  const agree = duplicateOutcomeConflicts([
+    { label: "Draw — Yes", priceCents: 24.6 },
+    { label: "Draw (Spain vs. Belgium) — Yes", priceCents: 25.0 },
+  ]);
+  assert.equal(agree.size, 0, "agreeing duplicates are not a conflict");
+});
+
 test("migrateSharesToAggressive: every share → aggressive, live bets retagged, idempotent", () => {
   const db = openDb(":memory:");
   seedDatabase(db);

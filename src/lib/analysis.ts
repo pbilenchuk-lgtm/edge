@@ -230,6 +230,10 @@ export async function runStrategists(
   // Quotes → de-vigged implied probs, once (same for every pair).
   const quotes = freshMarkets.map((m) => ({ label: m.label, priceCents: m.price, liquidity: parseLiq(m.liquidity) }));
   const impliedMap = impliedProbs(quotes);
+  // Duplicate-outcome price conflicts (Polymarket listing the same outcome twice at
+  // divergent prices) — surfaced to every strategist and hard-blocked at entry, so a
+  // phantom "edge" on a mispriced twin can't be traded even if a strategist misses it.
+  const conflicts = duplicateOutcomeConflicts(freshMarkets.map((m) => ({ label: m.label, priceCents: m.price })));
 
   let betsCreated = 0;
   const decisions: AnalyzeResult["decisions"] = [];
@@ -245,7 +249,7 @@ export async function runStrategists(
       strategyName: strat.name, strategyPrompt: strat.prompt,
       match: { home: match.home, away: match.away, sport, state: match.state, minute: match.minute, scoreHome: match.score_home, scoreAway: match.score_away },
       assessment: { confidence: assessment.confidence ?? "средняя", short: assessment.short ?? "", verdict: assessment.verdict ?? "" },
-      markets: freshMarkets.map((m) => ({ label: m.label, priceCents: m.price, aiProb: m.ai_prob })),
+      markets: freshMarkets.map((m) => ({ label: m.label, priceCents: m.price, aiProb: m.ai_prob, conflict: conflicts.get(m.label) ?? null })),
       openPositions: openPos.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
       context: stratCtx,
     }, stratModel, { fetchImpl: deps.fetchImpl, env });
@@ -280,6 +284,9 @@ export async function runStrategists(
       const pick = picksArr?.find((p) => sameMarketLabel(p.label, m.label));
       if (picksArr && !pick) { skipped++; continue; }
       if (held.has(norm(m.label))) { skipped++; continue; }
+      // Duplicate-outcome price conflict → never enter, even if the strategist picked
+      // it: one of the twins is a data artifact, so its edge is phantom.
+      if (conflicts.has(m.label)) { flagged++; battle.push({ market: m.label, status: "flag", reason: conflicts.get(m.label) }); continue; }
       const ourProb = pick?.prob != null ? pick.prob : (m.ai_prob as number);
       if (pick?.prob != null) R.setMarketAiProb(db, m.id, pick.prob);
       if (psFlags.has(m.label)) { flagged++; battle.push({ market: m.label, status: "flag", reason: "prob_sum вне допуска" }); continue; }
@@ -331,6 +338,40 @@ export async function runStrategists(
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 const round3 = (x: number) => Math.round(x * 1000) / 1000;
+
+// A market label with the "(Home vs. Away)" team qualifier stripped — so Polymarket's
+// duplicate listings of the SAME outcome collapse to one canonical key. E.g.
+// "Draw (Spain vs. Belgium) — Yes" and "Draw — Yes" → "draw — yes". Only a
+// parenthetical that actually reads like "… vs …" is removed, so real parentheticals
+// (handicaps "(-1.5)") are left intact.
+const canonOutcome = (label: string): string =>
+  norm(label.replace(/\([^)]*\bvs\.?\b[^)]*\)/gi, " "));
+const CONFLICT_CENTS = 8; // ≥ this price gap between two listings of one outcome = data artifact, not edge
+/**
+ * Detect DUPLICATE-OUTCOME markets whose prices CONTRADICT each other — Polymarket
+ * sometimes lists the same outcome twice ("Draw" vs "Draw (Spain vs. Belgium)"),
+ * and when the two prices diverge (41.5¢ vs 24.6¢ for the same 24% draw), the
+ * cheaper-looking side is a phantom edge, not a real one. Returns a per-label note
+ * for every market caught in such a conflict, so the strategist SEES it every time
+ * (instead of relying on the model to notice) and the entry loop can refuse it.
+ */
+export function duplicateOutcomeConflicts(markets: { label: string; priceCents: number }[]): Map<string, string> {
+  const groups = new Map<string, { label: string; priceCents: number }[]>();
+  for (const m of markets) {
+    const k = canonOutcome(m.label);
+    (groups.get(k) ?? groups.set(k, []).get(k)!).push(m);
+  }
+  const out = new Map<string, string>();
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;
+    const prices = members.map((m) => m.priceCents);
+    if (Math.max(...prices) - Math.min(...prices) < CONFLICT_CENTS) continue; // agree → genuine, not a conflict
+    const twins = members.map((m) => `${m.label} ${m.priceCents}¢`).join(" vs ");
+    for (const m of members)
+      out.set(m.label, `⚠ дубликат-конфликт: один исход торгуется по расходящимся ценам (${twins}) — вероятно артефакт данных, НЕ торговать без подтверждения`);
+  }
+  return out;
+}
 /** Short suffix appended to a bet's rationale from the strategist's tree-reasoning
  *  (role / how many outcome branches it lives in / anti-phantom verdict), so the
  *  decision row and trade log show WHY the bet was chosen, not just its edge. */

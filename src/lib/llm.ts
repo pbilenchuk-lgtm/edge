@@ -537,7 +537,7 @@ export interface StrategistInput {
   strategyName: string; strategyPrompt: string;
   match: { home: string; away: string; sport: string; state: string; minute: number | null; scoreHome: number | null; scoreAway: number | null; minuteApprox?: number | null };
   assessment: { confidence: string; short: string; verdict: string };
-  markets: { label: string; priceCents: number; aiProb: number | null; liquidity?: number | null; openCents?: number | null }[];
+  markets: { label: string; priceCents: number; aiProb: number | null; liquidity?: number | null; openCents?: number | null; conflict?: string | null }[];
   openPositions: { market: string; entryCents: number; currentCents: number }[];
   context?: string; // real lineups + in-match events (ESPN) — the reassessment triggers
 }
@@ -683,7 +683,8 @@ export async function strategistDecide(
       : "";
     const liq = m.liquidity != null ? `, ликв. $${Math.round(m.liquidity)}` : "";
     const ai = m.aiProb != null ? `, предматч. оценка ${(m.aiProb * 100).toFixed(0)}%` : "";
-    return `- ${m.label}: ${m.priceCents}¢${move}${liq}${ai}`;
+    const conflict = m.conflict ? `  ${m.conflict}` : "";
+    return `- ${m.label}: ${m.priceCents}¢${move}${liq}${ai}${conflict}`;
   }).join("\n");
   const posList = input.openPositions.length
     ? input.openPositions.map((p) => `- ${p.market}: вход ${p.entryCents}¢ → сейчас ${p.currentCents}¢`).join("\n")
