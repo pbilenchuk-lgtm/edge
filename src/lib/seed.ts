@@ -904,25 +904,36 @@ export function migrateSharesAllPairs(db: Database, now: string): void {
 // budget» happen automatically.
 const GRID_MARK = "shares_grid_signature";
 const PER_PAIR_USD = 1000; // every (strategy, profile) pair is funded with this, on every football category
+// Categories with a live-xG feed (Sportmonks). Live xG Momentum only makes sense
+// where this data exists — elsewhere it just burns LLM calls emitting "inactive".
+// Currently only the World Cup (fifa.world), for both the seed comp and the
+// Polymarket-discovered "pm-soccer-fifwc" (importer sets this external_league).
+const LIVE_XG_LEAGUES = new Set(["fifa.world"]);
+export function compHasLiveXg(c: { external_league: string | null }): boolean {
+  return c.external_league != null && LIVE_XG_LEAGUES.has(c.external_league);
+}
 export function migrateSharesGrid(db: Database, now: string): void {
   migrateSeedStrategists(db, now);
   const strategyIds = STRATEGIST_DEFS.map((d) => d.id);
   const profileIds = listRiskProfileViews(db).map((p) => p.id).sort();
   if (!strategyIds.length || !profileIds.length) return;
-  const n = strategyIds.length * profileIds.length;
-  // Signature includes the per-pair target, so introducing/altering budget
-  // management re-lays the grid even if the profile SET is unchanged.
-  const signature = `${PER_PAIR_USD}|${profileIds.join(",")}`;
+  // Signature: bump the leading tag whenever the GRID TOPOLOGY changes (here:
+  // live_xg restricted to live-xG categories) so the grid re-lays once even if the
+  // profile set / per-pair target are unchanged.
+  const signature = `livexg-wc|${PER_PAIR_USD}|${profileIds.join(",")}`;
   if (R.metaGet(db, GRID_MARK) === signature) return; // nothing changed → leave allocations/budget alone
-  // Full-precision even split: pct=100/n with budget=n·PER_PAIR floors to EXACTLY
-  // PER_PAIR per pair (money.stratBudget = floor(budget·pct/100)); display rounds it.
-  const pct = 100 / n;
-  const budget = n * PER_PAIR_USD;
   for (const c of R.listCompetitions(db)) {
     if (c.sport_id !== "football") continue;
-    R.setCompetitionBudget(db, c.id, budget); // e.g. 12 pairs → $12 000 → $1 000 each
+    // live_xg only where a live-xG feed exists; every category still gets the other
+    // two strategists. Budget/pairs adapt per category so each pair is still PER_PAIR.
+    const strats = compHasLiveXg(c) ? strategyIds : strategyIds.filter((id) => id !== "live_xg");
+    const n = strats.length * profileIds.length;
+    // Full-precision even split: pct=100/n with budget=n·PER_PAIR floors to EXACTLY
+    // PER_PAIR per pair (money.stratBudget = floor(budget·pct/100)); display rounds it.
+    const pct = 100 / n;
+    R.setCompetitionBudget(db, c.id, n * PER_PAIR_USD);
     R.clearShares(db, c.id);
-    for (const sid of strategyIds)
+    for (const sid of strats)
       for (const pid of profileIds)
         R.setShare(db, { competition_id: c.id, strategy_id: sid, risk_profile_id: pid, pct });
   }

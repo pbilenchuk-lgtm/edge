@@ -38,28 +38,36 @@ test("migrateSharesAllPairs: every football category gets all 3×3 pairs, evenly
   assert.equal(R.sharesForComp(db, "pm-a").length, 0, "re-run no-ops after the marker is set");
 });
 
-test("migrateSharesGrid: full strategist × ALL-profiles grid, even budget, re-lays on profile-set change", () => {
+test("migrateSharesGrid: live_xg only on the WC (fifa.world); other two strategists everywhere; even budget", () => {
   const db = openDb(":memory:");
   R.upsertSport(db, "football", "Футбол");
-  R.upsertCompetition(db, { id: "pm-a", sport_id: "football", name: "A", budget: 1200, external_league: null, created_at: "t" });
+  R.upsertCompetition(db, { id: "pm-a", sport_id: "football", name: "A", budget: 1200, external_league: null, created_at: "t" });         // non-WC
+  R.upsertCompetition(db, { id: "pm-soccer-fifwc", sport_id: "football", name: "ЧМ", budget: 1200, external_league: "fifa.world", created_at: "t" }); // WC
   seedRiskProfiles(db, "t"); // 3 presets
 
   migrateSharesGrid(db, "t");
-  let rows = R.sharesForComp(db, "pm-a");
-  assert.equal(rows.length, 9, "3 strategists × 3 profiles");
+  // Non-WC: only overreaction + prematch_value → 2 × 3 = 6 pairs, no live_xg.
+  const rowsA = R.sharesForComp(db, "pm-a");
+  assert.equal(rowsA.length, 6, "non-WC: 2 strategists × 3 profiles");
+  assert.ok(!rowsA.some((r) => r.strategy_id === "live_xg"), "non-WC has NO live_xg pair (no live-xG feed)");
+  assert.deepEqual([...new Set(rowsA.map((r) => r.strategy_id))].sort(), ["overreaction", "prematch_value"]);
+  // WC: all three → 3 × 3 = 9 pairs, includes live_xg.
+  const rowsWc = R.sharesForComp(db, "pm-soccer-fifwc");
+  assert.equal(rowsWc.length, 9, "WC: 3 strategists × 3 profiles");
+  assert.ok(rowsWc.some((r) => r.strategy_id === "live_xg"), "WC keeps live_xg");
+  // Each pair still funded with exactly $1000 in BOTH topologies.
+  const compA = R.listCompetitions(db).find((c) => c.id === "pm-a")!;
+  const compWc = R.listCompetitions(db).find((c) => c.id === "pm-soccer-fifwc")!;
+  assert.equal(compA.budget, 6000, "non-WC budget = 6 pairs × $1000");
+  assert.equal(compWc.budget, 9000, "WC budget = 9 pairs × $1000");
+  assert.equal(Math.floor(compA.budget * rowsA[0].pct / 100), 1000, "non-WC pair = $1000");
+  assert.equal(Math.floor(compWc.budget * rowsWc[0].pct / 100), 1000, "WC pair = $1000");
 
-  // user adds a 4th custom profile («Lite») → next boot re-lays the grid as 12
+  // profile set change re-lays both, still WC-aware
   R.upsertRiskProfile(db, { id: "lite", name: "Lite", content: JSON.stringify({}), sort: 9, created_at: "t" });
   migrateSharesGrid(db, "t2");
-  rows = R.sharesForComp(db, "pm-a");
-  assert.equal(rows.length, 12, "3 strategists × 4 profiles = 12 pairs");
-  assert.equal([...new Set(rows.map((r) => r.risk_profile_id))].length, 4, "all four profiles present");
-  assert.ok(rows.every((r) => r.pct === rows[0].pct), "budget split evenly");
-  assert.ok(rows[0].pct > 8 && rows[0].pct < 9, `~8.33% each, got ${rows[0].pct}`);
-  // budget set to pairs × $1000, and each pair floors to EXACTLY $1000
-  const comp = R.listCompetitions(db).find((c) => c.id === "pm-a")!;
-  assert.equal(comp.budget, 12000, "budget = 12 pairs × $1000");
-  assert.equal(Math.floor(comp.budget * rows[0].pct / 100), 1000, "every pair funded with exactly $1000");
+  assert.equal(R.sharesForComp(db, "pm-a").length, 8, "non-WC: 2 × 4 profiles");
+  assert.equal(R.sharesForComp(db, "pm-soccer-fifwc").length, 12, "WC: 3 × 4 profiles");
 
   // stable profile set → a manual reallocation survives (no re-run)
   R.setShare(db, { competition_id: "pm-a", strategy_id: "overreaction", risk_profile_id: "lite", pct: 40 });
