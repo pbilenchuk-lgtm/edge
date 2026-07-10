@@ -590,6 +590,26 @@ test("autoAnalyze analyzes an eligible match once per stage", async () => {
   assert.ok(!second.some((a) => a.matchId === "m-lineup"), "not re-analyzed for the same stage");
 });
 
+test("live-unanalysed match: back-fill analyses it (feeds live reassess) but SKIPS the pre-match strategist pass", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM assessments; DELETE FROM analysis_artifacts;");
+  const deps = { fetchImpl: mockLLM({ match_type: "group", match_type_reason: "ничья есть", core: { xg_home: 1.5, xg_away: 1.1, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 }, overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 8, notes: "" }, unknowns: [] }), env: { ANTHROPIC_API_KEY: "k" } };
+
+  // liveOnly ignores the seeded match while it's still pre-kickoff (lineup).
+  assert.ok(!(await autoAnalyze(db, deps, { liveOnly: true })).some((a) => a.matchId === "m-lineup"), "liveOnly skips a non-live match");
+
+  // The match reaches LIVE having never been analysed (scheduler gap over kickoff).
+  R.updateMatch(db, "m-lineup", { state: "live", minute: 30 });
+  const ran = await autoAnalyze(db, deps, { liveOnly: true });
+  const hit = ran.find((a) => a.matchId === "m-lineup");
+  assert.ok(hit && hit.ok, "live-unanalysed match rescued by the back-fill");
+  assert.equal(hit!.bets, 0, "no bets: the pre-match strategist pass is skipped on a live back-fill");
+  assert.ok(R.assessmentsForMatch(db, "m-lineup").some((a) => a.status === "ok"), "assessment stored");
+  assert.ok(R.artifactsForMatch(db, "m-lineup").some((a) => a.kind === "distribution"), "distribution artifact produced — the live reassessment is no longer blind");
+  assert.ok(!R.artifactsForMatch(db, "m-lineup").some((a) => a.kind === "battle_sheet"), "NO battle_sheet — pre-match proposals don't fire on a live match");
+});
+
 test("autoRunStrategists re-runs the engine for a NEW roster pair, without re-analysis, self-limiting", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

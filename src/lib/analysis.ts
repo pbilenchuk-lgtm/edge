@@ -67,7 +67,7 @@ function renderFootballBody(as: AssembledAnalysis): string {
 }
 
 export async function analyzeMatch(
-  db: Database, matchId: string, deps: AnalyzeDeps = {},
+  db: Database, matchId: string, deps: AnalyzeDeps = {}, opts: { skipStrategists?: boolean } = {},
 ): Promise<AnalyzeResult> {
   const now = deps.now ?? (() => new Date().toISOString());
   const match = R.getMatch(db, matchId);
@@ -179,6 +179,13 @@ export async function analyzeMatch(
     }
     if (hit) { hit.used = true; if (hit.prob != null) R.setMarketAiProb(db, m.id, hit.prob); }
   }
+  // Analysis-only mode: produce the artifacts (base/category/distribution) but do
+  // NOT run the PRE-MATCH strategist pass. Used when back-filling a match that went
+  // LIVE without analysis (a scheduler gap over kickoff) — the LIVE reassessment
+  // owns live entries via its own prompt, so a pre-match proposal pass on a live
+  // match would be the wrong window. The stored distribution still feeds that
+  // live reassessment (distributionContext), so it's no longer blind.
+  if (opts.skipStrategists) return { ok: true, stage, confidence: a.confidence, betsCreated: 0, decisions: [] };
   // Strategist pass is DECOUPLED (unified engine): it reads the stored analysis +
   // fresh quotes + risk_config and can be re-run on its own (e.g. when the roster
   // /shares change) without re-running the expensive analysis. Pass the exact

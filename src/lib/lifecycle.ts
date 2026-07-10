@@ -159,7 +159,7 @@ export interface AutoAnalyzeItem { matchId: string; match: string; stage: string
  * haven't been analyzed for their current stage. Capped per run so a tick over
  * hundreds of discovered matches doesn't fire hundreds of model calls.
  */
-export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { max?: number } = {}): Promise<AutoAnalyzeItem[]> {
+export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { max?: number; liveOnly?: boolean } = {}): Promise<AutoAnalyzeItem[]> {
   const max = opts.max ?? 6;
   const nowMs = Date.parse(nowFn(deps)()) || Date.now();
   const budgetByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.budget]));
@@ -167,6 +167,7 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
   const out: AutoAnalyzeItem[] = [];
   for (const { comp, match: m } of activeMatches(db)) {
     if (out.length >= max) break;
+    if (opts.liveOnly && m.state !== "live") continue;             // live-cycle back-fill: only rescue live-but-unanalysed matches
     if ((budgetByComp.get(comp) ?? 0) <= 0) continue;              // unfunded → skip (economical)
     if (!R.latestMarkets(db, m.id).length) continue;               // needs tradeable odds
     // Football (lineup-sport): no pre-match analysis until the real starting XI
@@ -181,7 +182,11 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
     if (stage === "pre_lineup" && h != null && h > ANALYZE_PRE_HOURS) continue;
     if (R.assessmentsForMatch(db, m.id).some((a) => a.stage === stage && a.status === "ok")) continue; // already done this stage
     if (jobActive(R.getAnalysisJob(db, m.id), Date.now())) continue; // a run is in flight
-    const r = await analyzeMatch(db, m.id, deps);
+    // A LIVE match reaching analysis here was NEVER analysed pre-kickoff (e.g. a
+    // scheduler gap spanned kickoff). Produce the analysis so the live reassessment
+    // isn't blind, but SKIP the pre-match strategist pass — live entries belong to
+    // the live-window reassessment (its own prompt), not a stale pre-match proposal.
+    const r = await analyzeMatch(db, m.id, deps, { skipStrategists: m.state === "live" });
     out.push({ matchId: m.id, match: `${m.home}–${m.away}`, stage, ok: r.ok, bets: r.betsCreated ?? 0 });
   }
   return out;
@@ -991,6 +996,12 @@ export async function runLiveCycle(
   for (const id of periodicReassessMatches(db, deps)) if (!labelFor.has(id)) labelFor.set(id, "time");
   const reassessIds = new Set(labelFor.keys());
 
+  // Back-fill analysis for a funded match that reached LIVE with none — a scheduler
+  // gap over kickoff means autoAnalyze (slow discover/tick cadence) never ran for it,
+  // and the live cycle would otherwise reassess it forever with no distribution. Run
+  // it HERE on the fast live cadence (analysis-only for live — see autoAnalyze) so
+  // the reassessment below has the outcome tree instead of guessing from the score.
+  await stepLive("liveBackfillAnalyze", () => autoAnalyze(db, deps, { max: 3, liveOnly: true }), [] as AutoAnalyzeItem[]);
   const detExits = await stepLive("exits", () => evaluateExits(db, deps), [] as ExitItem[]); // cheap TP/stop, reacts to price every tick
   const reassess = await stepLive("reassess", () => strategistReassess(db, deps, { newEventMatchIds: reassessIds, triggeredOnly: true, labelFor }), { exits: [], entries: [], llmCalls: 0, llmFail: 0 } as ReassessResult);
   await stepLive("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fill any positions the strategist just opened
