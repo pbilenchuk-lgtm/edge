@@ -828,6 +828,22 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
   }, [oddsErrKey]);
 
   const doRefresh = async () => { setRefreshing(true); await onRefreshOdds(match.id); setRefreshing(false); };
+  // Download the FULL match log (analysis + strategies + battle sheets + bets +
+  // reassessments + trade log + events + provider snapshots + live-data diagnosis)
+  // as one .md file — the exact dump for offline / hand-off analysis.
+  const [logBusy, setLogBusy] = useState(false);
+  const downloadMatchLog = async () => {
+    setLogBusy(true);
+    try {
+      const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "matchLog", matchId: match.id }) }).then((x) => x.json());
+      if (!r.ok) { alert(r.error || "не удалось собрать лог"); return; }
+      const blob = new Blob([r.markdown], { type: "text/markdown" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `match-log-${(match.home + "-" + match.away).replace(/[^\w-]+/g, "_")}.md`; a.click();
+      URL.revokeObjectURL(url);
+    } catch { alert("ошибка сети"); } finally { setLogBusy(false); }
+  };
   const runAnalyze = async () => {
     setAnalyzing(true); setAnalyzeErr(null);
     try { const r = await onAnalyze(match.id); if (r && r.ok === false) setAnalyzeErr(r.error || "оценка не удалась"); }
@@ -952,6 +968,11 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                     </div>
                   </div>
                 )}
+                <div style={{ display: "flex", justifyContent: "flex-end", padding: "4px 0" }}>
+                  <button style={{ ...S.artifactBtn, opacity: logBusy ? 0.6 : 1 }} disabled={logBusy} onClick={downloadMatchLog} title="Весь лог матча одним файлом: анализ, стратеги, боевые листы, ставки, переоценки, трейд-лог, события, снимки провайдеров, диагноз live-данных">
+                    {logBusy ? "собираю…" : "📥 Скачать полный лог матча (.md)"}
+                  </button>
+                </div>
                 <ArtifactsPanel artifacts={match.artifacts} />
                 <ProviderSnapshots matchId={match.id} count={match.snapshotCount} />
                 <PastAssessments history={match.assessmentHistory} />
