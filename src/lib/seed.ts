@@ -924,6 +924,24 @@ export function compHasLiveCoverage(c: { sport_id: string; external_league: stri
   if (c.sport_id !== "football") return true; // non-football gating handled elsewhere (tennis etc.)
   return c.external_league != null;
 }
+/** Lay the (strategy × profile) share grid for ONE covered football category and
+ *  fund it so each pair gets ~PER_PAIR_USD. live_xg only where a live-xG feed
+ *  exists (WC); every covered category gets the other two. Clears any prior shares
+ *  first so it's idempotent. Returns the pair count funded. */
+function layFootballGrid(db: Database, comp: { id: string; external_league: string | null }, strategyIds: string[], profileIds: string[]): number {
+  R.clearShares(db, comp.id);
+  const strats = compHasLiveXg(comp) ? strategyIds : strategyIds.filter((id) => id !== "live_xg");
+  const n = strats.length * profileIds.length;
+  if (!n) return 0;
+  // Full-precision even split: pct=100/n with budget=n·PER_PAIR floors to EXACTLY
+  // PER_PAIR per pair (money.stratBudget = floor(budget·pct/100)); display rounds it.
+  const pct = 100 / n;
+  R.setCompetitionBudget(db, comp.id, n * PER_PAIR_USD);
+  for (const sid of strats)
+    for (const pid of profileIds)
+      R.setShare(db, { competition_id: comp.id, strategy_id: sid, risk_profile_id: pid, pct });
+  return n;
+}
 export function migrateSharesGrid(db: Database, now: string): void {
   migrateSeedStrategists(db, now);
   const strategyIds = STRATEGIST_DEFS.map((d) => d.id);
@@ -936,23 +954,70 @@ export function migrateSharesGrid(db: Database, now: string): void {
   if (R.metaGet(db, GRID_MARK) === signature) return; // nothing changed → leave allocations/budget alone
   for (const c of R.listCompetitions(db)) {
     if (c.sport_id !== "football") continue;
-    R.clearShares(db, c.id);
     // No ESPN live coverage (external_league=null, e.g. Chinese Super League) →
     // can't be managed in-play → DEFUND: zero budget, no shares. It won't be
     // analyzed (autoAnalyze skips unfunded) or traded. Self-heals as discovery
     // maps/unmaps a league's external_league.
-    if (!compHasLiveCoverage(c)) { R.setCompetitionBudget(db, c.id, 0); continue; }
-    // live_xg only where a live-xG feed exists; every covered category gets the
-    // other two. Budget/pairs adapt per category so each pair is still PER_PAIR.
-    const strats = compHasLiveXg(c) ? strategyIds : strategyIds.filter((id) => id !== "live_xg");
-    const n = strats.length * profileIds.length;
-    // Full-precision even split: pct=100/n with budget=n·PER_PAIR floors to EXACTLY
-    // PER_PAIR per pair (money.stratBudget = floor(budget·pct/100)); display rounds it.
-    const pct = 100 / n;
-    R.setCompetitionBudget(db, c.id, n * PER_PAIR_USD);
-    for (const sid of strats)
-      for (const pid of profileIds)
-        R.setShare(db, { competition_id: c.id, strategy_id: sid, risk_profile_id: pid, pct });
+    if (!compHasLiveCoverage(c)) { R.clearShares(db, c.id); R.setCompetitionBudget(db, c.id, 0); continue; }
+    layFootballGrid(db, c, strategyIds, profileIds);
   }
   R.metaSet(db, GRID_MARK, signature, now);
+}
+
+/**
+ * Keep the football category set honest with WHO ACTUALLY DELIVERS LIVE DATA — run
+ * every auto cycle (not signature-gated like the one-shot grid). Three moves:
+ *
+ *  1. BACKFILL the ESPN league on any discovered football category whose mapping
+ *     was missing/buggy when it was first imported (e.g. UEFA Champions/Europa
+ *     League used to resolve to null). Uses the now-fixed name→code table.
+ *  2. FUND a mapped-but-unfunded category (budget 0, no shares) — so a league that
+ *     only got its `external_league` backfilled AFTER the one-shot grid ran still
+ *     gets its (strategy × profile) grid instead of showing «нет бюджета».
+ *  3. DELETE a category that is proven blind — no live data was EVER observed for
+ *     it (no `match_live` row: unmapped like the Chinese Super League, or a wrong
+ *     ESPN code), it holds NO real P&L (proposed/not_filled don't count), and has
+ *     NO matches still ahead. Its budget is zeroed first so nothing trades while
+ *     it waits for its last match to finish.
+ *
+ * Static mapping = the GUESS of which leagues to try (discovery/funding gate);
+ * empirical `match_live` = the PROOF a provider delivered (deletion gate). Together
+ * they answer the user's «точно связаны с провайдером?» — a funded category is one
+ * ESPN maps; a surviving one is a category ESPN actually fed. Returns a summary.
+ */
+export function reconcileFootballCategories(
+  db: Database, now: string,
+  espnLeagueForSeries: (series: string | null, seriesSlug: string | null) => string | null,
+): { backfilled: number; funded: number; deleted: number } {
+  const strategyIds = STRATEGIST_DEFS.map((d) => d.id);
+  const profileIds = listRiskProfileViews(db).map((p) => p.id).sort();
+  let backfilled = 0, funded = 0, deleted = 0;
+  for (const c of R.listCompetitions(db, "football")) {
+    if (!c.id.startsWith("pm-")) continue; // only discovered categories; leave seeded ones (WC) alone
+    let league = c.external_league;
+    // (1) Backfill a missing mapping from the category's series name/slug.
+    if (league == null) {
+      const slug = c.id.slice(3); // pm-<slug>
+      const inferred = espnLeagueForSeries(c.name, slug);
+      if (inferred) { R.setCompetitionLeague(db, c.id, inferred); league = inferred; backfilled++; }
+    }
+    if (league != null) {
+      // (2) Fund a covered category that isn't funded yet.
+      if (c.budget <= 0 && !R.competitionHasShares(db, c.id) && strategyIds.length && profileIds.length) {
+        layFootballGrid(db, { id: c.id, external_league: league }, strategyIds, profileIds);
+        funded++;
+      }
+      // A mapped category that HAS delivered live data, or still has matches ahead,
+      // stays — it's a real covered league, idle or not.
+      if (R.competitionLiveObserved(db, c.id) || R.competitionPendingMatchCount(db, c.id) > 0) continue;
+    }
+    // (3) Proven blind: never observed live, still might if matches remain → keep;
+    // else drop it unless it carries real P&L or user config (shares).
+    if (R.competitionPendingMatchCount(db, c.id) > 0) continue;
+    if (R.competitionHasRealBets(db, c.id) || R.competitionHasShares(db, c.id)) continue;
+    R.setCompetitionBudget(db, c.id, 0);
+    R.deleteCompetition(db, c.id);
+    deleted++;
+  }
+  return { backfilled, funded, deleted };
 }

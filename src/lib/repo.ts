@@ -603,6 +603,41 @@ export function removeSport(db: Database, sportId: string): number {
   return comps.length;
 }
 
+// ---------- empirical provider-coverage signals (per competition) ----------
+// A match_live row is written ONLY when a provider (ESPN) actually returned this
+// fixture on its scoreboard (engine.ts, sameTeams match) — so its existence is
+// GROUND TRUTH that the provider covers this competition, not a guess like the
+// static external_league mapping. Used to keep/prune football categories: a
+// category we discovered, mapped, and played through but NEVER received live data
+// for (unmapped league, or a wrong ESPN code) is proven-blind and can be dropped.
+export function competitionLiveObserved(db: Database, compId: string): boolean {
+  return !!db.prepare(
+    `SELECT 1 FROM match_live ml JOIN matches m ON ml.match_id=m.id WHERE m.competition_id=? LIMIT 1`,
+  ).get(compId);
+}
+/** Does this competition carry a bet with REAL money at stake (filled/settled)?
+ *  A merely `proposed`/`not_filled` bet never moved capital — it must NOT protect
+ *  a dead category from pruning (that's why phantom-proposal leagues like the
+ *  Chinese Super League lingered). */
+export function competitionHasRealBets(db: Database, compId: string): boolean {
+  return !!db.prepare(
+    `SELECT 1 FROM bets b JOIN matches m ON b.match_id=m.id
+      WHERE m.competition_id=? AND b.status IN ('open','settled_won','settled_lost') LIMIT 1`,
+  ).get(compId);
+}
+/** Does this competition have any live (pct>0) strategy shares? A category the
+ *  user has configured allocations for is "invested in" and never auto-pruned. */
+export function competitionHasShares(db: Database, compId: string): boolean {
+  return !!db.prepare(`SELECT 1 FROM strategy_shares WHERE competition_id=? AND pct>0 LIMIT 1`).get(compId);
+}
+/** Matches still ahead of us (pre-kickoff or in-play) — a category with any of
+ *  these might still deliver live data, so it's never pruned as "proven dead". */
+export function competitionPendingMatchCount(db: Database, compId: string): number {
+  return (db.prepare(
+    `SELECT COUNT(*) AS n FROM matches WHERE competition_id=? AND state IN ('upcoming','lineup','live')`,
+  ).get(compId) as { n: number }).n;
+}
+
 /**
  * Remove discovered (`pm-*`) categories we no longer track — a sport dropped
  * from keepSports (e.g. cricket) or a tennis series outside the allow-list
@@ -636,7 +671,13 @@ export function pruneRemovedCategories(db: Database, opts: { keepSports: Set<str
     }
     else if (c.sport_id === "football" && c.external_league == null) doomed = true; // no ESPN live coverage → not tradeable
     if (!doomed || c.budget > 0) continue;                               // funded → keep
-    const hasBet = db.prepare(`SELECT 1 FROM bets b JOIN matches m ON b.match_id=m.id WHERE m.competition_id=? LIMIT 1`).get(c.id);
+    // For football a merely `proposed`/`not_filled` bet moved NO money, so it must
+    // NOT keep a dead (unmapped) category alive — that's exactly why the Chinese
+    // Super League lingered on phantom proposals. Require REAL P&L to protect it.
+    // Other sports keep the conservative any-bet guard.
+    const hasBet = c.sport_id === "football"
+      ? competitionHasRealBets(db, c.id)
+      : db.prepare(`SELECT 1 FROM bets b JOIN matches m ON b.match_id=m.id WHERE m.competition_id=? LIMIT 1`).get(c.id);
     const hasShares = db.prepare(`SELECT 1 FROM strategy_shares WHERE competition_id=? AND pct>0 LIMIT 1`).get(c.id);
     if (hasBet || hasShares) continue;                                   // invested → keep (P&L / config)
     deleteCompetition(db, c.id);

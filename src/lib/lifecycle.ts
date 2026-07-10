@@ -17,7 +17,8 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
-import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches } from "./engine.js";
+import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries } from "./engine.js";
+import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBook, type PolymarketConfig } from "./polymarket.js";
 import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents, liquidationCents } from "./execution.js";
 import type { Bet, Market, Strategy } from "./types.js";
@@ -794,6 +795,13 @@ export async function runAutoCycle(
   // Drop categories we no longer track: untracked sports (cricket) + non-ATP
   // tennis. No-bet only, never a seeded comp. Discovery already stops importing
   // them; this clears the ones imported before the rule changed.
+  // Reconcile football categories against PROVEN provider coverage: backfill the
+  // ESPN league on any that was mis/unmapped at import, fund a covered-but-unfunded
+  // one, and delete a category we never received live data for (unmapped like the
+  // Chinese Super League, or a wrong code) that holds no real P&L and has no
+  // matches left. Runs before the generic prune so freshly-backfilled leagues keep
+  // their new mapping. (Empirical: funded ⇔ ESPN-mapped, surviving ⇔ ESPN-fed.)
+  stepSync("reconcileFootball", () => reconcileFootballCategories(db, nowFn(deps)(), espnLeagueForSeries).deleted, 0);
   stepSync("pruneCategories", () => R.pruneRemovedCategories(db, {
     keepSports: new Set(Object.keys(SPORT_LABELS)),
     tennisSeriesAllow: seriesAllowFor("tennis", deps.env) ?? new Set(),

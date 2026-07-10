@@ -522,6 +522,14 @@ const SERIES_ESPN_LEAGUE: Record<string, string> = {
 // and it still gates every enrich on a team-name match, so a loose guess here is
 // safe — worst case it finds nothing). Extend as more leagues are traded.
 const LEAGUE_NAME_ESPN: [RegExp, string][] = [
+  // UEFA club competitions — the marquee midweek cups. ORDER MATTERS: the more
+  // specific name must win, so Women's → Conference → Champions/Europa. Without
+  // these, "UEFA Champions League" fell through to null (unfunded) and "UEFA
+  // Europa League" wrongly matched the old /a-?league/ rule → aus.1.
+  [/women'?s\s*champions\s*league|uwcl/i, "uefa.wchampions"],
+  [/(europa\s*)?conference\s*league|uecl/i, "uefa.europa.conf"],
+  [/champions\s*league|\bucl\b/i, "uefa.champions"],
+  [/europa\s*league|\buel\b/i, "uefa.europa"],
   // CONMEBOL club cups — discovered from Polymarket but had no ESPN league, so a
   // live match went dark (no scores/events → no in-play management, no bets).
   [/copa\s*sudamericana|sudamericana/i, "conmebol.sudamericana"],
@@ -536,12 +544,18 @@ const LEAGUE_NAME_ESPN: [RegExp, string][] = [
   [/(swiss super|super league.*switzerland)/i, "sui.1"],
   [/(danish superliga|superligaen)/i, "den.1"],
   [/(major league soccer|\bmls\b)/i, "usa.1"],
-  [/(brasileir|s[ée]rie a.*brazil)/i, "bra.1"],
+  [/\bnwsl\b|national women'?s soccer/i, "usa.nwsl"],
+  // Brazil: Série B before Série A so "Serie B" doesn't fall into the A rule.
+  // Match either word order ("Brazil Serie B" / "Serie B Brazil") + "Brasileirão B".
+  [/((brazil|brasil).*s[ée]rie\s*b|s[ée]rie\s*b.*(brazil|brasil)|brasileir[ãa]o?\s*s[ée]rie\s*b)/i, "bra.2"],
+  [/(brasileir|(brazil|brasil).*s[ée]rie\s*a|s[ée]rie\s*a.*(brazil|brasil))/i, "bra.1"],
   [/liga mx/i, "mex.1"],
+  [/(k[\s-]?league\s*1|\bk1\s*league\b)/i, "kor.1"],
+  [/(liga 1.*romania|romania.*liga 1|superliga.*romania)/i, "rou.1"],
   [/(efl championship|\bchampionship\b)/i, "eng.2"],
   [/saudi pro league/i, "ksa.1"],
   [/j1 league/i, "jpn.1"],
-  [/a-?league/i, "aus.1"],
+  [/\ba-?league\b/i, "aus.1"],
   [/(greek super league|super league greece)/i, "gre.1"],
   [/(austrian bundesliga|bundesliga.*austria)/i, "aut.1"],
 ];

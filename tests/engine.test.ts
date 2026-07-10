@@ -639,3 +639,23 @@ test("espnLeagueForSeries: covered leagues resolve, uncovered (tennis/minor) ret
   assert.equal(espnLeagueForSeries(null, null), null);
 });
 
+test("espnLeagueForSeries: UEFA cups resolve by NAME (fixes null/aus.1 mis-map) and don't collide", async () => {
+  const { espnLeagueForSeries } = await import("../src/lib/engine.js");
+  // These arrived from Polymarket with slugs the SERIES_ESPN_LEAGUE table doesn't
+  // list, so they must resolve via name inference — previously UCL→null (unfunded)
+  // and UEL wrongly matched /a-?league/ → aus.1.
+  assert.equal(espnLeagueForSeries("UEFA Champions League 2025", "champions-league-2025"), "uefa.champions");
+  assert.equal(espnLeagueForSeries("UEFA Europa League 2025", "europa-league-2025"), "uefa.europa");
+  assert.equal(espnLeagueForSeries("UEFA Europa Conference League", "conference-league"), "uefa.europa.conf");
+  assert.equal(espnLeagueForSeries("UEFA Women's Champions League", "womens-champions-league"), "uefa.wchampions");
+  // Real A-League still resolves; "Europa League" no longer leaks into it.
+  assert.equal(espnLeagueForSeries("Australian A-League", "a-league"), "aus.1");
+  // Newly-linked leagues.
+  assert.equal(espnLeagueForSeries("NWSL", "nwsl"), "usa.nwsl");
+  assert.equal(espnLeagueForSeries("K League 1", "k-league-1"), "kor.1");
+  assert.equal(espnLeagueForSeries("Brazil Serie B", "brazil-serie-b"), "bra.2");
+  assert.equal(espnLeagueForSeries("Brazil Serie A", "brazil-serie-a"), "bra.1"); // Serie B rule doesn't swallow A
+  // Chinese Super League stays UNMAPPED by design (no ESPN live coverage).
+  assert.equal(espnLeagueForSeries("Chinese Super League", "chinese-super-league"), null);
+});
+

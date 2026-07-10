@@ -75,6 +75,56 @@ test("migrateSharesGrid: funds only ESPN-covered categories; live_xg only on WC;
   assert.equal(R.sharesForComp(db, "pm-epl").find((r) => r.strategy_id === "overreaction" && r.risk_profile_id === "lite")!.pct, 40, "manual edit preserved while profile set unchanged");
 });
 
+test("reconcileFootballCategories: backfills mapping, funds covered-unfunded, deletes proven-blind", async () => {
+  const { reconcileFootballCategories, migrateSeedStrategists } = await import("../src/lib/seed.js");
+  const { espnLeagueForSeries } = await import("../src/lib/engine.js");
+  const db = openDb(":memory:");
+  R.upsertSport(db, "football", "Футбол");
+  seedRiskProfiles(db, "t");
+  migrateSeedStrategists(db, "t"); // register the 3 strategists so the grid has pairs
+  const mkMatch = (id: string, comp: string, state: "upcoming" | "live" | "finished") => R.insertMatch(db, { id, competition_id: comp, home: "H", away: "A", state, lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+
+  // (1) UCL: mapping missing at import (external_league null), one upcoming match — must be BACKFILLED + FUNDED, never deleted.
+  R.upsertCompetition(db, { id: "pm-uefa-champions-league", sport_id: "football", name: "UEFA Champions League", budget: 0, external_league: null, created_at: "t" });
+  mkMatch("m-ucl", "pm-uefa-champions-league", "upcoming");
+  // (2) EPL: already mapped but UNFUNDED (budget 0, no shares), with an observed live match — must be FUNDED.
+  R.upsertCompetition(db, { id: "pm-epl", sport_id: "football", name: "EPL", budget: 0, external_league: "eng.1", created_at: "t" });
+  mkMatch("m-epl", "pm-epl", "finished");
+  R.upsertMatchLive(db, { match_id: "m-epl", espn_event_id: "e1", league: "eng.1", home_lineup: null, away_lineup: null, stats: null, updated_at: "t" });
+  // (3) CSL: unmapped, only a NOT-FILLED phantom bet, all matches finished, never observed → DELETED.
+  R.upsertCompetition(db, { id: "pm-chinese-super-league", sport_id: "football", name: "Chinese Super League", budget: 0, external_league: null, created_at: "t" });
+  mkMatch("m-csl", "pm-chinese-super-league", "finished");
+  R.insertBet(db, { id: "b-csl", match_id: "m-csl", strategy_id: R.listStrategies(db, "football")[0].id, market_label: "Over 2.5", status: "not_filled", proposed_price: 50, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.5, stake: 0, rationale: null, entered_minute: null, result: null, payout: null, created_at: "t" });
+  // (4) Botola: UNMAPPABLE (ESPN doesn't cover), all finished, never observed, but
+  // carries REAL P&L → KEPT (never destroy settled history), even though blind.
+  R.upsertCompetition(db, { id: "pm-morocco-botola", sport_id: "football", name: "Morocco Botola", budget: 0, external_league: null, created_at: "t" });
+  mkMatch("m-bo", "pm-morocco-botola", "finished");
+  R.insertBet(db, { id: "b-bo", match_id: "m-bo", strategy_id: R.listStrategies(db, "football")[0].id, market_label: "Over 2.5", status: "settled_won", proposed_price: 50, entry_price: 50, current_price: 60, closing_price: 55, ai_prob: 0.5, stake: 100, rationale: null, entered_minute: "3'", result: "won", payout: 120, created_at: "t" });
+
+  const r = reconcileFootballCategories(db, "t2", espnLeagueForSeries);
+
+  // UCL backfilled + funded, still present.
+  const ucl = R.listCompetitions(db).find((c) => c.id === "pm-uefa-champions-league");
+  assert.equal(ucl?.external_league, "uefa.champions", "UCL mapping backfilled");
+  assert.ok(ucl!.budget > 0, "UCL funded after backfill");
+  assert.ok(R.sharesForComp(db, "pm-uefa-champions-league").length > 0, "UCL got its share grid");
+  // EPL funded.
+  assert.ok(R.listCompetitions(db).find((c) => c.id === "pm-epl")!.budget > 0, "covered-unfunded EPL funded");
+  assert.ok(R.sharesForComp(db, "pm-epl").length > 0);
+  // CSL deleted.
+  assert.equal(R.listCompetitions(db).find((c) => c.id === "pm-chinese-super-league"), undefined, "proven-blind CSL deleted");
+  // Botola kept (real P&L) despite being unmapped + never observed.
+  assert.ok(R.listCompetitions(db).find((c) => c.id === "pm-morocco-botola"), "P&L-bearing category preserved");
+
+  assert.equal(r.backfilled, 1, "one backfill (UCL)");
+  assert.ok(r.funded >= 2, "UCL + EPL funded");
+  assert.equal(r.deleted, 1, "one deletion (CSL)");
+
+  // idempotent second run: no further changes.
+  const r2 = reconcileFootballCategories(db, "t3", espnLeagueForSeries);
+  assert.deepEqual(r2, { backfilled: 0, funded: 0, deleted: 0 }, "second run is a no-op");
+});
+
 test("migrateSharesToAggressive: every share → aggressive, live bets retagged, idempotent", () => {
   const db = openDb(":memory:");
   seedDatabase(db);
