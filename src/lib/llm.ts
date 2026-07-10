@@ -709,14 +709,21 @@ export async function strategistDecide(
       "Опционально на верхнем уровне: match_shape, current_branch (лайв), portfolio_correlation:{both_lose_on_scores,both_lose_weight,coverage_note}, rejected_markets:[{market,reason}], flagged:[{market,reason}], note/notes. " +
       "Пусто — значит воздержаться. Без текста вне JSON.",
     prompt: `СТРАТЕГИЯ «${input.strategyName}» (методология):\n${input.strategyPrompt}\n\nМАТЧ: ${input.match.home} — ${input.match.away} (${input.match.sport}, ${input.match.state}${liveMin}, счёт ${score}).\nОценка аналитики: уверенность ${input.assessment.confidence}. ${input.assessment.short} Итог: ${input.assessment.verdict}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы + статистика + события матча — твои триггеры переоценки):\n${input.context}\n` : ""}\nРЫНКИ (цена в ¢, движение от старта = направление price_move, ликвидность = глубина):\n${mkList}\n\nОТКРЫТЫЕ ПОЗИЦИИ:\n${posList}\n${!scoreKnown && input.match.state === "live" ? `\nВАЖНО: провайдер пока не отдаёт счёт/минуту по этому матчу — опирайся на ДВИЖЕНИЕ ЦЕН (price_move от старта) и ликвидность как основной сигнал, оценивай prob по ним. Не отказывайся от решения только из-за отсутствия счёта.` : ""}\nРеши по методологии: во что входить (picks) и что закрывать/фиксировать (exits, можно частично).`,
-    maxTokens: 900,
+    // The v3/v2 output schema is RICH (pre_match_positions with tree-reasoning +
+    // portfolio_correlation, or live_triggers_armed / live_entry_config). At the
+    // old 900 the JSON was truncated mid-object → "невалидный JSON" on EVERY pair
+    // → base-model fallback (the identical-bets bug). Give it room.
+    maxTokens: 3500,
   }, deps);
   if (!res.ok) return { ok: false, picks: [], exits: [], note: "", source: "none", error: res.error };
   try {
     const j = JSON.parse(extractJson(res.text));
     return { ...normalizeStrategistJson(j), ok: true, source: "llm" };
   } catch {
-    return { ok: false, picks: [], exits: [], note: "", source: "none", error: "невалидный JSON от стратега" };
+    // Capture the tail of the raw reply so the failure is diagnosable (truncation
+    // shows as a JSON that cuts off; a refusal/preamble shows as prose).
+    const tail = (res.text ?? "").slice(-160).replace(/\s+/g, " ");
+    return { ok: false, picks: [], exits: [], note: "", source: "none", error: `невалидный JSON от стратега (хвост ответа: …${tail})` };
   }
 }
 

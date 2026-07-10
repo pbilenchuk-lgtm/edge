@@ -151,6 +151,11 @@ export function sizePrematch(inp: SizeInput): SizeResult {
 
   if (!Number.isFinite(ourProb) || ourProb < 0 || ourProb > 1 || !Number.isFinite(p) || p <= 0 || p >= 1) return skip("некорректная цена/вероятность");
   if (budget <= 0) return skip("нет бюджета пары");
+  // Effectively-resolved market: a price at the rails (≤2¢ / ≥98¢) is a market the
+  // book has already settled — there is no tradeable edge there, and a big "edge"
+  // vs it is a phantom (our stale estimate vs an ~decided price, e.g. Under 1.5 at
+  // 0.2¢ on a live match that already has 2+ goals). Never enter these.
+  if (priceCents <= 2 || priceCents >= 98) return skip(`цена у планки (${priceCents}¢) — рынок фактически решён, край фантомный`);
 
   // Safeguard: an edge above absurd_edge_block is almost surely a bug (bad quote /
   // wrong market), not value — flag, do NOT trade. Skipped in live (allowLargeEdge)

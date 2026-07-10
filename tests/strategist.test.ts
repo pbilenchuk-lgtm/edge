@@ -92,6 +92,18 @@ test("sizePrematch: match-exposure cap limits the stake", () => {
   assert.ok(r.stake <= 5, `only the remaining $5 of match room can be staked, got ${r.stake}`);
 });
 
+test("sizePrematch: effectively-resolved price (≤2¢ / ≥98¢) is skipped — no phantom edge", () => {
+  // Under 1.5 at 0.2¢ on a live match that already has 2+ goals: model's stale
+  // 22% vs a ~decided 0.2¢ = a +22% phantom. Must not enter.
+  const r = sizePrematch({ ourProb: 0.22, priceCents: 0.2, implied: 0.002, calibration: 0.8, budget: 1000, cfg: MED });
+  assert.equal(r.status, "skip");
+  assert.match(r.reason, /фактически решён|планки/);
+  // and the other rail
+  assert.equal(sizePrematch({ ourProb: 0.5, priceCents: 99, implied: 0.99, calibration: 0.8, budget: 1000, cfg: MED }).status, "skip");
+  // a normal mid-book price with real edge still enters
+  assert.equal(sizePrematch({ ourProb: 0.62, priceCents: 53, implied: 0.52, calibration: 0.7, budget: 1000, cfg: MED }).status, "enter");
+});
+
 test("correlationKey: same-team 'more goals' markets share a cluster", () => {
   const home = "France", away = "Morocco";
   // France team-total Over and France negative handicap both need France's next
