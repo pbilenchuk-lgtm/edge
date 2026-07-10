@@ -491,7 +491,7 @@ export function pruneMarketSnapshots(db: Database, keepPerLabel = 8): number {
 // match. provider_snapshots is NOT here on purpose: it's long-retention research
 // data, and the prune queries below EXCLUDE any match that has snapshots, so a
 // snapshotted match is never deleted (protects the data AND avoids the FK error).
-const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "markets", "bets", "reassessments", "trade_log", "analysis_jobs", "match_live", "match_events", "market_open", "provider_match_map"];
+const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "markets", "bets", "reassessments", "trade_log", "analysis_jobs", "match_live", "match_events", "market_open", "provider_match_map", "provider_snapshots"];
 
 /**
  * Prune bloat matches to keep the DB (and every `buildAppData` scan) bounded.

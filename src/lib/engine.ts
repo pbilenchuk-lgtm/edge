@@ -871,7 +871,21 @@ export async function syncCompetitions(
         oddsLinked = await linkMatchOdds(db, match, c.sport_id, deps);
       }
       const r = await syncMatchStatus(db, s, deps);
-      out.push({ competition: c.id, match: `${s.home}–${s.away}`, created, state: r?.to ?? s.state, oddsLinked });
+      const finalState = r?.to ?? s.state;
+      // An ESPN board fixture Polymarket never listed has NO markets — untradeable.
+      // Once it's LIVE or FINISHED, Polymarket's listing window has passed (odds
+      // will never come), so it only clutters the UI as a market-less «LIVE» tile
+      // with idle funded strategies (analysis just fails «нет рынков»). Drop it —
+      // it provably holds no bets (no market to bet on). An UPCOMING market-less
+      // match is kept: Polymarket often lists odds only closer to kickoff and the
+      // retry above backfills them; discovery also re-imports a real match once it
+      // has markets. (No markets ever ⇔ latestMarkets empty — a stored link never
+      // disappears — so this can't drop a match whose odds merely failed one fetch.)
+      if ((finalState === "live" || finalState === "finished") && !R.latestMarkets(db, match.id).length) {
+        R.deleteMatchesById(db, [match.id]);
+        continue;
+      }
+      out.push({ competition: c.id, match: `${s.home}–${s.away}`, created, state: finalState, oddsLinked });
     }
   }
   return out;

@@ -6,7 +6,7 @@ import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { parseEspnEvent, parseEspnSummary, MockSportsProvider } from "../src/lib/sports.js";
 import {
-  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch, settleStaleOpenBets, settleMatch,
+  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch, settleStaleOpenBets, settleMatch, syncCompetitions,
 } from "../src/lib/engine.js";
 import { matchContext } from "../src/lib/analysis.js";
 import type { SportsMatchStatus, SportsProvider, MatchDetail } from "../src/lib/sports.js";
@@ -130,6 +130,31 @@ function mockDetailProvider(detail: MatchDetail, status: Partial<SportsMatchStat
     async matchDetail() { return detail; },
   };
 }
+
+test("syncCompetitions drops a LIVE ESPN fixture Polymarket never listed (no markets), keeps upcoming", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertCompetition(db, { id: "pm-brazil-serie-b", sport_id: "football", name: "Brazil Serie B", budget: 8000, external_league: "bra.2", created_at: "t" });
+  const prov: SportsProvider = {
+    name: "mock",
+    async scoreboard(_sport: string, league: string) {
+      if (league !== "bra.2") return [];
+      return [
+        { externalRef: "L1", home: "Sport", away: "Botafogo-SP", state: "live", minute: 11, scoreHome: 0, scoreAway: 0, final: false },
+        { externalRef: "U1", home: "Ceará", away: "Novorizontino", state: "upcoming", minute: null, scoreHome: null, scoreAway: null, final: false },
+      ] as SportsMatchStatus[];
+    },
+    async matchDetail() { return null; },
+  };
+  // linkOdds off → no market ever attaches, mirroring a fixture Polymarket doesn't list.
+  await syncCompetitions(db, prov, {}, { linkOdds: false });
+
+  const matches = R.listMatches(db, "pm-brazil-serie-b");
+  const live = matches.find((m) => m.home === "Sport");
+  const upcoming = matches.find((m) => m.home === "Ceará");
+  assert.equal(live, undefined, "market-less LIVE fixture dropped (untradeable, no Polymarket market)");
+  assert.ok(upcoming, "market-less UPCOMING fixture kept — odds may still list closer to kickoff");
+});
 
 test("enrichFromEspn stores lineups, records new events, reports triggers, and feeds matchContext", async () => {
   const db = openDb(":memory:");
