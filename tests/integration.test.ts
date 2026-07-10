@@ -216,6 +216,14 @@ test("migrateCanonicalPrompts brings stale football base + WC modifier current, 
   assert.ok(!R.analyticsPromptRow(db, "sport", "football")!.body.includes("Слой 1 · v2"), "v1 in place");
   migrateCanonicalPrompts(db);
   assert.match(R.analyticsPromptRow(db, "sport", "football")!.body, /Слой 1 · v2/, "v1 upgraded to v2");
+
+  // WC modifier is version-aware too: an older tag (v2) is re-pushed to current (v3),
+  // and the current body carries the two-knobs-one-cause guardrail.
+  R.upsertAnalyticsPrompt(db, "competition", "pm-soccer-fifwc", "# МОДИФИКАТОР ЧЕМПИОНАТА МИРА (Слой 2 · v2)\nстарое тело", null);
+  migrateCanonicalPrompts(db);
+  const wcBody = R.analyticsPromptRow(db, "competition", "pm-soccer-fifwc")!.body;
+  assert.match(wcBody, /Слой 2 · v3/, "WC modifier v2 upgraded to v3");
+  assert.match(wcBody, /ДВЕ РУЧКИ ЗА ОДНУ ПРИЧИНУ/, "guardrail against double-counting is present");
 });
 
 test("strategy versioning archives old and bumps version (§2.6, §3.5)", () => {
