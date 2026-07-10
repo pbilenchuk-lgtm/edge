@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { siblingLabel, impliedProbs, sizePrematch, probSumFlags, correlationKey } from "../src/lib/strategist.js";
+import { normalizeStrategistJson } from "../src/lib/llm.js";
 import { getProfileConfig, seedRiskProfiles, loadRiskConfig } from "../src/lib/riskConfig.js";
 import { openDb } from "../src/lib/db.js";
 
@@ -125,4 +126,62 @@ test("probSumFlags: flags a group whose raw sum drifts beyond tolerance", () => 
   // a tight book is fine
   const ok = probSumFlags([{ label: "Over 2.5", priceCents: 51 }, { label: "Under 2.5", priceCents: 50 }], MED);
   assert.equal(ok.size, 0);
+});
+
+test("normalizeStrategistJson: minimal {picks,exits,note} still parses (back-compat)", () => {
+  const d = normalizeStrategistJson({ picks: [{ label: "Over 2.5", conviction: "высокая", reason: "x", prob: 0.6 }], exits: [{ market: "BTTS No", fraction: 0.5, reason: "peak" }], note: "n" });
+  assert.equal(d.picks.length, 1);
+  assert.equal(d.picks[0].label, "Over 2.5");
+  assert.equal(d.picks[0].prob, 0.6);
+  assert.equal(d.exits[0].fraction, 0.5);
+  assert.equal(d.note, "n");
+});
+
+test("normalizeStrategistJson: v3 pre_match_positions + rich fields captured (engine still sizes from prob)", () => {
+  const d = normalizeStrategistJson({
+    match_shape: "A",
+    pre_match_positions: [{
+      market: "Under 2.5", side: "under", our_prob: 0.58, edge: 0.05, calibration: 0.7,
+      role: "anchor", lives_in_branches: ["fav_clean", "draw_0_0"], branch_weight_sum: 0.72,
+      total_check: "Over2.5:100%", phantom_check: "passed — конкретный фактор", size_pct: 5, kelly_fraction: 0.2,
+      exit: { take_price: "62¢", thesis_stop: "красная у фаворита", counter_scenario_stop: "fav_concedes" },
+    }],
+    portfolio_correlation: { both_lose_on_scores: ["3:2"], both_lose_weight: 0.11, coverage_note: "покрытие ок" },
+    rejected_markets: [{ market: "France advance", reason: "рынок прав" }],
+    notes: "value в производных",
+  });
+  const p = d.picks[0];
+  assert.equal(p.label, "Under 2.5");
+  assert.equal(p.prob, 0.58, "our_prob → prob (what the engine sizes on)");
+  assert.equal(p.role, "anchor");
+  assert.deepEqual(p.livesInBranches, ["fav_clean", "draw_0_0"]);
+  assert.equal(p.branchWeightSum, 0.72);
+  assert.equal(p.phantomCheck, "passed — конкретный фактор");
+  assert.equal(p.exitPlan?.counter_scenario_stop, "fav_concedes");
+  assert.equal(d.matchShape, "A");
+  assert.equal(d.portfolioCorrelation?.both_lose_weight, 0.11);
+  assert.equal(d.rejected?.[0].market, "France advance");
+  assert.equal(d.note, "value в производных");
+});
+
+test("normalizeStrategistJson: live actions map to picks/exits; close=1, reduce uses size_pct; trigger kept", () => {
+  const d = normalizeStrategistJson({
+    current_branch: "fav_concedes",
+    actions: [
+      { market: "Under 2.5", action: "close", reason: "counter", trigger: "counter_scenario" },
+      { market: "BTTS No", action: "reduce", size_pct: 50, reason: "peak" },
+      { market: "France -1.5", action: "add", our_prob: 0.55, reason: "add on event" },
+      { market: "Draw", action: "hold" },
+    ],
+  });
+  assert.equal(d.currentBranch, "fav_concedes");
+  assert.equal(d.exits.length, 2, "close + reduce → 2 exits, hold ignored");
+  const close = d.exits.find((e) => e.market === "Under 2.5")!;
+  assert.equal(close.fraction, 1);
+  assert.equal(close.trigger, "counter_scenario");
+  const reduce = d.exits.find((e) => e.market === "BTTS No")!;
+  assert.equal(reduce.fraction, 0.5, "size_pct 50 → fraction 0.5");
+  assert.equal(d.picks.length, 1, "action=add → a pick");
+  assert.equal(d.picks[0].label, "France -1.5");
+  assert.equal(d.picks[0].prob, 0.55);
 });

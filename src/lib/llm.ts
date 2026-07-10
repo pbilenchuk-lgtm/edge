@@ -541,9 +541,37 @@ export interface StrategistInput {
   openPositions: { market: string; entryCents: number; currentCents: number }[];
   context?: string; // real lineups + in-match events (ESPN) — the reassessment triggers
 }
-export interface StrategistPick { label: string; conviction: "низкая" | "средняя" | "высокая"; reason: string; prob?: number }
-export interface StrategistExit { market: string; reason: string; fraction: number } // fraction 0..1 of the position to close
-export interface StrategistDecision { ok: boolean; picks: StrategistPick[]; exits: StrategistExit[]; note: string; source: "llm" | "none"; error?: string }
+/** The exit plan the strategist attaches to an entry at ENTRY time (the v3
+ *  battle-sheet: how this leg should be closed). Free-text triggers the live
+ *  window then executes. Optional — a minimal pick carries none of it. */
+export interface StrategistExitPlan { take_price?: string; thesis_stop?: string; counter_scenario_stop?: string }
+export interface StrategistPick {
+  label: string; conviction: "низкая" | "средняя" | "высокая"; reason: string; prob?: number;
+  // v3 tree-reasoning metadata (optional). The ENGINE still sizes from `prob`
+  // (§9.6 invariant); these are captured for the battle sheet / display / audit,
+  // NOT used to compute stakes.
+  role?: "anchor" | "satellite";
+  livesInBranches?: string[];    // which outcome_scenarios branches this bet wins in
+  branchWeightSum?: number;      // Σ weight of those branches — "in how many outcomes it lives"
+  phantomCheck?: string;         // anti-phantom verdict for this bet
+  totalCheck?: string;           // total_note reconciliation on a borderline total
+  exitPlan?: StrategistExitPlan; // the pre-written exit plan for the live window
+}
+export interface StrategistExit {
+  market: string; reason: string; fraction: number; // fraction 0..1 of the position to close
+  trigger?: "take_price" | "thesis_stop" | "counter_scenario" | "liquidity_time_stop"; // which live trigger fired
+}
+/** Score-correlation summary the strategist reports for a portfolio (v3). */
+export interface StrategistPortfolioCorrelation { both_lose_on_scores?: string[]; both_lose_weight?: number; coverage_note?: string }
+export interface StrategistDecision {
+  ok: boolean; picks: StrategistPick[]; exits: StrategistExit[]; note: string; source: "llm" | "none"; error?: string;
+  // v3 top-level reasoning (optional, stored in the battle sheet / strategist artifact).
+  matchShape?: "A" | "B" | "C" | "mixed";
+  currentBranch?: string;        // live: which of the 6 branches the match is currently in
+  portfolioCorrelation?: StrategistPortfolioCorrelation;
+  rejected?: { market: string; reason: string }[];
+  flagged?: { market: string; reason: string }[];
+}
 
 /**
  * Apply the strategy's methodology (its prompt) to a match: which markets to
@@ -552,6 +580,78 @@ export interface StrategistDecision { ok: boolean; picks: StrategistPick[]; exit
  * market is wrong", no conflicting bets, in-match management. Returns picks;
  * the engine sizes and gates them (budget/caps/stop) in code.
  */
+/** Normalise the strategist's JSON (any of the three window schemas — picks/
+ *  pre_match_positions/actions, exits/actions) into the engine's action core
+ *  {picks, exits} plus the captured v3 reasoning. Tolerant of key aliases so a
+ *  strategy can output in its own methodology's shape. The engine still SIZES
+ *  from pick.prob (§9.6) — the rich fields are metadata for the battle sheet. */
+export function normalizeStrategistJson(j: any): Omit<StrategistDecision, "ok" | "source" | "error"> {
+  const conv = (c: unknown) => (["низкая", "средняя", "высокая"].includes(c as string) ? c : "средняя") as StrategistPick["conviction"];
+  const str = (x: unknown): string | undefined => (typeof x === "string" && x.trim() ? String(x) : undefined);
+  const arrStr = (x: unknown): string[] | undefined => (Array.isArray(x) ? x.map((v) => String(v)).filter(Boolean) : undefined);
+  const isAdd = (a: unknown) => a === "add" || a === "open_new";
+  const isClose = (a: unknown) => a === "reduce" || a === "close";
+  // ENTRY sources: explicit picks, v3 pre_match_positions, or live actions=add.
+  const rawEntries: any[] = [
+    ...(Array.isArray(j.picks) ? j.picks : []),
+    ...(Array.isArray(j.pre_match_positions) ? j.pre_match_positions : []),
+    ...(Array.isArray(j.actions) ? j.actions.filter((a: any) => a && isAdd(a.action)) : []),
+  ];
+  const picks: StrategistPick[] = rawEntries
+    .filter((p: any) => p && (typeof p.label === "string" || typeof p.market === "string"))
+    .map((p: any) => {
+      const probRaw = Number.isFinite(p.prob) ? p.prob : Number.isFinite(p.our_prob) ? p.our_prob : null;
+      const ex = p.exit && typeof p.exit === "object" ? p.exit : null;
+      const exitPlan: StrategistExitPlan | undefined = ex
+        ? { ...(str(ex.take_price) ? { take_price: str(ex.take_price) } : {}), ...(str(ex.thesis_stop) ? { thesis_stop: str(ex.thesis_stop) } : {}), ...(str(ex.counter_scenario_stop) ? { counter_scenario_stop: str(ex.counter_scenario_stop) } : {}) }
+        : undefined;
+      return {
+        label: String(p.label ?? p.market),
+        conviction: conv(p.conviction),
+        reason: String(p.reason ?? p.phantom_check ?? ""),
+        ...(probRaw != null ? { prob: clamp01(probRaw) } : {}),
+        ...(p.role === "anchor" || p.role === "satellite" ? { role: p.role } : {}),
+        ...(arrStr(p.lives_in_branches) ? { livesInBranches: arrStr(p.lives_in_branches) } : {}),
+        ...(Number.isFinite(p.branch_weight_sum) ? { branchWeightSum: Number(p.branch_weight_sum) } : {}),
+        ...(str(p.phantom_check) ? { phantomCheck: str(p.phantom_check) } : {}),
+        ...(str(p.total_check) ? { totalCheck: str(p.total_check) } : {}),
+        ...(exitPlan && Object.keys(exitPlan).length ? { exitPlan } : {}),
+      } as StrategistPick;
+    });
+  // EXIT sources: explicit exits, or live actions=reduce/close. size_pct on a
+  // reduce is treated as the fraction (0..1, or /100 if given as a percent).
+  const trig = (t: unknown): StrategistExit["trigger"] | undefined =>
+    (["take_price", "thesis_stop", "counter_scenario", "liquidity_time_stop"].includes(t as string) ? (t as StrategistExit["trigger"]) : undefined);
+  const fracOf = (e: any): number => {
+    if (typeof e.fraction === "number" && e.fraction > 0 && e.fraction <= 1) return e.fraction;
+    if (e.action === "close") return 1;
+    if (e.action === "reduce" && Number.isFinite(e.size_pct)) { const v = Number(e.size_pct); return v > 1 ? Math.min(1, v / 100) : v > 0 ? v : 0.5; }
+    return 1;
+  };
+  const rawExits: any[] = [
+    ...(Array.isArray(j.exits) ? j.exits : []),
+    ...(Array.isArray(j.actions) ? j.actions.filter((a: any) => a && isClose(a.action)) : []),
+  ];
+  const exits: StrategistExit[] = rawExits
+    .filter((e: any) => e && (typeof e.market === "string" || typeof e.position === "string"))
+    .map((e: any) => ({ market: String(e.market ?? e.position), reason: String(e.reason ?? ""), fraction: fracOf(e), ...(trig(e.trigger ?? e.trigger_hit) ? { trigger: trig(e.trigger ?? e.trigger_hit) } : {}) }));
+  // Top-level reasoning.
+  const pcRaw = j.portfolio_correlation && typeof j.portfolio_correlation === "object" ? j.portfolio_correlation : null;
+  const portfolioCorrelation: StrategistPortfolioCorrelation | undefined = pcRaw
+    ? { ...(arrStr(pcRaw.both_lose_on_scores) ? { both_lose_on_scores: arrStr(pcRaw.both_lose_on_scores) } : {}), ...(Number.isFinite(pcRaw.both_lose_weight) ? { both_lose_weight: Number(pcRaw.both_lose_weight) } : {}), ...(str(pcRaw.coverage_note) ? { coverage_note: str(pcRaw.coverage_note) } : {}) }
+    : undefined;
+  const rejMap = (x: unknown) => (Array.isArray(x) ? x.filter((r: any) => r && (r.market || r.reason)).map((r: any) => ({ market: String(r.market ?? ""), reason: String(r.reason ?? "") })) : undefined);
+  const shape = ["A", "B", "C", "mixed"].includes(j.match_shape) ? j.match_shape : undefined;
+  return {
+    picks, exits, note: String(j.note ?? j.notes ?? ""),
+    ...(shape ? { matchShape: shape } : {}),
+    ...(str(j.current_branch) ? { currentBranch: str(j.current_branch) } : {}),
+    ...(portfolioCorrelation && Object.keys(portfolioCorrelation).length ? { portfolioCorrelation } : {}),
+    ...(rejMap(j.rejected_markets ?? j.rejected)?.length ? { rejected: rejMap(j.rejected_markets ?? j.rejected) } : {}),
+    ...(rejMap(j.flagged)?.length ? { flagged: rejMap(j.flagged) } : {}),
+  };
+}
+
 export async function strategistDecide(
   input: StrategistInput, model: string, deps: Deps = {},
 ): Promise<StrategistDecision> {
@@ -578,22 +678,22 @@ export async function strategistDecide(
   const res = await callLLM({
     model,
     system:
-      "Ты — трейдер на прогнозных рынках, действующий СТРОГО по методологии из промта стратегии (это твой единственный свод правил). На основе оценки матча и цен реши ДЕЙСТВИЯ. Правила вывода: входи в рынок ТОЛЬКО если методология это разрешает и ты можешь назвать конкретную причину, почему цена неверна; не давай конфликтующих ставок на один матч; уважай стадию матча (предматч/лайв) и правила управления позицией; выход может быть ЧАСТИЧНЫМ (fraction — доля позиции 0..1, напр. 0.5 = зафиксировать половину на пике, 1 = закрыть полностью). Для КАЖДОГО пика укажи prob — свою АКТУАЛЬНУЮ вероятность (0..1), что этот рынок сыграет ДА, на ТЕКУЩИЙ момент матча (счёт/минута/события). НЕ копируй «предматч. оценку» — в лайве она устаревает (напр. при 0:2 «Over 1.5» уже ~1.0); пересчитай сам. Именно по твоему prob движок считает край и размер, поэтому оцени честно. Верни ТОЛЬКО JSON {picks:[{label, conviction:'низкая'|'средняя'|'высокая', reason, prob}], exits:[{market, fraction, reason}], note}. label/market бери ДОСЛОВНО из списков. Пусто — значит воздержаться. Без пояснений вне JSON.",
+      "Ты — трейдер на прогнозных рынках, действующий СТРОГО по методологии из промта стратегии (это твой единственный свод правил). На основе оценки матча, дерева исходов и цен реши ДЕЙСТВИЯ. " +
+      "Правила: входи в рынок ТОЛЬКО если методология это разрешает и ты можешь назвать конкретную причину, почему цена неверна; не давай конфликтующих ставок на один матч; уважай стадию (предматч/лайв); выход может быть ЧАСТИЧНЫМ (fraction 0..1: 0.5 = половина, 1 = полностью). " +
+      "Для КАЖДОГО входа укажи prob — свою АКТУАЛЬНУЮ вероятность (0..1), что рынок сыграет ДА на ТЕКУЩИЙ момент (счёт/минута/события). НЕ копируй «предматч. оценку» — в лайве она устаревает (при 0:2 «Over 1.5» ≈ 1.0); пересчитай. " +
+      "ВАЖНО ПРО РАЗМЕР: РАЗМЕР СЧИТАЕТ ДВИЖОК по твоему prob и риск-профилю (Kelly, кэпы). Твои size_pct/kelly_fraction/role — справочные, на реальную ставку НЕ влияют; честный prob — единственное, что двигает размер. " +
+      "ФОРМАТ ВЫХОДА — строгий JSON. Ключи входов и выходов могут называться как в твоей методологии, все они принимаются как синонимы: " +
+      "ВХОДЫ — picks ИЛИ pre_match_positions ИЛИ actions с action:'add'/'open_new'; поля входа: {label|market (ДОСЛОВНО из списка), prob|our_prob, conviction:'низкая'|'средняя'|'высокая'(опц.), reason, и опционально role:'anchor'|'satellite', lives_in_branches:[], branch_weight_sum, phantom_check, total_check, exit:{take_price,thesis_stop,counter_scenario_stop}}. " +
+      "ВЫХОДЫ — exits ИЛИ actions с action:'reduce'/'close'; поля выхода: {market|position (ДОСЛОВНО), fraction (или action reduce≈частично/close=1), reason, trigger:'take_price'|'thesis_stop'|'counter_scenario'|'liquidity_time_stop'(опц.)}. " +
+      "Опционально на верхнем уровне: match_shape, current_branch (лайв), portfolio_correlation:{both_lose_on_scores,both_lose_weight,coverage_note}, rejected_markets:[{market,reason}], flagged:[{market,reason}], note/notes. " +
+      "Пусто — значит воздержаться. Без текста вне JSON.",
     prompt: `СТРАТЕГИЯ «${input.strategyName}» (методология):\n${input.strategyPrompt}\n\nМАТЧ: ${input.match.home} — ${input.match.away} (${input.match.sport}, ${input.match.state}${liveMin}, счёт ${score}).\nОценка аналитики: уверенность ${input.assessment.confidence}. ${input.assessment.short} Итог: ${input.assessment.verdict}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы + статистика + события матча — твои триггеры переоценки):\n${input.context}\n` : ""}\nРЫНКИ (цена в ¢, движение от старта = направление price_move, ликвидность = глубина):\n${mkList}\n\nОТКРЫТЫЕ ПОЗИЦИИ:\n${posList}\n${!scoreKnown && input.match.state === "live" ? `\nВАЖНО: провайдер пока не отдаёт счёт/минуту по этому матчу — опирайся на ДВИЖЕНИЕ ЦЕН (price_move от старта) и ликвидность как основной сигнал, оценивай prob по ним. Не отказывайся от решения только из-за отсутствия счёта.` : ""}\nРеши по методологии: во что входить (picks) и что закрывать/фиксировать (exits, можно частично).`,
     maxTokens: 900,
   }, deps);
   if (!res.ok) return { ok: false, picks: [], exits: [], note: "", source: "none", error: res.error };
   try {
     const j = JSON.parse(extractJson(res.text));
-    const conv = (c: unknown) => (["низкая", "средняя", "высокая"].includes(c as string) ? c : "средняя") as StrategistPick["conviction"];
-    const picks: StrategistPick[] = Array.isArray(j.picks)
-      ? j.picks.filter((p: any) => p && typeof p.label === "string").map((p: any) => ({ label: String(p.label), conviction: conv(p.conviction), reason: String(p.reason ?? ""), ...(Number.isFinite(p.prob) ? { prob: clamp01(p.prob) } : {}) }))
-      : [];
-    const frac = (f: unknown) => (typeof f === "number" && f > 0 && f <= 1 ? f : 1);
-    const exits: StrategistExit[] = Array.isArray(j.exits)
-      ? j.exits.filter((e: any) => e && typeof e.market === "string").map((e: any) => ({ market: String(e.market), reason: String(e.reason ?? ""), fraction: frac(e.fraction) }))
-      : [];
-    return { ok: true, picks, exits, note: String(j.note ?? ""), source: "llm" };
+    return { ...normalizeStrategistJson(j), ok: true, source: "llm" };
   } catch {
     return { ok: false, picks: [], exits: [], note: "", source: "none", error: "невалидный JSON от стратега" };
   }

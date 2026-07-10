@@ -284,7 +284,8 @@ export async function runStrategists(
       if (psFlags.has(m.label)) { flagged++; battle.push({ market: m.label, status: "flag", reason: "prob_sum вне допуска" }); continue; }
       const cKey = correlationKey(m.label, match.home, match.away);
       const r = sizePrematch({ ourProb, priceCents: m.price, implied, calibration, liquidity: parseLiq(m.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg });
-      battle.push({ market: m.label, our_prob: round3(ourProb), implied: round3(implied), edge_pct: round3(r.edge * 100), status: r.status, stake: r.stake, kelly_fraction: round3(r.kellyFraction), reason: r.reason });
+      battle.push({ market: m.label, our_prob: round3(ourProb), implied: round3(implied), edge_pct: round3(r.edge * 100), status: r.status, stake: r.stake, kelly_fraction: round3(r.kellyFraction), reason: r.reason,
+        ...(pick?.role ? { role: pick.role } : {}), ...(pick?.livesInBranches ? { lives_in_branches: pick.livesInBranches } : {}), ...(pick?.branchWeightSum != null ? { branch_weight_sum: pick.branchWeightSum } : {}), ...(pick?.phantomCheck ? { phantom_check: pick.phantomCheck } : {}), ...(pick?.totalCheck ? { total_check: pick.totalCheck } : {}), ...(pick?.exitPlan ? { exit: pick.exitPlan } : {}) });
       if (r.status === "flag") { flagged++; continue; }
       if (r.status !== "enter") { skipped++; continue; }
       exposure += r.stake; matchExposure += r.stake; entries++;
@@ -293,7 +294,7 @@ export async function runStrategists(
         id: R.uid(), match_id: matchId, strategy_id: strat.id, risk_profile_id: profile, market_label: m.label,
         status: "proposed", proposed_price: m.price, entry_price: null, current_price: null,
         closing_price: null, ai_prob: ourProb, stake: r.stake,
-        rationale: `«${m.label}»: edge ${(r.edge * 100).toFixed(1)}% (наша ${(ourProb * 100).toFixed(0)}% vs рынок ${(implied * 100).toFixed(0)}%). ${pick?.reason || r.reason}.`,
+        rationale: `«${m.label}»: edge ${(r.edge * 100).toFixed(1)}% (наша ${(ourProb * 100).toFixed(0)}% vs рынок ${(implied * 100).toFixed(0)}%). ${pick?.reason || r.reason}.${pickTreeNote(pick)}`,
         entered_minute: null, result: null, payout: null, created_at: now(),
       });
     }
@@ -310,6 +311,18 @@ export async function runStrategists(
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 const round3 = (x: number) => Math.round(x * 1000) / 1000;
+/** Short suffix appended to a bet's rationale from the strategist's tree-reasoning
+ *  (role / how many outcome branches it lives in / anti-phantom verdict), so the
+ *  decision row and trade log show WHY the bet was chosen, not just its edge. */
+function pickTreeNote(pick: { role?: string; branchWeightSum?: number; livesInBranches?: string[]; phantomCheck?: string } | undefined): string {
+  if (!pick) return "";
+  const bits: string[] = [];
+  if (pick.role) bits.push(pick.role === "anchor" ? "якорь" : "спутник");
+  if (pick.branchWeightSum != null) bits.push(`живёт в ветках Σ${Math.round(pick.branchWeightSum * 100)}%`);
+  else if (pick.livesInBranches?.length) bits.push(`ветки: ${pick.livesInBranches.join("/")}`);
+  if (pick.phantomCheck) bits.push(`анти-фантом: ${pick.phantomCheck}`);
+  return bits.length ? ` [${bits.join(" · ")}]` : "";
+}
 /** Word confidence → a numeric band for the profile's min_calibration gate
  *  (used only for non-football, where there's no assembled xg_confidence). */
 const confBand = (c: string) => (c === "высокая" ? 0.75 : c === "низкая" ? 0.3 : 0.5);

@@ -635,7 +635,8 @@ export async function strategistReassess(
         const sell = await sellVwapCents(mk, b.entry_price, basis, poly, deps, mk.price);
         const { pnl, partial } = closeBetPortion(db, b, ex.fraction, sell.cents, minuteLabel(m), now);
         const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
-        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag}) @ ${sell.cents}¢ · стратег: ${ex.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+        const trg = ex.trigger ? ` (${ex.trigger})` : ""; // which v3 live trigger fired (take_price / counter_scenario / …)
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag})${trg} @ ${sell.cents}¢ · стратег: ${ex.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
         out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}`, pnl });
         exitedMarkets.push(`${b.market_label} (${tag})`);
         touched.add(sid);
@@ -696,7 +697,8 @@ export async function strategistReassess(
       if (exitedMarkets.length) facts.push(`вышел: ${exitedMarkets.join(", ")}`);
       if (!enteredMarkets.length && !exitedMarkets.length) facts.push(myOpen.length ? `держу ${myOpen.length} поз.` : "позиций нет, вход не сделан");
       if (unfilled.length) facts.push(`не вошёл: ${unfilled.slice(0, 3).join("; ")}`);
-      const noteBody = `${facts.join(" · ")}.${dec.note?.trim() ? " " + dec.note.trim() : ""}`;
+      const branchNote = dec.currentBranch ? ` [ветка: ${dec.currentBranch}]` : ""; // which of the 6 outcome branches the match is in now
+      const noteBody = `${facts.join(" · ")}${branchNote}.${dec.note?.trim() ? " " + dec.note.trim() : ""}`;
       R.insertReassessment(db, {
         id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m),
         body: noteBody, confidence: assess?.confidence ?? null,
