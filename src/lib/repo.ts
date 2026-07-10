@@ -634,6 +634,7 @@ export function pruneRemovedCategories(db: Database, opts: { keepSports: Set<str
       const slug = c.id.slice(3);                                        // pm-<slug>
       if (!opts.tennisSeriesAllow.has(slug)) doomed = true;             // non-ATP series
     }
+    else if (c.sport_id === "football" && c.external_league == null) doomed = true; // no ESPN live coverage → not tradeable
     if (!doomed || c.budget > 0) continue;                               // funded → keep
     const hasBet = db.prepare(`SELECT 1 FROM bets b JOIN matches m ON b.match_id=m.id WHERE m.competition_id=? LIMIT 1`).get(c.id);
     const hasShares = db.prepare(`SELECT 1 FROM strategy_shares WHERE competition_id=? AND pct>0 LIMIT 1`).get(c.id);

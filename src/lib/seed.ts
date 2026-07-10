@@ -912,27 +912,44 @@ const LIVE_XG_LEAGUES = new Set(["fifa.world"]);
 export function compHasLiveXg(c: { external_league: string | null }): boolean {
   return c.external_league != null && LIVE_XG_LEAGUES.has(c.external_league);
 }
+// A football category has usable LIVE coverage iff it's mapped to an ESPN league
+// (external_league set). ESPN is the only provider that actually delivers live
+// football state (score/minute/events) for our categories — StatPal returns empty
+// feeds for these leagues, Sportmonks is WC-plan-only. An unmapped Polymarket
+// discovery (external_league=null, e.g. Chinese Super League) has NO live data:
+// it can't be managed in-play, so we don't fund or analyze it (it would only burn
+// LLM and manufacture phantom edges vs near-resolved odds). The runtime hasLiveData
+// gate is the final safety net; this is the pre-emptive one.
+export function compHasLiveCoverage(c: { sport_id: string; external_league: string | null }): boolean {
+  if (c.sport_id !== "football") return true; // non-football gating handled elsewhere (tennis etc.)
+  return c.external_league != null;
+}
 export function migrateSharesGrid(db: Database, now: string): void {
   migrateSeedStrategists(db, now);
   const strategyIds = STRATEGIST_DEFS.map((d) => d.id);
   const profileIds = listRiskProfileViews(db).map((p) => p.id).sort();
   if (!strategyIds.length || !profileIds.length) return;
-  // Signature: bump the leading tag whenever the GRID TOPOLOGY changes (here:
-  // live_xg restricted to live-xG categories) so the grid re-lays once even if the
-  // profile set / per-pair target are unchanged.
-  const signature = `livexg-wc|${PER_PAIR_USD}|${profileIds.join(",")}`;
+  // Signature: bump the leading tag whenever the GRID TOPOLOGY changes so the grid
+  // re-lays once even if the profile set / per-pair target are unchanged. Here:
+  // fund ONLY categories with live coverage (covered-only); live_xg only on WC.
+  const signature = `covered-only|${PER_PAIR_USD}|${profileIds.join(",")}`;
   if (R.metaGet(db, GRID_MARK) === signature) return; // nothing changed → leave allocations/budget alone
   for (const c of R.listCompetitions(db)) {
     if (c.sport_id !== "football") continue;
-    // live_xg only where a live-xG feed exists; every category still gets the other
-    // two strategists. Budget/pairs adapt per category so each pair is still PER_PAIR.
+    R.clearShares(db, c.id);
+    // No ESPN live coverage (external_league=null, e.g. Chinese Super League) →
+    // can't be managed in-play → DEFUND: zero budget, no shares. It won't be
+    // analyzed (autoAnalyze skips unfunded) or traded. Self-heals as discovery
+    // maps/unmaps a league's external_league.
+    if (!compHasLiveCoverage(c)) { R.setCompetitionBudget(db, c.id, 0); continue; }
+    // live_xg only where a live-xG feed exists; every covered category gets the
+    // other two. Budget/pairs adapt per category so each pair is still PER_PAIR.
     const strats = compHasLiveXg(c) ? strategyIds : strategyIds.filter((id) => id !== "live_xg");
     const n = strats.length * profileIds.length;
     // Full-precision even split: pct=100/n with budget=n·PER_PAIR floors to EXACTLY
     // PER_PAIR per pair (money.stratBudget = floor(budget·pct/100)); display rounds it.
     const pct = 100 / n;
     R.setCompetitionBudget(db, c.id, n * PER_PAIR_USD);
-    R.clearShares(db, c.id);
     for (const sid of strats)
       for (const pid of profileIds)
         R.setShare(db, { competition_id: c.id, strategy_id: sid, risk_profile_id: pid, pct });

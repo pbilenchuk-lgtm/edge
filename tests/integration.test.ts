@@ -418,29 +418,42 @@ test("polymarket: findMatchEvent / bySlug / listSportEvents via mocked Gamma", a
   assert.equal((await listSportEvents(cfg, "football", 10, { fetchImpl: eventsFetch })).length, 1);
 });
 
-test("importPolymarketMatches: liquid match imported even w/o ESPN coverage; thin one skipped", async () => {
+test("importPolymarketMatches: football imports only ESPN-covered leagues; uncovered + thin skipped", async () => {
   const { importPolymarketMatches } = await import("../src/lib/engine.js");
   const base = loadPolymarketConfig({ POLYMARKET_ENABLED: "true" });
   const now = "2026-07-03T12:00:00Z";
-  // Generic import path: a liquid Polymarket fixture with no ESPN coverage still
-  // imports by liquidity (1234+500). Uses the football sport (the only discovered
-  // sport now); the fixture's title/series is just a vehicle for the mechanic.
+
+  // Uncovered series ("atp" → no ESPN FOOTBALL league) → NOT imported, even liquid.
+  const db0 = openDb(":memory:");
+  seedDatabase(db0);
+  const uncovered = await importPolymarketMatches(db0, "football",
+    { fetchImpl: eventsFetch, polymarket: { ...base, minLiquidity: 250 }, now: () => now });
+  assert.equal(uncovered.length, 0, "football w/o ESPN coverage is skipped (can't be live-traded)");
+
+  // A football fixture whose series maps to ESPN (EPL → eng.1) → imported.
+  const eplFixture = [{
+    id: "77", slug: "epl-arsenal-chelsea-2026-07-04",
+    title: "Premier League: Arsenal vs Chelsea", startDate: "2026-07-03T16:00:00Z",
+    series: [{ title: "Premier League", slug: "soccer-epl" }],
+    markets: [
+      { groupItemTitle: "", question: "Arsenal vs Chelsea", outcomes: '["Arsenal","Chelsea"]', outcomePrices: '["0.55","0.45"]', clobTokenIds: '["t-a","t-b"]', liquidity: "1500", conditionId: "0x1" },
+      { groupItemTitle: "Total: O/U 2.5", question: "…O/U 2.5", outcomes: '["Over 2.5","Under 2.5"]', outcomePrices: '["0.5","0.5"]', clobTokenIds: '["t-c","t-d"]', liquidity: "900", conditionId: "0x2" },
+    ],
+  }];
+  const eplFetch = (async () => ({ ok: true, json: async () => eplFixture })) as unknown as typeof fetch;
   const db = openDb(":memory:");
   seedDatabase(db);
   const items = await importPolymarketMatches(db, "football",
-    { fetchImpl: eventsFetch, polymarket: { ...base, minLiquidity: 250 }, now: () => now });
-  assert.equal(items.length, 1, "liquid uncovered match imported");
-  assert.equal(items[0].created, true);
-  const m = R.matchByExternalRef(db, "pm:football:connordoig-eudaldgonzalez");
-  assert.ok(m, "match row created under a pm-* category");
-  assert.ok(R.latestMarkets(db, m!.id).length >= 2, "settleable markets attached");
-  assert.ok(db.prepare("SELECT 1 FROM sports WHERE id='football'").get(), "sport row present (FK target)");
+    { fetchImpl: eplFetch, polymarket: { ...base, minLiquidity: 250 }, now: () => now });
+  assert.equal(items.length, 1, "covered EPL fixture imported");
+  const comp = R.listCompetitions(db).find((c) => R.listMatches(db, c.id).length > 0)!;
+  assert.equal(comp.external_league, "eng.1", "routed into the ESPN-mapped category");
 
-  // Same fixture, threshold above its liquidity → skipped entirely.
+  // Covered but sub-threshold liquidity → still skipped.
   const db2 = openDb(":memory:");
   seedDatabase(db2);
   const none = await importPolymarketMatches(db2, "football",
-    { fetchImpl: eventsFetch, polymarket: { ...base, minLiquidity: 100000 }, now: () => now });
+    { fetchImpl: eplFetch, polymarket: { ...base, minLiquidity: 100000 }, now: () => now });
   assert.equal(none.length, 0, "sub-threshold liquidity → not imported");
 });
 

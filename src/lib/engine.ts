@@ -651,6 +651,12 @@ export async function importPolymarketMatches(
     // prop "X vs Y" markets (player H2H, "to play?"), not real fixtures. They
     // fed the useless «… · прочее» catch-all. Real matches always carry a series.
     if (!d.series && !d.seriesSlug) continue;
+    // FOOTBALL: import ONLY leagues ESPN maps (live coverage). An unmapped league
+    // (e.g. Chinese Super League) has no live provider data — StatPal returns empty
+    // feeds, Sportmonks is WC-only — so it can't be managed in-play and only wastes
+    // analysis on phantom edges vs near-resolved odds. Supersedes the earlier
+    // import-by-liquidity rule FOR FOOTBALL; other sports keep their own coverage.
+    if (sport === "football" && espnLeagueForSeries(d.series, d.seriesSlug) == null) continue;
     // Route into the tournament category this match belongs to (Polymarket series).
     const compId = ensureCategoryComp(db, sport, d.series, d.seriesSlug, now);
     // Order-INSENSITIVE ref (teams sorted): Polymarket may list a fixture as

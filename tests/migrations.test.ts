@@ -38,41 +38,41 @@ test("migrateSharesAllPairs: every football category gets all 3×3 pairs, evenly
   assert.equal(R.sharesForComp(db, "pm-a").length, 0, "re-run no-ops after the marker is set");
 });
 
-test("migrateSharesGrid: live_xg only on the WC (fifa.world); other two strategists everywhere; even budget", () => {
+test("migrateSharesGrid: funds only ESPN-covered categories; live_xg only on WC; uncovered defunded", () => {
   const db = openDb(":memory:");
   R.upsertSport(db, "football", "Футбол");
-  R.upsertCompetition(db, { id: "pm-a", sport_id: "football", name: "A", budget: 1200, external_league: null, created_at: "t" });         // non-WC
+  R.upsertCompetition(db, { id: "pm-csl", sport_id: "football", name: "CSL", budget: 8000, external_league: null, created_at: "t" });        // UNCOVERED (no ESPN league)
+  R.upsertCompetition(db, { id: "pm-epl", sport_id: "football", name: "EPL", budget: 1200, external_league: "eng.1", created_at: "t" });     // covered, non-WC
   R.upsertCompetition(db, { id: "pm-soccer-fifwc", sport_id: "football", name: "ЧМ", budget: 1200, external_league: "fifa.world", created_at: "t" }); // WC
   seedRiskProfiles(db, "t"); // 3 presets
 
   migrateSharesGrid(db, "t");
-  // Non-WC: only overreaction + prematch_value → 2 × 3 = 6 pairs, no live_xg.
-  const rowsA = R.sharesForComp(db, "pm-a");
-  assert.equal(rowsA.length, 6, "non-WC: 2 strategists × 3 profiles");
-  assert.ok(!rowsA.some((r) => r.strategy_id === "live_xg"), "non-WC has NO live_xg pair (no live-xG feed)");
-  assert.deepEqual([...new Set(rowsA.map((r) => r.strategy_id))].sort(), ["overreaction", "prematch_value"]);
-  // WC: all three → 3 × 3 = 9 pairs, includes live_xg.
+  // Uncovered (external_league=null) → DEFUNDED: no shares, budget 0.
+  assert.equal(R.sharesForComp(db, "pm-csl").length, 0, "uncovered CSL gets no shares");
+  assert.equal(R.listCompetitions(db).find((c) => c.id === "pm-csl")!.budget, 0, "uncovered CSL defunded to $0");
+  // Covered non-WC: overreaction + prematch_value → 2 × 3 = 6, no live_xg.
+  const rowsEpl = R.sharesForComp(db, "pm-epl");
+  assert.equal(rowsEpl.length, 6, "covered non-WC: 2 strategists × 3 profiles");
+  assert.ok(!rowsEpl.some((r) => r.strategy_id === "live_xg"), "non-WC has NO live_xg pair");
+  // WC: all three → 3 × 3 = 9, includes live_xg.
   const rowsWc = R.sharesForComp(db, "pm-soccer-fifwc");
   assert.equal(rowsWc.length, 9, "WC: 3 strategists × 3 profiles");
   assert.ok(rowsWc.some((r) => r.strategy_id === "live_xg"), "WC keeps live_xg");
-  // Each pair still funded with exactly $1000 in BOTH topologies.
-  const compA = R.listCompetitions(db).find((c) => c.id === "pm-a")!;
-  const compWc = R.listCompetitions(db).find((c) => c.id === "pm-soccer-fifwc")!;
-  assert.equal(compA.budget, 6000, "non-WC budget = 6 pairs × $1000");
-  assert.equal(compWc.budget, 9000, "WC budget = 9 pairs × $1000");
-  assert.equal(Math.floor(compA.budget * rowsA[0].pct / 100), 1000, "non-WC pair = $1000");
-  assert.equal(Math.floor(compWc.budget * rowsWc[0].pct / 100), 1000, "WC pair = $1000");
+  // $1000/pair on the funded ones.
+  assert.equal(R.listCompetitions(db).find((c) => c.id === "pm-epl")!.budget, 6000, "EPL budget = 6 × $1000");
+  assert.equal(R.listCompetitions(db).find((c) => c.id === "pm-soccer-fifwc")!.budget, 9000, "WC budget = 9 × $1000");
 
-  // profile set change re-lays both, still WC-aware
+  // profile set change re-lays; uncovered stays empty
   R.upsertRiskProfile(db, { id: "lite", name: "Lite", content: JSON.stringify({}), sort: 9, created_at: "t" });
   migrateSharesGrid(db, "t2");
-  assert.equal(R.sharesForComp(db, "pm-a").length, 8, "non-WC: 2 × 4 profiles");
-  assert.equal(R.sharesForComp(db, "pm-soccer-fifwc").length, 12, "WC: 3 × 4 profiles");
+  assert.equal(R.sharesForComp(db, "pm-csl").length, 0, "uncovered stays defunded after re-lay");
+  assert.equal(R.sharesForComp(db, "pm-epl").length, 8, "covered non-WC: 2 × 4");
+  assert.equal(R.sharesForComp(db, "pm-soccer-fifwc").length, 12, "WC: 3 × 4");
 
   // stable profile set → a manual reallocation survives (no re-run)
-  R.setShare(db, { competition_id: "pm-a", strategy_id: "overreaction", risk_profile_id: "lite", pct: 40 });
+  R.setShare(db, { competition_id: "pm-epl", strategy_id: "overreaction", risk_profile_id: "lite", pct: 40 });
   migrateSharesGrid(db, "t3");
-  assert.equal(R.sharesForComp(db, "pm-a").find((r) => r.strategy_id === "overreaction" && r.risk_profile_id === "lite")!.pct, 40, "manual edit preserved while profile set unchanged");
+  assert.equal(R.sharesForComp(db, "pm-epl").find((r) => r.strategy_id === "overreaction" && r.risk_profile_id === "lite")!.pct, 40, "manual edit preserved while profile set unchanged");
 });
 
 test("migrateSharesToAggressive: every share → aggressive, live bets retagged, idempotent", () => {
