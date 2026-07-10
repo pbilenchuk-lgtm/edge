@@ -212,9 +212,10 @@ test("migrateOverreactionV2: brings prompts to v2 once, bumps version, idempoten
 
   migrateOverreactionV2(db);
   const s = R.getStrategy(db, "overreaction")!;
-  assert.ok(s.prompt.includes("OVERREACTION (v2)"), "prematch prompt updated to v2");
-  assert.ok((s.prompt_live ?? "").includes("OVERREACTION (v2)"), "live prompt updated to v2");
+  assert.ok(s.prompt.includes("OVERREACTION (v3)"), "prematch prompt updated to v3");
+  assert.ok((s.prompt_live ?? "").includes("OVERREACTION (v3)"), "live prompt updated to v3");
   assert.ok((s.prompt_live ?? "").includes("live_triggers_armed"), "live window reads the armed triggers");
+  assert.ok((s.prompt_live ?? "").includes("ЖЕЛЕЗНАЯ ГРАНИЦА ВХОДА"), "v3 strict entry boundary present");
   assert.equal(s.version, v0 + 1, "version bumped once");
 
   migrateOverreactionV2(db);

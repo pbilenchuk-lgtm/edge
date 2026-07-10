@@ -325,7 +325,7 @@ const PROMPT_STRATEGY = `Ты — стратег по ставкам на про
 // deploys mostly IN-PLAY; strategy 2 (pre-match value) does its work BEFORE the
 // match and only defends in live.
 // ============================================================
-export const STRAT_OVERREACTION_PREMATCH = `# [ОКНО: ПРЕДМАТЧ] СТРАТЕГ 1 — OVERREACTION (v2)
+export const STRAT_OVERREACTION_PREMATCH = `# [ОКНО: ПРЕДМАТЧ] СТРАТЕГ 1 — OVERREACTION (v3)
 
 Предматчевая часть стратега in-play overreaction. Ты работаешь ДО матча. Задача — НЕ набрать позиции, а ПОДГОТОВИТЬ выкуп в live: определить, при каких событиях и по каким целевым ценам стратег будет выкупать переоценку. Основной капитал разворачивается в live-окне.
 
@@ -372,9 +372,19 @@ distribution (с событийным деревом \`scenarios\`), котир�
 }
 \`\`\``;
 
-export const STRAT_OVERREACTION_LIVE = `# [ОКНО: LIVE] СТРАТЕГ 1 — OVERREACTION (v2)
+export const STRAT_OVERREACTION_LIVE = `# [ОКНО: LIVE] СТРАТЕГ 1 — OVERREACTION (v3)
 
 Live-часть стратега overreaction. ОСНОВНАЯ фаза — здесь разворачивается капитал. Ты исполняешь заряженные триггеры выкупа: сопоставляешь событие на поле и свежую цену с заготовкой, выкупаешь переоценку. Не строишь стратегию заново.
+
+## ЖЕЛЕЗНАЯ ГРАНИЦА ВХОДА (читать первым, нарушать нельзя)
+Вход (открытие/добор позиции) разрешён ТОЛЬКО как исполнение конкретного заряженного buyback-триггера из \`live_triggers_armed\`, у которого ОДНОВРЕМЕННО выполнены его условия: depth (глубина счёта ≤ заданной) И price (цена дошла до buyback_target) И time (в пределах окна триггера). Нет активного триггера со всеми выполненными условиями → входов НЕТ. Точка.
+
+Что это значит на практике (ЗАПРЕЩЕНО, даже если «видишь край»):
+- НЕ оцениваешь рынки на value и не входишь «because Испания дожмёт / доминирует по xG» — это моментум, не твоя ниша (это Live xG / Pre-match Value).
+- НЕ ловишь ситуативную переоценку события, для которого НЕ был заряжен триггер («рынок раздул Draw на волне гола» — воздержись, если это не твой армед-триггер).
+- \`open_new\` существует В СХЕМЕ ТОЛЬКО как техническое открытие позиции ПОД сработавший армед-триггер. \`open_new\` без привязки к активному выполненному триггеру — запрещён полностью.
+- Заметил мисценку/переоценку вне своих триггеров — это работа ДРУГОГО стратега, не твоя. Воздержись. Твой edge узкий и редкий: камбэк-выкуп после раннего гола андердога / удаления. На многих матчах ты НЕ входишь вовсе — это не простой, это отсутствие твоего сетапа, и это правильно. Пустых входов ради активности не делаешь.
+(Управление уже открытыми позициями — фиксация/стоп/добор ПО триггеру — этой границей не ограничено; она про НОВЫЕ входы.)
 
 Общие правила: предохранители первыми, кэпы всегда, стоп по тезису, строгий JSON.
 
@@ -399,10 +409,11 @@ battle_sheet (live_triggers_armed), live-состояние (счёт, врем�
 
 7. **Выходы выкупных позиций.** take_price (переоценка отыграна) → фикс. thesis_stop (андердог продолжает доминировать по качеству / забил второй) → закрытие.
 
-## ГЛАВНЫЕ УЗЛЫ
+## ГЛАВНЫЕ УЗЛЫ (входы — ТОЛЬКО эти, и только как исполнение армед-триггера)
 - ранний гол андердога (≤0:1, время есть) → выкуп фаворита (фильтр: доминирование + качество моментов).
 - удаление у фаворита рано → частичный выкуп, меньше размер.
 - фаворит забил/повёл → ФИКСАЦИЯ выкупной позиции, не вход.
+Всё, что не один из этих сработавших триггеров, — НЕ вход (см. ЖЕЛЕЗНУЮ ГРАНИЦУ). «Спорный» камбэк без выполненных depth+price+time — воздержись, а не «войду малым».
 
 ## ДИСЦИПЛИНА ВЫХОДА
 Ловишь ВОЗВРАТ, не держишь до финала. Отыгралось до справедливой цены — вышел. Не превращай выкуп в веру до конца матча. Тезис сломан (рынок был прав) — закрыл с убытком, не усредняешь.
@@ -416,7 +427,7 @@ battle_sheet (live_triggers_armed), live-состояние (счёт, врем�
   "false_signal_check": { "live_xg_home": , "live_xg_away": , "dog_shot_quality": "пустой объём|реальные моменты", "verdict": "overreaction|real_shift", "note": },
   "depth_check": "≤0:1 ок | 0:2 — малый/пропуск",
   "matched_trigger": ,
-  "actions": [ { "market": , "action": "add|reduce|close|open_new|hold", "side": , "price": , "size_pct": , "reason": , "cap_check": } ],
+  "actions": [ { "market": , "action": "add|reduce|close|open_new|hold", "side": , "price": , "size_pct": , "reason": , "cap_check": , "armed_trigger": "какой заряженный триггер исполняет этот вход + чем выполнены depth/price/time; для add/open_new ОБЯЗАТЕЛЬНО — без него это не вход overreaction" } ],
   "exit_checks": [ { "position": , "trigger_hit": , "action": } ],
   "notes": ""
 }
@@ -801,15 +812,19 @@ export function migratePrematchValueV3(db: Database): void {
   R.saveStrategyVersion(db, "prematch_value", STRAT_PMVALUE_PREMATCH, s.params, "prompts → v3 (6-branch outcome tree)");
   R.updateStrategy(db, "prematch_value", { prompt_live: STRAT_PMVALUE_LIVE });
 }
-// Same pattern for Overreaction: marker-guarded on "OVERREACTION (v2)" (present in
+// Same pattern for Overreaction: marker-guarded on "OVERREACTION (v3)" (present in
 // both window titles), so it re-applies once on an existing DB and respects edits.
-const OVERREACTION_VERSION = "OVERREACTION (v2)";
+// v3 adds the STRICT live entry boundary: new entries ONLY as execution of an armed
+// buyback trigger with depth+price+time met — no value/momentum/situational entries,
+// open_new hard-bound to a fired trigger. Keeps Overreaction's PnL measured on its
+// OWN methodology (clean cross-strategy comparison).
+const OVERREACTION_VERSION = "OVERREACTION (v3)";
 export function migrateOverreactionV2(db: Database): void {
   const s = R.getStrategy(db, "overreaction");
   if (!s) return;
   const current = s.prompt.includes(OVERREACTION_VERSION) && (s.prompt_live ?? "").includes(OVERREACTION_VERSION);
   if (current) return;
-  R.saveStrategyVersion(db, "overreaction", STRAT_OVERREACTION_PREMATCH, s.params, "prompts → v2 (armed buyback triggers, false-signal quality filter)");
+  R.saveStrategyVersion(db, "overreaction", STRAT_OVERREACTION_PREMATCH, s.params, "prompts → v3 (strict: entries only via armed buyback trigger, no non-trigger value/momentum)");
   R.updateStrategy(db, "overreaction", { prompt_live: STRAT_OVERREACTION_LIVE });
 }
 const LIVEXG_VERSION = "LIVE xG MOMENTUM (v2)";
