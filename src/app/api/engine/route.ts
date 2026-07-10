@@ -177,6 +177,19 @@ export async function POST(req: Request) {
         });
         return NextResponse.json({ ok: true });
       }
+      case "matchLog": {
+        // Full single-file match log (markdown) for offline analysis: live-data
+        // status, analysis artifacts, every strategist decision (incl. its error),
+        // battle sheets, bets, reassessments, trade log, events, provider snapshots,
+        // cron log. `match` may be a match id OR a team-name substring.
+        const q = body.match ?? body.matchId;
+        if (!q) return NextResponse.json({ ok: false, error: "нет match (id или имя команды)" }, { status: 400 });
+        const { buildMatchLog, findMatch } = await import("@/lib/matchLog");
+        const hit = findMatch(db, q);
+        if (!hit) return NextResponse.json({ ok: false, error: `матч не найден: ${q}` }, { status: 404 });
+        const md = buildMatchLog(db, hit.id);
+        return NextResponse.json({ ok: true, matchId: hit.id, markdown: md });
+      }
       default:
         return NextResponse.json({ ok: false, error: `неизвестное действие: ${body.action}` }, { status: 400 });
     }
