@@ -53,11 +53,16 @@ export function loadProvidersConfig(env: Record<string, string | undefined> = pr
   const smKey = env.SPORTMONKS_KEY ?? env.Sportmonks ?? env.SPORTMONKS ?? "";
   const tsaKey = env.THESTATSAPI_KEY ?? env.THESTATSAPI ?? "";
   const spKey = env.STATPAL_KEY ?? env.STATPAL ?? "";
+  // RETIRED: TheStatsAPI + StatPal subscriptions were cancelled — the only live
+  // football data now comes from ESPN (core SportsProvider, free) + Sportmonks
+  // (live xG on the WC plan). Force these OFF regardless of any lingering key so
+  // the collector never calls them and the UI badge never lists them. Flip back by
+  // restoring `!!tsaKey` / `!!spKey` if a paid plan is re-added.
   return {
     timeoutMs: Number(env.SNAPSHOT_TIMEOUT_MS ?? env.SPORTS_TIMEOUT_MS ?? 8000),
     sportmonks: { enabled: !!smKey, key: smKey, base: env.SPORTMONKS_BASE ?? "https://api.sportmonks.com/v3/football" },
-    thestatsapi: { enabled: !!tsaKey, key: tsaKey, base: env.THESTATSAPI_BASE ?? "https://api.thestatsapi.com" },
-    statpal: { enabled: !!spKey, key: spKey, base: env.STATPAL_BASE ?? "https://statpal.io/api/v1" },
+    thestatsapi: { enabled: false, key: tsaKey, base: env.THESTATSAPI_BASE ?? "https://api.thestatsapi.com" },
+    statpal: { enabled: false, key: spKey, base: env.STATPAL_BASE ?? "https://statpal.io/api/v1" },
   };
 }
 

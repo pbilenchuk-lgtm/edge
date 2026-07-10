@@ -1001,20 +1001,25 @@ export function reconcileFootballCategories(
       const inferred = espnLeagueForSeries(c.name, slug);
       if (inferred) { R.setCompetitionLeague(db, c.id, inferred); league = inferred; backfilled++; }
     }
+    // Never destroy a category the user has money or config in, mapped or not.
+    const invested = R.competitionHasRealBets(db, c.id) || R.competitionHasShares(db, c.id);
     if (league != null) {
       // (2) Fund a covered category that isn't funded yet.
       if (c.budget <= 0 && !R.competitionHasShares(db, c.id) && strategyIds.length && profileIds.length) {
         layFootballGrid(db, { id: c.id, external_league: league }, strategyIds, profileIds);
         funded++;
       }
-      // A mapped category that HAS delivered live data, or still has matches ahead,
-      // stays — it's a real covered league, idle or not.
-      if (R.competitionLiveObserved(db, c.id) || R.competitionPendingMatchCount(db, c.id) > 0) continue;
+      // A mapped category stays if it has delivered live data, still has matches
+      // ahead (might yet deliver), or is invested in. Otherwise it's a dead/wrong
+      // code with all matches finished and no money → drop it.
+      if (R.competitionLiveObserved(db, c.id) || R.competitionPendingMatchCount(db, c.id) > 0 || invested) continue;
+    } else if (invested) {
+      continue; // (3a) UNMAPPED but holds real P&L / shares — keep the history.
     }
-    // (3) Proven blind: never observed live, still might if matches remain → keep;
-    // else drop it unless it carries real P&L or user config (shares).
-    if (R.competitionPendingMatchCount(db, c.id) > 0) continue;
-    if (R.competitionHasRealBets(db, c.id) || R.competitionHasShares(db, c.id)) continue;
+    // (3b) DELETE. For an UNMAPPED category no provider will EVER cover it (ESPN is
+    // our only football feed now that StatPal/TheStatsAPI are retired), so pending
+    // matches don't earn it a reprieve — drop it now, upcoming fixtures and all.
+    // Chinese Super League, K-League, Australia Cup land here.
     R.setCompetitionBudget(db, c.id, 0);
     R.deleteCompetition(db, c.id);
     deleted++;
