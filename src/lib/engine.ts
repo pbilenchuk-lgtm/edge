@@ -514,6 +514,9 @@ const SERIES_ESPN_LEAGUE: Record<string, string> = {
   "soccer-seriea": "ita.1",
   "soccer-bundesliga": "ger.1",
   "soccer-ligue1": "fra.1",
+  // Exact Polymarket slugs whose NAME is too generic to infer safely:
+  "liga-1": "per.1",     // Polymarket "Liga 1" = Peruvian Liga 1 (Cusco, Sport Boys, Alianza…)
+  "romania-1": "rou.1",  // "Romania 1" = Romanian SuperLiga
 };
 // Fallback when the exact Polymarket series slug isn't in the table above:
 // infer the ESPN league code from the series NAME/slug, so a newly-listed
@@ -550,8 +553,11 @@ const LEAGUE_NAME_ESPN: [RegExp, string][] = [
   [/((brazil|brasil).*s[ée]rie\s*b|s[ée]rie\s*b.*(brazil|brasil)|brasileir[ãa]o?\s*s[ée]rie\s*b)/i, "bra.2"],
   [/(brasileir|(brazil|brasil).*s[ée]rie\s*a|s[ée]rie\s*a.*(brazil|brasil))/i, "bra.1"],
   [/liga mx/i, "mex.1"],
-  [/(k[\s-]?league\s*1|\bk1\s*league\b)/i, "kor.1"],
-  [/(liga 1.*romania|romania.*liga 1|superliga.*romania)/i, "rou.1"],
+  // Peru Liga 1 (ESPN per.1). The bare "Liga 1" slug is pinned in SERIES_ESPN_LEAGUE;
+  // this catches a name that spells the country out.
+  [/(liga 1.*per[uú]|per[uú].*liga 1|\bperu\b)/i, "per.1"],
+  // Romania SuperLiga (ESPN rou.1). Category arrives as bare "Romania 1".
+  [/\bromania\b|superliga.*romania|liga 1.*romania/i, "rou.1"],
   [/(efl championship|\bchampionship\b)/i, "eng.2"],
   [/saudi pro league/i, "ksa.1"],
   [/j1 league/i, "jpn.1"],

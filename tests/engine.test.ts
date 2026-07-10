@@ -650,12 +650,16 @@ test("espnLeagueForSeries: UEFA cups resolve by NAME (fixes null/aus.1 mis-map) 
   assert.equal(espnLeagueForSeries("UEFA Women's Champions League", "womens-champions-league"), "uefa.wchampions");
   // Real A-League still resolves; "Europa League" no longer leaks into it.
   assert.equal(espnLeagueForSeries("Australian A-League", "a-league"), "aus.1");
-  // Newly-linked leagues.
+  // Newly-linked leagues (ESPN codes verified live against the scoreboard API).
   assert.equal(espnLeagueForSeries("NWSL", "nwsl"), "usa.nwsl");
-  assert.equal(espnLeagueForSeries("K League 1", "k-league-1"), "kor.1");
   assert.equal(espnLeagueForSeries("Brazil Serie B", "brazil-serie-b"), "bra.2");
   assert.equal(espnLeagueForSeries("Brazil Serie A", "brazil-serie-a"), "bra.1"); // Serie B rule doesn't swallow A
-  // Chinese Super League stays UNMAPPED by design (no ESPN live coverage).
+  assert.equal(espnLeagueForSeries("Liga 1", "liga-1"), "per.1");     // Polymarket "Liga 1" = Peru (pinned by slug)
+  assert.equal(espnLeagueForSeries("Romania 1", "romania-1"), "rou.1");
+  // NOT on ESPN (scoreboard returns no league object) → stay UNMAPPED, so discovery
+  // skips them and they're never funded: K-League, Australia Cup, Chinese Super League.
+  assert.equal(espnLeagueForSeries("K-league", "k-league"), null);
+  assert.equal(espnLeagueForSeries("Australia Cup", "soccer-auc"), null);
   assert.equal(espnLeagueForSeries("Chinese Super League", "chinese-super-league"), null);
 });
 
