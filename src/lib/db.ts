@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2 } from "./seed.js";
+import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2 } from "./seed.js";
 import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
 
@@ -84,6 +84,10 @@ export function getDb(path = dbPath()): Database {
   // Bring the Overreaction strategist prompts to v2 (armed buyback triggers +
   // false-signal shot-quality filter). Marker-guarded, respects user edits.
   try { migrateOverreactionV2(db); }
+  catch { /* non-fatal */ }
+  // Bring the Live xG Momentum prompts to v2 (match_shape-tuned entry threshold,
+  // pressure-sustainability filter, counterattack stop). Marker-guarded.
+  try { migrateLiveXgV2(db); }
   catch { /* non-fatal */ }
   // One-time: move every (category × strategy) allocation onto the AGGRESSIVE
   // profile (and retag live bets). Marker-guarded, so it runs once and respects

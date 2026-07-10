@@ -234,9 +234,9 @@ export async function runStrategists(
 
   let betsCreated = 0;
   const decisions: AnalyzeResult["decisions"] = [];
-  // Strategist context = match facts (lineups/events) + the outcome tree the
-  // strategist reasons over. Same for every pair, so build it once.
-  const stratCtx = [ctx, distributionContext(db, matchId)].filter(Boolean).join("\n\n") || undefined;
+  // Strategist context = match facts + the outcome tree / match_shape / scenarios
+  // the strategist reasons over. Same for every pair, so build it once.
+  const stratCtx = strategistContext(db, matchId);
   for (const { strat, profile, pct } of pairs) {
     const budget = stratBudget(comp!.budget, pct);
     const pairLabel = `${strat.name} · ${profile}`;
@@ -298,12 +298,15 @@ export async function runStrategists(
         entered_minute: null, result: null, payout: null, created_at: now(),
       });
     }
-    try { R.saveArtifact(db, { match_id: matchId, kind: "battle_sheet", label: pairLabel, stage, content: JSON.stringify({ pair: pairLabel, profile, budget, calibration, positions: battle, flagged, ...(dec.ok && dec.liveTriggersArmed ? { live_triggers_armed: dec.liveTriggersArmed } : {}), strategist_plan: dec.ok ? dec : { ok: false } }, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
+    try { R.saveArtifact(db, { match_id: matchId, kind: "battle_sheet", label: pairLabel, stage, content: JSON.stringify({ pair: pairLabel, profile, budget, calibration, positions: battle, flagged, ...(dec.ok && dec.liveTriggersArmed ? { live_triggers_armed: dec.liveTriggersArmed } : {}), ...(dec.ok && dec.liveEntryConfig ? { live_entry_config: dec.liveEntryConfig } : {}), strategist_plan: dec.ok ? dec : { ok: false } }, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
+    // Overreaction and Live xG open nothing pre-match by design — they ARM the
+    // live window (buyback triggers / xG-entry config). Log THAT, not a misleading
+    // "edge insufficient".
     const armedN = dec.ok && Array.isArray(dec.liveTriggersArmed) ? dec.liveTriggersArmed.length : 0;
-    if (entries === 0 && armedN > 0) {
-      // Overreaction by design opens nothing pre-match — it ARMS live buyback
-      // triggers. Log that, not a misleading "edge insufficient".
-      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `предматч-входов нет — заряжено ${armedN} триггер(ов) выкупа на live`, created_at: now() });
+    const armedConfig = dec.ok && !!dec.liveEntryConfig;
+    if (entries === 0 && (armedN > 0 || armedConfig)) {
+      const what = armedN > 0 ? `заряжено ${armedN} триггер(ов) выкупа на live` : "настроен порог live-xG входа";
+      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `предматч-входов нет — ${what}`, created_at: now() });
     } else if (entries === 0 && (skipped + flagged) > 0) {
       const why = flagged > 0 && skipped === 0 ? `флаги предохранителей (${flagged})` : `край недостаточен (${skipped} ниже порога)`;
       R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — ${why}`, created_at: now() });
@@ -420,6 +423,14 @@ export function distributionContext(db: Database, matchId: string): string | und
     lines.push("Событийные сценарии (scenarios): " + scen.map((s: any) => `• ${s.trigger}${Number.isFinite(s.prob) ? ` (P≈${Math.round(s.prob * 100)}%)` : ""}${s.note ? ` — ${s.note}` : ""}`).join("; "));
   }
   return lines.join("\n");
+}
+/** The context handed to EVERY strategist (all three windows): the match facts
+ *  (lineups/stats/live-xG/events) plus the outcome tree + match_shape + event
+ *  scenarios. Single source of truth for the wiring, so a strategy prompt can
+ *  never reference data the engine forgot to pass (see the invariant test). The
+ *  live loop appends the pair's battle sheet on top of this. */
+export function strategistContext(db: Database, matchId: string): string | undefined {
+  return [matchContext(db, matchId), distributionContext(db, matchId)].filter(Boolean).join("\n\n") || undefined;
 }
 const tokenSet = (s: string) => new Set(norm(s).split(" ").filter(Boolean));
 // Numbers a label carries (e.g. "over 2.5 goals" → "2.5"). Two labels can only

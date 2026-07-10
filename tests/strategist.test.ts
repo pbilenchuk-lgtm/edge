@@ -176,6 +176,17 @@ test("normalizeStrategistJson: overreaction prematch arms live_triggers (passed 
   assert.equal((d.liveTriggersArmed as any[])[0].buyback_target, "38¢");
 });
 
+test("normalizeStrategistJson: live_xg prematch arms live_entry_config (passed through, no picks)", () => {
+  const d = normalizeStrategistJson({
+    strategist: "live_xg", phase: "prematch", active: true, match_shape_used: "A",
+    pre_match_positions: [],
+    live_entry_config: { xg_gap_threshold: 1.1, min_pressure_duration_min: 20, target_markets: ["France Over 1.5"], context_note: "shape A — порог ниже" },
+    notes: "порог настроен под A",
+  });
+  assert.equal(d.picks.length, 0, "prematch live_xg opens no positions");
+  assert.ok(d.liveEntryConfig && (d.liveEntryConfig as any).xg_gap_threshold === 1.1, "live_entry_config captured");
+});
+
 test("normalizeStrategistJson: live actions map to picks/exits; close=1, reduce uses size_pct; trigger kept", () => {
   const d = normalizeStrategistJson({
     current_branch: "fav_concedes",

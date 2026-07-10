@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
-import { seedDatabase, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migrateSeedStrategists, migratePrematchValueV3, migrateOverreactionV2 } from "../src/lib/seed.js";
+import { seedDatabase, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migrateSeedStrategists, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2 } from "../src/lib/seed.js";
 import { assembleFootball } from "../src/lib/assembler.js";
-import { distributionContext } from "../src/lib/analysis.js";
+import { distributionContext, strategistContext } from "../src/lib/analysis.js";
 import { seedRiskProfiles } from "../src/lib/riskConfig.js";
 import { loadPolymarketConfig } from "../src/lib/polymarket.js";
 import * as R from "../src/lib/repo.js";
@@ -132,6 +132,59 @@ test("migrateOverreactionV2: brings prompts to v2 once, bumps version, idempoten
 
   migrateOverreactionV2(db);
   assert.equal(R.getStrategy(db, "overreaction")!.version, v0 + 1, "idempotent: no re-bump");
+});
+
+test("migrateLiveXgV2: brings prompts to v2 once, bumps version, idempotent", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  migrateSeedStrategists(db, "2026-01-01T00:00:00Z");
+  R.updateStrategy(db, "live_xg", { prompt: "СТАРЫЙ live_xg", prompt_live: "СТАРЫЙ live" });
+  const v0 = R.getStrategy(db, "live_xg")!.version;
+
+  migrateLiveXgV2(db);
+  const s = R.getStrategy(db, "live_xg")!;
+  assert.ok(s.prompt.includes("LIVE xG MOMENTUM (v2)"), "prematch prompt updated to v2");
+  assert.ok((s.prompt_live ?? "").includes("LIVE xG MOMENTUM (v2)"), "live prompt updated to v2");
+  assert.ok(s.prompt.includes("match_shape"), "prematch threshold keys off match_shape");
+  assert.equal(s.version, v0 + 1, "version bumped once");
+
+  migrateLiveXgV2(db);
+  assert.equal(R.getStrategy(db, "live_xg")!.version, v0 + 1, "idempotent: no re-bump");
+});
+
+// The invariant that closes the whole class of "prompt references data the engine
+// never passes" bugs: for each strategist, every data key its v-latest prompt
+// references must appear in the context the engine actually assembles.
+test("INVARIANT: each strategist's context carries the data its prompt references", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  migrateSeedStrategists(db, "2026-01-01T00:00:00Z");
+  migratePrematchValueV3(db); migrateOverreactionV2(db); migrateLiveXgV2(db);
+
+  // A live football match: lineups (matchContext), a live-xG snapshot (the stream
+  // Live xG needs), and a distribution artifact (the tree + match_shape + scenarios).
+  const comp = R.listCompetitions(db)[0]!;
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "France", away: "Morocco", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: null, league: null, home_lineup: JSON.stringify({ team: "France", formation: "4-3-3", starters: ["Maignan", "Koundé"] }), away_lineup: JSON.stringify({ team: "Morocco", formation: "4-1-4-1", starters: ["Bounou"] }), stats: null, updated_at: "t" });
+  R.insertProviderSnapshot(db, { match_id: mid, batch_at: "2026-01-01T00:05:00Z", provider: "sportmonks", phase: "live", ok: true, http_status: 200, provider_ref: "x", minute: 30, latency_ms: 100, extracted: { xg: { present: true, home: 1.2, away: 0.3 } }, raw: null });
+  const base = { ok: true, matchType: "knockout" as const, matchTypeReason: "", core: { xg_home: 1.75, xg_away: 1.05, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0.03 }, overrides: [], drivers: [], scenarios: [{ trigger: "ранний гол андердога", prob: 0.25, shifts: null, note: "рынок переоценит" }], calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 0, notes: "" }, unknowns: [] };
+  R.saveArtifact(db, { match_id: mid, kind: "distribution", stage: "post_lineup", content: JSON.stringify(assembleFootball(base, null)), model: "x", created_at: "2026-01-01T00:00:00Z" });
+
+  const ctx = strategistContext(db, mid)!;
+  // Live xG (prematch threshold) + Pre-match Value both key off match_shape.
+  assert.match(ctx, /match_shape/, "context carries match_shape (Live xG threshold, Pre-match Value)");
+  // Pre-match Value reasons over the 6-branch tree.
+  assert.match(ctx, /outcome_scenarios/, "context carries the outcome tree (Pre-match Value)");
+  // Overreaction + Pre-match Value read the event scenarios.
+  assert.match(ctx, /scenarios/, "context carries the event scenarios (Overreaction, Pre-match Value)");
+  // Live xG Momentum needs the live-xG stream itself.
+  assert.match(ctx, /Live xG/, "context carries the live-xG stream (Live xG Momentum)");
+
+  // Battle-sheet-carried arming: the live windows read these from the battle sheet.
+  const bs = (extra: object) => JSON.stringify({ pair: "p", positions: [], ...extra });
+  assert.match(bs({ live_triggers_armed: [{ scenario_trigger: "гол андердога" }] }), /live_triggers_armed/, "overreaction arming survives into the battle sheet");
+  assert.match(bs({ live_entry_config: { xg_gap_threshold: 1.2 } }), /live_entry_config/, "live_xg config survives into the battle sheet");
 });
 
 test("distributionContext: formats the 6-branch tree + scenarios for the strategist", () => {
