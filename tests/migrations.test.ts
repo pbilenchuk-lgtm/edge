@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
-import { seedDatabase, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migrateSeedStrategists, migratePrematchValueV3 } from "../src/lib/seed.js";
+import { seedDatabase, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migrateSeedStrategists, migratePrematchValueV3, migrateOverreactionV2 } from "../src/lib/seed.js";
 import { assembleFootball } from "../src/lib/assembler.js";
 import { distributionContext } from "../src/lib/analysis.js";
 import { seedRiskProfiles } from "../src/lib/riskConfig.js";
@@ -114,6 +114,24 @@ test("migratePrematchValueV3: brings prompts to v3 once, bumps version, idempote
 
   migratePrematchValueV3(db); // marker present now → no-op
   assert.equal(R.getStrategy(db, "prematch_value")!.version, v0 + 1, "idempotent: no re-bump on re-run");
+});
+
+test("migrateOverreactionV2: brings prompts to v2 once, bumps version, idempotent", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  migrateSeedStrategists(db, "2026-01-01T00:00:00Z");
+  R.updateStrategy(db, "overreaction", { prompt: "СТАРЫЙ overreaction", prompt_live: "СТАРЫЙ live" });
+  const v0 = R.getStrategy(db, "overreaction")!.version;
+
+  migrateOverreactionV2(db);
+  const s = R.getStrategy(db, "overreaction")!;
+  assert.ok(s.prompt.includes("OVERREACTION (v2)"), "prematch prompt updated to v2");
+  assert.ok((s.prompt_live ?? "").includes("OVERREACTION (v2)"), "live prompt updated to v2");
+  assert.ok((s.prompt_live ?? "").includes("live_triggers_armed"), "live window reads the armed triggers");
+  assert.equal(s.version, v0 + 1, "version bumped once");
+
+  migrateOverreactionV2(db);
+  assert.equal(R.getStrategy(db, "overreaction")!.version, v0 + 1, "idempotent: no re-bump");
 });
 
 test("distributionContext: formats the 6-branch tree + scenarios for the strategist", () => {

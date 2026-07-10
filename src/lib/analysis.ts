@@ -298,8 +298,13 @@ export async function runStrategists(
         entered_minute: null, result: null, payout: null, created_at: now(),
       });
     }
-    try { R.saveArtifact(db, { match_id: matchId, kind: "battle_sheet", label: pairLabel, stage, content: JSON.stringify({ pair: pairLabel, profile, budget, calibration, positions: battle, flagged, strategist_plan: dec.ok ? dec : { ok: false } }, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
-    if (entries === 0 && (skipped + flagged) > 0) {
+    try { R.saveArtifact(db, { match_id: matchId, kind: "battle_sheet", label: pairLabel, stage, content: JSON.stringify({ pair: pairLabel, profile, budget, calibration, positions: battle, flagged, ...(dec.ok && dec.liveTriggersArmed ? { live_triggers_armed: dec.liveTriggersArmed } : {}), strategist_plan: dec.ok ? dec : { ok: false } }, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
+    const armedN = dec.ok && Array.isArray(dec.liveTriggersArmed) ? dec.liveTriggersArmed.length : 0;
+    if (entries === 0 && armedN > 0) {
+      // Overreaction by design opens nothing pre-match — it ARMS live buyback
+      // triggers. Log that, not a misleading "edge insufficient".
+      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `предматч-входов нет — заряжено ${armedN} триггер(ов) выкупа на live`, created_at: now() });
+    } else if (entries === 0 && (skipped + flagged) > 0) {
       const why = flagged > 0 && skipped === 0 ? `флаги предохранителей (${flagged})` : `край недостаточен (${skipped} ниже порога)`;
       R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — ${why}`, created_at: now() });
     }

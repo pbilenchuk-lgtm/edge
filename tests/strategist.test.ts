@@ -164,6 +164,18 @@ test("normalizeStrategistJson: v3 pre_match_positions + rich fields captured (en
   assert.equal(d.note, "value в производных");
 });
 
+test("normalizeStrategistJson: overreaction prematch arms live_triggers (passed through, no picks)", () => {
+  const d = normalizeStrategistJson({
+    strategist: "overreaction", phase: "prematch",
+    pre_match_positions: [],
+    live_triggers_armed: [{ scenario_trigger: "ранний гол андердога", buyback_target: "38¢", depth_condition: "≤0:1", price_trigger: "≤40¢", size: "small", false_signal_filter: "live-xG качество", linked_node: "early_dog_goal" }],
+    notes: "ждём панику на раннем голе",
+  });
+  assert.equal(d.picks.length, 0, "prematch overreaction opens no positions");
+  assert.ok(Array.isArray(d.liveTriggersArmed) && d.liveTriggersArmed.length === 1, "armed triggers captured");
+  assert.equal((d.liveTriggersArmed as any[])[0].buyback_target, "38¢");
+});
+
 test("normalizeStrategistJson: live actions map to picks/exits; close=1, reduce uses size_pct; trigger kept", () => {
   const d = normalizeStrategistJson({
     current_branch: "fav_concedes",

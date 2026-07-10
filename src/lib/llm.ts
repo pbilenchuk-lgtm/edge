@@ -571,6 +571,10 @@ export interface StrategistDecision {
   portfolioCorrelation?: StrategistPortfolioCorrelation;
   rejected?: { market: string; reason: string }[];
   flagged?: { market: string; reason: string }[];
+  /** Overreaction prematch: the buyback triggers armed for the live window (scenario
+   *  trigger + target price + false-signal filter). Passed through verbatim — the
+   *  live strategist reads them from the battle sheet to execute the buyback. */
+  liveTriggersArmed?: unknown[];
 }
 
 /**
@@ -649,6 +653,7 @@ export function normalizeStrategistJson(j: any): Omit<StrategistDecision, "ok" |
     ...(portfolioCorrelation && Object.keys(portfolioCorrelation).length ? { portfolioCorrelation } : {}),
     ...(rejMap(j.rejected_markets ?? j.rejected)?.length ? { rejected: rejMap(j.rejected_markets ?? j.rejected) } : {}),
     ...(rejMap(j.flagged)?.length ? { flagged: rejMap(j.flagged) } : {}),
+    ...(Array.isArray(j.live_triggers_armed) && j.live_triggers_armed.length ? { liveTriggersArmed: j.live_triggers_armed } : {}),
   };
 }
 
