@@ -107,8 +107,8 @@ test("migratePrematchValueV3: brings prompts to v3 once, bumps version, idempote
 
   migratePrematchValueV3(db);
   const s = R.getStrategy(db, "prematch_value")!;
-  assert.ok(s.prompt.includes("v3 · 6-branch"), "prematch prompt updated to v3");
-  assert.ok((s.prompt_live ?? "").includes("v3 · 6-branch"), "live prompt updated to v3");
+  assert.ok(s.prompt.includes("v3.1 · 6-branch"), "prematch prompt updated to v3");
+  assert.ok((s.prompt_live ?? "").includes("v3.1 · 6-branch"), "live prompt updated to v3");
   assert.ok(s.prompt.includes("outcome_scenarios"), "v3 references the 6-branch tree");
   assert.equal(s.version, v0 + 1, "version bumped once (prior archived)");
 

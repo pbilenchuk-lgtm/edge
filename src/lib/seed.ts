@@ -372,7 +372,7 @@ battle_sheet (с live_triggers_armed из предматч-окна), live-со�
 ## ВЫХОД (actions)
 Строгий JSON: { "strategist": "overreaction", "phase": "live", "timestamp_context": , "safeguard_status": {...}, "false_signal_check": { "live_xg_home": , "live_xg_away": , "verdict": "overreaction|real_shift", "note": }, "matched_trigger": , "actions": [ { "market": , "action": "add|reduce|close|open_new|hold", "side": , "price": , "size_pct": , "reason": , "cap_check": } ], "exit_checks": [...], "notes": }`;
 
-export const STRAT_PMVALUE_PREMATCH = `# [ОКНО: ПРЕДМАТЧ] СТРАТЕГ 2 — PRE-MATCH VALUE (v3 · 6-branch)
+export const STRAT_PMVALUE_PREMATCH = `# [ОКНО: ПРЕДМАТЧ] СТРАТЕГ 2 — PRE-MATCH VALUE (v3.1 · 6-branch)
 
 Предматчевая часть стратега pre-match value. Основная фаза. Ты входишь до матча на расхождении оценки с очищенной ценой. Ты НЕ считаешь edge механически — ты РАССУЖДАЕШЬ ПО ДЕРЕВУ ИСХОДОВ (6 MECE-веток) как аналитик: смотришь, в каких ветвях живёт каждая ставка, строишь портфель. Live — только защита.
 
@@ -417,8 +417,9 @@ distribution, котировки, risk_config. В distribution:
 - Назови КОНКРЕТНУЮ причину, почему рынок неправ. Прогони через анти-фантом. Нет причины → выкинь.
 
 ### Шаг 4. Портфель ЯКОРЬ + СПУТНИК
-- ЯКОРЬ: лучший edge + высокий вес в дереве + высокая calibration. Больший размер.
-- СПУТНИК: в ТУ ЖЕ сторону тезиса, меньший размер.
+Роль — ОПИСАНИЕ, а не рычаг размера: размер считает движок по edge/калибровке/весу веток (§9.6), роль ему не множитель. НЕ назначай размер «за роль».
+- ЯКОРЬ: лучший edge + высокий вес в дереве + высокая calibration — движок САМ даст больший размер. Он крупнее ПОТОМУ ЧТО эти три выше, а не потому что «якорь».
+- СПУТНИК: в ТУ ЖЕ сторону тезиса; обычно меньше — потому что ниже edge/вес/калибровка. При истинном равенстве всех трёх размеры равны — это норма, не ошибка.
 - ПРОВЕРКА КОРРЕЛЯЦИИ ПО СЧЁТАМ (обязательна): по \`score_cluster\` веток выпиши, в каких счётах якорь и спутник падают ВМЕСТЕ. Идеал — взаимное покрытие (одна нога спасает при 1:1, другая при 2:0). Падение ОБЕИХ — на маловероятные счёта (суммарный вес их веток < ~15–20%).
 - Пример правильной связки: якорь Under 2.5 (живёт в fav_clean+draw_0_0+draw_scoring[1:1]+dog_clean) + спутник BTTS No (fav_clean+draw_0_0+dog_clean). При 1:1 Under спасает, при 2:0 обе живут. Падают вместе только на результативных концедах — проверь их суммарный вес.
 - НЕ маскируй ставку ПРОТИВ тезиса под «хедж».
@@ -460,7 +461,7 @@ distribution, котировки, risk_config. В distribution:
 
 Честно: тонкий/фантомный edge → «пропуск». Не создавай иллюзию предсказательной силы. На фаворитских ликвидных матчах чаще всего верный ответ — малый портфель в производных или полный пропуск.`;
 
-export const STRAT_PMVALUE_LIVE = `# [ОКНО: LIVE] СТРАТЕГ 2 — PRE-MATCH VALUE (v3 · 6-branch · защитная фаза)
+export const STRAT_PMVALUE_LIVE = `# [ОКНО: LIVE] СТРАТЕГ 2 — PRE-MATCH VALUE (v3.1 · 6-branch · защитная фаза)
 
 Live-часть pre-match value. Live — НЕ источник альфы, а ЗАЩИТА открытых пред-матч позиций. Новых входов не ищешь (выкуп переоценки и xG-моментум — другие стратеги). Ведёшь открытое по ТОМУ ЖЕ дереву, по которому строился портфель. Не изобретаешь стратегию — исполняешь прописанные выходы.
 
@@ -693,10 +694,11 @@ const STRATEGIST_DEFS: Array<Pick<Parameters<typeof R.insertStrategy>[1], "id" |
 ];
 // Bring the Pre-match Value strategist's prompts current on an existing DB (the
 // migrateSeedStrategists insert only fires on a brand-new roster). Marker-guarded
-// on the "v3 · 6-branch" version tag in BOTH windows, so it runs once and never
-// re-clobbers a later user edit that keeps the tag. Archives the prior prompt via
-// the version bump, so the change is reversible.
-const PMVALUE_VERSION = "v3 · 6-branch";
+// on the PMVALUE_VERSION tag in BOTH windows, so it runs once per version and
+// never re-clobbers a later user edit that keeps the tag. Bumping the tag (e.g.
+// v3 → v3.1) re-applies once on the next boot. Archives the prior prompt via the
+// version bump, so the change is reversible.
+const PMVALUE_VERSION = "v3.1 · 6-branch";
 export function migratePrematchValueV3(db: Database): void {
   const s = R.getStrategy(db, "prematch_value");
   if (!s) return;
