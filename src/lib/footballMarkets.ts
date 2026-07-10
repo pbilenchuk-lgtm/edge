@@ -38,6 +38,21 @@ export function footballLabelProb(rawLabel: string, home: string, away: string, 
   // explicit side words appended by the market-side expansion ("— No", "— Under")
   const isNo = /\b(no|under)\b/.test(s) && !/\byes\b/.test(s);
 
+  // 0) CONSERVATIVE SEMANTIC GUARD (before any greedy keyword rule).
+  // The rules below match on a single keyword ("over", a team name, "draw") and
+  // ignore the rest of the label — so a market whose SUBJECT or MOMENT we don't
+  // derive would silently get a goals/moneyline probability by coincidence of
+  // wording. Return null for those instead: no ai_prob is correct, a fabricated
+  // one is not (and it would be traded on). Draw is a genuine 1X2 tie and stays
+  // handled below; this catches the siblings of that same string-matching class.
+  // (a) Subjects we never derive (non-goal totals, scorer/specials).
+  if (/\b(corners?|cards?|bookings?|yellow|red card|offsides?|fouls?|throw|tackles?|saves?|possession|clean sheet|to score first|first (goal|scorer|team to score)|last goal|anytime|scorer|score in both halves|either half|highest scoring)\b/.test(s)) return null;
+  // (b) TEAM + HALF total ("Spain 2nd Half O/U 1.5"): we derive match halves
+  // (totals_1h/2h) and full-match team totals (totals_home/away) but NOT a team's
+  // per-half total — so it must not collapse into the match-half or full-team cell.
+  const isHalf = /\b(1st half|first half|1h|2nd half|second half|2h)\b/.test(s);
+  if (isHalf && /\b(over|under)\b/.test(s) && (mentions(s, home) || mentions(s, away))) return null;
+
   // 1) TOTALS — "over/under X.5" (optionally team- or half-scoped)
   const tot = s.match(/\b(over|under)\s+(\d+(?:\.\d+)?)\b/);
   if (tot) {

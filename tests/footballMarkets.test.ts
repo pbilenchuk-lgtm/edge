@@ -51,3 +51,24 @@ test("footballLabelProb: unmapped market → null", () => {
   eq(P("Corners Over 9.5"), null);   // 9.5 isn't a derived total line
   eq(P("Red Card in Match"), null);
 });
+
+test("footballLabelProb: conservative guard — unmodeled subject/moment → null, not a coincidental prob", () => {
+  // Non-goal totals: the line (2.5) IS a derived goals line, so WITHOUT the guard
+  // these would wrongly get the goals-total probability by keyword coincidence.
+  eq(P("Corners Over 2.5"), null);
+  eq(P("Brazil Cards Over 2.5"), null);
+  eq(P("Total Bookings Under 3.5"), null);
+  // Scorer/specials: mentions a team, so without the guard "to score first" would
+  // collapse into the full-match win prob (outcome_90.home).
+  eq(P("Brazil to Score First"), null);
+  eq(P("Brazil Clean Sheet"), null);
+  eq(P("Anytime Goalscorer: Haaland"), null);
+  // TEAM + HALF total: we derive match halves and full-match team totals, but not a
+  // team's per-half total — so it must be null, not the match-half or team number.
+  eq(P("Brazil 2nd Half Over 1.5"), null);
+  eq(P("Norway 1st Half Over 0.5"), null);
+  // But the pieces we DO derive still resolve (guard doesn't over-reach):
+  eq(P("1st Half Over 1.5"), d.totals_1h["1.5"]);   // match half — no team
+  eq(P("Brazil Over 1.5"), d.totals_home["1.5"]);   // full-match team total
+  eq(P("Draw"), d.outcome_90.draw);                 // genuine 1X2 tie unaffected
+});
