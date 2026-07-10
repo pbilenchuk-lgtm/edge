@@ -17,6 +17,8 @@
     "sports:probe": "node --import tsx scripts/sports-probe.ts",
     "sm:probe": "node --import tsx scripts/probe-sportmonks.ts",
     "tsa:probe": "node --import tsx scripts/probe-thestatsapi.ts",
+    "coverage:report": "node --import tsx scripts/coverage-report.ts",
+    "statpal:probe": "node --import tsx scripts/statpal-coverage.ts",
     "reassess:probe": "node --experimental-sqlite --import tsx scripts/reassess-probe.ts",
     "simulate": "node --experimental-sqlite --import tsx scripts/simulate.ts",
     "sync:once": "node --experimental-sqlite --import tsx scripts/sync-once.ts",
