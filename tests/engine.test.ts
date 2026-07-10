@@ -545,6 +545,25 @@ test("settleMatch: CLV closing = kickoff for pre-match bets, entry (neutral) for
   assert.equal(R.getBet(db, inm)!.closing_price, 70, "in-match bet neutral (closing = entry 70)");
 });
 
+test("settleMatch: orphaned PROPOSED bets are closed out as not_filled (never stuck «предлагается»)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Shandong", away: "Yunnan", state: "finished", lineup_out: true, kickoff_at: null, minute: 90, score_home: 2, score_away: 1, final_score: "2:1", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 1.5", price: 20, ai_prob: 0.4, liquidity: null, external_ref: "tk", snapshot_at: "t1", is_closing: false });
+  // a proposal that never filled (no live coverage) — must not stay "proposed"
+  const prop = R.uid();
+  R.insertBet(db, { id: prop, match_id: mid, strategy_id: strat.id, market_label: "Under 1.5", status: "proposed", proposed_price: 20, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.4, stake: 72, rationale: "«Under 1.5»: edge …", entered_minute: null, result: null, payout: null, created_at: "t" });
+
+  settleMatch(db, R.getMatch(db, mid)!, {});
+
+  const b = R.getBet(db, prop)!;
+  assert.equal(b.status, "not_filled", "orphaned proposal closed as not_filled, not left «предлагается»");
+  assert.match(b.rationale ?? "", /вход не открывался/, "reason recorded on the bet");
+});
+
 test("seriesAllowFor: tennis unrestricted by default (liquidity + live-data gate), narrowable via env", async () => {
   const { seriesAllowFor } = await import("../src/lib/engine.js");
   assert.equal(seriesAllowFor("tennis", {}), null, "no series whitelist — show any liquid, covered tennis");

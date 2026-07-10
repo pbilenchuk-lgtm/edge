@@ -249,14 +249,16 @@ export async function runStrategists(
       openPositions: openPos.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
       context: stratCtx,
     }, stratModel, { fetchImpl: deps.fetchImpl, env });
-    const picksArr = dec.ok ? dec.picks : null;
+    // On a FAILED strategist call, propose NOTHING (empty picks) — do NOT fall back
+    // to raw base-model edge. That fallback bypassed every strategist safeguard
+    // (anti-phantom, thin-market skepticism, methodology gating) and produced
+    // ungated bets — e.g. all strategists proposing the SAME value bets off a
+    // degenerate quote, which is not any strategy's decision. A failed call means
+    // "no decision", not "trade the base model".
+    const picksArr = dec.ok ? dec.picks : [];
     try { R.saveArtifact(db, { match_id: matchId, kind: "strategist", label: pairLabel, stage, content: JSON.stringify(dec, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
-    // Make a strategist outage first-class: when the call fails, picksArr is null
-    // and the loop below degrades to sizing on the raw base-model edge (no
-    // strategist gating). Record it so post-match analysis sees "ran without the
-    // strategist" instead of silently attributing those entries to a full plan.
     if (!dec.ok) {
-      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `стратег недоступен (${dec.error || "нет ответа ИИ"}) — сайзинг по базовой модели`, created_at: now() });
+      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `стратег недоступен (${dec.error || "нет ответа ИИ"}) — входов нет (без базовой подмены)`, created_at: now() });
     }
 
     const held = new Set(openPos.map((b) => norm(b.market_label)));

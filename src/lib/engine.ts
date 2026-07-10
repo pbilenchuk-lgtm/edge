@@ -277,8 +277,22 @@ export function settleMatch(
     });
     settled++; affected.add(b.strategy_id);
   }
+  // Close out orphaned PROPOSALS: a proposed bet that never filled (autoEnter held
+  // it — no provider live coverage on this match, or its price/liquidity guard hit)
+  // would otherwise sit as «предлагается» forever on a finished match. Mark it
+  // not_filled so the terminal state is honest and the pair frees its exposure.
+  for (const b of R.betsForMatch(db, match.id)) {
+    if (b.status !== "proposed") continue;
+    R.updateBet(db, b.id, { status: "not_filled", settled_at: now, rationale: appendReasonEngine(b.rationale, "матч завершился — вход не открывался (нет live-данных провайдера или не наступили условия)") });
+    R.insertTradeLog(db, { id: R.uid(), match_id: match.id, strategy_id: b.strategy_id, minute: "финал", type: "skip", text: `${b.market_label}: предложение не открылось до конца матча (нет live-покрытия / условия не наступили)`, created_at: now });
+    affected.add(b.strategy_id);
+  }
   for (const sid of affected) recomputeMetrics(db, sid, deps);
   return { settled, skipped, affectedStrategies: [...affected] };
+}
+/** Append a short reason to a bet rationale (engine-local; mirrors lifecycle's). */
+function appendReasonEngine(rationale: string | null, note: string): string {
+  return rationale ? `${rationale} · ${note}` : note;
 }
 
 /**
