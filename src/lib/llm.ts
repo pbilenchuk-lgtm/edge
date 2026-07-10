@@ -657,7 +657,7 @@ export function normalizeStrategistJson(j: any): Omit<StrategistDecision, "ok" |
     ...(rejMap(j.rejected_markets ?? j.rejected)?.length ? { rejected: rejMap(j.rejected_markets ?? j.rejected) } : {}),
     ...(rejMap(j.flagged)?.length ? { flagged: rejMap(j.flagged) } : {}),
     ...(Array.isArray(j.live_triggers_armed) && j.live_triggers_armed.length ? { liveTriggersArmed: j.live_triggers_armed } : {}),
-    ...(j.live_entry_config && typeof j.live_entry_config === "object" ? { liveEntryConfig: j.live_entry_config } : {}),
+    ...(j.live_entry_config && typeof j.live_entry_config === "object" && Object.keys(j.live_entry_config).length ? { liveEntryConfig: j.live_entry_config } : {}),
   };
 }
 

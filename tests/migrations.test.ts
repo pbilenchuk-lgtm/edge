@@ -4,6 +4,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migrateSeedStrategists, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2 } from "../src/lib/seed.js";
 import { assembleFootball } from "../src/lib/assembler.js";
 import { distributionContext, strategistContext } from "../src/lib/analysis.js";
+import { normalizeStrategistJson } from "../src/lib/llm.js";
 import { seedRiskProfiles } from "../src/lib/riskConfig.js";
 import { loadPolymarketConfig } from "../src/lib/polymarket.js";
 import * as R from "../src/lib/repo.js";
@@ -172,19 +173,39 @@ test("INVARIANT: each strategist's context carries the data its prompt reference
   R.saveArtifact(db, { match_id: mid, kind: "distribution", stage: "post_lineup", content: JSON.stringify(assembleFootball(base, null)), model: "x", created_at: "2026-01-01T00:00:00Z" });
 
   const ctx = strategistContext(db, mid)!;
-  // Live xG (prematch threshold) + Pre-match Value both key off match_shape.
-  assert.match(ctx, /match_shape/, "context carries match_shape (Live xG threshold, Pre-match Value)");
-  // Pre-match Value reasons over the 6-branch tree.
-  assert.match(ctx, /outcome_scenarios/, "context carries the outcome tree (Pre-match Value)");
-  // Overreaction + Pre-match Value read the event scenarios.
-  assert.match(ctx, /scenarios/, "context carries the event scenarios (Overreaction, Pre-match Value)");
-  // Live xG Momentum needs the live-xG stream itself.
-  assert.match(ctx, /Live xG/, "context carries the live-xG stream (Live xG Momentum)");
+  // ── Presence AND validity (a field that is present-but-degenerate is the next,
+  //    quieter failure: it passes a "field exists" check yet leaves the strategist
+  //    without usable data). So assert the values are real, not just present. ──
+  // Live xG (prematch threshold) + Pre-match Value key off match_shape — and it
+  // must be a REAL shape, not "?"/"unavailable".
+  assert.match(ctx, /match_shape=(A|B|C|mixed)\b/, "match_shape present AND a real value (not ?)");
+  // Pre-match Value reasons over the 6-branch tree: all six ids present with weights.
+  for (const id of ["fav_clean", "fav_concedes", "draw_0_0", "draw_scoring", "dog_clean", "dog_concedes"]) assert.ok(ctx.includes(id), `context names branch ${id}`);
+  const weights = [...ctx.matchAll(/вес=([\d.]+)/g)].map((m) => Number(m[1]));
+  assert.equal(weights.length, 6, "six branch weights are rendered");
+  assert.ok(Math.abs(weights.reduce((a, b) => a + b, 0) - 1) < 0.02, `branch weights sum to ~1, got ${weights.reduce((a, b) => a + b, 0)}`);
+  assert.ok(weights.every((w) => w > 0), "no branch is a degenerate zero-weight");
+  // Overreaction + Pre-match Value read the event scenarios — at least one real node.
+  assert.match(ctx, /Событийные сценарии \(scenarios\): •/, "event scenarios present AND non-empty");
+  // Live xG Momentum needs the live-xG stream with REAL numbers (not an empty line).
+  assert.match(ctx, /Live xG \([^)]*\): дом [\d.]+ – [\d.]+ гости · перекос [\d.]+/, "live-xG stream present AND numeric");
 
-  // Battle-sheet-carried arming: the live windows read these from the battle sheet.
+  // Cross-check against the source of truth: the distribution's derived tree.
+  const dist = JSON.parse(R.artifactsForMatch(db, mid).find((a) => a.kind === "distribution")!.content);
+  assert.equal(dist.derived.outcome_scenarios.length, 6, "distribution carries exactly 6 branches");
+  assert.ok(Math.abs(dist.derived.outcome_scenarios.reduce((s: number, b: any) => s + b.prob, 0) - 1) < 1e-3, "source weights sum to 1 (rounded probs; raw is exact by the poisson guard)");
+
+  // Battle-sheet-carried arming: present AND non-empty (an empty array/object is the
+  // same quiet failure — "arming survived" but there is nothing to execute).
   const bs = (extra: object) => JSON.stringify({ pair: "p", positions: [], ...extra });
-  assert.match(bs({ live_triggers_armed: [{ scenario_trigger: "гол андердога" }] }), /live_triggers_armed/, "overreaction arming survives into the battle sheet");
-  assert.match(bs({ live_entry_config: { xg_gap_threshold: 1.2 } }), /live_entry_config/, "live_xg config survives into the battle sheet");
+  const armed = normalizeStrategistJson({ pre_match_positions: [], live_triggers_armed: [{ scenario_trigger: "гол андердога", buyback_target: "38¢" }] });
+  assert.ok(Array.isArray(armed.liveTriggersArmed) && armed.liveTriggersArmed.length > 0, "overreaction arming is captured non-empty");
+  assert.match(bs({ live_triggers_armed: armed.liveTriggersArmed }), /scenario_trigger/, "arming survives into the battle sheet with content");
+  const cfg = normalizeStrategistJson({ pre_match_positions: [], live_entry_config: { xg_gap_threshold: 1.2, min_pressure_duration_min: 20 } });
+  assert.ok(cfg.liveEntryConfig && (cfg.liveEntryConfig as any).xg_gap_threshold === 1.2, "live_xg config captured with a real threshold");
+  // "present but empty" must NOT masquerade as armed: an empty array/object is dropped.
+  assert.equal(normalizeStrategistJson({ live_triggers_armed: [] }).liveTriggersArmed, undefined, "empty armed array is not captured");
+  assert.equal(normalizeStrategistJson({ live_entry_config: {} }).liveEntryConfig, undefined, "empty config object is not captured");
 });
 
 test("distributionContext: formats the 6-branch tree + scenarios for the strategist", () => {
