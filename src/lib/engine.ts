@@ -654,6 +654,15 @@ export async function importPolymarketMatches(
   const numEnv = (v: string | undefined, def: number) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : def; };
   const windowDays = numEnv(env.DISCOVER_WINDOW_DAYS, 21);
   const limit = opts.limit != null && Number.isFinite(opts.limit) ? opts.limit : numEnv(env.DISCOVER_MATCH_LIMIT, 400);
+  // Per-MARKET dust gate (provenance by depth): Polymarket lists a fixture across
+  // several events, and a stale/novelty contract shows up with dust liquidity
+  // (~$90) alongside the real $5k+ markets — untradeable, degenerate-priced, and it
+  // pollutes the quote panel + the ai_prob matcher. Drop a market only when it's
+  // BOTH under an absolute dust floor AND dwarfed by a real market on the same
+  // fixture (≥ ratio deeper), so a uniformly-thin low-profile fixture keeps all of
+  // its markets. Both env-tunable; 0 disables.
+  const dustLiq = numEnv(env.MARKET_MIN_LIQUIDITY, 200);
+  const dustRatio = numEnv(env.MARKET_DUST_RATIO, 5);
   const discovered = await discoverSportMatches(poly, sport, now, { fetchImpl: deps.fetchImpl }, { limit, windowDays, nowMs });
   const allow = seriesAllowFor(sport, deps.env); // e.g. tennis → only ATP tour
   const out: DiscoverItem[] = [];
@@ -723,9 +732,18 @@ export async function importPolymarketMatches(
     const existing = R.latestMarkets(db, match.id);
     const haveTokens = new Set(existing.map((mk) => mk.external_ref).filter(Boolean));
     const haveLabels = new Set(existing.map((mk) => mk.label));
+    // Fixture depth = the deepest market across everything we know for it (existing +
+    // incoming). Dust = below the floor AND ≥ratio shallower than that reference.
+    const liqOf = (v: string | number | null | undefined) => Number(v ?? 0) || 0;
+    const refLiq = Math.max(0, ...existing.map((mk) => liqOf(mk.liquidity)), ...d.markets.map((s) => liqOf(s.liquidity)));
+    const isDust = (liq: number) => dustLiq > 0 && liq > 0 && liq < dustLiq && refLiq >= liq * dustRatio;
+    // Drop existing dust listings (imported before this gate, or a market that drained
+    // to dust) so the pollution self-heals on re-discovery.
+    for (const mk of existing) if (isDust(liqOf(mk.liquidity))) R.deleteMarketLabel(db, match.id, mk.label);
     for (const s of d.markets) {
       // dedup by token (tokenless → by label) so re-discovery can't duplicate.
       if (s.external_ref ? haveTokens.has(s.external_ref) : haveLabels.has(s.label)) continue;
+      if (isDust(liqOf(s.liquidity))) continue; // orphan/degenerate dust listing — don't surface it
       R.insertMarket(db, { id: R.uid(), match_id: match.id, label: s.label, price: s.price, ai_prob: null, liquidity: s.liquidity, external_ref: s.external_ref, snapshot_at: now, is_closing: false });
     }
     out.push({ sport, match: `${d.home}–${d.away}`, created, markets: d.markets.length });

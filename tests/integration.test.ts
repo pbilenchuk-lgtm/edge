@@ -465,6 +465,34 @@ test("importPolymarketMatches: football imports only ESPN-covered leagues; uncov
   assert.equal(none.length, 0, "sub-threshold liquidity → not imported");
 });
 
+test("importPolymarketMatches: dust market (thin orphan/degenerate) dropped, deep markets kept", async () => {
+  const { importPolymarketMatches } = await import("../src/lib/engine.js");
+  const base = loadPolymarketConfig({ POLYMARKET_ENABLED: "true" });
+  const now = "2026-07-03T12:00:00Z";
+  // One covered fixture with a DEEP moneyline + total, plus a DUST orphan "Draw"
+  // (liq $90) — the pattern that polluted Spain–Belgium / EC Juventude quote panels.
+  const fixture = [{
+    id: "88", slug: "epl-arsenal-chelsea-2026-07-04",
+    title: "Premier League: Arsenal vs Chelsea", startDate: "2026-07-03T16:00:00Z",
+    series: [{ title: "Premier League", slug: "soccer-epl" }],
+    markets: [
+      { groupItemTitle: "", question: "Arsenal vs Chelsea", outcomes: '["Arsenal","Chelsea"]', outcomePrices: '["0.55","0.45"]', clobTokenIds: '["t-a","t-b"]', liquidity: "9000", conditionId: "0x1" },
+      { groupItemTitle: "Total: O/U 2.5", question: "…O/U 2.5", outcomes: '["Over 2.5","Under 2.5"]', outcomePrices: '["0.5","0.5"]', clobTokenIds: '["t-c","t-d"]', liquidity: "2000", conditionId: "0x2" },
+      { groupItemTitle: "Draw", question: "Draw?", outcomes: '["Yes","No"]', outcomePrices: '["0.005","0.995"]', clobTokenIds: '["t-dust","t-dz"]', liquidity: "90", conditionId: "0x3" },
+    ],
+  }];
+  const fetchImpl = (async () => ({ ok: true, json: async () => fixture })) as unknown as typeof fetch;
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  await importPolymarketMatches(db, "football", { fetchImpl, polymarket: { ...base, minLiquidity: 250 }, now: () => now });
+  const comp = R.listCompetitions(db).find((c) => c.external_league === "eng.1")!;
+  const mid = R.listMatches(db, comp.id).find((m) => /arsenal/i.test(m.home) || /arsenal/i.test(m.away))!.id;
+  const labels = R.latestMarkets(db, mid).map((m) => m.label);
+  assert.ok(labels.some((l) => /over 2\.5/i.test(l)), "deep total kept");
+  assert.ok(labels.some((l) => /arsenal/i.test(l)), "deep moneyline kept");
+  assert.ok(!labels.some((l) => /draw/i.test(l)), "dust Draw ($90 vs $9000 deep) dropped");
+});
+
 // ---------------- LLM abstraction graceful (§5.3, §6, §9.9) ----------------
 test("llm: model resolution and key handling", () => {
   assert.deepEqual(resolveModel("Claude Opus 4.8"), { provider: "anthropic", apiId: "claude-opus-4-8" });

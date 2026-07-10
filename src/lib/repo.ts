@@ -457,6 +457,14 @@ export function insertMarket(db: Database, m: Market): void {
      VALUES(?,?,?,?,?,?,?,?,?)`,
   ).run(m.id, m.match_id, m.label, m.price, m.ai_prob, m.liquidity, m.external_ref, m.snapshot_at, m.is_closing ? 1 : 0);
 }
+/** Remove a market entirely (all snapshot rows + its kickoff-open row) from a match
+ *  — used to drop a dust/orphan listing the importer no longer wants to surface.
+ *  Returns the number of snapshot rows deleted. Never touches bets (a dust market
+ *  never carried one). */
+export function deleteMarketLabel(db: Database, matchId: string, label: string): number {
+  db.prepare(`DELETE FROM market_open WHERE match_id=? AND label=?`).run(matchId, label);
+  return db.prepare(`DELETE FROM markets WHERE match_id=? AND label=?`).run(matchId, label).changes as number;
+}
 /** Find the match that already owns a market backed by any of these CLOB token
  *  refs — a spelling-independent way to recognise the same Polymarket fixture
  *  across runs (the tokens are stable even when the title's wording drifts). */
