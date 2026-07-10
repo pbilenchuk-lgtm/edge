@@ -559,7 +559,10 @@ export interface StrategistPick {
 }
 export interface StrategistExit {
   market: string; reason: string; fraction: number; // fraction 0..1 of the position to close
-  trigger?: "take_price" | "thesis_stop" | "counter_scenario" | "liquidity_time_stop"; // which live trigger fired
+  /** Which live trigger fired (free-form: take_price / thesis_stop / counter_scenario
+   *  / liquidity_time_stop, or a strategy-specific one like goal_scored /
+   *  pressure_faded / counterattack_conceded). Recorded in the exit log. */
+  trigger?: string;
 }
 /** Score-correlation summary the strategist reports for a portfolio (v3). */
 export interface StrategistPortfolioCorrelation { both_lose_on_scores?: string[]; both_lose_weight?: number; coverage_note?: string }
@@ -625,23 +628,31 @@ export function normalizeStrategistJson(j: any): Omit<StrategistDecision, "ok" |
         ...(exitPlan && Object.keys(exitPlan).length ? { exitPlan } : {}),
       } as StrategistPick;
     });
-  // EXIT sources: explicit exits, or live actions=reduce/close. size_pct on a
-  // reduce is treated as the fraction (0..1, or /100 if given as a percent).
-  const trig = (t: unknown): StrategistExit["trigger"] | undefined =>
-    (["take_price", "thesis_stop", "counter_scenario", "liquidity_time_stop"].includes(t as string) ? (t as StrategistExit["trigger"]) : undefined);
+  // EXIT sources: explicit `exits`, live `actions`=reduce/close, AND `exit_checks`
+  // — the per-position exit channel the live prompts emit ({position, trigger_hit,
+  // action}). A close expressed ONLY in exit_checks must still fire, so we include
+  // any exit_check whose trigger actually fired (trigger_hit not none/empty) or
+  // whose action is a close/reduce. The live loop dedups by resolved bet id, so an
+  // exit that also appears in `actions` won't double-close.
+  const trig = (t: unknown): string | undefined => (typeof t === "string" && t.trim() ? String(t) : undefined);
+  const fired = (e: any): boolean => {
+    const th = typeof e.trigger_hit === "string" ? e.trigger_hit.trim().toLowerCase() : "";
+    return (!!th && th !== "none" && th !== "нет" && th !== "н/д") || isClose(e.action);
+  };
   const fracOf = (e: any): number => {
     if (typeof e.fraction === "number" && e.fraction > 0 && e.fraction <= 1) return e.fraction;
-    if (e.action === "close") return 1;
-    if (e.action === "reduce" && Number.isFinite(e.size_pct)) { const v = Number(e.size_pct); return v > 1 ? Math.min(1, v / 100) : v > 0 ? v : 0.5; }
-    return 1;
+    const a = typeof e.action === "string" ? e.action.toLowerCase() : "";
+    if (a.includes("reduce") || a.includes("частичн") || a.includes("половин")) { if (Number.isFinite(e.size_pct)) { const v = Number(e.size_pct); return v > 1 ? Math.min(1, v / 100) : v > 0 ? v : 0.5; } return 0.5; }
+    return 1; // close / thesis_stop / counter_scenario etc. → full
   };
   const rawExits: any[] = [
     ...(Array.isArray(j.exits) ? j.exits : []),
     ...(Array.isArray(j.actions) ? j.actions.filter((a: any) => a && isClose(a.action)) : []),
+    ...(Array.isArray(j.exit_checks) ? j.exit_checks.filter((e: any) => e && (e.market || e.position) && fired(e)) : []),
   ];
   const exits: StrategistExit[] = rawExits
     .filter((e: any) => e && (typeof e.market === "string" || typeof e.position === "string"))
-    .map((e: any) => ({ market: String(e.market ?? e.position), reason: String(e.reason ?? ""), fraction: fracOf(e), ...(trig(e.trigger ?? e.trigger_hit) ? { trigger: trig(e.trigger ?? e.trigger_hit) } : {}) }));
+    .map((e: any) => ({ market: String(e.market ?? e.position), reason: String(e.reason ?? e.trigger_hit ?? ""), fraction: fracOf(e), ...(trig(e.trigger ?? e.trigger_hit) ? { trigger: trig(e.trigger ?? e.trigger_hit) } : {}) }));
   // Top-level reasoning.
   const pcRaw = j.portfolio_correlation && typeof j.portfolio_correlation === "object" ? j.portfolio_correlation : null;
   const portfolioCorrelation: StrategistPortfolioCorrelation | undefined = pcRaw
@@ -693,7 +704,8 @@ export async function strategistDecide(
       "ВАЖНО ПРО РАЗМЕР: РАЗМЕР СЧИТАЕТ ДВИЖОК по твоему prob и риск-профилю (Kelly, кэпы). Твои size_pct/kelly_fraction/role — справочные, на реальную ставку НЕ влияют; честный prob — единственное, что двигает размер. " +
       "ФОРМАТ ВЫХОДА — строгий JSON. Ключи входов и выходов могут называться как в твоей методологии, все они принимаются как синонимы: " +
       "ВХОДЫ — picks ИЛИ pre_match_positions ИЛИ actions с action:'add'/'open_new'; поля входа: {label|market (ДОСЛОВНО из списка), prob|our_prob, conviction:'низкая'|'средняя'|'высокая'(опц.), reason, и опционально role:'anchor'|'satellite', lives_in_branches:[], branch_weight_sum, phantom_check, total_check, exit:{take_price,thesis_stop,counter_scenario_stop}}. " +
-      "ВЫХОДЫ — exits ИЛИ actions с action:'reduce'/'close'; поля выхода: {market|position (ДОСЛОВНО), fraction (или action reduce≈частично/close=1), reason, trigger:'take_price'|'thesis_stop'|'counter_scenario'|'liquidity_time_stop'(опц.)}. " +
+      "В ЛЮБОМ входе, включая actions(add/open_new), поле prob ОБЯЗАТЕЛЬНО — без него движок посчитает размер по УСТАРЕВШЕЙ предматч-оценке. И бери market как ПОЛНЫЙ ярлык из списка ДОСЛОВНО (сторона уже в ярлыке: «… — No», «Over 2.5» и т.п.); НЕ дроби на market+side отдельными полями — иначе рынок не найдётся и вход потеряется. " +
+      "ВЫХОДЫ — exits ИЛИ actions с action:'reduce'/'close' ИЛИ exit_checks с сработавшим trigger_hit; поля выхода: {market|position (ДОСЛОВНО, ПОЛНЫЙ ярлык), fraction (или action reduce≈частично/close=1), reason, trigger/trigger_hit (напр. take_price/thesis_stop/counter_scenario/goal_scored)}. Закрытие можно указать в exits, в actions ИЛИ в exit_checks — движок объединит и не закроет дважды. " +
       "Опционально на верхнем уровне: match_shape, current_branch (лайв), portfolio_correlation:{both_lose_on_scores,both_lose_weight,coverage_note}, rejected_markets:[{market,reason}], flagged:[{market,reason}], note/notes. " +
       "Пусто — значит воздержаться. Без текста вне JSON.",
     prompt: `СТРАТЕГИЯ «${input.strategyName}» (методология):\n${input.strategyPrompt}\n\nМАТЧ: ${input.match.home} — ${input.match.away} (${input.match.sport}, ${input.match.state}${liveMin}, счёт ${score}).\nОценка аналитики: уверенность ${input.assessment.confidence}. ${input.assessment.short} Итог: ${input.assessment.verdict}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы + статистика + события матча — твои триггеры переоценки):\n${input.context}\n` : ""}\nРЫНКИ (цена в ¢, движение от старта = направление price_move, ликвидность = глубина):\n${mkList}\n\nОТКРЫТЫЕ ПОЗИЦИИ:\n${posList}\n${!scoreKnown && input.match.state === "live" ? `\nВАЖНО: провайдер пока не отдаёт счёт/минуту по этому матчу — опирайся на ДВИЖЕНИЕ ЦЕН (price_move от старта) и ликвидность как основной сигнал, оценивай prob по ним. Не отказывайся от решения только из-за отсутствия счёта.` : ""}\nРеши по методологии: во что входить (picks) и что закрывать/фиксировать (exits, можно частично).`,

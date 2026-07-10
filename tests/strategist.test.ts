@@ -187,6 +187,25 @@ test("normalizeStrategistJson: live_xg prematch arms live_entry_config (passed t
   assert.ok(d.liveEntryConfig && (d.liveEntryConfig as any).xg_gap_threshold === 1.1, "live_entry_config captured");
 });
 
+test("normalizeStrategistJson: exit_checks is an exit channel (a close expressed only there still fires)", () => {
+  const d = normalizeStrategistJson({
+    strategist: "prematch_value", phase: "live", current_branch: "fav_concedes",
+    actions: [{ market: "Under 2.5", action: "hold", reason: "смотрю" }], // NOT a close
+    exit_checks: [
+      { position: "Under 2.5", trigger_hit: "counter_scenario", action: "close" }, // the real close, only here
+      { position: "BTTS No", trigger_hit: "none", action: "hold" },                 // nothing fired → ignored
+      { position: "France -1.5", trigger_hit: "goal_scored", action: "reduce", size_pct: 50 }, // strategy-specific trigger
+    ],
+  });
+  assert.equal(d.exits.length, 2, "the fired exit_checks become exits; the 'none' one is ignored");
+  const close = d.exits.find((e) => e.market === "Under 2.5")!;
+  assert.equal(close.fraction, 1, "close → full");
+  assert.equal(close.trigger, "counter_scenario");
+  const red = d.exits.find((e) => e.market === "France -1.5")!;
+  assert.equal(red.fraction, 0.5, "reduce+size_pct 50 → half");
+  assert.equal(red.trigger, "goal_scored", "strategy-specific trigger preserved as free string");
+});
+
 test("normalizeStrategistJson: live actions map to picks/exits; close=1, reduce uses size_pct; trigger kept", () => {
   const d = normalizeStrategistJson({
     current_branch: "fav_concedes",

@@ -210,7 +210,6 @@ export async function runStrategists(
   const safeModel = (m: string | null | undefined) => (m && resolveModel(m) ? m : DEFAULT_MODEL);
   const model = safeModel(prompt.model);
   const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
-  const ctx = matchContext(db, matchId);
 
   const freshMarkets = R.latestMarkets(db, matchId);
   // Only replace existing proposals if we actually have usable probabilities — a
@@ -297,6 +296,17 @@ export async function runStrategists(
         rationale: `«${m.label}»: edge ${(r.edge * 100).toFixed(1)}% (наша ${(ourProb * 100).toFixed(0)}% vs рынок ${(implied * 100).toFixed(0)}%). ${pick?.reason || r.reason}.${pickTreeNote(pick)}`,
         entered_minute: null, result: null, payout: null, created_at: now(),
       });
+    }
+    // A pick the strategist named that resolves to NO real market (a mislabel, or a
+    // market+side split like {market:"BTTS", side:"No"}) would otherwise vanish
+    // silently — the ranked loop only iterates markets, so an unmatched pick is
+    // never seen. Surface it in the battle sheet + trade log so it's visible, not lost.
+    if (picksArr) {
+      const unresolved = picksArr.filter((p) => !freshMarkets.some((m) => sameMarketLabel(p.label, m.label)));
+      if (unresolved.length) {
+        for (const p of unresolved) battle.push({ market: p.label, status: "unresolved", reason: "нет совпадающего рынка (проверь ярлык/сторону)" });
+        R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `стратег назвал рынок(и) без совпадения: ${unresolved.slice(0, 3).map((p) => `«${p.label}»`).join(", ")}`, created_at: now() });
+      }
     }
     try { R.saveArtifact(db, { match_id: matchId, kind: "battle_sheet", label: pairLabel, stage, content: JSON.stringify({ pair: pairLabel, profile, budget, calibration, positions: battle, flagged, ...(dec.ok && dec.liveTriggersArmed ? { live_triggers_armed: dec.liveTriggersArmed } : {}), ...(dec.ok && dec.liveEntryConfig ? { live_entry_config: dec.liveEntryConfig } : {}), strategist_plan: dec.ok ? dec : { ok: false } }, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
     // Overreaction and Live xG open nothing pre-match by design — they ARM the
@@ -421,6 +431,12 @@ export function distributionContext(db: Database, matchId: string): string | und
   const scen = a?.scenarios;
   if (Array.isArray(scen) && scen.length) {
     lines.push("Событийные сценарии (scenarios): " + scen.map((s: any) => `• ${s.trigger}${Number.isFinite(s.prob) ? ` (P≈${Math.round(s.prob * 100)}%)` : ""}${s.note ? ` — ${s.note}` : ""}`).join("; "));
+  }
+  // Веса веток = ЧИСТЫЙ Пуассон. Если аналитик применил override на конкретный
+  // рынок (btts/исход/тотал/фора), рыночная оценка в СПИСКЕ РЫНКОВ уже сдвинута, а
+  // веса веток — нет: тогда авторитетна рыночная оценка, а не сумма веток.
+  if (Array.isArray(a?.overrides) && a.overrides.length) {
+    lines.push(`(Аналитик применил ${a.overrides.length} override — по затронутым рынкам авторитетна оценка в списке рынков, а не сумма веток.)`);
   }
   return lines.join("\n");
 }
