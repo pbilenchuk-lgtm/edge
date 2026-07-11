@@ -457,6 +457,22 @@ test("syncMatchStatus: finish settles open bets and recomputes metrics", async (
   assert.ok(q!.samples >= 2, "metrics recomputed from settled bets");
 });
 
+test("syncMatchStatus: first finish stamps a Warsaw end_time + Warsaw kickoff + duration", async () => {
+  const { durationLabel } = await import("../src/lib/time.js");
+  assert.equal(durationLabel("2026-07-11T14:00:00Z", "2026-07-11T16:01:00Z"), "2 ч 1 мин");
+  assert.equal(durationLabel("x", "2026-07-11T16:01:00Z"), null, "non-ISO → null");
+
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.updateMatch(db, "m-live", { external_ref: "SIM1", kickoff_at: "2026-07-11T14:00:00.000Z" });
+  const final: SportsMatchStatus = { externalRef: "SIM1", home: "Бразилия", away: "Англия", state: "finished", minute: 90, scoreHome: 2, scoreAway: 2, final: true };
+  await syncMatchStatus(db, final, { ...CFG, now: () => "2026-07-11T16:01:00.000Z" } as any);
+  const m = R.getMatch(db, "m-live")!;
+  assert.equal(m.end_time, "18:01", "16:01 UTC → 18:01 Warsaw (CEST) — the finish time in Warsaw");
+  assert.equal(m.kickoff_time, "16:00", "14:00 UTC → 16:00 Warsaw");
+  assert.equal(m.duration, "2 ч 1 мин", "14:00→16:01 span");
+});
+
 // ---------------- odds refresh: versioned snapshot + mark-to-market + price_move ----------------
 test("refreshMatchOdds writes a snapshot, marks to market, and triggers on a big move", async () => {
   const db = openDb(":memory:");

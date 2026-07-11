@@ -29,6 +29,16 @@ export function warsawClock(iso: string | null | undefined): string | null {
   return new Intl.DateTimeFormat("ru-RU", { timeZone: WARSAW, hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
 }
 
+/** "1 ч 52 мин" from two ISO instants (kickoff → finish), or null when either isn't
+ *  ISO, they're out of order, or the span is implausibly long (>6h — a bad kickoff). */
+export function durationLabel(startIso: string | null | undefined, endIso: string | null | undefined): string | null {
+  if (!isIso(startIso) || !isIso(endIso)) return null;
+  const ms = Date.parse(endIso) - Date.parse(startIso);
+  if (!(ms > 0) || ms > 6 * 3_600_000) return null;
+  const mins = Math.round(ms / 60_000), h = Math.floor(mins / 60), m = mins % 60;
+  return h > 0 ? `${h} ч ${m} мин` : `${m} мин`;
+}
+
 /** Hours from `nowMs` until the kickoff (negative if already started); null if unknown. */
 export function hoursUntil(iso: string | null | undefined, nowMs: number): number | null {
   if (!isIso(iso)) return null;

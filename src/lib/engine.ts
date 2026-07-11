@@ -20,7 +20,7 @@ import { settleBet, resolveFootballMarket } from "./settlement.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig } from "./polymarket.js";
 import { liquidationCents } from "./execution.js";
-import { isIso } from "./time.js";
+import { isIso, warsawClock, durationLabel } from "./time.js";
 import type { SportsProvider } from "./sports.js";
 
 export interface EngineConfig {
@@ -356,6 +356,17 @@ export async function syncMatchStatus(
   };
   if (nextState === "finished") {
     patch.final_score = `${scoreHome ?? 0}:${scoreAway ?? 0}`;
+    // Stamp the FINISH time (Warsaw) once, on the first transition into finished, so
+    // the card can show «завершён 18:07» / «20:00–22:01 · длительность 2 ч 01 мин»
+    // instead of a bare «финал». Warsaw everywhere (kickoff too); duration off the ISO
+    // kickoff. Best-effort — a missing/again-finished match just keeps what it had.
+    if (from !== "finished" && !match.end_time) {
+      const nowIso = nowFn(deps)();
+      patch.end_time = warsawClock(nowIso);
+      if (isIso(match.kickoff_at)) patch.kickoff_time = warsawClock(match.kickoff_at);
+      const dur = durationLabel(match.kickoff_at, nowIso);
+      if (dur) patch.duration = dur;
+    }
   }
   R.updateMatch(db, match.id, patch);
   const updated = { ...match, ...patch } as Match;

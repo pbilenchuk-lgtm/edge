@@ -1035,22 +1035,25 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                             const edge = modelProb != null ? (modelProb - impl) * 100 : null; // no model prob → no edge, don't show "NaN%"
                             const stake = b.stake != null ? b.stake : Math.round(budget * (b.pct || 0));
                             const isOpen = b.status === "open";
+                            const dead = b.status === "not_filled"; // proposed entry that never filled — not a position, not deployed
                             const live = isOpen && curPrice != null && b.entryPrice != null && b.entryPrice > 0 ? b.stake * (curPrice / b.entryPrice) - b.stake : null;
                             const entryDisp = b.entryPrice != null ? `${b.entryPrice}¢` : (b.price != null ? `${b.price}¢` : "");
                             return (
-                              <div key={i} style={S.betRow}>
+                              <div key={i} style={{ ...S.betRow, ...(dead ? { opacity: 0.5 } : {}) }}>
                                 <div style={S.betMain}><span style={S.betMarket}>{b.market}</span><span style={S.betOdds}>@ {entryDisp}</span></div>
                                 <div style={S.betMeta}>
-                                  {edge != null && <span style={{ ...S.betEdge, color: edge >= 5 ? "#5fd08a" : edge >= 3 ? "#e8a838" : "#9aa4b2" }}>edge {edge >= 0 ? "+" : ""}{edge.toFixed(1)}%</span>}
-                                  <span style={S.betStake}>{fmtMoney(stake)}</span>
+                                  {/* a not_filled bet never deployed — show it greyed, no green "value" edge, and it does NOT count toward «задействовано» below */}
+                                  {edge != null && !dead && <span style={{ ...S.betEdge, color: edge >= 5 ? "#5fd08a" : edge >= 3 ? "#e8a838" : "#9aa4b2" }}>edge {edge >= 0 ? "+" : ""}{edge.toFixed(1)}%</span>}
+                                  {!dead && <span style={S.betStake}>{fmtMoney(stake)}</span>}
                                   {isOpen && live != null && <span style={{ ...S.betLive, color: live >= 0 ? "#5fd08a" : "#ff6b6b" }}>{live >= 0 ? "▲" : "▼"}{fmtMoney(live)}</span>}
                                   {b.status === "proposed" && <span style={S.betProposed}>предлагается</span>}
+                                  {dead && <span style={S.betProposed}>не заполнилась</span>}
                                 </div>
                                 {b.entered && <div style={S.betEntered}>вход: {b.entered}</div>}
                               </div>
                             );
                           })}
-                          <div style={S.betTotal}>задействовано {fmtMoney(items.reduce((a: number, b: any) => a + (b.stake != null ? b.stake : Math.round(budget * (b.pct || 0))), 0))} из {fmtMoney0(budget)}</div>
+                          <div style={S.betTotal}>задействовано {fmtMoney(items.filter((b: any) => b.status !== "not_filled").reduce((a: number, b: any) => a + (b.stake != null ? b.stake : Math.round(budget * (b.pct || 0))), 0))} из {fmtMoney0(budget)}</div>
                         </div>
                       )}
                     </div>

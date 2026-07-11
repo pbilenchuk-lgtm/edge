@@ -231,6 +231,20 @@ test("normalizeStrategistJson: exit_checks is an exit channel (a close expressed
   assert.equal(red.trigger, "goal_scored", "strategy-specific trigger preserved as free string");
 });
 
+test("normalizeStrategistJson: a NEGATIVE exit_check answer ('нет — …') does NOT fire (holds the position)", () => {
+  const d = normalizeStrategistJson({
+    strategist: "overreaction", phase: "live",
+    exit_checks: [
+      { position: "Molde FK", trigger_hit: "нет — переоценка ещё не отыграна, справедливая ~50¢", action: "hold" }, // NO — hold
+      { position: "Draw", trigger_hit: "no, not yet", action: "hold" },                                             // NO — hold
+      { position: "Over 2.5", trigger_hit: "take_price", action: "close" },                                          // real close
+    ],
+  });
+  assert.ok(!d.exits.some((e) => e.market === "Molde FK"), "'нет — …' with an explanation is NOT a fired trigger");
+  assert.ok(!d.exits.some((e) => e.market === "Draw"), "'no, not yet' is NOT a fired trigger");
+  assert.ok(d.exits.some((e) => e.market === "Over 2.5"), "a real take_price close still fires");
+});
+
 test("normalizeStrategistJson: live actions map to picks/exits; close=1, reduce uses size_pct; trigger kept", () => {
   const d = normalizeStrategistJson({
     current_branch: "fav_concedes",

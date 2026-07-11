@@ -680,7 +680,14 @@ export function normalizeStrategistJson(j: any): Omit<StrategistDecision, "ok" |
   const trig = (t: unknown): string | undefined => (typeof t === "string" && t.trim() ? String(t) : undefined);
   const fired = (e: any): boolean => {
     const th = typeof e.trigger_hit === "string" ? e.trigger_hit.trim().toLowerCase() : "";
-    return (!!th && th !== "none" && th !== "нет" && th !== "н/д") || isClose(e.action);
+    // A NEGATIVE answer means the trigger did NOT fire — match the leading token, not
+    // the exact string. The model routinely appends an explanation ("нет — переоценка
+    // ещё не отыграна", "no, not yet"), and a bare-equality check let that through and
+    // CLOSED a position meant to be held (harmless when up, a wrong cut when down).
+    // (Can't use \b — it's ASCII-only, so it won't fire after Cyrillic "нет".)
+    const NEG = ["нет", "не", "no", "not", "none", "н/д"];
+    const negative = !th || NEG.some((n) => th === n || (th.startsWith(n) && !/[а-яёa-z]/i.test(th.charAt(n.length))));
+    return !negative || isClose(e.action);
   };
   const fracOf = (e: any): number => {
     if (typeof e.fraction === "number" && e.fraction > 0 && e.fraction <= 1) return e.fraction;

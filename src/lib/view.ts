@@ -287,8 +287,11 @@ export function buildAppData(db: Database, env = process.env): AppData {
         // Real starting XI published (provider), NOT the ~1h timer flip — this is
         // what actually gates football analysis, so the UI badge must track it.
         lineupsReady: R.hasLineups(db, m.id),
-        kickoff: warsawLabel(m.kickoff_at), kickoffAt: m.kickoff_at, oddsUpdated: null, finalScore: m.final_score, kickoffTime: m.kickoff_time,
-        endTime: m.end_time, duration: m.duration, endNote: m.end_note,
+        kickoff: warsawLabel(m.kickoff_at), kickoffAt: m.kickoff_at, oddsUpdated: null, finalScore: m.final_score,
+        // Finish/kickoff clocks shown in Warsaw everywhere: an ISO value formats to
+        // HH:MM, a value already stored as a Warsaw string passes straight through.
+        kickoffTime: warsawClock(m.kickoff_time) ?? m.kickoff_time,
+        endTime: warsawClock(m.end_time) ?? m.end_time, duration: m.duration, endNote: m.end_note,
         analyzing: jobActive(R.getAnalysisJob(db, m.id), nowMs),
         preLineup: pre ? view(pre) : null, postLineup: post ? view(post) : null,
         assessmentHistory,
