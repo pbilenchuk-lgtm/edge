@@ -134,6 +134,13 @@ function activeMatches(db: Database): { comp: string; sport: string; match: Matc
   return out;
 }
 
+/** Is any match IN PLAY right now (state "live")? The fast live loop's domain — the
+ *  heartbeat uses this to decide whether live position management is the critical
+ *  cadence (a stalled live loop during a live match is what actually costs money). */
+export function hasLiveMatchInPlay(db: Database): boolean {
+  return activeMatches(db).some(({ match: m }) => m.state === "live");
+}
+
 // ------------------------------------------------------------
 // 0) Advance clocks — flip lineup_out / state from the kickoff time
 // ------------------------------------------------------------

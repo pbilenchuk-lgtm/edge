@@ -16,10 +16,15 @@ import { getDb } from "./db.js";
 import * as R from "./repo.js";
 import { loadSportsProvider, loadSportsConfig } from "./sports.js";
 import { loadPolymarketConfig } from "./polymarket.js";
-import { runAutoCycle, runLiveCycle } from "./lifecycle.js";
+import { runAutoCycle, runLiveCycle, hasLiveMatchInPlay } from "./lifecycle.js";
 import { tryAcquireEngine, releaseEngine } from "./engineLock.js";
 
 let started = false;
+
+// The fast live loop stamps this every run; the heartbeat reads it to tell a HEALTHY
+// loop (fresh stamp → no-op) from a stalled one (stale stamp → drive a live cycle now).
+// DB-backed so it survives the process restart that kills the in-process loop.
+const LAST_LIVE_TICK_KEY = "last_live_tick_ms";
 
 /**
  * Deploy-independent CATCH-UP heartbeat. The scheduler is in-process (setInterval),
@@ -36,17 +41,60 @@ let started = false;
 export async function heartbeat(
   env: Record<string, string | undefined> = process.env,
   opts: { db?: ReturnType<typeof getDb>; nowMs?: number } = {},
-): Promise<{ ran: boolean; reason?: string }> {
+): Promise<{ ran: boolean; reason?: string; live?: boolean }> {
   if ((env.AUTO_TICK ?? "false").toLowerCase() !== "true") return { ran: false, reason: "AUTO_TICK off" };
   const tickMin = Math.max(1, Number(env.TICK_INTERVAL_MIN ?? 30));
   const staleMs = Math.max(10, tickMin * 2) * 60_000; // overdue = no full cycle within ~2× the tick
   let db: ReturnType<typeof getDb>;
   try { db = opts.db ?? getDb(); } catch { return { ran: false, reason: "no db" }; }
+  const nowMs = opts.nowMs ?? Date.now();
+
+  // (1) LIVE catch-up — the money-critical path. While a match is IN PLAY, the fast loop
+  // (LIVE_TICK_SEC) is what manages open positions; its silent death (a process restart,
+  // a wedged setInterval, or an instance that was down and just came back) leaves stops /
+  // take-profits / reassessment unrun. The loop stamps LAST_LIVE_TICK_KEY every run, so a
+  // stale stamp means the loop isn't running: drive ONE live cycle right here. Because the
+  // heartbeat is also called from /api/health, ANY ping (Render's own health check or an
+  // external uptime monitor) then resumes live management within ~a stamp-interval — not
+  // the 60-min full-cycle threshold below. The stamp is in the DB, so it survives the very
+  // restart that kills the loop. Gated on the shared engine lock; a healthy loop keeps the
+  // stamp fresh, so this no-ops (fresh) and never double-runs a real cycle.
+  if (hasLiveMatchInPlay(db)) {
+    const liveSec = Math.max(15, Number(env.LIVE_TICK_SEC ?? 20));
+    const liveStaleMs = Math.max(90_000, liveSec * 1000 * 3); // overdue ≈ 3 missed live ticks (≥90s)
+    const lastLiveMs = Number(R.metaGet(db, LAST_LIVE_TICK_KEY) ?? 0);
+    if (!lastLiveMs || nowMs - lastLiveMs >= liveStaleMs) {
+      const tok = tryAcquireEngine();
+      if (tok) {
+        const at = new Date(nowMs).toISOString();
+        try {
+          const provider = loadSportsProvider(loadSportsConfig(env));
+          const r = await runLiveCycle(db, provider, {});
+          R.metaSet(db, LAST_LIVE_TICK_KEY, String(nowMs), at);
+          // Log only when the outage catch-up actually managed something (mirrors the live
+          // loop's no-flood policy), tagged as a heartbeat-driven recovery.
+          if (r.live > 0 && (r.triggers || r.exits || r.entries || r.llmFail)) {
+            const llmNote = r.llmFail > 0 ? ` · ИИ-сбои ${r.llmFail}/${r.llmCalls}` : "";
+            const summary = `[heartbeat] live catch-up (live-петля простаивала) · live ${r.live} · выходы ${r.exits} · входы ${r.entries}${llmNote}`;
+            console.log(`[scheduler:heartbeat] ${summary}`);
+            try { R.insertCronLog(db, { id: R.uid(), at, kind: "live", ok: r.llmFail > 0 ? 0 : 1, summary, created_at: at }); } catch {}
+          }
+          return { ran: true, live: true };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error("[scheduler:heartbeat:live] error:", msg);
+          return { ran: false, reason: "error" };
+        } finally { releaseEngine(tok); }
+      }
+      // busy → a real cycle already holds the lock; fall through to the full-cycle check.
+    }
+  }
+
+  // (2) FULL-cycle catch-up — pre-match analysis/entries cadence for ALL matches.
   // Most recent FULL-cycle marker (tick/discover/heartbeat/manual) — the fast "live"
   // loop doesn't count, it doesn't do analysis/entries.
   const last = R.recentCronLog(db, 30).find((r) => r.kind !== "live");
   const lastMs = last ? Date.parse(last.created_at) : 0;
-  const nowMs = opts.nowMs ?? Date.now();
   if (lastMs && nowMs - lastMs < staleMs) return { ran: false, reason: "fresh" };
   const tok = tryAcquireEngine();
   if (!tok) return { ran: false, reason: "busy" }; // a real cycle is running → not stalled
@@ -121,6 +169,9 @@ export function startScheduler(env: Record<string, string | undefined> = process
     let db: ReturnType<typeof getDb> | null = null;
     try {
       db = getDb();
+      // Prove the live loop is alive (DB-backed, survives restart) so the heartbeat can
+      // tell a healthy loop from a stalled one and only drives a catch-up when this goes stale.
+      try { R.metaSet(db, LAST_LIVE_TICK_KEY, String(Date.now()), new Date().toISOString()); } catch {}
       const provider = loadSportsProvider(loadSportsConfig(env));
       const r = await runLiveCycle(db, provider, {});
       // Log when something happened OR when the strategist was unreachable — an

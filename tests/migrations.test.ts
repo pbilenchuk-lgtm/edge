@@ -15,6 +15,9 @@ test("scheduler heartbeat: no-op when AUTO_TICK off or the cron is fresh; catch-
   seedDatabase(db);
   const env = { AUTO_TICK: "true", TICK_INTERVAL_MIN: "30", POLYMARKET_ENABLED: "false", SPORTS_ENABLED: "false" };
   const t0 = Date.parse("2026-07-11T00:00:00Z");
+  // Seed carries live matches; a healthy live loop keeps this stamp fresh, so stamp it
+  // here to isolate the FULL-CYCLE assertions below from the (separately tested) live path.
+  R.metaSet(db, "last_live_tick_ms", String(t0), new Date(t0).toISOString());
 
   // AUTO_TICK off → never runs, regardless of staleness.
   assert.equal((await heartbeat({ ...env, AUTO_TICK: "false" }, { db, nowMs: t0 })).ran, false);
@@ -33,6 +36,39 @@ test("scheduler heartbeat: no-op when AUTO_TICK off or the cron is fresh; catch-
   const r = await heartbeat(env, { db, nowMs: t0 });
   assert.equal(r.ran, true, "overdue cron → catch-up ran");
   assert.ok(R.recentCronLog(db, 5).some((x) => x.kind === "heartbeat"), "catch-up logged as a heartbeat run");
+});
+
+test("scheduler heartbeat: live match + STALE live-tick → drives a live catch-up and re-stamps", async () => {
+  const { heartbeat } = await import("../src/lib/scheduler.js");
+  const db = openDb(":memory:");
+  seedDatabase(db);           // seed carries state="live" matches
+  db.exec("DELETE FROM bets"); // no open positions → live cycle does no LLM work, stays fast
+  const env = { AUTO_TICK: "true", LIVE_TICK_SEC: "20", POLYMARKET_ENABLED: "false", SPORTS_ENABLED: "false" };
+  const t0 = Date.parse("2026-07-11T00:00:00Z");
+  // A FRESH full-cycle marker, so the full-cycle path can't be what runs here.
+  R.insertCronLog(db, { id: R.uid(), at: "t", kind: "tick", ok: 1, summary: "s", created_at: new Date(t0 - 60_000).toISOString() });
+  // The live loop last stamped 5 min ago → stale (> 90s) → the loop is presumed dead.
+  R.metaSet(db, "last_live_tick_ms", String(t0 - 5 * 60_000), new Date(t0 - 5 * 60_000).toISOString());
+
+  const r = await heartbeat(env, { db, nowMs: t0 });
+  assert.deepEqual(r, { ran: true, live: true }, "live match + stalled live loop → live catch-up runs (not the 60-min full cycle)");
+  assert.equal(Number(R.metaGet(db, "last_live_tick_ms")), t0, "the live tick is re-stamped to now");
+});
+
+test("scheduler heartbeat: live match + FRESH live-tick → live path no-ops (healthy loop, no double-run)", async () => {
+  const { heartbeat } = await import("../src/lib/scheduler.js");
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const env = { AUTO_TICK: "true", LIVE_TICK_SEC: "20", POLYMARKET_ENABLED: "false", SPORTS_ENABLED: "false" };
+  const t0 = Date.parse("2026-07-11T00:00:00Z");
+  R.insertCronLog(db, { id: R.uid(), at: "t", kind: "tick", ok: 1, summary: "s", created_at: new Date(t0 - 60_000).toISOString() });
+  // Live loop stamped 30s ago → fresh (< 90s) → healthy, must not double-run.
+  R.metaSet(db, "last_live_tick_ms", String(t0 - 30_000), new Date(t0 - 30_000).toISOString());
+
+  const r = await heartbeat(env, { db, nowMs: t0 });
+  assert.equal(r.live, undefined, "healthy live loop → heartbeat does not take the live catch-up path");
+  assert.equal(r.ran, false, "full cycle is fresh too → overall no-op");
+  assert.equal(Number(R.metaGet(db, "last_live_tick_ms")), t0 - 30_000, "fresh live tick left untouched");
 });
 
 test("loadPolymarketConfig: taker fee defaults to the real Polymarket SPORTS rate (0.75%)", () => {
