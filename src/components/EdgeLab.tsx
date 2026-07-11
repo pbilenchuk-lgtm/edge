@@ -728,7 +728,12 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 }
 
 function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskProfiles, onRefreshOdds, onReassess, onAnalyze, onResumeAnalyze, oddsErrKey }: any) {
-  const meta = STATE_META[match.state] ?? { label: String(match.state ?? "—").toUpperCase(), color: "#8b95a5", bg: "#232a35" };
+  // "live" by our clock, but the provider isn't delivering yet (ESPN "pre"/lagging):
+  // show a distinct «ждём данные» badge, not a misleading LIVE — nothing trades until
+  // real data lands.
+  const meta = match.liveNoData
+    ? { label: "ЖДЁМ ДАННЫЕ", color: "#e8a838", bg: "#2e2a1a" }
+    : STATE_META[match.state] ?? { label: String(match.state ?? "—").toUpperCase(), color: "#8b95a5", bg: "#232a35" };
   const hasLineups = LINEUP_SPORTS.has(comp.sport); // does this sport have team sheets?
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
   // The (strategy, profile) PAIRS funded here — the real trading unit, so a
@@ -867,11 +872,11 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
     <section style={{ ...S.card, borderColor: meta.color + "55" }}>
       <div style={S.cardHead}>
         <div>
-          <div style={S.matchup}>{match.home}{match.state === "live" || match.state === "finished" ? <span style={S.score}> {match.scoreHome}:{match.scoreAway} </span> : <span style={S.vs}> — </span>}{match.away}</div>
-          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && match.kickoff}{match.state === "live" && `LIVE · ${match.clock || (match.minute != null ? `${match.minute}'` : "")}`}{match.state === "finished" && (match.endTime ? `завершён ${match.endTime}` : "финал")}{hasLineups && (() => { const out = match.lineupsReady || match.state === "live" || match.state === "finished"; return <>{"  ·  "}<span style={{ color: out ? "#70b56a" : "#e8a838" }}>{out ? "✓ состав" : "○ ждём состав — анализ позже"}</span></>; })()}</div>
+          <div style={S.matchup}>{match.home}{(match.state === "live" && !match.liveNoData) || match.state === "finished" ? <span style={S.score}> {match.scoreHome}:{match.scoreAway} </span> : <span style={S.vs}> — </span>}{match.away}</div>
+          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && match.kickoff}{match.state === "live" && (match.liveNoData ? "ждём данные провайдера — матч не торгуется" : `LIVE · ${match.clock || (match.minute != null ? `${match.minute}'` : "")}`)}{match.state === "finished" && (match.endTime ? `завершён ${match.endTime}` : "финал")}{hasLineups && (() => { const out = match.lineupsReady || match.state === "live" || match.state === "finished"; return <>{"  ·  "}<span style={{ color: out ? "#70b56a" : "#e8a838" }}>{out ? "✓ состав" : "○ ждём состав — анализ позже"}</span></>; })()}</div>
           {match.state === "finished" && match.duration && <div style={S.finishTiming}>{match.kickoffTime}–{match.endTime} · длительность {match.duration}{match.endNote && ` · ${match.endNote}`}</div>}
         </div>
-        <div style={{ ...S.stateBadge, background: meta.bg, color: meta.color }}>{match.state === "live" && <span style={S.pulse} />}{meta.label}</div>
+        <div style={{ ...S.stateBadge, background: meta.bg, color: meta.color }}>{match.state === "live" && !match.liveNoData && <span style={S.pulse} />}{meta.label}</div>
       </div>
 
       <div style={S.matchBody} className="el-match-body">

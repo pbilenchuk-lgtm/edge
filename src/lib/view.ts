@@ -11,7 +11,7 @@ import { jobActive } from "./analysis.js";
 import { warsawLabel, warsawClock, isIso } from "./time.js";
 import { SPORT_LABELS, isNoiseMarket } from "./polymarket.js";
 import { resolveFootballMarket } from "./settlement.js";
-import { maxLiveMinutes } from "./lifecycle.js";
+import { maxLiveMinutes, liveDelivering } from "./lifecycle.js";
 import { listRiskProfileViews, type RiskProfileView } from "./riskConfig.js";
 import type { StrategyParams, Match, Bet } from "./types.js";
 
@@ -32,6 +32,10 @@ export interface BetItemView {
 export interface MatchView {
   id: string; competitionId: string; home: string; away: string; state: string;
   minute: number | null; clock: string | null; scoreHome: number | null; scoreAway: number | null;
+  // state==="live" by our CLOCK, but the provider isn't actually delivering in-play
+  // data yet (ESPN still "pre"/lagging — no real minute, no events). The badge shows
+  // «ждём данные», not «LIVE», and nothing trades until real data lands.
+  liveNoData: boolean;
   lineupOut: boolean; lineupsReady: boolean; kickoff: string | null; kickoffAt: string | null; oddsUpdated: string | null;
   finalScore: string | null; kickoffTime: string | null; endTime: string | null;
   duration: string | null; endNote: string | null;
@@ -273,9 +277,13 @@ export function buildAppData(db: Database, env = process.env): AppData {
         ? Math.min(maxLiveMinutes(c.sport_id), Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at)) / 60000)))
         : m.minute;
 
+      // "live" by our clock, but the provider isn't delivering in-play data yet
+      // (frozen at 0', no events — ESPN still "pre"/lagging). Same predicate the
+      // entry/exit gate uses, so the badge matches reality: no trading, «ждём данные».
+      const liveNoData = m.state === "live" && !liveDelivering(db, m, c.sport_id);
       matchDb[m.id] = {
-        id: m.id, competitionId: m.competition_id, home: m.home, away: m.away, state: m.state,
-        minute: liveMinute, clock: m.clock ?? null, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
+        id: m.id, competitionId: m.competition_id, home: m.home, away: m.away, state: m.state, liveNoData,
+        minute: liveNoData ? null : liveMinute, clock: m.clock ?? null, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
         // Real starting XI published (provider), NOT the ~1h timer flip — this is
         // what actually gates football analysis, so the UI badge must track it.
         lineupsReady: R.hasLineups(db, m.id),

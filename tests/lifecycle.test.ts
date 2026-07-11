@@ -149,6 +149,24 @@ test("autoEnter: two profiles of the SAME strategy both fill the SAME market ind
   assert.equal(agg.stake, 200); assert.equal(med.stake, 100);
 });
 
+test("buildAppData: a clock-flipped live match with no provider delivery is flagged liveNoData (UI shows «ждём данные», not LIVE)", async () => {
+  const { buildAppData } = await import("../src/lib/view.js");
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const frozen = R.uid(), real = R.uid();
+  // Frozen: "live" by the clock, ESPN still "pre" — lineup match_live (zeros stats), no minute/events.
+  R.insertMatch(db, { id: frozen, competition_id: comp.id, home: "Orlando", away: "Kansas", state: "live", lineup_out: true, kickoff_at: "2026-07-11T00:00:00Z", minute: null, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: frozen });
+  R.upsertMatchLive(db, { match_id: frozen, espn_event_id: "e", league: "usa.nwsl", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: {}, away: {} }), updated_at: "t" });
+  // Really live: provider drives a real minute.
+  R.insertMatch(db, { id: real, competition_id: comp.id, home: "Bay", away: "Racing", state: "live", lineup_out: true, kickoff_at: null, minute: 12, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: real });
+
+  const app = buildAppData(db) as any;
+  assert.equal(app.matchDb[frozen].liveNoData, true, "frozen live match flagged — no provider delivery");
+  assert.equal(app.matchDb[frozen].minute, null, "no fabricated timer minute while awaiting data");
+  assert.equal(app.matchDb[real].liveNoData, false, "a genuinely delivering live match is NOT flagged");
+});
+
 test("evaluateExits HOLDS a position on a live match the provider isn't delivering (no noise-cut)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
