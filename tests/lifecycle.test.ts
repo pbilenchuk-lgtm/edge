@@ -6,7 +6,7 @@ import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision } from "../src/lib/thresholds.js";
 import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats } from "../src/lib/lifecycle.js";
-import { analyzeMatch } from "../src/lib/analysis.js";
+import { analyzeMatch, runStrategists } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
 const mockLLM = (a: unknown) => (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify(a) }] }) })) as any;
@@ -726,6 +726,32 @@ test("live match that JUST kicked off (0:0, within grace): pre-match strategist 
   await autoAnalyze(db, deps, { liveOnly: true });
   assert.ok(R.artifactsForMatch(db, "m-lineup").some((a) => a.kind === "distribution"), "distribution still produced (live reassess not blind)");
   assert.ok(!R.artifactsForMatch(db, "m-lineup").some((a) => a.kind === "battle_sheet"), "NO battle_sheet — 30' in, past the grace, pre-match strategist skipped");
+});
+
+test("runStrategists (Model A): ONE strategist call per strategy, shared across its risk profiles; profiles size the SAME picks deterministically", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  // the SAME strategy funded under THREE risk profiles
+  R.clearShares(db, comp.id);
+  for (const p of ["aggressive", "medium", "conservative"]) R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, risk_profile_id: p, pct: 20 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "lineup", lineup_out: true, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 40, ai_prob: 0.6, liquidity: "3000", external_ref: "TOK", snapshot_at: "t", is_closing: false });
+  R.upsertAssessment(db, { id: R.uid(), match_id: mid, stage: "post_lineup", confidence: "высокая", short: "s", body: "b", verdict: "v", model: "Claude Opus 4.8", status: "ok", created_at: "t" });
+
+  // Count strategist LLM calls: pre-Model-A this was one PER profile (3); Model A shares one.
+  let calls = 0;
+  const decision = { picks: [{ label: "Over 2.5", prob: 0.6, conviction: "высокая", reason: "класс-дисбаланс" }], exits: [] };
+  const fetchImpl = (async () => { calls++; return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify(decision) }] }) }; }) as any;
+
+  await runStrategists(db, mid, { now: () => "t", fetchImpl, env: { ANTHROPIC_API_KEY: "k" } });
+  assert.equal(calls, 1, "exactly ONE strategist LLM call for the strategy — the judgment is shared across all 3 profiles");
+  assert.equal(R.artifactsForMatch(db, mid).filter((a) => a.kind === "battle_sheet").length, 3, "still one battle_sheet per profile (sizing is per-profile)");
+  const proposed = R.betsForMatch(db, mid, strat.id).filter((b) => b.status === "proposed");
+  assert.equal(proposed.length, 3, "all three profiles sized the SAME shared pick — a nested subset of one candidate list, not divergent LLM picks");
+  assert.ok(proposed.every((b) => b.market_label === "Over 2.5"), "identical market across profiles (determinism restored)");
 });
 
 test("autoRunStrategists re-runs the engine for a NEW roster pair, without re-analysis, self-limiting", async () => {

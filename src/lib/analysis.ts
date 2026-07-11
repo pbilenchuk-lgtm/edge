@@ -247,19 +247,37 @@ export async function runStrategists(
   // Strategist context = match facts + the outcome tree / match_shape / scenarios
   // the strategist reasons over. Same for every pair, so build it once.
   const stratCtx = strategistContext(db, matchId);
+  // Model A — the strategist JUDGMENT (which markets, and the refined prob per
+  // market) is made ONCE per strategy and SHARED across its risk profiles. Profiles
+  // then diverge ONLY in the deterministic threshold + sizing (sizePrematch below),
+  // so a stricter profile's entries are a NESTED SUBSET of one candidate list — not
+  // different picks from independent, non-deterministic per-profile LLM calls (which
+  // made profile-vs-profile PnL a comparison of luck, not of thresholds). It also
+  // cuts pre-match strategist calls ~Nx (one per strategy, not per profile), easing
+  // credit burn. Safe as a single point of failure because that one call is hardened
+  // by JSON-repair (parseJsonLoose) + transient retry (callLLM). A profile that
+  // already HOLDS positions (a mid-match roster/share change) still gets its OWN call
+  // that sees them — the shared judgment is built with NO open positions, so it's
+  // only reused for profiles that likewise hold none (the pre-match norm).
+  const sharedDec = new Map<string, Awaited<ReturnType<typeof strategistDecide>>>();
   for (const { strat, profile, pct } of pairs) {
     const budget = stratBudget(comp!.budget, pct);
     const pairLabel = `${strat.name} · ${profile}`;
     const stratModel = safeModel(strat.model ?? model);
     const openPos = R.betsForMatch(db, matchId, strat.id).filter((b) => b.status === "open" && (b.risk_profile_id ?? "medium") === profile);
-    const dec = await strategistDecide({
-      strategyName: strat.name, strategyPrompt: strat.prompt,
-      match: { home: match.home, away: match.away, sport, state: match.state, minute: match.minute, scoreHome: match.score_home, scoreAway: match.score_away },
-      assessment: { confidence: assessment.confidence ?? "средняя", short: assessment.short ?? "", verdict: assessment.verdict ?? "" },
-      markets: freshMarkets.map((m) => ({ label: m.label, priceCents: m.price, aiProb: m.ai_prob, conflict: conflicts.get(m.label) ?? null })),
-      openPositions: openPos.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
-      context: stratCtx,
-    }, stratModel, { fetchImpl: deps.fetchImpl, env });
+    let dec = openPos.length === 0 ? sharedDec.get(strat.id) : undefined;
+    const reused = dec != null;
+    if (!dec) {
+      dec = await strategistDecide({
+        strategyName: strat.name, strategyPrompt: strat.prompt,
+        match: { home: match.home, away: match.away, sport, state: match.state, minute: match.minute, scoreHome: match.score_home, scoreAway: match.score_away },
+        assessment: { confidence: assessment.confidence ?? "средняя", short: assessment.short ?? "", verdict: assessment.verdict ?? "" },
+        markets: freshMarkets.map((m) => ({ label: m.label, priceCents: m.price, aiProb: m.ai_prob, conflict: conflicts.get(m.label) ?? null })),
+        openPositions: openPos.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
+        context: stratCtx,
+      }, stratModel, { fetchImpl: deps.fetchImpl, env });
+      if (openPos.length === 0) sharedDec.set(strat.id, dec);
+    }
     // On a FAILED strategist call, propose NOTHING (empty picks) — do NOT fall back
     // to raw base-model edge. That fallback bypassed every strategist safeguard
     // (anti-phantom, thin-market skepticism, methodology gating) and produced
@@ -268,7 +286,7 @@ export async function runStrategists(
     // "no decision", not "trade the base model".
     const picksArr = dec.ok ? dec.picks : [];
     try { R.saveArtifact(db, { match_id: matchId, kind: "strategist", label: pairLabel, stage, content: JSON.stringify(dec, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
-    if (!dec.ok) {
+    if (!dec.ok && !reused) {
       R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `стратег недоступен (${dec.error || "нет ответа ИИ"}) — входов нет (без базовой подмены)`, created_at: now() });
     }
 
