@@ -86,6 +86,12 @@ export interface LLMRequest {
   prompt: string;
   maxTokens?: number;
   timeoutMs?: number;
+  /** Extra attempts on a TRANSIENT failure (network blip / 5xx / rate-limit).
+   *  Total attempts = 1 + retries. Default 2. A hard failure (auth, bad request,
+   *  our own response-timeout abort) never retries. */
+  retries?: number;
+  /** Base backoff (ms) between retries; doubles each attempt. Default 400. */
+  retryBackoffMs?: number;
 }
 
 export type LLMResult =
@@ -95,18 +101,33 @@ export type LLMResult =
 interface Deps {
   fetchImpl?: typeof fetch;
   env?: Record<string, string | undefined>;
+  /** Injectable delay so tests don't wait on real backoff. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** HTTP statuses worth a retry (transient upstream state), vs a 4xx that will
+ *  fail identically on retry (auth / bad request / not found). 529 = Anthropic
+ *  "overloaded"; 429 = rate limit; 5xx = upstream hiccup. */
+function retryableStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status === 529 || (status >= 500 && status <= 504);
 }
 
 /**
- * Single graceful call. Never throws: returns {ok:false} on missing key,
- * network failure, timeout, or a non-2xx / malformed response.
+ * Single graceful call with retry on TRANSIENT failures. Never throws: returns
+ * {ok:false} on missing key, network failure, timeout, or a non-2xx / malformed
+ * response. A network blip (ETIMEDOUT / ECONNRESET / "fetch failed"), a 5xx, or a
+ * rate-limit is retried with backoff — one dropped socket must not sink a whole
+ * live cycle (8/8 pairs failing on the same hiccup). Hard failures — auth, bad
+ * request, our own 120s response-timeout abort — do NOT retry (a retry would just
+ * wait again for the same wall).
  */
 export async function callLLM(
   req: LLMRequest,
   deps: Deps = {},
 ): Promise<LLMResult> {
   const env = deps.env ?? process.env;
-  const doFetch = deps.fetchImpl ?? fetch;
   const resolved = resolveModel(req.model);
   if (!resolved) return { ok: false, error: `неизвестная модель: ${req.model}` };
   const { provider, apiId } = resolved;
@@ -115,6 +136,25 @@ export async function callLLM(
   if (!key)
     return { ok: false, provider, error: `нет ключа для ${provider} (ТЗ §4.6)` };
 
+  const maxAttempts = 1 + Math.max(0, req.retries ?? 2);
+  const doSleep = deps.sleep ?? sleep;
+  let last: LLMResult = { ok: false, provider, error: "нет попыток" };
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { result, retryable } = await callLLMOnce(req, deps, provider, apiId, key);
+    if (result.ok) return result;
+    last = result;
+    if (!retryable || attempt >= maxAttempts) break;
+    // 400, 800, … ms (+ small jitter-free determinism for tests).
+    await doSleep((req.retryBackoffMs ?? 400) * 2 ** (attempt - 1));
+  }
+  return last;
+}
+
+/** One HTTP attempt. Returns the result plus whether the failure is worth a retry. */
+async function callLLMOnce(
+  req: LLMRequest, deps: Deps, provider: ProviderId, apiId: string, key: string,
+): Promise<{ result: LLMResult; retryable: boolean }> {
+  const doFetch = deps.fetchImpl ?? fetch;
   const ctrl = new AbortController();
   // 120s: the analytics/strategist calls send a long prompt + many markets and
   // Opus can take 40–70s; 30s aborted them mid-flight ("operation was aborted").
@@ -125,12 +165,12 @@ export async function callLLM(
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       const hint = body.slice(0, 200).replace(/\s+/g, " ");
-      return { ok: false, provider, error: `${provider} HTTP ${res.status}${hint ? ` — ${hint}` : ""}` };
+      return { result: { ok: false, provider, error: `${provider} HTTP ${res.status}${hint ? ` — ${hint}` : ""}` }, retryable: retryableStatus(res.status) };
     }
     const json = await res.json();
     const text = extractText(provider, json);
-    if (text == null) return { ok: false, provider, error: "пустой ответ модели" };
-    return { ok: true, text, provider, model: apiId };
+    if (text == null) return { result: { ok: false, provider, error: "пустой ответ модели" }, retryable: false };
+    return { result: { ok: true, text, provider, model: apiId }, retryable: false };
   } catch (e) {
     // undici's fetch throws a bare "fetch failed" and hides the real reason on
     // `.cause` (ENOTFOUND / ECONNREFUSED / UND_ERR_CONNECT_TIMEOUT / TLS / an
@@ -138,12 +178,15 @@ export async function callLLM(
     // actually diagnosable instead of an opaque "fetch failed".
     const msg = e instanceof Error ? e.message : String(e);
     const cause = (e as any)?.cause;
-    const detail = cause ? ` (${cause.code || cause.message || String(cause)})` : "";
+    const code = cause?.code || cause?.message;
+    const detail = cause ? ` (${code || String(cause)})` : "";
     const aborted = (e as any)?.name === "AbortError" || /abort/i.test(msg);
+    // Transient network faults are worth a retry; our own timeout-abort is not
+    // (it already waited the full window — retrying just waits it again).
+    const transient = !aborted && /fetch failed|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|EPIPE|socket|UND_ERR|network|terminated/i.test(`${msg} ${code ?? ""}`);
     return {
-      ok: false,
-      provider,
-      error: aborted ? `модель не ответила за отведённое время (таймаут)` : `${msg}${detail}`,
+      result: { ok: false, provider, error: aborted ? `модель не ответила за отведённое время (таймаут)` : `${msg}${detail}` },
+      retryable: transient,
     };
   } finally {
     clearTimeout(timer);
@@ -257,7 +300,7 @@ export async function llmExtractThresholds(
     deps,
   );
   if (!res.ok) throw new Error(res.error);
-  return JSON.parse(extractJson(res.text));
+  return parseJsonLoose(res.text);
 }
 
 /** Generate a 1–2 word strategy name; falls back to a keyword heuristic. */
@@ -363,7 +406,7 @@ export async function assessMatchLLM(
 
   if (!res.ok) return failed(res.error);
   try {
-    const j = JSON.parse(extractJson(res.text));
+    const j = parseJsonLoose(res.text);
     const markets = Array.isArray(j.markets)
       ? j.markets.filter((m: any) => m && typeof m.label === "string" && Number.isFinite(m.prob))
           .map((m: any) => ({ label: String(m.label), prob: clamp01(m.prob) }))
@@ -433,7 +476,7 @@ export async function assessFootballStructured(
   }, deps);
   if (!res.ok) return failedFootball(res.error);
   try {
-    const j = JSON.parse(extractJson(res.text));
+    const j = parseJsonLoose(res.text);
     const c = j.core ?? {};
     if (!Number.isFinite(c.xg_home) || !Number.isFinite(c.xg_away)) return failedFootball("нет xg_home/xg_away в core");
     const mt = ["group", "knockout", "uncertain"].includes(j.match_type) ? j.match_type : "uncertain";
@@ -509,7 +552,7 @@ export async function assessCategoryModifier(
   }, deps);
   if (!res.ok) return { ok: false, coreAdjustments: [], newDrivers: [], newScenarios: [], overrideAdjustments: [], confidenceXgDelta: 0, confidenceScenarioDelta: 0, notes: "", error: res.error };
   try {
-    const j = JSON.parse(extractJson(res.text));
+    const j = parseJsonLoose(res.text);
     const reasoned = (x: any) => x && typeof x.reason === "string" && x.reason.trim();
     return {
       ok: true,
@@ -718,7 +761,7 @@ export async function strategistDecide(
   }, deps);
   if (!res.ok) return { ok: false, picks: [], exits: [], note: "", source: "none", error: res.error };
   try {
-    const j = JSON.parse(extractJson(res.text));
+    const j = parseJsonLoose(res.text);
     return { ...normalizeStrategistJson(j), ok: true, source: "llm" };
   } catch {
     // Capture the tail of the raw reply so the failure is diagnosable (truncation
@@ -755,7 +798,7 @@ export async function proposeImprovement(
     }, deps);
     if (res.ok) {
       try {
-        const j = JSON.parse(extractJson(res.text));
+        const j = parseJsonLoose(res.text);
         if (j.newPrompt) return { removed: "(текущий промт)", added: "(предложение ИИ)", newPrompt: String(j.newPrompt), reason: String(j.reason ?? ""), source: "llm" };
       } catch { /* fall through to heuristic */ }
     }
@@ -815,4 +858,72 @@ export function extractJson(s: string): string {
     else if (ch === "}") { if (--depth === 0) return t.slice(start, i + 1); }
   }
   return t.slice(start); // unbalanced (truncated) — best effort, parse may still throw
+}
+
+/**
+ * Parse a model reply as JSON, tolerant of the small malformations LLMs routinely
+ * emit. Strict `JSON.parse(extractJson(...))` first (the fast, common path); only
+ * if that throws do we attempt a REPAIR and re-parse. Repair is never applied to a
+ * reply that already parsed, so a valid response is never altered — worst case the
+ * repaired text still throws and the caller's existing error path runs.
+ * Fixes the reproducing "невалидный JSON от стратега" skips: a reply that reached
+ * its closing brace but carried a trailing comma, a bare newline inside a string,
+ * or an unbalanced/stray bracket used to be discarded whole; now it's salvaged.
+ */
+export function parseJsonLoose(raw: string): any {
+  const extracted = extractJson(raw);
+  try { return JSON.parse(extracted); } catch { /* fall through to repair */ }
+  return JSON.parse(repairJson(extracted));
+}
+
+/**
+ * Best-effort structural repair of almost-valid JSON. A single string-aware pass:
+ * escapes bare control chars inside strings (raw \n/\t a model dropped into a
+ * "notes" field), drops trailing commas before a closer, discards a stray closing
+ * bracket with no opener, auto-closes mismatched nesting, and closes anything left
+ * open at EOF (truncation). Deliberately conservative — it only makes malformed
+ * input parseable, it doesn't reinterpret values.
+ */
+export function repairJson(src: string): string {
+  const out: string[] = [];
+  const stack: string[] = [];
+  let inStr = false, esc = false;
+  // Drop trailing whitespace + an optional dangling comma from `out` (called right
+  // before we emit a closer, so `[1,2,]` / `{"a":1,}` become valid).
+  const trimTrailingComma = () => {
+    let j = out.length - 1;
+    while (j >= 0 && /\s/.test(out[j])) j--;
+    if (j >= 0 && out[j] === ",") out.splice(j);
+  };
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (inStr) {
+      if (esc) { out.push(ch); esc = false; continue; }
+      if (ch === "\\") { out.push(ch); esc = true; continue; }
+      if (ch === '"') { out.push(ch); inStr = false; continue; }
+      if (ch === "\n") { out.push("\\n"); continue; }
+      if (ch === "\r") { out.push("\\r"); continue; }
+      if (ch === "\t") { out.push("\\t"); continue; }
+      if (ch === "\b") { out.push("\\b"); continue; }
+      if (ch === "\f") { out.push("\\f"); continue; }
+      out.push(ch); continue;
+    }
+    if (ch === '"') { inStr = true; out.push(ch); continue; }
+    if (ch === "{" || ch === "[") { stack.push(ch); out.push(ch); continue; }
+    if (ch === "}" || ch === "]") {
+      const open = ch === "}" ? "{" : "[";
+      trimTrailingComma();
+      if (stack[stack.length - 1] === open) { stack.pop(); out.push(ch); }
+      else if (stack.lastIndexOf(open) >= 0) {
+        // close intermediate mismatched nesting until we reach the matching opener
+        while (stack.length && stack[stack.length - 1] !== open) { const o = stack.pop()!; out.push(o === "{" ? "}" : "]"); }
+        stack.pop(); out.push(ch);
+      } // else: stray closer with no opener → drop it
+      continue;
+    }
+    out.push(ch);
+  }
+  if (inStr) out.push('"');                       // unterminated string at EOF
+  while (stack.length) { trimTrailingComma(); const o = stack.pop()!; out.push(o === "{" ? "}" : "]"); }
+  return out.join("");
 }

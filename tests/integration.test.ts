@@ -13,7 +13,7 @@ import {
 } from "../src/lib/polymarket.js";
 import {
   resolveModel, apiKeyFor, callLLM, generateStrategyName, heuristicName,
-  effectiveEnv, providerEnabled,
+  effectiveEnv, providerEnabled, parseJsonLoose, repairJson,
 } from "../src/lib/llm.js";
 import { extractThresholds } from "../src/lib/thresholds.js";
 import { analyzeMatch } from "../src/lib/analysis.js";
@@ -544,6 +544,69 @@ test("llm: callLLM success via mocked provider", async () => {
   );
   assert.equal(res.ok, true);
   if (res.ok) assert.equal(res.text, "готово");
+});
+
+test("parseJsonLoose: valid JSON is untouched; strict path returns it verbatim", () => {
+  const obj = { picks: [{ label: "Over 2.5", prob: 0.6 }], notes: "ok" };
+  assert.deepEqual(parseJsonLoose(JSON.stringify(obj)), obj);
+  // with prose + fences around it (extractJson path)
+  assert.deepEqual(parseJsonLoose("Вот ответ:\n```json\n" + JSON.stringify(obj) + "\n```\nвсё."), obj);
+});
+
+test("parseJsonLoose: repairs the LLM malformations that were being discarded whole", () => {
+  // trailing comma (array + object) — the classic
+  assert.deepEqual(parseJsonLoose('{"a":[1,2,],"b":{"c":1,},}'), { a: [1, 2], b: { c: 1 } });
+  // bare newline inside a string value (a model dropped a real \n into "notes")
+  assert.deepEqual(parseJsonLoose('{"notes":"строка один\nстрока два"}'), { notes: "строка один\nстрока два" });
+  // truncated mid-object — missing closers appended
+  assert.deepEqual(parseJsonLoose('{"picks":[{"label":"X","prob":0.5'), { picks: [{ label: "X", prob: 0.5 }] });
+  // the reproducing shape: reaches its "}" but is structurally off — empty array
+  // then notes, with a trailing comma before the close
+  assert.deepEqual(parseJsonLoose('{"picks":[],"notes":"Воздерживаюсь.",}'), { picks: [], notes: "Воздерживаюсь." });
+  // unterminated string at EOF is closed
+  assert.deepEqual(parseJsonLoose('{"note":"обрыв'), { note: "обрыв" });
+});
+
+test("repairJson: leaves already-valid JSON semantically identical", () => {
+  const s = '{"x":1,"y":[true,null,"z"],"w":{"k":2}}';
+  assert.deepEqual(JSON.parse(repairJson(s)), JSON.parse(s));
+});
+
+test("callLLM: retries a TRANSIENT network fault (ETIMEDOUT) then succeeds", async () => {
+  let calls = 0;
+  const flaky = (async () => {
+    calls++;
+    if (calls < 3) { const e: any = new Error("fetch failed"); e.cause = { code: "ETIMEDOUT" }; throw e; }
+    return { ok: true, json: async () => ({ content: [{ text: "готово" }] }) };
+  }) as unknown as typeof fetch;
+  const res = await callLLM(
+    { model: "Claude Opus 4.8", prompt: "hi" },
+    { env: { ANTHROPIC_API_KEY: "sk-ant-x" }, fetchImpl: flaky, sleep: async () => {} },
+  );
+  assert.equal(res.ok, true, "third attempt succeeded");
+  assert.equal(calls, 3, "two failed attempts then one success");
+});
+
+test("callLLM: a HARD failure (HTTP 400) is NOT retried", async () => {
+  let calls = 0;
+  const bad = (async () => { calls++; return { ok: false, status: 400, text: async () => "bad request" }; }) as unknown as typeof fetch;
+  const res = await callLLM(
+    { model: "Claude Opus 4.8", prompt: "hi" },
+    { env: { ANTHROPIC_API_KEY: "sk-ant-x" }, fetchImpl: bad, sleep: async () => {} },
+  );
+  assert.equal(res.ok, false);
+  assert.equal(calls, 1, "400 fails once, no retry");
+});
+
+test("callLLM: a 529 overloaded IS retried; retries exhausted returns the last error", async () => {
+  let calls = 0;
+  const overloaded = (async () => { calls++; return { ok: false, status: 529, text: async () => "overloaded" }; }) as unknown as typeof fetch;
+  const res = await callLLM(
+    { model: "Claude Opus 4.8", prompt: "hi", retries: 2 },
+    { env: { ANTHROPIC_API_KEY: "sk-ant-x" }, fetchImpl: overloaded, sleep: async () => {} },
+  );
+  assert.equal(res.ok, false);
+  assert.equal(calls, 3, "1 + 2 retries all hit the wall");
 });
 
 test("llm: name generation and threshold extraction fall back without a key", async () => {
