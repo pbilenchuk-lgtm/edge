@@ -387,24 +387,33 @@ const appendReason = (existing: string | null, note?: string): string =>
 async function sellVwapCents(
   mk: Market | undefined, entryCents: number, basisUsd: number,
   poly: PolymarketConfig, deps: EngineDeps, quoteCents: number,
-): Promise<{ cents: number; note?: string }> {
-  if (!poly.enabled) return { cents: quoteCents };
+  bookCache?: Map<string, Awaited<ReturnType<typeof fetchOrderBook>>>,
+): Promise<{ cents: number; note?: string; fromBook: boolean }> {
+  if (!poly.enabled) return { cents: quoteCents, fromBook: false };
   const token = mk?.external_ref ?? null;
   const shares = entryCents > 0 ? basisUsd / (entryCents / 100) : 0;
-  const book = token && shares > 0 ? await fetchOrderBook(token, poly, deps) : null;
+  // The order book is per-TOKEN, not per-position — cache it for the cycle so two
+  // risk profiles on the same market don't each hit the (uncached) CLOB endpoint.
+  let book: Awaited<ReturnType<typeof fetchOrderBook>> = null;
+  if (token && shares > 0) {
+    if (bookCache && bookCache.has(token)) book = bookCache.get(token) ?? null;
+    else { book = await fetchOrderBook(token, poly, deps); if (bookCache) bookCache.set(token, book); }
+  }
   if (book && book.bids.length) {
     const f = simulateSell(book.bids, shares);
     const bestBid = book.bids[0].priceCents;
     const fee = takerFeeCents(f.avgPriceCents, poly.exec.takerFeeRate); // taker fee on exit
     const eff = Math.round((f.avgPriceCents - fee) * 10) / 10;           // proceeds/share after fee
     const slip = Math.round((bestBid - f.avgPriceCents) * 10) / 10;
-    return { cents: eff, note: `выход VWAP ${f.avgPriceCents}¢ (бид ${bestBid}¢${slip > 0 ? `, слип −${slip}¢` : ""}) − комиссия ${fee}¢` };
+    return { cents: eff, fromBook: true, note: `выход VWAP ${f.avgPriceCents}¢ (бид ${bestBid}¢${slip > 0 ? `, слип −${slip}¢` : ""}) − комиссия ${fee}¢` };
   }
   const liq = Number(mk?.liquidity ?? 0) || 0;
   const avg = parametricSellAvgCents(quoteCents, basisUsd, liq, poly.exec.fallbackK);
   const fee = takerFeeCents(avg, poly.exec.takerFeeRate);
   const eff = Math.round((avg - fee) * 10) / 10;
-  return { cents: eff, note: `≈выход ${avg}¢ − комиссия ${fee}¢ (модель по ликвидности)` };
+  // fromBook=false: this is a MODELLED price (no real book), so the phantom-bid guard
+  // must NOT treat a large-stake illiquidity haircut here as a phantom to hold on.
+  return { cents: eff, fromBook: false, note: `≈выход ${avg}¢ − комиссия ${fee}¢ (модель по ликвидности)` };
 }
 
 export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<AutoEnterItem[]> {
@@ -523,6 +532,8 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
   const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
   const out: ExitItem[] = [];
   const touched = new Set<string>();
+  // One order-book fetch per TOKEN per cycle — profiles sharing a market reuse it.
+  const bookCache = new Map<string, Awaited<ReturnType<typeof fetchOrderBook>>>();
   for (const { sport, match: m } of activeMatches(db)) {
     // Price-driven exits (take-profit / stop / edge-gone) are LIVE management —
     // per ТЗ §3.3 mark-to-market and price triggers belong to the live phase. A
@@ -550,7 +561,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // strategist re-entered and it churned). Deciding on the same value we then fill
       // at removes the phantom trigger at the source. Fetch ONCE, reuse for the fill.
       // (poly off → sellVwapCents returns the quote, so the decision falls back to mid.)
-      const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price);
+      const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price, bookCache);
       // When the model prob is unknown, DON'T let it read as "edge gone" (which
       // would force-close on the first tick) — pass 1 so only take-profit / hard
       // stop can fire. (Defensive: entries always store a non-null ai_prob.)
@@ -561,13 +572,13 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       const ex = getProfileConfig(db, b.risk_profile_id ?? "medium").exits;
       const d = exitDecision({ params: { takeProfit: ex.take_profit_pct, exitStop: ex.hard_stop_pct, edgeExit: false }, aiProb: b.ai_prob ?? 1, entryPriceCents: b.entry_price, currentPriceCents: sell.cents });
       if (!d.exit) continue;
-      // Phantom-bid guard (EXIT_PHANTOM_*): a mechanical stop that would fill at a
-      // degenerate bid sitting far below the mark is dumping into a phantom, not
-      // managing risk — HOLD, let the position settle on the real result. Only the
-      // blunt code stop is guarded; a deliberate strategist close is left alone.
+      // Log a HOLD at most once per continuous hold period for THIS market (guillemets
+      // delimit the label so «Over 1.5» ≠ «Over 1.5 goals»; scan a recent window so two
+      // alternating held markets don't each re-log every cycle).
+      const holdKey = `«${b.market_label}»`;
       const holdOnce = (text: string) => {
-        const last = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === b.strategy_id).at(-1);
-        if (!(last && last.type === "hold" && last.text.includes(b.market_label))) {
+        const recent = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === b.strategy_id).slice(-8);
+        if (!recent.some((e) => e.type === "hold" && e.text.includes(holdKey))) {
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text, created_at: now });
         }
       };
@@ -575,8 +586,10 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // below the mid is dumping into a momentarily-broken book, not managing risk —
       // HOLD, let it settle on the real result. (A take-profit can no longer fire on a
       // phantom-inflated mark: the decision above is made on this same executable bid.)
-      if (sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP) {
-        holdOnce(`выход отклонён: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${d.reason}); держим до реального рынка/сеттла (exit_phantom_block)`);
+      // ONLY on a REAL book (fromBook) — a modelled parametric price this low is a
+      // genuine illiquidity haircut, not a phantom, and a real stop must still fire.
+      if (sell.fromBook && sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP) {
+        holdOnce(`выход отклонён по ${holdKey}: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${d.reason}); держим до реального рынка/сеттла (exit_phantom_block)`);
         continue;
       }
       const pnl = closeBetEarly(db, b, sell.cents, d.reason, minuteLabel(m), now);
@@ -594,22 +607,30 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 const stripDia = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
 /**
  * Score reconciled with the goal-event feed: never BELOW the goals the strategist is
- * told about. The ESPN score field can lag its own event feed, and a model shown a
- * phantom-crashed price can back-derive a fake deficit — either way the strategist
- * must reason over a score consistent with the (unforgeable) goal events. Corrects
- * UPWARD only, off `goal` events; an unmatched team name is ignored, so it can never
- * over-count. Pure prose hallucination when score and events already agree is out of
- * reach here (needs market-semantic labelling), but stale/inconsistent state isn't.
+ * told about, so a lagging ESPN score field (or a model back-deriving a fake deficit
+ * from a phantom price) can't feed a wrong live prob. Corrects UPWARD only, off `goal`
+ * events. Team attribution is EXACT (diacritic-folded) or word-level containment —
+ * NOT a loose substring, which mis-booked an away goal to home when one name nested
+ * inside the other ("Inter" ⊂ "Inter Miami"). Known limitation: a VAR-disallowed goal
+ * leaves its `goal` event in the feed (events are never deleted) while ESPN reverts
+ * the score, so this can briefly read one goal high; it only nudges an LLM prob input
+ * (sizing arithmetic stays deterministic), and clears once real play passes it.
  */
 export function reconciledScore(db: Database, m: Match): { home: number | null; away: number | null } {
   const home = stripDia(m.home).toLowerCase(), away = stripDia(m.away).toLowerCase();
-  const hit = (name: string, t: string) => t === name || (t.length >= 3 && (name.includes(t) || t.includes(name)));
+  // Match on whole words: exact, or the event team is a full word-subset of the match
+  // name (or vice-versa). Never a bare substring — "inter" must not hit "inter miami".
+  const words = (s: string) => new Set(s.split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 3));
+  const hit = (name: string, t: string) => { if (t === name) return true; const a = words(name), b = words(t); if (!a.size || !b.size) return false; return [...b].every((w) => a.has(w)) || [...a].every((w) => b.has(w)); };
   let gh = 0, ga = 0;
   for (const e of R.eventsForMatch(db, m.id)) {
     if (e.type !== "goal" || !e.team) continue;
     const t = stripDia(e.team).toLowerCase();
-    if (hit(home, t)) gh++;
-    else if (hit(away, t)) ga++;
+    // Attribute to home ONLY if it matches home and NOT away (an ambiguous name that
+    // matches both — a nested pair — is dropped rather than mis-booked to one side).
+    const h = hit(home, t), a = hit(away, t);
+    if (h && !a) gh++;
+    else if (a && !h) ga++;
   }
   // Correct UPWARD only; preserve a null (provider hasn't reported a score yet) when
   // no goal events contradict it, so the strategist's "score unknown" path still fires.

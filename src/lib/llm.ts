@@ -680,13 +680,14 @@ export function normalizeStrategistJson(j: any): Omit<StrategistDecision, "ok" |
   const trig = (t: unknown): string | undefined => (typeof t === "string" && t.trim() ? String(t) : undefined);
   const fired = (e: any): boolean => {
     const th = typeof e.trigger_hit === "string" ? e.trigger_hit.trim().toLowerCase() : "";
-    // A NEGATIVE answer means the trigger did NOT fire — match the leading token, not
-    // the exact string. The model routinely appends an explanation ("нет — переоценка
-    // ещё не отыграна", "no, not yet"), and a bare-equality check let that through and
-    // CLOSED a position meant to be held (harmless when up, a wrong cut when down).
-    // (Can't use \b — it's ASCII-only, so it won't fire after Cyrillic "нет".)
-    const NEG = ["нет", "не", "no", "not", "none", "н/д"];
-    const negative = !th || NEG.some((n) => th === n || (th.startsWith(n) && !/[а-яёa-z]/i.test(th.charAt(n.length))));
+    // A NEGATIVE answer means the trigger did NOT fire. The model writes free text and
+    // the negation is not always the LEADING word — "ещё нет", "пока нет", "пока не
+    // сработал стоп" all mean "not yet / hold". Match a standalone negation WORD
+    // anywhere (Unicode letter-boundaries, since ASCII \b never fires after Cyrillic),
+    // so a held position isn't force-closed (harmless when up, a wrong cut when down).
+    // "недооценка отыграна" is NOT suppressed — "не" there is glued to a letter, not a
+    // standalone word. A deliberate action:close still fires regardless (isClose).
+    const negative = !th || /(^|[^\p{L}])(нет|не|no|not|none|н\/д)($|[^\p{L}])/u.test(th);
     return !negative || isClose(e.action);
   };
   const fracOf = (e: any): number => {

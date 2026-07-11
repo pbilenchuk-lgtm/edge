@@ -235,13 +235,19 @@ test("normalizeStrategistJson: a NEGATIVE exit_check answer ('нет — …') d
   const d = normalizeStrategistJson({
     strategist: "overreaction", phase: "live",
     exit_checks: [
-      { position: "Molde FK", trigger_hit: "нет — переоценка ещё не отыграна, справедливая ~50¢", action: "hold" }, // NO — hold
-      { position: "Draw", trigger_hit: "no, not yet", action: "hold" },                                             // NO — hold
+      { position: "Molde FK", trigger_hit: "нет — переоценка ещё не отыграна, справедливая ~50¢", action: "hold" }, // NO (leading)
+      { position: "Draw", trigger_hit: "no, not yet", action: "hold" },                                             // NO
+      { position: "Bodo", trigger_hit: "ещё нет", action: "hold" },                                                  // NO — negation NOT leading
+      { position: "Rosenborg", trigger_hit: "пока не сработал стоп", action: "hold" },                               // NO — negation mid-string
+      { position: "Valued", trigger_hit: "недооценка отыграна", action: "close" },                                   // FIRES — "не" glued to a letter
       { position: "Over 2.5", trigger_hit: "take_price", action: "close" },                                          // real close
     ],
   });
   assert.ok(!d.exits.some((e) => e.market === "Molde FK"), "'нет — …' with an explanation is NOT a fired trigger");
   assert.ok(!d.exits.some((e) => e.market === "Draw"), "'no, not yet' is NOT a fired trigger");
+  assert.ok(!d.exits.some((e) => e.market === "Bodo"), "'ещё нет' (non-leading negation) is NOT a fired trigger");
+  assert.ok(!d.exits.some((e) => e.market === "Rosenborg"), "'пока не сработал' (mid-string negation) is NOT fired");
+  assert.ok(d.exits.some((e) => e.market === "Valued"), "'недооценка' (не glued to a letter) is NOT a negation → fires");
   assert.ok(d.exits.some((e) => e.market === "Over 2.5"), "a real take_price close still fires");
 });
 

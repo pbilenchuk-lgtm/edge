@@ -263,6 +263,12 @@ test("reconciledScore: corrects a lagging score up to the goal events (diacritic
   const m3 = mk("rs3", 2, 1);
   goal("rs3", "AIK", 30); // only one event known
   assert.deepEqual(reconciledScore(db, m3), { home: 2, away: 1 }, "never corrected downward off an incomplete feed");
+
+  // (4) NESTED names — an away goal by "Inter" must NOT be mis-booked to "Inter Miami"
+  //     (the old substring match did exactly that). Ambiguous → dropped, not attributed.
+  R.insertMatch(db, { id: "rs4", competition_id: comp.id, home: "Inter Miami", away: "Inter", state: "live", lineup_out: true, kickoff_at: null, minute: 60, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "rs4" });
+  goal("rs4", "Inter", 55); // the AWAY side scored
+  assert.equal(reconciledScore(db, R.getMatch(db, "rs4")!).home, 0, "an away goal by the nested name is NOT booked to home");
 });
 
 test("evaluateExits HOLDS a stop that would fill into a PHANTOM bid (exit_phantom_block), takes a stop with a real book", async () => {
