@@ -20,7 +20,7 @@ import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries } from "./engine.js";
 import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBook, type PolymarketConfig } from "./polymarket.js";
-import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents, liquidationCents } from "./execution.js";
+import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents } from "./execution.js";
 import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision } from "./thresholds.js";
@@ -59,6 +59,12 @@ export const EARLY_LIVE_STRATEGIST_GRACE_MIN = (() => {
 // silent; here it's delivering but the ORDER BOOK momentarily lies). Env-tunable.
 export const EXIT_PHANTOM_FLOOR = (() => { const n = Number(process.env.EXIT_PHANTOM_FLOOR); return Number.isFinite(n) && n >= 0 ? n : 5; })();
 export const EXIT_PHANTOM_GAP = (() => { const n = Number(process.env.EXIT_PHANTOM_GAP); return Number.isFinite(n) && n >= 0 ? n : 8; })();
+// An entry's edge was sized against the price the strategist EVALUATED. If the book
+// has since moved so the executable fill lands at a rail (≤2¢/≥98¢, effectively
+// resolved) or this far from the evaluated price, the market we sized is gone — the
+// fill is a phantom/stale book (BTTS-No evaluated at 74.5¢, filled at 1.2¢), not the
+// bet the strategist decided. Don't open it. Env-tunable.
+export const ENTRY_PHANTOM_DIVERGENCE = (() => { const n = Number(process.env.ENTRY_PHANTOM_DIVERGENCE); return Number.isFinite(n) && n > 0 ? n : 25; })();
 
 /** A live match that only JUST kicked off — still ~pre-match. True iff the score is
  *  0:0 and kickoff was within the grace window. Uses wall-clock-since-kickoff (from
@@ -330,6 +336,13 @@ async function executeEntry(
   const fairCents = (b.ai_prob ?? 0) * 100;
   const exec = poly.exec;
   const token = mk?.external_ref ?? null;
+  // Entry-phantom guard: a fill at a rail, or one that has drifted far from the price
+  // the strategist evaluated (b.proposed_price), is not the bet that was sized — the
+  // book moved / the offer is a phantom. Reject the fill (see ENTRY_PHANTOM_DIVERGENCE).
+  const ref = b.proposed_price ?? quoteCents;
+  const phantomFill = (eff: number): string | null =>
+    eff <= 2 || eff >= 98 ? `цена исполнения ${eff}¢ у планки — рынок решён, вход отклонён (entry_phantom_block)`
+    : ref > 0 && Math.abs(eff - ref) >= ENTRY_PHANTOM_DIVERGENCE ? `цена исполнения ${eff}¢ ушла от оценённой ${ref}¢ на ${Math.abs(eff - ref).toFixed(0)}¢ — рынок сместился, вход отклонён (entry_phantom_block)` : null;
   const book = token ? await fetchOrderBook(token, poly, deps) : null;
   if (book && book.asks.length) {
     const bestAsk = book.asks[0].priceCents;
@@ -340,6 +353,8 @@ async function executeEntry(
     const fee = takerFeeCents(fill.avgPriceCents, exec.takerFeeRate); // taker fee on entry, per share
     const eff = Math.round((fill.avgPriceCents + fee) * 10) / 10;      // effective cost/share
     const slip = Math.round((fill.avgPriceCents - bestAsk) * 10) / 10;
+    const ph = phantomFill(eff);
+    if (ph) return { skip: true, priceCents: eff, stake: 0, note: ph };
     const capped = stake < proposedUsd - 0.5;
     const note = `VWAP ${fill.avgPriceCents}¢ (котир. ${bestAsk}¢${slip > 0 ? `, слип +${slip}¢` : ""}) + комиссия ${fee}¢ · сдвиг→${fill.newTopCents}¢${capped ? ` · урезан по глубине $${Math.round(proposedUsd)}→$${Math.round(stake)}` : ""}`;
     return { skip: false, priceCents: eff, stake: Math.round(stake), note };
@@ -350,6 +365,8 @@ async function executeEntry(
   const fee = takerFeeCents(avg, exec.takerFeeRate);
   const eff = Math.round((avg + fee) * 10) / 10;
   if (eff >= fairCents - exec.edgeFloorCents) return { skip: true, priceCents: eff, stake: 0, note: `≈${eff}¢ (VWAP+комиссия) ≥ справ.−порог — эдж съеден (модель по ликв. $${Math.round(liq)})` };
+  const ph = phantomFill(eff);
+  if (ph) return { skip: true, priceCents: eff, stake: 0, note: ph };
   return { skip: false, priceCents: eff, stake: proposedUsd, note: `≈VWAP ${avg}¢ + комиссия ${fee}¢ (модель по ликвидности)` };
 }
 
@@ -519,21 +536,24 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       if (!mk || mk.price == null || b.entry_price == null) continue;
       const strat = R.getStrategy(db, b.strategy_id);
       if (!strat) continue;
+      // Mark the position on the REAL EXECUTABLE BID — what you'd actually net selling
+      // the full stake right now — NOT the parametric mid. On a thin book the mid is
+      // pulled up by a phantom ask; a take-profit computed on it fires at a "profit"
+      // the bid can't pay (the «+197% тейк-профит» that filled at a LOSS, then the
+      // strategist re-entered and it churned). Deciding on the same value we then fill
+      // at removes the phantom trigger at the source. Fetch ONCE, reuse for the fill.
+      // (poly off → sellVwapCents returns the quote, so the decision falls back to mid.)
+      const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price);
       // When the model prob is unknown, DON'T let it read as "edge gone" (which
       // would force-close on the first tick) — pass 1 so only take-profit / hard
       // stop can fire. (Defensive: entries always store a non-null ai_prob.)
-      // Decide on the LIQUIDATION value (what you'd actually net selling now), not
-      // the optimistic mid — consistent with how the position is marked to market.
-      const liqCents = poly.enabled ? liquidationCents(mk.price, b.stake ?? 0, Number(mk.liquidity ?? 0) || 0, poly.exec.fallbackK, poly.exec.takerFeeRate) : mk.price;
       // Deterministic safety-net take-profit / hard-stop come from the position's
       // RISK PROFILE (aggressive holds longer + wider stop; conservative locks in
       // sooner), not per-strategy params. edgeExit:false — the strategist manages
       // edge/thesis exits in live (module 5); this net only catches extreme moves.
       const ex = getProfileConfig(db, b.risk_profile_id ?? "medium").exits;
-      const d = exitDecision({ params: { takeProfit: ex.take_profit_pct, exitStop: ex.hard_stop_pct, edgeExit: false }, aiProb: b.ai_prob ?? 1, entryPriceCents: b.entry_price, currentPriceCents: liqCents });
+      const d = exitDecision({ params: { takeProfit: ex.take_profit_pct, exitStop: ex.hard_stop_pct, edgeExit: false }, aiProb: b.ai_prob ?? 1, entryPriceCents: b.entry_price, currentPriceCents: sell.cents });
       if (!d.exit) continue;
-      // Fill the close against the real book (sell into bids) — exit slippage into P&L.
-      const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price);
       // Phantom-bid guard (EXIT_PHANTOM_*): a mechanical stop that would fill at a
       // degenerate bid sitting far below the mark is dumping into a phantom, not
       // managing risk — HOLD, let the position settle on the real result. Only the
@@ -544,18 +564,12 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text, created_at: now });
         }
       };
+      // Phantom-bid guard: a stop firing on a degenerate bid (≤FLOOR¢) that sits far
+      // below the mid is dumping into a momentarily-broken book, not managing risk —
+      // HOLD, let it settle on the real result. (A take-profit can no longer fire on a
+      // phantom-inflated mark: the decision above is made on this same executable bid.)
       if (sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP) {
         holdOnce(`выход отклонён: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${d.reason}); держим до реального рынка/сеттла (exit_phantom_block)`);
-        continue;
-      }
-      // A TAKE-PROFIT fires on the MARK; if the executable bid can't actually deliver
-      // a profit — the mark was inflated by a phantom ask on a thin book (the «+197%
-      // тейк-профит» that filled at 14¢ below a 17¢ entry, booking a loss, then the
-      // strategist re-entered and it repeated) — do NOT realise a fake "profit". HOLD
-      // until the book can pay it or the position settles. Stops are exempt (pnlFrac
-      // < 0): a stop's job is to cut at a loss, and the phantom-floor guard covers it.
-      if (d.pnlFrac >= 0 && b.entry_price != null && sell.cents <= b.entry_price) {
-        holdOnce(`тейк-профит отклонён: марка ${mk.price}¢ (${d.reason}), но реальный бид ${sell.cents}¢ ≤ входа ${b.entry_price}¢ — прибыль фантомная, держим (take_profit_no_loss)`);
         continue;
       }
       const pnl = closeBetEarly(db, b, sell.cents, d.reason, minuteLabel(m), now);
@@ -569,6 +583,34 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+/** Strip diacritics for a lenient team-name compare ("Mjällby" ↔ "Mjallby"). */
+const stripDia = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
+/**
+ * Score reconciled with the goal-event feed: never BELOW the goals the strategist is
+ * told about. The ESPN score field can lag its own event feed, and a model shown a
+ * phantom-crashed price can back-derive a fake deficit — either way the strategist
+ * must reason over a score consistent with the (unforgeable) goal events. Corrects
+ * UPWARD only, off `goal` events; an unmatched team name is ignored, so it can never
+ * over-count. Pure prose hallucination when score and events already agree is out of
+ * reach here (needs market-semantic labelling), but stale/inconsistent state isn't.
+ */
+export function reconciledScore(db: Database, m: Match): { home: number | null; away: number | null } {
+  const home = stripDia(m.home).toLowerCase(), away = stripDia(m.away).toLowerCase();
+  const hit = (name: string, t: string) => t === name || (t.length >= 3 && (name.includes(t) || t.includes(name)));
+  let gh = 0, ga = 0;
+  for (const e of R.eventsForMatch(db, m.id)) {
+    if (e.type !== "goal" || !e.team) continue;
+    const t = stripDia(e.team).toLowerCase();
+    if (hit(home, t)) gh++;
+    else if (hit(away, t)) ga++;
+  }
+  // Correct UPWARD only; preserve a null (provider hasn't reported a score yet) when
+  // no goal events contradict it, so the strategist's "score unknown" path still fires.
+  return {
+    home: gh > (m.score_home ?? 0) ? gh : m.score_home,
+    away: ga > (m.score_away ?? 0) ? ga : m.score_away,
+  };
+}
 
 /** Snapshot each live match's current prices as its kickoff baseline (first
  *  write wins), so the odds column shows in-match movement, not pre-match drift. */
@@ -664,6 +706,9 @@ export async function strategistReassess(
       ? Math.min(maxLiveMinutes(sport), Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at as string)) / 60000)))
       : null;
     const assess = R.assessmentsForMatch(db, m.id).filter((a) => a.status === "ok").sort((a, b) => (a.created_at >= b.created_at ? -1 : 1))[0];
+    // Score the strategist reasons over, reconciled against the goal events so a
+    // lagging/inconsistent score field can't feed a wrong live prob (→ wrong size).
+    const score = reconciledScore(db, m);
     // Match facts + the outcome tree / match_shape / scenarios the strategist
     // reasons over (single-sourced; the pair's battle sheet is appended below).
     const ctx = strategistContext(db, m.id);
@@ -703,7 +748,7 @@ export async function strategistReassess(
       const battleSheet = R.artifactsForMatch(db, m.id).find((x) => x.kind === "battle_sheet" && x.label === pairLabel)?.content;
       const dec = await strategistDecide({
         strategyName: strat.name, strategyPrompt: strat.prompt_live ?? strat.prompt,
-        match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, minuteApprox },
+        match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: score.home, scoreAway: score.away, minuteApprox },
         assessment: { confidence: assess?.confidence ?? "средняя", short: assess?.short ?? "", verdict: assess?.verdict ?? "" },
         markets: markets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob, liquidity: mk.liquidity != null ? Number(mk.liquidity) : null, openCents: mk.label in opens ? opens[mk.label] : null })),
         openPositions: myOpen.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),

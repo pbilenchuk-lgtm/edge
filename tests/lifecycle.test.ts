@@ -7,6 +7,7 @@ import * as R from "../src/lib/repo.js";
 import { exitDecision } from "../src/lib/thresholds.js";
 import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats } from "../src/lib/lifecycle.js";
 import { analyzeMatch, runStrategists } from "../src/lib/analysis.js";
+import { reconciledScore } from "../src/lib/lifecycle.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
 const mockLLM = (a: unknown) => (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify(a) }] }) })) as any;
@@ -195,11 +196,13 @@ test("evaluateExits fills the close against the bid book — exit slippage into 
   seedDatabase(db);
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
   const strat = R.listStrategies(db, "football")[0];
+  db.exec("DELETE FROM bets"); // isolate from seeded open positions (the mock book applies to every token)
   const mid = R.uid();
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 80, ai_prob: 0.9, liquidity: "1000", external_ref: "TOKEN", snapshot_at: "t", is_closing: false });
-  // entry 50¢, mid 80¢ → +60% ⇒ take-profit fires; ai_prob 90% keeps edge (no edge-gone).
-  R.insertBet(db, { id: "ex-1", match_id: mid, strategy_id: strat.id, market_label: "Over 1.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 80, closing_price: null, ai_prob: 0.9, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+  // entry 45¢; the position is marked (and the take-profit decided) on the EXECUTABLE
+  // bid VWAP 73.4¢ → +63% ≥ medium 50% — NOT the optimistic 80¢ mid. ai_prob 90% keeps edge.
+  R.insertBet(db, { id: "ex-1", match_id: mid, strategy_id: strat.id, market_label: "Over 1.5", status: "open", proposed_price: 45, entry_price: 45, current_price: 80, closing_price: null, ai_prob: 0.9, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
 
   // 200 shares to sell. bids: 78¢×100 + 70¢×500 → sell 200 = 100@78 + 100@70 ⇒ VWAP 74¢ (not the 80¢ mid).
   const book = { asks: [{ price: "0.82", size: "100" }], bids: [{ price: "0.78", size: "100" }, { price: "0.70", size: "500" }] };
@@ -208,10 +211,58 @@ test("evaluateExits fills the close against the bid book — exit slippage into 
 
   assert.equal(exits.length, 1);
   const b = R.getBet(db, "ex-1")!;
-  // bid VWAP 74¢ minus the taker fee (0.03·74·26/100 = 0.58¢) → 73.4¢ net.
-  assert.equal(b.closing_price, 73.4, "closed at bid-book VWAP minus the exit taker fee, not the 80¢ mid");
-  assert.equal(b.payout, 146.8, "100 × 73.4/50 — exit slippage + fee booked into P&L (vs 160 at the mid)");
+  // 222 shares (100/0.45) sell 100@78 + 122@70 ⇒ VWAP 73.6¢, minus taker fee → 73¢ net.
+  assert.equal(b.closing_price, 73, "closed at bid-book VWAP minus the exit taker fee, not the 80¢ mid");
+  assert.equal(b.payout, 162.22, "100 × 73/45 — exit slippage + fee booked into P&L (vs 178 at the mid)");
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "exit" && /выход VWAP.*комиссия/.test(l.text)), "exit execution + fee logged");
+});
+
+test("autoEnter: rejects a fill that lands far from the evaluated price / at a rail (entry_phantom_block)", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Mjallby", away: "AIK", state: "live", lineup_out: true, kickoff_at: null, minute: 88, score_home: 0, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "e", league: "l", home_lineup: null, away_lineup: null, stats: null, updated_at: "t" });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Both Teams to Score — No", price: 74, ai_prob: 0.9, liquidity: "3000", external_ref: "TOKP", snapshot_at: "t", is_closing: false });
+  // strategist evaluated BTTS-No at 74.5¢; by fill the ask book has collapsed to ~1¢.
+  R.insertBet(db, { id: "ph", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Both Teams to Score — No", status: "proposed", proposed_price: 74, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.9, stake: 28, rationale: "план", entered_minute: null, result: null, payout: null, created_at: "t" });
+  const book = { asks: [{ price: "0.01", size: "100000" }], bids: [{ price: "0.005", size: "1000" }] };
+  const fetchImpl = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
+  const filled = await autoEnter(db, { now: () => "t", polymarket: poly, fetchImpl });
+  assert.ok(!filled.some((f) => f.matchId === mid), "no fill — the evaluated market is gone");
+  assert.equal(R.getBet(db, "ph")!.status, "not_filled", "proposed bet marked not_filled, not opened at the phantom");
+  assert.ok(/entry_phantom_block/.test(R.getBet(db, "ph")!.rationale ?? ""), "reason records the phantom-fill rejection");
+});
+
+test("reconciledScore: corrects a lagging score up to the goal events (diacritic-tolerant), preserves a null", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const mk = (id: string, sh: number | null, sa: number | null) => {
+    R.insertMatch(db, { id, competition_id: comp.id, home: "Mjallby AIF", away: "AIK", state: "live", lineup_out: true, kickoff_at: null, minute: 80, score_home: sh, score_away: sa, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+    return R.getMatch(db, id)!;
+  };
+  const goal = (mid: string, team: string, min: number) => R.insertMatchEvent(db, { id: R.uid(), match_id: mid, event_key: `${team}-${min}`, minute: min, type: "goal", team, text: "goal", created_at: "t" });
+
+  // (1) stored 0:0 but the event feed shows AIK scored twice ("AIK") and Mjällby once
+  //     (note the diacritic vs the "Mjallby AIF" match name) → reconciled 1:2.
+  const m1 = mk("rs1", 0, 0);
+  goal("rs1", "AIK", 74); goal("rs1", "AIK", 90); goal("rs1", "Mjällby AIF", 90);
+  assert.deepEqual(reconciledScore(db, m1), { home: 1, away: 2 }, "lagging score corrected UP to the goals");
+
+  // (2) no events, score genuinely unknown (null) → stays null (the «score unknown» path).
+  const m2 = mk("rs2", null, null);
+  assert.deepEqual(reconciledScore(db, m2), { home: null, away: null }, "null preserved when no goals contradict it");
+
+  // (3) stored score AHEAD of a sparse event feed → keep the stored score (never down).
+  const m3 = mk("rs3", 2, 1);
+  goal("rs3", "AIK", 30); // only one event known
+  assert.deepEqual(reconciledScore(db, m3), { home: 2, away: 1 }, "never corrected downward off an incomplete feed");
 });
 
 test("evaluateExits HOLDS a stop that would fill into a PHANTOM bid (exit_phantom_block), takes a stop with a real book", async () => {
@@ -244,7 +295,7 @@ test("evaluateExits HOLDS a stop that would fill into a PHANTOM bid (exit_phanto
   assert.ok(R.getBet(db, "real-bet")!.status.startsWith("settled"), "real stop settled");
 });
 
-test("evaluateExits HOLDS a take-profit whose real bid would book a LOSS (phantom-inflated mark), takes a real one", async () => {
+test("evaluateExits decides the take-profit on the EXECUTABLE bid, not a phantom-inflated mid", async () => {
   const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
   const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
   const db = openDb(":memory:");
@@ -252,25 +303,24 @@ test("evaluateExits HOLDS a take-profit whose real bid would book a LOSS (phanto
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
   const strat = R.listStrategies(db, "football")[0];
   const liveMatch = (id: string, ref: string) => R.insertMatch(db, { id, competition_id: comp.id, home: "Mjallby", away: "AIK", state: "live", lineup_out: true, kickoff_at: null, minute: 35, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: ref });
-  // entry 34¢, MARK 55¢ → +62% ⇒ medium take-profit (0.50) fires on the mark.
   const openBet = (id: string, mid: string) => R.insertBet(db, { id, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Mjallby — Yes", status: "open", proposed_price: 34, entry_price: 34, current_price: 55, closing_price: null, ai_prob: 0.6, stake: 40, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
   const bookFetch = (book: any) => (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
 
-  // (1) mark 55¢ but the real bid is 30¢ (< entry 34¢) — the "profit" is phantom → HOLD.
+  // (1) MID 55¢ (+62% vs entry 34¢) would trip the take-profit — but the real bid is
+  // 30¢ (−12%). Deciding on the executable bid, the "profit" doesn't exist → no exit.
   const m1 = R.uid(); liveMatch(m1, "P1");
   R.insertMarket(db, { id: R.uid(), match_id: m1, label: "Mjallby — Yes", price: 55, ai_prob: 0.6, liquidity: "3000", external_ref: "TOK1", snapshot_at: "t", is_closing: false });
   openBet("tp-phantom", m1);
   const ex1 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.60", size: "500" }], bids: [{ price: "0.30", size: "5000" }] }) });
-  assert.ok(!ex1.some((e) => e.matchId === m1), "no exit — a take-profit that fills below entry is held");
-  assert.equal(R.getBet(db, "tp-phantom")!.status, "open", "position kept open (no fake profit realised)");
-  assert.ok(R.tradeLogForMatch(db, m1).some((l) => l.type === "hold" && /take_profit_no_loss/.test(l.text)), "phantom take-profit hold logged");
+  assert.ok(!ex1.some((e) => e.matchId === m1), "no phantom take-profit — decided on the 30¢ bid, not the 55¢ mid");
+  assert.equal(R.getBet(db, "tp-phantom")!.status, "open", "position held (no fake profit booked)");
 
-  // (2) mark 55¢ AND a real bid of 52¢ (> entry 34¢) — a genuine profit → take it.
+  // (2) same mid, but a REAL bid of 55¢ (+62% vs entry) — a genuine profit → take it.
   const m2 = R.uid(); liveMatch(m2, "P2");
   R.insertMarket(db, { id: R.uid(), match_id: m2, label: "Mjallby — Yes", price: 55, ai_prob: 0.6, liquidity: "3000", external_ref: "TOK2", snapshot_at: "t", is_closing: false });
   openBet("tp-real", m2);
-  const ex2 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.60", size: "500" }], bids: [{ price: "0.52", size: "5000" }] }) });
-  assert.ok(ex2.some((e) => e.matchId === m2 && e.pnl > 0), "genuine take-profit executes at a real profit");
+  const ex2 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.60", size: "500" }], bids: [{ price: "0.55", size: "5000" }] }) });
+  assert.ok(ex2.some((e) => e.matchId === m2 && e.pnl > 0), "genuine take-profit (real bid ≥ +50%) executes at a profit");
   assert.ok(R.getBet(db, "tp-real")!.status.startsWith("settled"), "real take-profit settled");
 });
 
