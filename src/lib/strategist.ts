@@ -134,6 +134,13 @@ export interface SizeInput {
   allowLargeEdge?: boolean;
 }
 
+/** HARD liquidity floor ($): a market whose known depth is below this is
+ *  UNTRADEABLE at any size, for any profile — its price is pure noise ($24-depth
+ *  phantom quotes). A deterministic code safeguard OVER the LLM, exactly like
+ *  absurd_edge_block: the model can't opt into a market the code has floored, even
+ *  if it "felt" an edge. Env-tunable; same value as the import hard floor. */
+export const MIN_LIQUIDITY_BLOCK = (() => { const n = Number(process.env.MARKET_HARD_FLOOR); return Number.isFinite(n) && n > 0 ? n : 50; })();
+
 /**
  * Deterministically decide entry + size for ONE market against a risk profile.
  * The whole point of profiles: aggressive enters a smaller edge and stakes more,
@@ -156,6 +163,13 @@ export function sizePrematch(inp: SizeInput): SizeResult {
   // vs it is a phantom (our stale estimate vs an ~decided price, e.g. Under 1.5 at
   // 0.2¢ on a live match that already has 2+ goals). Never enter these.
   if (priceCents <= 2 || priceCents >= 98) return skip(`цена у планки (${priceCents}¢) — рынок фактически решён, край фантомный`);
+  // min_liquidity_block — a HARD code safeguard (like absurd_edge_block) that the LLM
+  // CANNOT override: a market with KNOWN depth below the floor is untradeable at any
+  // size, whatever the strategist decided (a $24-depth «Draw — No» phantom price is
+  // noise, not edge). Applies pre-match AND live. Unknown depth (null) is not blocked
+  // here — the thin-market caution below (raised min-edge) handles that.
+  if (inp.liquidity != null && inp.liquidity > 0 && inp.liquidity < MIN_LIQUIDITY_BLOCK)
+    return skip(`ликвидность $${Math.round(inp.liquidity)} < floor $${MIN_LIQUIDITY_BLOCK} — рынок неторгуем (min_liquidity_block)`);
 
   // Safeguard: an edge above absurd_edge_block is almost surely a bug (bad quote /
   // wrong market), not value — flag, do NOT trade. Skipped in live (allowLargeEdge)

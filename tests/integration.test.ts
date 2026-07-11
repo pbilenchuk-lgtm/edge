@@ -493,6 +493,32 @@ test("importPolymarketMatches: dust market (thin orphan/degenerate) dropped, dee
   assert.ok(!labels.some((l) => /draw/i.test(l)), "dust Draw ($90 vs $9000 deep) dropped");
 });
 
+test("importPolymarketMatches: absolute hard floor drops a sub-$50 market even when EVERY market is thin", async () => {
+  const { importPolymarketMatches } = await import("../src/lib/engine.js");
+  const base = loadPolymarketConfig({ POLYMARKET_ENABLED: "true" });
+  const now = "2026-07-03T12:00:00Z";
+  // A niche fixture where NOTHING is deep — the relative rule can't fire (no market
+  // dwarfs another), so only the absolute floor catches the $20 dust.
+  const fixture = [{
+    id: "99", slug: "epl-arsenal-chelsea-2026-07-04",
+    title: "Premier League: Arsenal vs Chelsea", startDate: "2026-07-03T16:00:00Z",
+    series: [{ title: "Premier League", slug: "soccer-epl" }],
+    markets: [
+      { groupItemTitle: "", question: "Arsenal vs Chelsea", outcomes: '["Arsenal","Chelsea"]', outcomePrices: '["0.55","0.45"]', clobTokenIds: '["t-a","t-b"]', liquidity: "120", conditionId: "0x1" },
+      { groupItemTitle: "Draw", question: "Draw?", outcomes: '["Yes","No"]', outcomePrices: '["0.30","0.70"]', clobTokenIds: '["t-d","t-dz"]', liquidity: "20", conditionId: "0x3" },
+    ],
+  }];
+  const fetchImpl = (async () => ({ ok: true, json: async () => fixture })) as unknown as typeof fetch;
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  await importPolymarketMatches(db, "football", { fetchImpl, polymarket: { ...base, minLiquidity: 0 }, now: () => now });
+  const comp = R.listCompetitions(db).find((c) => c.external_league === "eng.1")!;
+  const mid = R.listMatches(db, comp.id).find((m) => /arsenal/i.test(m.home))!.id;
+  const labels = R.latestMarkets(db, mid).map((m) => m.label);
+  assert.ok(labels.some((l) => /arsenal/i.test(l)), "the $120 moneyline (above $50 floor) kept");
+  assert.ok(!labels.some((l) => /draw/i.test(l)), "the $20 draw (below the $50 absolute floor) dropped despite no deep market to dwarf it");
+});
+
 // ---------------- LLM abstraction graceful (§5.3, §6, §9.9) ----------------
 test("llm: model resolution and key handling", () => {
   assert.deepEqual(resolveModel("Claude Opus 4.8"), { provider: "anthropic", apiId: "claude-opus-4-8" });

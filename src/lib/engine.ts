@@ -661,8 +661,13 @@ export async function importPolymarketMatches(
   // BOTH under an absolute dust floor AND dwarfed by a real market on the same
   // fixture (≥ ratio deeper), so a uniformly-thin low-profile fixture keeps all of
   // its markets. Both env-tunable; 0 disables.
-  const dustLiq = numEnv(env.MARKET_MIN_LIQUIDITY, 200);
+  const dustLiq = numEnv(env.MARKET_MIN_LIQUIDITY, 200); // relative dust ceiling
   const dustRatio = numEnv(env.MARKET_DUST_RATIO, 5);
+  // ABSOLUTE hard floor: a market below this is never tradeable, full stop — drop it
+  // regardless of the rest of the fixture. This closes the hole in the relative rule:
+  // on a niche league where EVERY market is thin, no market "dwarfs" another, so the
+  // relative check never fires and dust would pass. The absolute floor catches it.
+  const hardFloor = numEnv(env.MARKET_HARD_FLOOR, 50);
   const discovered = await discoverSportMatches(poly, sport, now, { fetchImpl: deps.fetchImpl }, { limit, windowDays, nowMs });
   const allow = seriesAllowFor(sport, deps.env); // e.g. tennis → only ATP tour
   const out: DiscoverItem[] = [];
@@ -736,7 +741,13 @@ export async function importPolymarketMatches(
     // incoming). Dust = below the floor AND ≥ratio shallower than that reference.
     const liqOf = (v: string | number | null | undefined) => Number(v ?? 0) || 0;
     const refLiq = Math.max(0, ...existing.map((mk) => liqOf(mk.liquidity)), ...d.markets.map((s) => liqOf(s.liquidity)));
-    const isDust = (liq: number) => dustLiq > 0 && liq > 0 && liq < dustLiq && refLiq >= liq * dustRatio;
+    // Dust = below the ABSOLUTE hard floor (always), OR below the relative ceiling AND
+    // dwarfed by a real market on the same fixture (≥ratio deeper). Two thresholds:
+    // the absolute closes the "every market is thin" hole the relative one can't.
+    const isDust = (liq: number) => liq > 0 && (
+      liq < hardFloor ||
+      (dustLiq > 0 && liq < dustLiq && refLiq >= liq * dustRatio)
+    );
     // Drop existing dust listings (imported before this gate, or a market that drained
     // to dust) so the pollution self-heals on re-discovery.
     for (const mk of existing) if (isDust(liqOf(mk.liquidity))) R.deleteMarketLabel(db, match.id, mk.label);

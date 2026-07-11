@@ -64,6 +64,19 @@ test("sizePrematch: absurd edge is flagged, not traded", () => {
   assert.match(r.reason, /absurd/i);
 });
 
+test("sizePrematch: min_liquidity_block — a market below the hard floor is untradeable, whatever the edge or window", async () => {
+  const { MIN_LIQUIDITY_BLOCK } = await import("../src/lib/strategist.js");
+  // The Orlando «Draw — No» case: $24 depth, a big 36% edge, live window. The LLM
+  // "wanted" it; the code floor must veto regardless.
+  const thin = { ourProb: 0.86, priceCents: 50, implied: 0.50, calibration: 0.8, budget: 1000, liquidity: 24, cfg: MED };
+  const r = sizePrematch({ ...thin, allowLargeEdge: true });
+  assert.equal(r.status, "skip", "below the hard floor → blocked even live, even on a huge edge");
+  assert.match(r.reason, /min_liquidity_block/);
+  assert.ok(MIN_LIQUIDITY_BLOCK >= 50, "hard floor defaults to $50");
+  // Same edge on a market just above the floor is NOT blocked by this gate.
+  assert.notEqual(sizePrematch({ ...thin, liquidity: MIN_LIQUIDITY_BLOCK + 1, allowLargeEdge: true }).reason, r.reason, "above the floor → not blocked by min_liquidity_block");
+});
+
 test("sizePrematch: aggressive stakes more and enters lower edge than conservative", () => {
   const db = openDb(":memory:");
   seedRiskProfiles(db, "t");
