@@ -59,6 +59,14 @@ export const EARLY_LIVE_STRATEGIST_GRACE_MIN = (() => {
 // silent; here it's delivering but the ORDER BOOK momentarily lies). Env-tunable.
 export const EXIT_PHANTOM_FLOOR = (() => { const n = Number(process.env.EXIT_PHANTOM_FLOOR); return Number.isFinite(n) && n >= 0 ? n : 5; })();
 export const EXIT_PHANTOM_GAP = (() => { const n = Number(process.env.EXIT_PHANTOM_GAP); return Number.isFinite(n) && n >= 0 ? n : 8; })();
+// A live stop must also not DUMP the whole position through a thin/broken book: when
+// selling the FULL stake slips the executable VWAP this many cents BELOW the best bid,
+// the top of book can't absorb the size — the realized price (and the stop it
+// self-triggers) is a depth artifact, not the real value. On a broken book (best bid
+// 42¢ but full-stake VWAP 15.9¢, −26¢ slip) that fake −70% stop-out was pure slippage.
+// HOLD instead: let the position ride to a deeper book / real settlement. Only on a REAL
+// book and only on a LARGE full-stake slip (normal exits slip 0–1¢). Env-tunable.
+export const EXIT_SLIPPAGE_BLOCK = (() => { const n = Number(process.env.EXIT_SLIPPAGE_BLOCK); return Number.isFinite(n) && n > 0 ? n : 15; })();
 // An entry's edge was sized against the price the strategist EVALUATED. If the book
 // has since moved so the executable fill lands at a rail (≤2¢/≥98¢, effectively
 // resolved) or this far from the evaluated price, the market we sized is gone — the
@@ -416,7 +424,7 @@ async function sellVwapCents(
   mk: Market | undefined, entryCents: number, basisUsd: number,
   poly: PolymarketConfig, deps: EngineDeps, quoteCents: number,
   bookCache?: Map<string, OrderBookFetch>,
-): Promise<{ cents: number; note?: string; fromBook: boolean }> {
+): Promise<{ cents: number; note?: string; fromBook: boolean; bestBidCents?: number }> {
   if (!poly.enabled) return { cents: quoteCents, fromBook: false };
   const token = mk?.external_ref ?? null;
   const shares = entryCents > 0 ? basisUsd / (entryCents / 100) : 0;
@@ -433,7 +441,7 @@ async function sellVwapCents(
     const fee = takerFeeCents(f.avgPriceCents, poly.exec.takerFeeRate); // taker fee on exit
     const eff = Math.round((f.avgPriceCents - fee) * 10) / 10;           // proceeds/share after fee
     const slip = Math.round((bestBid - f.avgPriceCents) * 10) / 10;
-    return { cents: eff, fromBook: true, note: `выход VWAP ${f.avgPriceCents}¢ (бид ${bestBid}¢${slip > 0 ? `, слип −${slip}¢` : ""}) − комиссия ${fee}¢` };
+    return { cents: eff, fromBook: true, bestBidCents: bestBid, note: `выход VWAP ${f.avgPriceCents}¢ (бид ${bestBid}¢${slip > 0 ? `, слип −${slip}¢` : ""}) − комиссия ${fee}¢` };
   }
   const liq = Number(mk?.liquidity ?? 0) || 0;
   const avg = parametricSellAvgCents(quoteCents, basisUsd, liq, poly.exec.fallbackK);
@@ -627,6 +635,15 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // genuine illiquidity haircut, not a phantom, and a real stop must still fire.
       if (sell.fromBook && sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP) {
         holdOnce(`выход отклонён по ${holdKey}: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${d.reason}); держим до реального рынка/сеттла (exit_phantom_block)`);
+        continue;
+      }
+      // Slippage guard: the best bid can pay far MORE than the full-stake dump realizes —
+      // the top of book just can't absorb the size. That gap (not the real value) both
+      // crushes the price AND self-triggers this stop. HOLD, let it ride to a deeper book
+      // / settlement, rather than book a depth artifact as a −70% loss. Only on a real
+      // book; a genuine small-slip stop (0–1¢) still fires.
+      if (sell.fromBook && sell.bestBidCents != null && (sell.bestBidCents - sell.cents) >= EXIT_SLIPPAGE_BLOCK) {
+        holdOnce(`выход отклонён по ${holdKey}: фулл-стейк VWAP ${sell.cents}¢ против бида ${sell.bestBidCents}¢ (слип −${Math.round((sell.bestBidCents - sell.cents) * 10) / 10}¢) — книга не держит размер (${d.reason}); держим до реального рынка/сеттла (exit_slippage_block)`);
         continue;
       }
       const pnl = closeBetEarly(db, b, sell.cents, d.reason, minuteLabel(m), now);
@@ -826,6 +843,15 @@ export async function strategistReassess(
           const holdKey = `«${b.market_label}»`;
           const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
           if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отклонён по ${holdKey}: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${ex.reason}); держим до реального рынка/сеттла (exit_phantom_block)`, created_at: now });
+          continue;
+        }
+        // Slippage guard, SYMMETRIC with evaluateExits: don't dump the full stake through a
+        // thin book when the best bid can pay far more than the dump realizes — that gap is a
+        // depth artifact, not the value. HOLD and let it ride to a deeper book / settlement.
+        if (sell.fromBook && sell.bestBidCents != null && (sell.bestBidCents - sell.cents) >= EXIT_SLIPPAGE_BLOCK) {
+          const holdKey = `«${b.market_label}»`;
+          const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
+          if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отклонён по ${holdKey}: фулл-стейк VWAP ${sell.cents}¢ против бида ${sell.bestBidCents}¢ (слип −${Math.round((sell.bestBidCents - sell.cents) * 10) / 10}¢) — книга не держит размер (${ex.reason}); держим до реального рынка/сеттла (exit_slippage_block)`, created_at: now });
           continue;
         }
         const { pnl, partial } = closeBetPortion(db, b, ex.fraction, sell.cents, minuteLabel(m), now);

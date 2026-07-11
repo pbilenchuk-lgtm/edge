@@ -353,6 +353,39 @@ test("evaluateExits HOLDS a stop that would fill into a PHANTOM bid (exit_phanto
   assert.ok(R.getBet(db, "real-bet")!.status.startsWith("settled"), "real stop settled");
 });
 
+test("evaluateExits HOLDS a stop when the full stake would SLIP far below the best bid (exit_slippage_block), executes it on a deep book", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets"); // isolate from seeded positions (the mock book applies to every token)
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const liveMatch = (id: string, ref: string) => R.insertMatch(db, { id, competition_id: comp.id, home: "Orgryte", away: "Hacken", state: "live", lineup_out: true, kickoff_at: null, minute: 38, score_home: 1, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: ref });
+  // Large $100 position entered at 52¢ (~192 shares) — enough to walk a thin book.
+  const openBet = (id: string, mid: string) => R.insertBet(db, { id, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "BK Hacken Under 2.5", status: "open", proposed_price: 52, entry_price: 52, current_price: 40, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "35'", result: null, payout: null, created_at: "t" });
+  const bookFetch = (book: any) => (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
+
+  // (1) THIN book: best bid 42¢ with tiny size, then a cliff to 14¢. The full-stake dump
+  // averages ~18¢ (a −24¢ slip below the 42¢ top). That crushed VWAP would self-trigger a
+  // −65% stop — but the best bid can pay far more, so it's a depth artifact → HELD.
+  const m1 = R.uid(); liveMatch(m1, "T1");
+  R.insertMarket(db, { id: R.uid(), match_id: m1, label: "BK Hacken Under 2.5", price: 40, ai_prob: 0.6, liquidity: "2000", external_ref: "TOKT", snapshot_at: "t", is_closing: false });
+  openBet("slip-bet", m1);
+  const ex1 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.44", size: "500" }], bids: [{ price: "0.42", size: "30" }, { price: "0.14", size: "100000" }] }) });
+  assert.ok(!ex1.some((e) => e.matchId === m1), "no exit — full-stake dump into a thin book is held");
+  assert.equal(R.getBet(db, "slip-bet")!.status, "open", "position kept open (rides to a deeper book / settlement)");
+  assert.ok(R.tradeLogForMatch(db, m1).some((l) => l.type === "hold" && /exit_slippage_block/.test(l.text)), "slippage hold logged");
+
+  // (2) SAME stop, but a DEEP book at 18¢ (no size problem) → the stop executes normally.
+  const m2 = R.uid(); liveMatch(m2, "T2");
+  R.insertMarket(db, { id: R.uid(), match_id: m2, label: "BK Hacken Under 2.5", price: 40, ai_prob: 0.6, liquidity: "2000", external_ref: "TOKD", snapshot_at: "t", is_closing: false });
+  openBet("deep-bet", m2);
+  const ex2 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.44", size: "500" }], bids: [{ price: "0.18", size: "100000" }] }) });
+  assert.ok(ex2.some((e) => e.matchId === m2), "deep-book stop executes (guard doesn't over-block a genuine low value)");
+  assert.ok(R.getBet(db, "deep-bet")!.status.startsWith("settled"), "deep-book stop settled at the real price");
+});
+
 test("evaluateExits decides the take-profit on the EXECUTABLE bid, not a phantom-inflated mid", async () => {
   const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
   const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
