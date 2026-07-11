@@ -507,7 +507,8 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
   const payout = round2(closed * (currentPriceCents / entry));
   const pnl = round2(payout - closed);
   R.insertBet(db, {
-    id: R.uid(), match_id: bet.match_id, strategy_id: bet.strategy_id, market_label: bet.market_label,
+    id: R.uid(), match_id: bet.match_id, strategy_id: bet.strategy_id, risk_profile_id: bet.risk_profile_id ?? "medium",
+    market_label: bet.market_label,
     status: pnl >= 0 ? "settled_won" : "settled_lost", proposed_price: bet.proposed_price, entry_price: entry,
     current_price: currentPriceCents, closing_price: currentPriceCents, ai_prob: bet.ai_prob, stake: closed,
     rationale: `частичная фиксация ${Math.round(fraction * 100)}%`, entered_minute: bet.entered_minute,

@@ -498,7 +498,7 @@ test("strategistReassess supports partial fixation (fraction)", async () => {
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 40, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 80, ai_prob: 0.7, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
   const bid = R.uid();
-  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Under 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 80, closing_price: null, ai_prob: 0.7, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, risk_profile_id: "aggressive", market_label: "Under 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 80, closing_price: null, ai_prob: 0.7, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
 
   const mock = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Under 2.5", fraction: 0.5, reason: "фиксирую половину на пике (п.4.2)" }] }) }] }) }) as any);
   await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
@@ -508,6 +508,9 @@ test("strategistReassess supports partial fixation (fraction)", async () => {
   assert.equal(open.stake, 50);        // half of 100 remains open
   assert.ok(settled && settled.stake === 50); // half booked
   assert.equal(settled!.payout, 80);   // 50 * 80/50
+  // the partial-fixation child must carry the SAME profile — else per-profile PnL
+  // attribution is polluted (the «overreaction/?» rows in the logs).
+  assert.equal(settled!.risk_profile_id, "aggressive", "partial fixation keeps the profile");
 });
 
 test("strategistReassess hands the model minute estimate, price movement, liquidity and a no-score note", async () => {
