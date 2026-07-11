@@ -149,6 +149,28 @@ test("autoEnter: two profiles of the SAME strategy both fill the SAME market ind
   assert.equal(agg.stake, 200); assert.equal(med.stake, 100);
 });
 
+test("evaluateExits HOLDS a position on a live match the provider isn't delivering (no noise-cut)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  // "live" by the clock, but frozen: no advancing minute, no events, only a lineup
+  // match_live (zeros stats). A price crash (55¢ → 15¢) would normally hard-stop.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Orlando", away: "Kansas", state: "live", lineup_out: true, kickoff_at: "2026-07-11T00:00:00Z", minute: null, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "e", league: "usa.nwsl", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { shots: 0 }, away: { shots: 0 } }), updated_at: "t" });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 15, ai_prob: 0.5, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  const bid = R.uid();
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Under 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+
+  await evaluateExits(db, { now: () => "t" });
+  assert.equal(R.getBet(db, bid)!.status, "open", "no delivery → held, not cut on unverifiable price noise");
+  // Provider starts delivering a real minute → management resumes and the hard-stop fires.
+  R.updateMatch(db, mid, { minute: 33 });
+  await evaluateExits(db, { now: () => "t" });
+  assert.ok(R.getBet(db, bid)!.status.startsWith("settled_"), "cut once the provider is actually delivering");
+});
+
 test("evaluateExits fills the close against the bid book — exit slippage into P&L", async () => {
   const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
   const db = openDb(":memory:");
@@ -367,8 +389,11 @@ test("strategistReassess hands the model minute estimate, price movement, liquid
   const strat = R.listStrategies(db, "football")[0];
   R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
   const mid = R.uid();
-  // Clock-only live match: no provider minute/score, but kicked off 25 min ago.
+  // Live match the provider IS delivering (a real card event) but with no minute/
+  // score yet — kicked off 25 min ago. The event is what qualifies it for reassess;
+  // the timer estimate + no-score note then fill the gap the provider left.
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "BK Hacken", away: "Djurgardens IF", state: "live", lineup_out: true, kickoff_at: "2026-07-06T18:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMatchEvent(db, { id: R.uid(), match_id: mid, event_key: "yc1", minute: null, type: "yellow_card", team: "BK Hacken", text: "Yellow card", created_at: "t" });
   R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 94, ai_prob: 0.6, liquidity: "5900", external_ref: "t", snapshot_at: "t", is_closing: false });
   R.captureOpenOdds(db, mid, "2026-07-06T18:00:00Z"); // open = 94 initially
   // now move the live price down so there is a delta to report

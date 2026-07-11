@@ -461,13 +461,19 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
   const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
   const out: ExitItem[] = [];
   const touched = new Set<string>();
-  for (const { match: m } of activeMatches(db)) {
+  for (const { sport, match: m } of activeMatches(db)) {
     // Price-driven exits (take-profit / stop / edge-gone) are LIVE management —
     // per ТЗ §3.3 mark-to-market and price triggers belong to the live phase. A
     // position opened on lineup is HELD untouched until kickoff; letting exits run
     // pre-match closed positions on pure Polymarket drift (the «вход… → выход…
     // предматч» churn). Settlement of finished matches is handled elsewhere.
     if (m.state !== "live") continue;
+    // A "live" match the provider isn't actually DELIVERING (frozen at 0', no events
+    // — ESPN stuck on "pre"/lagging) offers only UNVERIFIABLE Polymarket price drift
+    // to react to. Don't cut positions on that noise (the −$5.85 Orlando–Kansas
+    // partial was exactly this) — HOLD them until real live data resumes or the match
+    // settles on its final result. Mirrors the autoEnter entry gate.
+    if (!liveDelivering(db, m, sport)) continue;
     const markets = R.latestMarkets(db, m.id);
     for (const b of R.betsForMatch(db, m.id)) {
       if (b.status !== "open") continue;
@@ -575,6 +581,12 @@ export async function strategistReassess(
     // lineup still happens (autoAnalyze post_lineup + autoEnter); we just hold
     // those positions untouched until the ball is actually rolling.
     if (m.state !== "live") continue;
+    // A "live" match the provider isn't DELIVERING (frozen at 0', no events — ESPN
+    // stuck "pre"/lagging) has only stale state + Polymarket price noise to reassess
+    // on. Don't burn a call or let the strategist cut positions on that noise — HOLD
+    // until real live data resumes or the match settles. A real event would make
+    // liveDelivering true, so this never skips a genuine reaction.
+    if (!liveDelivering(db, m, sport)) continue;
     const open = R.betsForMatch(db, m.id).filter((b) => b.status === "open");
     // Reassess only where there's live risk (open positions) or a fresh trigger.
     // In triggeredOnly mode (fast loop) a trigger is REQUIRED — quiet positions
