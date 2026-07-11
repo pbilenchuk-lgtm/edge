@@ -198,7 +198,7 @@ export interface TradeLogEntry {
   match_id: string;
   strategy_id: string;
   minute: string | null;
-  type: "enter" | "exit" | "settle" | "skip";
+  type: "enter" | "exit" | "settle" | "skip" | "hold";
   text: string;
   created_at: string;
 }

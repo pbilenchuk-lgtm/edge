@@ -157,16 +157,17 @@ export function initSchema(db: Database): void {
     }
   } catch { try { db.exec("ROLLBACK"); } catch { /* ignore */ } }
   // SQLite can't ALTER a CHECK constraint, so relax the old trade_log.type CHECK
-  // (which excluded the later 'skip' type) by recreating the table. Guarded: runs
-  // only when the existing CHECK is the old, skip-less one; preserves all rows.
+  // (which excluded the later 'skip', then 'hold' types) by recreating the table.
+  // Guarded: runs only when the existing CHECK is missing a currently-valid type;
+  // preserves all rows.
   try {
     const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='trade_log'").get() as { sql?: string } | undefined;
-    if (row?.sql && /CHECK/i.test(row.sql) && !/skip/i.test(row.sql)) {
+    if (row?.sql && /CHECK/i.test(row.sql) && (!/skip/i.test(row.sql) || !/hold/i.test(row.sql))) {
       db.exec("BEGIN");
       db.exec(`CREATE TABLE trade_log_new (
         id TEXT PRIMARY KEY, match_id TEXT NOT NULL REFERENCES matches(id),
         strategy_id TEXT NOT NULL REFERENCES strategies(id), minute TEXT,
-        type TEXT NOT NULL CHECK (type IN ('enter','exit','settle','skip')),
+        type TEXT NOT NULL CHECK (type IN ('enter','exit','settle','skip','hold')),
         text TEXT NOT NULL, created_at TEXT NOT NULL)`);
       db.exec("INSERT INTO trade_log_new SELECT id,match_id,strategy_id,minute,type,text,created_at FROM trade_log");
       db.exec("DROP TABLE trade_log");

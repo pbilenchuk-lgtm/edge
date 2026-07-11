@@ -214,6 +214,36 @@ test("evaluateExits fills the close against the bid book — exit slippage into 
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "exit" && /выход VWAP.*комиссия/.test(l.text)), "exit execution + fee logged");
 });
 
+test("evaluateExits HOLDS a stop that would fill into a PHANTOM bid (exit_phantom_block), takes a stop with a real book", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const liveMatch = (id: string, ref: string) => R.insertMatch(db, { id, competition_id: comp.id, home: "Utah", away: "Gotham", state: "live", lineup_out: true, kickoff_at: null, minute: 23, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: ref });
+  // Down ~-55% at the 18¢ mark (entry 40¢) → the medium hard-stop fires.
+  const openBet = (id: string, mid: string) => R.insertBet(db, { id, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Gotham", status: "open", proposed_price: 35, entry_price: 40, current_price: 18, closing_price: null, ai_prob: 0.47, stake: 36, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  const bookFetch = (book: any) => (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
+
+  // (1) PHANTOM 1¢ bid on a thin book → the stop is held, not filled at the phantom.
+  const m1 = R.uid(); liveMatch(m1, "P1");
+  R.insertMarket(db, { id: R.uid(), match_id: m1, label: "Gotham", price: 18, ai_prob: 0.47, liquidity: "93", external_ref: "TOKP", snapshot_at: "t", is_closing: false });
+  openBet("phantom-bet", m1);
+  const ex1 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.20", size: "50" }], bids: [{ price: "0.01", size: "10000" }] }) });
+  assert.ok(!ex1.some((e) => e.matchId === m1), "no exit — stop into a phantom bid is held");
+  assert.equal(R.getBet(db, "phantom-bet")!.status, "open", "position kept open through the phantom (rides to real settlement)");
+  assert.ok(R.tradeLogForMatch(db, m1).some((l) => l.type === "hold" && /exit_phantom_block/.test(l.text)), "phantom hold logged once");
+
+  // (2) SAME stop but a REAL bid book (17¢) → the stop executes normally (guard doesn't over-block).
+  const m2 = R.uid(); liveMatch(m2, "P2");
+  R.insertMarket(db, { id: R.uid(), match_id: m2, label: "Gotham", price: 18, ai_prob: 0.47, liquidity: "1000", external_ref: "TOKR", snapshot_at: "t", is_closing: false });
+  openBet("real-bet", m2);
+  const ex2 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.20", size: "500" }], bids: [{ price: "0.17", size: "5000" }] }) });
+  assert.ok(ex2.some((e) => e.matchId === m2), "real-book stop executes (not over-blocked)");
+  assert.ok(R.getBet(db, "real-bet")!.status.startsWith("settled"), "real stop settled");
+});
+
 test("evaluateExits fires the PROFILE's take-profit; edge-gone alone is left to the strategist", async () => {
   const db = openDb(":memory:");
   seedDatabase(db); // seeds the 3 risk profiles too

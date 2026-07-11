@@ -239,7 +239,7 @@ CREATE TABLE IF NOT EXISTS trade_log (
   match_id    TEXT NOT NULL REFERENCES matches(id),
   strategy_id TEXT NOT NULL REFERENCES strategies(id),
   minute      TEXT,
-  type        TEXT NOT NULL CHECK (type IN ('enter','exit','settle','skip')),
+  type        TEXT NOT NULL CHECK (type IN ('enter','exit','settle','skip','hold')),
   text        TEXT NOT NULL,
   created_at  TEXT NOT NULL
 );

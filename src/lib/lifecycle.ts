@@ -48,6 +48,18 @@ export const EARLY_LIVE_STRATEGIST_GRACE_MIN = (() => {
   const n = Number(process.env.EARLY_LIVE_STRATEGIST_GRACE_MIN);
   return Number.isFinite(n) && n >= 0 ? n : 10;
 })();
+// A live stop must be able to fill NEAR the price that triggered it. When the
+// executable bid collapses to a phantom — a thin book prints a 1¢ bid while the mark
+// is ~19¢ — a mechanical stop would DUMP the position at that phantom and realize a
+// fake near-total loss. That is the −$35 «NJ/NY Gotham FC» cut that fired the instant
+// Utah went 1:0, three minutes before Gotham equalized and won 3:1 (the Lite sibling,
+// wider stop, held and won $231). HOLD instead: a bid at/below FLOOR¢ that sits ≥ GAP¢
+// under the mark is not real liquidity, so the position rides to its true settlement
+// rather than paying a phantom. Distinct from liveDelivering (there the provider is
+// silent; here it's delivering but the ORDER BOOK momentarily lies). Env-tunable.
+export const EXIT_PHANTOM_FLOOR = (() => { const n = Number(process.env.EXIT_PHANTOM_FLOOR); return Number.isFinite(n) && n >= 0 ? n : 5; })();
+export const EXIT_PHANTOM_GAP = (() => { const n = Number(process.env.EXIT_PHANTOM_GAP); return Number.isFinite(n) && n >= 0 ? n : 8; })();
+
 /** A live match that only JUST kicked off — still ~pre-match. True iff the score is
  *  0:0 and kickoff was within the grace window. Uses wall-clock-since-kickoff (from
  *  the reliable kickoff_at), NOT the ESPN clock minute, which can freeze at 0 on a
@@ -522,6 +534,17 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       if (!d.exit) continue;
       // Fill the close against the real book (sell into bids) — exit slippage into P&L.
       const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price);
+      // Phantom-bid guard (EXIT_PHANTOM_*): a mechanical stop that would fill at a
+      // degenerate bid sitting far below the mark is dumping into a phantom, not
+      // managing risk — HOLD, let the position settle on the real result. Only the
+      // blunt code stop is guarded; a deliberate strategist close is left alone.
+      if (sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP) {
+        const last = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === b.strategy_id).at(-1);
+        if (!(last && last.type === "hold" && last.text.includes(b.market_label))) {
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text: `выход отклонён: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${d.reason}); держим до реального рынка/сеттла (exit_phantom_block)`, created_at: now });
+        }
+        continue;
+      }
       const pnl = closeBetEarly(db, b, sell.cents, d.reason, minuteLabel(m), now);
       R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${d.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason: d.reason, pnl });
