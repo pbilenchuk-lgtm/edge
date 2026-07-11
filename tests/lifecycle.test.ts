@@ -244,6 +244,36 @@ test("evaluateExits HOLDS a stop that would fill into a PHANTOM bid (exit_phanto
   assert.ok(R.getBet(db, "real-bet")!.status.startsWith("settled"), "real stop settled");
 });
 
+test("evaluateExits HOLDS a take-profit whose real bid would book a LOSS (phantom-inflated mark), takes a real one", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const liveMatch = (id: string, ref: string) => R.insertMatch(db, { id, competition_id: comp.id, home: "Mjallby", away: "AIK", state: "live", lineup_out: true, kickoff_at: null, minute: 35, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: ref });
+  // entry 34¢, MARK 55¢ → +62% ⇒ medium take-profit (0.50) fires on the mark.
+  const openBet = (id: string, mid: string) => R.insertBet(db, { id, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Mjallby — Yes", status: "open", proposed_price: 34, entry_price: 34, current_price: 55, closing_price: null, ai_prob: 0.6, stake: 40, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  const bookFetch = (book: any) => (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
+
+  // (1) mark 55¢ but the real bid is 30¢ (< entry 34¢) — the "profit" is phantom → HOLD.
+  const m1 = R.uid(); liveMatch(m1, "P1");
+  R.insertMarket(db, { id: R.uid(), match_id: m1, label: "Mjallby — Yes", price: 55, ai_prob: 0.6, liquidity: "3000", external_ref: "TOK1", snapshot_at: "t", is_closing: false });
+  openBet("tp-phantom", m1);
+  const ex1 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.60", size: "500" }], bids: [{ price: "0.30", size: "5000" }] }) });
+  assert.ok(!ex1.some((e) => e.matchId === m1), "no exit — a take-profit that fills below entry is held");
+  assert.equal(R.getBet(db, "tp-phantom")!.status, "open", "position kept open (no fake profit realised)");
+  assert.ok(R.tradeLogForMatch(db, m1).some((l) => l.type === "hold" && /take_profit_no_loss/.test(l.text)), "phantom take-profit hold logged");
+
+  // (2) mark 55¢ AND a real bid of 52¢ (> entry 34¢) — a genuine profit → take it.
+  const m2 = R.uid(); liveMatch(m2, "P2");
+  R.insertMarket(db, { id: R.uid(), match_id: m2, label: "Mjallby — Yes", price: 55, ai_prob: 0.6, liquidity: "3000", external_ref: "TOK2", snapshot_at: "t", is_closing: false });
+  openBet("tp-real", m2);
+  const ex2 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.60", size: "500" }], bids: [{ price: "0.52", size: "5000" }] }) });
+  assert.ok(ex2.some((e) => e.matchId === m2 && e.pnl > 0), "genuine take-profit executes at a real profit");
+  assert.ok(R.getBet(db, "tp-real")!.status.startsWith("settled"), "real take-profit settled");
+});
+
 test("evaluateExits fires the PROFILE's take-profit; edge-gone alone is left to the strategist", async () => {
   const db = openDb(":memory:");
   seedDatabase(db); // seeds the 3 risk profiles too

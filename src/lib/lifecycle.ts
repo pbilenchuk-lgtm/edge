@@ -538,11 +538,24 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // degenerate bid sitting far below the mark is dumping into a phantom, not
       // managing risk — HOLD, let the position settle on the real result. Only the
       // blunt code stop is guarded; a deliberate strategist close is left alone.
-      if (sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP) {
+      const holdOnce = (text: string) => {
         const last = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === b.strategy_id).at(-1);
         if (!(last && last.type === "hold" && last.text.includes(b.market_label))) {
-          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text: `выход отклонён: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${d.reason}); держим до реального рынка/сеттла (exit_phantom_block)`, created_at: now });
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text, created_at: now });
         }
+      };
+      if (sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP) {
+        holdOnce(`выход отклонён: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${d.reason}); держим до реального рынка/сеттла (exit_phantom_block)`);
+        continue;
+      }
+      // A TAKE-PROFIT fires on the MARK; if the executable bid can't actually deliver
+      // a profit — the mark was inflated by a phantom ask on a thin book (the «+197%
+      // тейк-профит» that filled at 14¢ below a 17¢ entry, booking a loss, then the
+      // strategist re-entered and it repeated) — do NOT realise a fake "profit". HOLD
+      // until the book can pay it or the position settles. Stops are exempt (pnlFrac
+      // < 0): a stop's job is to cut at a loss, and the phantom-floor guard covers it.
+      if (d.pnlFrac >= 0 && b.entry_price != null && sell.cents <= b.entry_price) {
+        holdOnce(`тейк-профит отклонён: марка ${mk.price}¢ (${d.reason}), но реальный бид ${sell.cents}¢ ≤ входа ${b.entry_price}¢ — прибыль фантомная, держим (take_profit_no_loss)`);
         continue;
       }
       const pnl = closeBetEarly(db, b, sell.cents, d.reason, minuteLabel(m), now);
