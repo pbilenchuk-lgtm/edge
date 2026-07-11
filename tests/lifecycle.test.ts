@@ -7,7 +7,6 @@ import * as R from "../src/lib/repo.js";
 import { exitDecision } from "../src/lib/thresholds.js";
 import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats } from "../src/lib/lifecycle.js";
 import { analyzeMatch, runStrategists } from "../src/lib/analysis.js";
-import { reconciledScore } from "../src/lib/lifecycle.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
 const mockLLM = (a: unknown) => (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify(a) }] }) })) as any;
@@ -237,38 +236,6 @@ test("autoEnter: rejects a fill that lands far from the evaluated price / at a r
   assert.ok(!filled.some((f) => f.matchId === mid), "no fill — the evaluated market is gone");
   assert.equal(R.getBet(db, "ph")!.status, "not_filled", "proposed bet marked not_filled, not opened at the phantom");
   assert.ok(/entry_phantom_block/.test(R.getBet(db, "ph")!.rationale ?? ""), "reason records the phantom-fill rejection");
-});
-
-test("reconciledScore: corrects a lagging score up to the goal events (diacritic-tolerant), preserves a null", () => {
-  const db = openDb(":memory:");
-  seedDatabase(db);
-  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
-  const mk = (id: string, sh: number | null, sa: number | null) => {
-    R.insertMatch(db, { id, competition_id: comp.id, home: "Mjallby AIF", away: "AIK", state: "live", lineup_out: true, kickoff_at: null, minute: 80, score_home: sh, score_away: sa, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
-    return R.getMatch(db, id)!;
-  };
-  const goal = (mid: string, team: string, min: number) => R.insertMatchEvent(db, { id: R.uid(), match_id: mid, event_key: `${team}-${min}`, minute: min, type: "goal", team, text: "goal", created_at: "t" });
-
-  // (1) stored 0:0 but the event feed shows AIK scored twice ("AIK") and Mjällby once
-  //     (note the diacritic vs the "Mjallby AIF" match name) → reconciled 1:2.
-  const m1 = mk("rs1", 0, 0);
-  goal("rs1", "AIK", 74); goal("rs1", "AIK", 90); goal("rs1", "Mjällby AIF", 90);
-  assert.deepEqual(reconciledScore(db, m1), { home: 1, away: 2 }, "lagging score corrected UP to the goals");
-
-  // (2) no events, score genuinely unknown (null) → stays null (the «score unknown» path).
-  const m2 = mk("rs2", null, null);
-  assert.deepEqual(reconciledScore(db, m2), { home: null, away: null }, "null preserved when no goals contradict it");
-
-  // (3) stored score AHEAD of a sparse event feed → keep the stored score (never down).
-  const m3 = mk("rs3", 2, 1);
-  goal("rs3", "AIK", 30); // only one event known
-  assert.deepEqual(reconciledScore(db, m3), { home: 2, away: 1 }, "never corrected downward off an incomplete feed");
-
-  // (4) NESTED names — an away goal by "Inter" must NOT be mis-booked to "Inter Miami"
-  //     (the old substring match did exactly that). Ambiguous → dropped, not attributed.
-  R.insertMatch(db, { id: "rs4", competition_id: comp.id, home: "Inter Miami", away: "Inter", state: "live", lineup_out: true, kickoff_at: null, minute: 60, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "rs4" });
-  goal("rs4", "Inter", 55); // the AWAY side scored
-  assert.equal(reconciledScore(db, R.getMatch(db, "rs4")!).home, 0, "an away goal by the nested name is NOT booked to home");
 });
 
 test("evaluateExits HOLDS a stop that would fill into a PHANTOM bid (exit_phantom_block), takes a stop with a real book", async () => {

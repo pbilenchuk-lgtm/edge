@@ -603,42 +603,6 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
-/** Strip diacritics for a lenient team-name compare ("Mjällby" ↔ "Mjallby"). */
-const stripDia = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
-/**
- * Score reconciled with the goal-event feed: never BELOW the goals the strategist is
- * told about, so a lagging ESPN score field (or a model back-deriving a fake deficit
- * from a phantom price) can't feed a wrong live prob. Corrects UPWARD only, off `goal`
- * events. Team attribution is EXACT (diacritic-folded) or word-level containment —
- * NOT a loose substring, which mis-booked an away goal to home when one name nested
- * inside the other ("Inter" ⊂ "Inter Miami"). Known limitation: a VAR-disallowed goal
- * leaves its `goal` event in the feed (events are never deleted) while ESPN reverts
- * the score, so this can briefly read one goal high; it only nudges an LLM prob input
- * (sizing arithmetic stays deterministic), and clears once real play passes it.
- */
-export function reconciledScore(db: Database, m: Match): { home: number | null; away: number | null } {
-  const home = stripDia(m.home).toLowerCase(), away = stripDia(m.away).toLowerCase();
-  // Match on whole words: exact, or the event team is a full word-subset of the match
-  // name (or vice-versa). Never a bare substring — "inter" must not hit "inter miami".
-  const words = (s: string) => new Set(s.split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 3));
-  const hit = (name: string, t: string) => { if (t === name) return true; const a = words(name), b = words(t); if (!a.size || !b.size) return false; return [...b].every((w) => a.has(w)) || [...a].every((w) => b.has(w)); };
-  let gh = 0, ga = 0;
-  for (const e of R.eventsForMatch(db, m.id)) {
-    if (e.type !== "goal" || !e.team) continue;
-    const t = stripDia(e.team).toLowerCase();
-    // Attribute to home ONLY if it matches home and NOT away (an ambiguous name that
-    // matches both — a nested pair — is dropped rather than mis-booked to one side).
-    const h = hit(home, t), a = hit(away, t);
-    if (h && !a) gh++;
-    else if (a && !h) ga++;
-  }
-  // Correct UPWARD only; preserve a null (provider hasn't reported a score yet) when
-  // no goal events contradict it, so the strategist's "score unknown" path still fires.
-  return {
-    home: gh > (m.score_home ?? 0) ? gh : m.score_home,
-    away: ga > (m.score_away ?? 0) ? ga : m.score_away,
-  };
-}
 
 /** Snapshot each live match's current prices as its kickoff baseline (first
  *  write wins), so the odds column shows in-match movement, not pre-match drift. */
@@ -734,9 +698,6 @@ export async function strategistReassess(
       ? Math.min(maxLiveMinutes(sport), Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at as string)) / 60000)))
       : null;
     const assess = R.assessmentsForMatch(db, m.id).filter((a) => a.status === "ok").sort((a, b) => (a.created_at >= b.created_at ? -1 : 1))[0];
-    // Score the strategist reasons over, reconciled against the goal events so a
-    // lagging/inconsistent score field can't feed a wrong live prob (→ wrong size).
-    const score = reconciledScore(db, m);
     // Match facts + the outcome tree / match_shape / scenarios the strategist
     // reasons over (single-sourced; the pair's battle sheet is appended below).
     const ctx = strategistContext(db, m.id);
@@ -776,7 +737,7 @@ export async function strategistReassess(
       const battleSheet = R.artifactsForMatch(db, m.id).find((x) => x.kind === "battle_sheet" && x.label === pairLabel)?.content;
       const dec = await strategistDecide({
         strategyName: strat.name, strategyPrompt: strat.prompt_live ?? strat.prompt,
-        match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: score.home, scoreAway: score.away, minuteApprox },
+        match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, minuteApprox },
         assessment: { confidence: assess?.confidence ?? "средняя", short: assess?.short ?? "", verdict: assess?.verdict ?? "" },
         markets: markets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob, liquidity: mk.liquidity != null ? Number(mk.liquidity) : null, openCents: mk.label in opens ? opens[mk.label] : null })),
         openPositions: myOpen.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
