@@ -9,6 +9,32 @@ import { seedRiskProfiles } from "../src/lib/riskConfig.js";
 import { loadPolymarketConfig } from "../src/lib/polymarket.js";
 import * as R from "../src/lib/repo.js";
 
+test("scheduler heartbeat: no-op when AUTO_TICK off or the cron is fresh; catch-up only when overdue", async () => {
+  const { heartbeat } = await import("../src/lib/scheduler.js");
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const env = { AUTO_TICK: "true", TICK_INTERVAL_MIN: "30", POLYMARKET_ENABLED: "false", SPORTS_ENABLED: "false" };
+  const t0 = Date.parse("2026-07-11T00:00:00Z");
+
+  // AUTO_TICK off → never runs, regardless of staleness.
+  assert.equal((await heartbeat({ ...env, AUTO_TICK: "false" }, { db, nowMs: t0 })).ran, false);
+
+  // A fresh full-cycle marker (10 min ago) → not overdue (< 2×30min) → no-op.
+  R.insertCronLog(db, { id: R.uid(), at: "t", kind: "tick", ok: 1, summary: "s", created_at: new Date(t0 - 10 * 60_000).toISOString() });
+  assert.deepEqual(await heartbeat(env, { db, nowMs: t0 }), { ran: false, reason: "fresh" });
+
+  // A "live" entry doesn't count as a full cycle — still fresh only via the tick above.
+  R.insertCronLog(db, { id: R.uid(), at: "t", kind: "live", ok: 1, summary: "s", created_at: new Date(t0 - 1 * 60_000).toISOString() });
+  assert.equal((await heartbeat(env, { db, nowMs: t0 })).ran, false, "recent live tick alone doesn't refresh the full-cycle clock");
+
+  // Now the last full cycle is 90 min old (> 2×30) → overdue → catch-up runs.
+  db.exec("DELETE FROM cron_log");
+  R.insertCronLog(db, { id: R.uid(), at: "t", kind: "tick", ok: 1, summary: "s", created_at: new Date(t0 - 90 * 60_000).toISOString() });
+  const r = await heartbeat(env, { db, nowMs: t0 });
+  assert.equal(r.ran, true, "overdue cron → catch-up ran");
+  assert.ok(R.recentCronLog(db, 5).some((x) => x.kind === "heartbeat"), "catch-up logged as a heartbeat run");
+});
+
 test("loadPolymarketConfig: taker fee defaults to the real Polymarket SPORTS rate (0.75%)", () => {
   assert.equal(loadPolymarketConfig({}).exec.takerFeeRate, 0.0075);
   // env still overrides for a schedule change

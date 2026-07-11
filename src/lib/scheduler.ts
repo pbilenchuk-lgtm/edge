@@ -21,6 +21,51 @@ import { tryAcquireEngine, releaseEngine } from "./engineLock.js";
 
 let started = false;
 
+/**
+ * Deploy-independent CATCH-UP heartbeat. The scheduler is in-process (setInterval),
+ * so it dies whenever the web process restarts — a redeploy, a crash, or (what bit
+ * us) a burst of rapid deploys that keeps restarting it. When that spans a kickoff,
+ * the pre-match analysis/entry window is silently missed (the 2h cron gap in the
+ * Orlando/EC-Juventude logs). This runs one full auto-cycle IFF none has been logged
+ * within ~2× the tick interval — recovering a stalled cron promptly. It's called
+ * from BOTH the in-process minute interval AND `/api/health` (which Render pings on
+ * its own cadence), so even a wedged in-process scheduler gets driven as long as the
+ * process is up. Behind the shared engine lock, so it never overlaps a real cycle;
+ * a no-op when the cron is healthy (a recent full cycle exists). Returns whether it
+ * actually ran a catch-up. */
+export async function heartbeat(
+  env: Record<string, string | undefined> = process.env,
+  opts: { db?: ReturnType<typeof getDb>; nowMs?: number } = {},
+): Promise<{ ran: boolean; reason?: string }> {
+  if ((env.AUTO_TICK ?? "false").toLowerCase() !== "true") return { ran: false, reason: "AUTO_TICK off" };
+  const tickMin = Math.max(1, Number(env.TICK_INTERVAL_MIN ?? 30));
+  const staleMs = Math.max(10, tickMin * 2) * 60_000; // overdue = no full cycle within ~2× the tick
+  let db: ReturnType<typeof getDb>;
+  try { db = opts.db ?? getDb(); } catch { return { ran: false, reason: "no db" }; }
+  // Most recent FULL-cycle marker (tick/discover/heartbeat/manual) — the fast "live"
+  // loop doesn't count, it doesn't do analysis/entries.
+  const last = R.recentCronLog(db, 30).find((r) => r.kind !== "live");
+  const lastMs = last ? Date.parse(last.created_at) : 0;
+  const nowMs = opts.nowMs ?? Date.now();
+  if (lastMs && nowMs - lastMs < staleMs) return { ran: false, reason: "fresh" };
+  const tok = tryAcquireEngine();
+  if (!tok) return { ran: false, reason: "busy" }; // a real cycle is running → not stalled
+  const at = new Date(nowMs).toISOString();
+  try {
+    const provider = loadSportsProvider(loadSportsConfig(env));
+    const r = await runAutoCycle(db, provider, {}, { linkOdds: loadPolymarketConfig(env).enabled, discover: false });
+    const summary = `[heartbeat] catch-up (крон простаивал с ${last?.created_at ?? "never"}) · sync ${r.synced} · анализ ${r.analyzed.length} · входы ${r.entered.length} · выходы ${r.exited.length}`;
+    console.log(`[scheduler:heartbeat] ${summary}`);
+    try { R.insertCronLog(db, { id: R.uid(), at, kind: "heartbeat", ok: r.llmFail > 0 ? 0 : 1, summary, created_at: at }); } catch {}
+    return { ran: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[scheduler:heartbeat] error:", msg);
+    try { R.insertCronLog(db, { id: R.uid(), at, kind: "heartbeat", ok: 0, summary: `ошибка: ${msg}`, created_at: at }); } catch {}
+    return { ran: false, reason: "error" };
+  } finally { releaseEngine(tok); }
+}
+
 export function startScheduler(env: Record<string, string | undefined> = process.env): void {
   if (started) return;
   if ((env.AUTO_TICK ?? "false").toLowerCase() !== "true") return;
@@ -100,4 +145,5 @@ export function startScheduler(env: Record<string, string | undefined> = process
   setTimeout(run, 5_000);               // first full pass shortly after boot (discovers)
   setInterval(run, tickMin * 60_000);   // then every tickMin
   setInterval(liveRun, liveSec * 1000); // fast real-time loop for in-play matches
+  setInterval(() => void heartbeat(env), 60_000); // catch-up watchdog — recover a stalled cron within a minute of the process being alive
 }

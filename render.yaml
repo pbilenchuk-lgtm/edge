@@ -25,6 +25,14 @@ services:
       - key: SPORTS_ENABLED
         value: "true"    # pull ESPN live scores + real lineups/events (reassessment triggers)
       # Automated cron (in-process scheduler): parse + analyze + enter/exit on a loop.
+      # NOTE: the scheduler runs INSIDE this web process, so it stops whenever the
+      # process restarts. A single redeploy recovers in ~5s; but a BURST of rapid
+      # pushes (autoDeploy re-triggers on each) keeps restarting it and can leave a
+      # multi-minute gap — avoid deploying while a match is live. Two safety nets are
+      # built in: (1) an in-process catch-up watchdog, and (2) /api/health runs a
+      # catch-up cycle when the cron is overdue, so Render's health pings act as a
+      # deploy-independent heartbeat. For belt-and-suspenders, point an external
+      # uptime monitor (cron-job.org / UptimeRobot) at GET /api/health every ~5 min.
       - key: AUTO_TICK
         value: "true"
       - key: LIVE_TICK_SEC

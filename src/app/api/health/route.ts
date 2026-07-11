@@ -15,6 +15,11 @@ export async function GET() {
     const comps = listCompetitions(db);
     const strats = listStrategies(db);
     const treasury = getTreasury(db);
+    // Turn Render's health pings into a deploy-independent cron heartbeat: if the
+    // in-process scheduler has stalled (a redeploy/crash killed it), run a catch-up
+    // auto-cycle. Fire-and-forget + internally locked/overdue-gated, so it never
+    // blocks the health response and no-ops when the cron is healthy.
+    void import("@/lib/scheduler").then((s) => s.heartbeat()).catch(() => {});
     return NextResponse.json({
       ok: true,
       treasury: treasury.total_balance,
