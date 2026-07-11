@@ -78,6 +78,27 @@ test("autoEnter refuses to open a position on a match with no live data (blind =
   assert.equal(R.getBet(db, "nd-1")!.status, "open", "fills once live data is present");
 });
 
+test("autoEnter: clock-flipped LIVE match with only a lineup match_live (provider still 'pre') does NOT fill", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  // The Orlando–Kansas case: our clock flipped it to "live", but ESPN still shows
+  // "pre" — the only match_live is the pre-match LINEUP row (stats null), minute 0'.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Orlando", away: "Kansas", state: "live", lineup_out: true, kickoff_at: "2026-07-11T00:00:00Z", minute: null, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "e", league: "usa.nwsl", home_lineup: JSON.stringify({ team: "Orlando", formation: "4-3-3", starters: ["x"] }), away_lineup: JSON.stringify({ team: "Kansas", formation: "4-4-2", starters: ["y"] }), stats: null, updated_at: "t" });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "op-1", match_id: mid, strategy_id: strat.id, market_label: "Over 2.5", status: "proposed", proposed_price: 55, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.6, stake: 50, rationale: null, entered_minute: null, result: null, payout: null, settled_by: null, created_at: "t" });
+
+  await autoEnter(db, { now: () => "t" });
+  assert.equal(R.getBet(db, "op-1")!.status, "proposed", "lineup-only match_live on a 'live' match ≠ live delivery → held, not filled");
+  // Provider starts delivering (a real minute) → now it fills.
+  R.updateMatch(db, mid, { minute: 12 });
+  await autoEnter(db, { now: () => "t" });
+  assert.equal(R.getBet(db, "op-1")!.status, "open", "fills once the provider drives a real minute");
+});
+
 test("autoEnter executes against the order book — VWAP fill + depth cap on a thin book", async () => {
   const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
   const db = openDb(":memory:");

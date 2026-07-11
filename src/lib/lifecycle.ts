@@ -245,10 +245,33 @@ export interface AutoEnterItem { matchId: string; strategyId: string; market: st
 // position in play — opening one would be blind capital that bleeds — so entry is
 // forbidden. A clock-only "live" match (minute null, no provider row) is NOT
 // covered.
+// Is the fixture provider-TRACKED at all — real lineups/stats (a match_live row), a
+// real in-match event, or a provider-driven minute? Used by advanceClocks to decide
+// a clock-only match is uncovered (our provider doesn't carry it) and can be
+// finished. A lineup-only match_live counts here (the provider knows the fixture),
+// which is exactly right for "don't clock-finish a match ESPN will deliver soon".
+// For "is the provider actually DELIVERING live state right now" (the entry gate),
+// see liveDelivering — a lineup-only row is NOT enough there.
 export function hasLiveData(db: Database, m: Match): boolean {
   if (R.getMatchLive(db, m.id)) return true;
   if (m.state === "live" && m.minute != null) return true;
   return R.eventsForMatch(db, m.id).some((e) => e.type !== "stats" && e.type !== "other");
+}
+
+/** Is the provider actually DELIVERING live in-play state for this match right now
+ *  (not just tracking the fixture)? The entry gate for a LIVE match: a fixture our
+ *  clock flipped to "live" while the provider still shows "pre" (frozen at 0', no
+ *  stats/events — a lagging or uncovered in-play feed) has a match_live row from its
+ *  published lineups but ISN'T live — filling there is blind in-play capital. Require
+ *  a real signal: an in-match event, live STATS (ESPN populates these only in-play),
+ *  or a provider minute past 0. Non-lineup sports write match_live only from the live
+ *  board, so the row itself is the signal there. */
+export function liveDelivering(db: Database, m: Match, sport: string): boolean {
+  if (R.eventsForMatch(db, m.id).some((e) => e.type !== "stats" && e.type !== "other")) return true;
+  const live = R.getMatchLive(db, m.id);
+  if (!R.LINEUP_SPORTS.has(sport)) return !!live;
+  if (live?.stats) return true;
+  return m.minute != null && m.minute > 0;
 }
 
 interface EntryExec { skip: boolean; priceCents: number; stake: number; note?: string }
@@ -330,9 +353,12 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
     const preLineupHold = R.LINEUP_SPORTS.has(sport) && !m.lineup_out && (m.state === "upcoming" || m.state === "lineup");
     const markets = R.latestMarkets(db, m.id);
     if (!markets.length) continue; // no quotes → nothing tradeable, no entry
-    // Never open a position on a match we have no LIVE data for — we couldn't
-    // manage/exit it in play, which is exactly how capital bleeds (user rule).
-    const liveData = hasLiveData(db, m);
+    // Never open a position we can't follow. A PRE-kickoff fill (lineups out,
+    // upcoming/lineup) only needs the fixture confirmed (hasLiveData). A LIVE-state
+    // fill needs the provider to be actually DELIVERING in-play data (liveDelivering)
+    // — otherwise a fixture our clock flipped to "live" while ESPN still shows "pre"
+    // (frozen 0', no stats/events) would take blind in-play capital we can't manage.
+    const liveData = m.state === "live" ? liveDelivering(db, m, sport) : hasLiveData(db, m);
     const bets = R.betsForMatch(db, m.id);
     // A (strategy, PROFILE) pair must never hold two OPEN positions on the SAME
     // market — that's the double-exposure a concurrent analyze/reassess race (or

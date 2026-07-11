@@ -24,17 +24,29 @@ export function findMatch(db: Database, query: string): { id: string } | null {
 
 const j = (x: unknown) => "```json\n" + JSON.stringify(x, null, 2) + "\n```";
 
-/** True iff the engine considers this match to have provider live coverage — the
- *  exact predicate autoEnter gates entry on. Mirror of lifecycle.hasLiveData (kept
- *  local to avoid a circular import). */
+/** The EXACT predicate autoEnter gates entry on (kept local to avoid a circular
+ *  import). Pre-kickoff (upcoming/lineup) needs only the fixture confirmed; a LIVE
+ *  match needs the provider actually DELIVERING in-play data — a lineup-only
+ *  match_live on a fixture ESPN still shows "pre" (frozen 0', no stats/events) does
+ *  NOT count, so we don't take blind in-play capital. */
 function liveDataStatus(db: Database, matchId: string): { ok: boolean; via: string } {
-  const live = R.getMatchLive(db, matchId);
-  if (live) return { ok: true, via: `match_live row (провайдер отдал матч; составы ${live.home_lineup ? "есть" : "нет"}, статистика ${live.stats ? "есть" : "нет"})` };
   const m = R.getMatch(db, matchId);
-  if (m?.state === "live" && m.minute != null) return { ok: true, via: "state=live + minute" };
+  const live = R.getMatchLive(db, matchId);
   const realEvents = R.eventsForMatch(db, matchId).filter((e) => e.type !== "stats" && e.type !== "other");
+  const football = R.listCompetitions(db).some((c) => c.id === m?.competition_id && c.sport_id === "football");
+  if (m?.state === "live") {
+    // Live: require real delivery (event / live stats / provider minute past 0).
+    if (realEvents.length) return { ok: true, via: `${realEvents.length} реальных событий` };
+    if (!football && live) return { ok: true, via: "match_live (не-футбол: live-борд)" };
+    if (live?.stats) return { ok: true, via: "match_live со статистикой (провайдер отдаёт live)" };
+    if (m.minute != null && m.minute > 0) return { ok: true, via: `провайдерская минута ${m.minute}'` };
+    return { ok: false, via: `LIVE по таймеру, но провайдер live-состояние НЕ отдаёт (${live ? "есть только составы, минута 0', без статы/событий" : "нет match_live"}) → провайдер показывает матч как «pre»/лагает; autoEnter НЕ входит (иначе слепой капитал)` };
+  }
+  // Pre-kickoff: the fixture being confirmed (match_live / lineups) is enough — a
+  // fill here is a pre-match entry, no live feed needed.
+  if (live) return { ok: true, via: `match_live row (составы ${live.home_lineup ? "есть" : "нет"}, статистика ${live.stats ? "есть" : "нет"}) — предматч, вход по подтверждённой фикстуре` };
   if (realEvents.length) return { ok: true, via: `${realEvents.length} реальных событий` };
-  return { ok: false, via: "НЕТ (нет match_live-строки, нет live-минуты, нет реальных событий) → autoEnter держит предложения как превью, не входит" };
+  return { ok: false, via: "НЕТ (нет match_live-строки, нет реальных событий) → autoEnter держит предложения как превью, не входит" };
 }
 
 export function buildMatchLog(db: Database, matchId: string): string {
