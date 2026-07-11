@@ -19,8 +19,8 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries } from "./engine.js";
 import { reconcileFootballCategories } from "./seed.js";
-import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBook, type PolymarketConfig } from "./polymarket.js";
-import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricBuyAvgCents, parametricSellAvgCents, takerFeeCents } from "./execution.js";
+import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBookResult, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
+import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricSellAvgCents, takerFeeCents } from "./execution.js";
 import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { exitDecision } from "./thresholds.js";
@@ -329,7 +329,29 @@ export function liveDelivering(db: Database, m: Match, sport: string): boolean {
   return m.state === "live" && m.minute != null && m.minute > 0;
 }
 
-interface EntryExec { skip: boolean; priceCents: number; stake: number; note?: string }
+/** Single source of truth for "does this token have a REAL, tradeable order book" —
+ *  used by BOTH the entry gate (executeEntry) and the exit phantom guard (sellVwapCents)
+ *  so "no real book" means the same thing on both sides of a position's life cycle
+ *  (the untradeable-market gate). Classification:
+ *    ok          — live levels present → trade against the book
+ *    empty        — fetch OK but no/dead book → PLACEHOLDER market; never trade it
+ *                   (don't parametric-enter, don't mark an exit off a modelled price)
+ *    unavailable — the fetch failed → skip THIS cycle and retry next (a network hiccup
+ *                   must never read as a permanently untradeable market)
+ *  A missing CLOB token is treated as `empty`: there is no real market to trade.
+ *  Per-token result is cached for the cycle so two profiles on one market fetch once. */
+async function classifyOrderBook(
+  token: string | null, poly: PolymarketConfig, deps: EngineDeps,
+  bookCache?: Map<string, OrderBookFetch>,
+): Promise<OrderBookFetch> {
+  if (!token) return { status: "empty" };
+  if (bookCache && bookCache.has(token)) return bookCache.get(token)!;
+  const r = await fetchOrderBookResult(token, poly, deps);
+  if (bookCache) bookCache.set(token, r);
+  return r;
+}
+
+interface EntryExec { skip: boolean; priceCents: number; stake: number; note?: string; retry?: boolean }
 
 /** Model an entry fill against the real order book: VWAP price (slippage), size
  *  capped to what the book absorbs while keeping edge and bounding price impact.
@@ -337,6 +359,7 @@ interface EntryExec { skip: boolean; priceCents: number; stake: number; note?: s
 async function executeEntry(
   b: Bet, mk: Market | undefined, quoteCents: number, proposedUsd: number,
   poly: PolymarketConfig, deps: EngineDeps,
+  bookCache?: Map<string, OrderBookFetch>,
 ): Promise<EntryExec> {
   if (!poly.enabled) return { skip: false, priceCents: quoteCents, stake: proposedUsd }; // execution model off → quote fill
   const fairCents = (b.ai_prob ?? 0) * 100;
@@ -349,7 +372,8 @@ async function executeEntry(
   const phantomFill = (eff: number): string | null =>
     eff <= 2 || eff >= 98 ? `цена исполнения ${eff}¢ у планки — рынок решён, вход отклонён (entry_phantom_block)`
     : ref > 0 && Math.abs(eff - ref) >= ENTRY_PHANTOM_DIVERGENCE ? `цена исполнения ${eff}¢ ушла от оценённой ${ref}¢ на ${Math.abs(eff - ref).toFixed(0)}¢ — рынок сместился, вход отклонён (entry_phantom_block)` : null;
-  const book = token ? await fetchOrderBook(token, poly, deps) : null;
+  const bookRes = await classifyOrderBook(token, poly, deps, bookCache);
+  const book = bookRes.status === "ok" ? bookRes.book : null;
   if (book && book.asks.length) {
     const bestAsk = book.asks[0].priceCents;
     const capUsd = maxExecutableBuyUsd(book.asks, fairCents, { edgeFloorCents: exec.edgeFloorCents, maxImpactCents: exec.maxImpactCents, feeRate: exec.takerFeeRate });
@@ -365,15 +389,19 @@ async function executeEntry(
     const note = `VWAP ${fill.avgPriceCents}¢ (котир. ${bestAsk}¢${slip > 0 ? `, слип +${slip}¢` : ""}) + комиссия ${fee}¢ · сдвиг→${fill.newTopCents}¢${capped ? ` · урезан по глубине $${Math.round(proposedUsd)}→$${Math.round(stake)}` : ""}`;
     return { skip: false, priceCents: eff, stake: Math.round(stake), note };
   }
-  // Parametric fallback: dead/near-resolved book or a fetch error.
-  const liq = Number(mk?.liquidity ?? 0) || 0;
-  const avg = parametricBuyAvgCents(quoteCents, proposedUsd, liq, exec.fallbackK);
-  const fee = takerFeeCents(avg, exec.takerFeeRate);
-  const eff = Math.round((avg + fee) * 10) / 10;
-  if (eff >= fairCents - exec.edgeFloorCents) return { skip: true, priceCents: eff, stake: 0, note: `≈${eff}¢ (VWAP+комиссия) ≥ справ.−порог — эдж съеден (модель по ликв. $${Math.round(liq)})` };
-  const ph = phantomFill(eff);
-  if (ph) return { skip: true, priceCents: eff, stake: 0, note: ph };
-  return { skip: false, priceCents: eff, stake: proposedUsd, note: `≈VWAP ${avg}¢ + комиссия ${fee}¢ (модель по ликвидности)` };
+  // Untradeable-market gate (option 1, symmetric to the exit-side phantom guard): with
+  // no real, tradeable ask book we do NOT enter on the parametric model — we never open
+  // a position on a market we couldn't actually price against a live book. This is what
+  // stopped a placeholder ~50¢ Poisson market (empty book) from being filled parametrically.
+  // Split the reason so a transient outage isn't mistaken for a permanent placeholder:
+  //   empty       → market uninitialized (placeholder) — block, never trade it
+  //   ok w/o asks → book exists but no offers to buy right now — skip, retry next cycle
+  //   unavailable → the book fetch failed — skip THIS cycle, next cycle may price it
+  if (bookRes.status === "empty") // placeholder: uninitialized market — terminal block (not a retry)
+    return { skip: true, priceCents: quoteCents, stake: 0, note: `стакан пуст — рынок не инициализирован, вход отклонён (untradeable_market_block)` };
+  if (bookRes.status === "ok") // initialized book but no ask-side offers to buy right now — retry next cycle
+    return { skip: true, retry: true, priceCents: quoteCents, stake: 0, note: `нет предложений на продажу в стакане — вход отложен до след. цикла (orderbook_unavailable)` };
+  return { skip: true, retry: true, priceCents: quoteCents, stake: 0, note: `стакан недоступен — книга не получена, вход отложен до след. цикла (orderbook_unavailable)` };
 }
 
 const appendReason = (existing: string | null, note?: string): string =>
@@ -387,18 +415,18 @@ const appendReason = (existing: string | null, note?: string): string =>
 async function sellVwapCents(
   mk: Market | undefined, entryCents: number, basisUsd: number,
   poly: PolymarketConfig, deps: EngineDeps, quoteCents: number,
-  bookCache?: Map<string, Awaited<ReturnType<typeof fetchOrderBook>>>,
+  bookCache?: Map<string, OrderBookFetch>,
 ): Promise<{ cents: number; note?: string; fromBook: boolean }> {
   if (!poly.enabled) return { cents: quoteCents, fromBook: false };
   const token = mk?.external_ref ?? null;
   const shares = entryCents > 0 ? basisUsd / (entryCents / 100) : 0;
-  // The order book is per-TOKEN, not per-position — cache it for the cycle so two
-  // risk profiles on the same market don't each hit the (uncached) CLOB endpoint.
-  let book: Awaited<ReturnType<typeof fetchOrderBook>> = null;
-  if (token && shares > 0) {
-    if (bookCache && bookCache.has(token)) book = bookCache.get(token) ?? null;
-    else { book = await fetchOrderBook(token, poly, deps); if (bookCache) bookCache.set(token, book); }
-  }
+  // SAME single-source classification as the entry gate (classifyOrderBook), so "no real
+  // book" is decided identically on both sides of a position. The book is per-TOKEN, not
+  // per-position — the cache lets two risk profiles on one market fetch it once per cycle.
+  // A placeholder/empty or unavailable book yields no real bids: the exit is modelled
+  // (fromBook=false) and the phantom-bid guard stays off a merely-illiquid haircut.
+  const bookRes: OrderBookFetch = shares > 0 ? await classifyOrderBook(token, poly, deps, bookCache) : { status: "empty" };
+  const book = bookRes.status === "ok" ? bookRes.book : null;
   if (book && book.bids.length) {
     const f = simulateSell(book.bids, shares);
     const bestBid = book.bids[0].priceCents;
@@ -420,6 +448,9 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
   const now = nowFn(deps)();
   const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
   const out: AutoEnterItem[] = [];
+  // Per-token order-book cache for the whole entry cycle: two profiles of one strategy
+  // filling the same market must not each hit the (uncached) CLOB endpoint.
+  const bookCache = new Map<string, OrderBookFetch>();
   for (const { sport, match: m } of activeMatches(db)) {
     // Don't DEPLOY capital on a lineup-sport match before its lineups are out —
     // pre-lineup we still analyze and PROPOSE possible bets (shown as
@@ -460,8 +491,14 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       // far (market impact). This is what stops a big stake from eating its own
       // edge on a thin market. Falls back to a parametric model, or (execution off)
       // the quote itself.
-      const ex = await executeEntry(b, mk, quote, proposed, poly, deps);
-      if (ex.skip) { R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, ex.note) }); continue; }
+      const ex = await executeEntry(b, mk, quote, proposed, poly, deps, bookCache);
+      // retry: a TRANSIENT reason not to fill (order book momentarily unavailable / no ask
+      // offers) — leave the proposal untouched so the next cycle re-attempts it. A plain
+      // skip is TERMINAL (phantom fill, edge gone, placeholder market) → mark not_filled.
+      if (ex.skip) {
+        if (!ex.retry) R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, ex.note) });
+        continue;
+      }
 
       R.updateBet(db, b.id, { status: "open", entry_price: ex.priceCents, current_price: ex.priceCents, stake: ex.stake, entered_minute: minuteLabel(m) });
       openKey.add(key);
@@ -533,7 +570,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
   const out: ExitItem[] = [];
   const touched = new Set<string>();
   // One order-book fetch per TOKEN per cycle — profiles sharing a market reuse it.
-  const bookCache = new Map<string, Awaited<ReturnType<typeof fetchOrderBook>>>();
+  const bookCache = new Map<string, OrderBookFetch>();
   for (const { sport, match: m } of activeMatches(db)) {
     // Price-driven exits (take-profit / stop / edge-gone) are LIVE management —
     // per ТЗ §3.3 mark-to-market and price triggers belong to the live phase. A

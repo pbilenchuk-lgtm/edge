@@ -152,32 +152,59 @@ export async function fetchMidpointCents(
   return round1(mid * 100);
 }
 
-/** Live order book for one CLOB token, prices in cents and levels sorted best-first
- *  (bids desc, asks asc). Returns null on any failure or an empty/dead book — the
- *  caller then falls back to the parametric slippage model. */
-export async function fetchOrderBook(
+/** Why a token's order book is (un)available. Lets callers tell a genuinely
+ *  uninitialized/placeholder market (fetch OK, no live book) apart from a transient
+ *  fetch failure (network/timeout/5xx) — so a network hiccup is never mistaken for a
+ *  permanently untradeable market, and vice-versa.
+ *    ok          — live levels present, the market is tradeable
+ *    empty        — the fetch succeeded but there is no/dead book → placeholder market
+ *    unavailable — the fetch itself failed → skip this cycle, retry next */
+export type OrderBookFetch =
+  | { status: "ok"; book: OrderBook }
+  | { status: "empty" }
+  | { status: "unavailable" };
+
+/** Live order book for one CLOB token, classified. Prices in cents and levels sorted
+ *  best-first (bids desc, asks asc). Never throws — a failed fetch resolves to
+ *  `{status:"unavailable"}` and an empty/dead book to `{status:"empty"}`. */
+export async function fetchOrderBookResult(
   tokenId: string,
   cfg: PolymarketConfig,
   deps: FetchDeps = {},
-): Promise<OrderBook | null> {
+): Promise<OrderBookFetch> {
   try {
     const doFetch = deps.fetchImpl ?? fetch;
     const url = `${cfg.clobBase}/book?token_id=${encodeURIComponent(tokenId)}`;
     const res = await withTimeout(cfg.timeoutMs, (signal) => doFetch(url, { signal }));
-    if (!res.ok) return null;
+    if (!res.ok) return { status: "unavailable" }; // transport-level failure → retry
     const json = (await res.json()) as { error?: string; bids?: { price: string; size: string }[]; asks?: { price: string; size: string }[] };
-    if (json.error) return null;
+    // A structured {error} from a 200 means the server has no book for this token — the
+    // fetch WORKED, the market simply isn't initialized. That's a placeholder, not a
+    // transient outage: classify it "empty" so the entry gate blocks rather than retries.
+    if (json.error) return { status: "empty" };
     const norm = (arr: { price: string; size: string }[] | undefined) =>
       (arr ?? [])
         .map((l) => ({ priceCents: round1(Number(l.price) * 100), size: Number(l.size) }))
         .filter((l) => isFinite(l.priceCents) && l.priceCents > 0 && l.priceCents < 100 && isFinite(l.size) && l.size > 0);
     const bids = norm(json.bids).sort((a, b) => b.priceCents - a.priceCents); // best (highest) first
     const asks = norm(json.asks).sort((a, b) => a.priceCents - b.priceCents); // best (lowest) first
-    if (!bids.length && !asks.length) return null;
-    return { bids, asks };
+    if (!bids.length && !asks.length) return { status: "empty" };
+    return { status: "ok", book: { bids, asks } };
   } catch {
-    return null;
+    return { status: "unavailable" }; // network/timeout → retry
   }
+}
+
+/** Live order book for one CLOB token, or null on any failure or an empty/dead book.
+ *  Thin wrapper over fetchOrderBookResult for callers that don't care WHY the book is
+ *  missing; callers that must distinguish placeholder-vs-outage use the result form. */
+export async function fetchOrderBook(
+  tokenId: string,
+  cfg: PolymarketConfig,
+  deps: FetchDeps = {},
+): Promise<OrderBook | null> {
+  const r = await fetchOrderBookResult(tokenId, cfg, deps);
+  return r.status === "ok" ? r.book : null;
 }
 
 /**

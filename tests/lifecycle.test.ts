@@ -238,6 +238,91 @@ test("autoEnter: rejects a fill that lands far from the evaluated price / at a r
   assert.ok(/entry_phantom_block/.test(R.getBet(db, "ph")!.rationale ?? ""), "reason records the phantom-fill rejection");
 });
 
+test("autoEnter: BLOCKS entry on a PLACEHOLDER market (empty book, fetch OK) — untradeable_market_block, terminal (not a retry)", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 6, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "e", league: "l", home_lineup: null, away_lineup: null, stats: null, updated_at: "t" });
+  // A placeholder ~50¢ market (the un-initialized Poisson artifact case) — a nominal
+  // liquidity number, but NO real order book.
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Draw — No", price: 50, ai_prob: 0.62, liquidity: "1000", external_ref: "TOKEN", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "pl-1", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Draw — No", status: "proposed", proposed_price: 50, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "план", entered_minute: null, result: null, payout: null, created_at: "t" });
+  // Empty book, but the fetch SUCCEEDS (200 ok) — a genuinely uninitialized market, not a
+  // network outage. Previously this filled parametrically ("модель по ликвидности").
+  const fetchImpl = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? { bids: [], asks: [] } : {}) })) as unknown as typeof fetch;
+  const filled = await autoEnter(db, { now: () => "t", polymarket: poly, fetchImpl });
+
+  assert.ok(!filled.some((f) => f.matchId === mid), "no fill on a placeholder market");
+  const b = R.getBet(db, "pl-1")!;
+  assert.equal(b.status, "not_filled", "placeholder market → terminal block, not opened on the parametric model");
+  assert.ok(/untradeable_market_block/.test(b.rationale ?? ""), "reason records the untradeable-market gate");
+  assert.ok(/стакан пуст/.test(b.rationale ?? ""), "reason distinguishes empty-book from unavailable");
+});
+
+test("autoEnter: order book UNAVAILABLE (fetch failed) HOLDS the proposal for a RETRY — stays proposed, not not_filled", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 6, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "e", league: "l", home_lineup: null, away_lineup: null, stats: null, updated_at: "t" });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Draw — No", price: 50, ai_prob: 0.62, liquidity: "1000", external_ref: "TOKEN", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "un-1", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Draw — No", status: "proposed", proposed_price: 50, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "план", entered_minute: null, result: null, payout: null, created_at: "t" });
+  // The book fetch FAILS (5xx / network) — a transient outage must NOT permanently block
+  // a legitimate market. The proposal is held (proposed) so the next cycle re-attempts it.
+  const fetchImpl = (async (url: any) => (String(url).includes("/book")
+    ? { ok: false, status: 503, json: async () => ({}) }
+    : { ok: true, status: 200, json: async () => ({}) })) as unknown as typeof fetch;
+  await autoEnter(db, { now: () => "t", polymarket: poly, fetchImpl });
+
+  assert.equal(R.getBet(db, "un-1")!.status, "proposed", "transient outage keeps the proposal for the next cycle (retry), not not_filled");
+});
+
+test("untradeable-market gate is SYMMETRIC: one placeholder market blocks ENTRY and models the EXIT (fromBook=false) — same hasRealOrderbook source", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 33, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "e", league: "l", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { shots: 1 }, away: { shots: 1 } }), updated_at: "t" });
+  // ONE market/token. Mark has crashed to 12¢ — a stop-out on any OPEN position here.
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 12, ai_prob: 0.5, liquidity: "1000", external_ref: "TOKEN", snapshot_at: "t", is_closing: false });
+  // (a) a fresh proposal on this market (aggressive) — the ENTRY side.
+  R.insertBet(db, { id: "sym-entry", match_id: mid, strategy_id: strat.id, risk_profile_id: "aggressive", market_label: "Over 1.5", status: "proposed", proposed_price: 12, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "план", entered_minute: null, result: null, payout: null, created_at: "t" });
+  // (b) an already-OPEN position on the SAME market (medium, different pair) — the EXIT side.
+  R.insertBet(db, { id: "sym-open", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Over 1.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 12, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+
+  // The SAME empty-but-fetch-OK book drives both sides.
+  const emptyBook = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? { bids: [], asks: [] } : {}) })) as unknown as typeof fetch;
+
+  // Entry side: the placeholder market is untradeable → blocked.
+  await autoEnter(db, { now: () => "t", polymarket: poly, fetchImpl: emptyBook });
+  assert.equal(R.getBet(db, "sym-entry")!.status, "not_filled", "entry blocked on the placeholder market");
+  assert.ok(/untradeable_market_block/.test(R.getBet(db, "sym-entry")!.rationale ?? ""), "entry blocked by the untradeable-market gate");
+
+  // Exit side, SAME empty book: the stop fills via the parametric model (fromBook=false),
+  // and is NOT held by exit_phantom_block — proving the exit classifies the book the same
+  // way the entry did (both read "no real order book" from the one classifier).
+  await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: emptyBook });
+  const closed = R.getBet(db, "sym-open")!;
+  assert.ok(closed.status.startsWith("settled_"), "open position on the placeholder market exits via the model — not phantom-held on a missing book");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "exit" && /модель по ликвидности/.test(l.text)), "exit priced by the parametric model — no real book, same as the entry side saw");
+});
+
 test("evaluateExits HOLDS a stop that would fill into a PHANTOM bid (exit_phantom_block), takes a stop with a real book", async () => {
   const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
   const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
