@@ -815,6 +815,19 @@ export async function strategistReassess(
         // Fill the (partial) close against the real bid book — exit slippage into P&L.
         const basis = (b.stake ?? 0) * Math.min(ex.fraction, 1);
         const sell = await sellVwapCents(mk, b.entry_price, basis, poly, deps, mk.price);
+        // Phantom-bid guard, SYMMETRIC with the deterministic exit path (evaluateExits):
+        // a strategist exit (thesis_stop / counter_scenario) must NOT dump into a degenerate
+        // bid (≤FLOOR¢) sitting ≥GAP¢ below the mark — that's a momentarily-broken book, not
+        // the real value. HOLD and let the position ride to real settlement / a real book next
+        // cycle, exactly as a mechanical stop would. Only on a REAL book (fromBook) and only
+        // for phantom-LOW bids: a genuine take-profit (high bid) or a modelled parametric price
+        // is unaffected. Log at most once per continuous hold period for this market.
+        if (sell.fromBook && sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP) {
+          const holdKey = `«${b.market_label}»`;
+          const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
+          if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отклонён по ${holdKey}: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${ex.reason}); держим до реального рынка/сеттла (exit_phantom_block)`, created_at: now });
+          continue;
+        }
         const { pnl, partial } = closeBetPortion(db, b, ex.fraction, sell.cents, minuteLabel(m), now);
         const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
         const trg = ex.trigger ? ` (${ex.trigger})` : ""; // which v3 live trigger fired (take_price / counter_scenario / …)

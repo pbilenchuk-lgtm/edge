@@ -624,6 +624,43 @@ test("strategistReassess closes a position the strategy prompt says to cut", asy
   assert.equal(b.payout, 72.73); // 100 * 40/55
 });
 
+test("strategistReassess HOLDS a strategist exit (thesis_stop) that would dump into a PHANTOM bid, executes it against a real book (exit_phantom_block, symmetric to evaluateExits)", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const mid = R.uid();
+  // Open position marked at 40¢. The strategist asks to cut it (thesis_stop). If the
+  // executable bid is a phantom (1¢ while the mark is 40¢), a real stop HOLDS — the
+  // strategist exit must do the same, not realize a fake near-total loss.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 60, score_home: 0, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 40, ai_prob: 0.5, liquidity: "2000", external_ref: "TOKEN", snapshot_at: "t", is_closing: false });
+  const bid = R.uid();
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Under 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 40, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+
+  // fetchImpl: `/book` → order book; anything else → the strategist's exit decision.
+  const exitDec = { picks: [], exits: [{ market: "Under 2.5", reason: "thesis_stop — гол сломал сценарий few-goals" }], note: "" };
+  const makeFetch = (book: any) => (async (url: any) => (String(url).includes("/book")
+    ? { ok: true, status: 200, json: async () => book }
+    : { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify(exitDec) }] }) })) as unknown as typeof fetch;
+
+  // Phantom bid (1¢ under a 40¢ mark) → the strategist exit is HELD, not executed.
+  const phantom = { asks: [{ price: "0.42", size: "500" }], bids: [{ price: "0.01", size: "5000" }] };
+  const r1 = await strategistReassess(db, { fetchImpl: makeFetch(phantom), polymarket: poly, env: { ANTHROPIC_API_KEY: "k" } });
+  assert.ok(!r1.exits.some((e) => e.matchId === mid), "strategist exit NOT taken into the phantom bid");
+  assert.equal(R.getBet(db, bid)!.status, "open", "position held — a strategist thesis_stop does not dump into a phantom, same as a mechanical stop");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "hold" && /exit_phantom_block/.test(l.text)), "the hold is logged with the phantom-guard reason");
+
+  // Real bid (38¢ under a 40¢ mark) → the very same strategist exit now EXECUTES.
+  const realBook = { asks: [{ price: "0.42", size: "500" }], bids: [{ price: "0.38", size: "5000" }] };
+  const r2 = await strategistReassess(db, { fetchImpl: makeFetch(realBook), polymarket: poly, env: { ANTHROPIC_API_KEY: "k" } });
+  assert.ok(r2.exits.some((e) => e.matchId === mid), "with a real book the strategist exit is taken");
+  assert.ok(R.getBet(db, bid)!.status.startsWith("settled_"), "position closed against the real bid — the guard holds only phantoms");
+});
+
 test("module 5: live reassess uses the LIVE prompt + battle sheet, sizes by risk_config, tags the profile", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
