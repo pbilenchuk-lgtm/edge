@@ -220,9 +220,10 @@ test("migratePrematchValueV3: brings prompts to v3 once, bumps version, idempote
 
   migratePrematchValueV3(db);
   const s = R.getStrategy(db, "prematch_value")!;
-  assert.ok(s.prompt.includes("v3.1 · 6-branch"), "prematch prompt updated to v3");
-  assert.ok((s.prompt_live ?? "").includes("v3.1 · 6-branch"), "live prompt updated to v3");
+  assert.ok(s.prompt.includes("v3.2 · 6-branch"), "prematch prompt updated to v3.2");
+  assert.ok((s.prompt_live ?? "").includes("v3.2 · 6-branch"), "live prompt updated to v3.2");
   assert.ok(s.prompt.includes("outcome_scenarios"), "v3 references the 6-branch tree");
+  assert.ok(s.prompt.includes("Edge НЕ может опираться на фактор, уже сидящий в базе"), "v3.2 carries the self-attributed-edge guard");
   assert.equal(s.version, v0 + 1, "version bumped once (prior archived)");
 
   migratePrematchValueV3(db); // marker present now → no-op

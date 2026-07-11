@@ -80,12 +80,13 @@ export function impliedProbs(markets: MarketQuote[]): Map<string, ImpliedInfo> {
  * (both need France's next goal) and carry double the intended risk on one event
  * while each passes the per-position cap individually.
  *
- * Conservative on purpose: only clusters markets that clearly pay off from the
- * SAME team's goals (team-total Over or a negative handicap → that team scores
- * more) and, separately, match-total Over (a further goal by either side).
- * Anything ambiguous returns null (its own singleton) — a false negative just
- * keeps today's behaviour; a false positive would wrongly suppress genuine
- * diversification, so we avoid it.
+ * Conservative on purpose: clusters markets that clearly pay off from the SAME
+ * team's goals (team-total Over or a negative handicap → that team scores more),
+ * match-total Over (a further goal by either side), and — symmetrically — every
+ * LOW-total bet (match/team Under, BTTS-No) into one `total:under` cluster, since
+ * they all lose on the same risk (a goal). Anything ambiguous returns null (its own
+ * singleton) — a false negative just keeps today's behaviour; a false positive would
+ * wrongly suppress genuine diversification, so we avoid it.
  */
 export function correlationKey(label: string, home: string, away: string): string | null {
   const n = norm(label);
@@ -93,12 +94,21 @@ export function correlationKey(label: string, home: string, away: string): strin
   const hasH = h.length > 1 && n.includes(h);
   const hasA = a.length > 1 && n.includes(a);
   const over = /\bover\b/.test(n);
+  const under = /\bunder\b/.test(n);
+  const bttsNo = (/\bboth teams to score\b/.test(n) || /\bbtts\b/.test(n)) && /\bno\b/.test(n);
   const negH = /[-−–]\s*\d/.test(n); // negative handicap → favourite's margin
   // Exactly one team named + (Over team-total OR negative handicap): that team
   // putting more goals in resolves it. Both such markets share the event.
   if (hasH !== hasA && (over || negH)) return `dom:${hasH ? "home" : "away"}`;
   // Match-total Over with no single-team qualifier: a further goal by either side.
   if (over && hasH === hasA) return "total:over";
+  // Symmetric LOW-total cluster (anti-pseudo-diversification): every "few goals" bet —
+  // a match Under, a team's Under, BTTS-No — bleeds on the SAME risk (a goal is scored),
+  // so two of them are a DOUBLED low-total position, not diversification. Unlike Over
+  // (which splits by WHICH team scores), a low total needs BOTH sides quiet, so all Unders
+  // co-move → one cluster. This caps two Under legs together — the Örgryte–Häcken pair
+  // ("BK Hacken Under 2.5" + "Under 3.5") was one low-total bet at double size, uncapped.
+  if (under || bttsNo) return "total:under";
   return null;
 }
 

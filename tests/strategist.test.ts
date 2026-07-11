@@ -133,6 +133,24 @@ test("correlationKey: same-team 'more goals' markets share a cluster", () => {
   assert.equal(correlationKey("France to win", home, away), null);
 });
 
+test("correlationKey: LOW-total bets share one cluster (Under-symmetry — Örgryte–Häcken pseudo-diversification)", () => {
+  const home = "Orgryte", away = "BK Hacken";
+  // The two legs that were a doubled low-total bet at DOUBLE size, previously uncapped:
+  // a team Under and a match Under both bleed on the same risk (a goal) → one cluster.
+  const teamUnder = correlationKey("BK Hacken Under 2.5", home, away);
+  const matchUnder = correlationKey("Under 3.5", home, away);
+  assert.equal(teamUnder, "total:under", "team Under joins the low-total cluster");
+  assert.equal(matchUnder, "total:under", "match Under joins the low-total cluster");
+  assert.equal(teamUnder, matchUnder, "the two Under legs share a correlation cluster (capped together)");
+  // BTTS-No is also a low-total bet → same cluster.
+  assert.equal(correlationKey("Both Teams to Score — No", home, away), "total:under");
+  // Symmetry preserved: Over stays its OWN (opposite) cluster, never folded into Under.
+  assert.equal(correlationKey("Over 2.5", home, away), "total:over");
+  assert.notEqual(correlationKey("Over 2.5", home, away), matchUnder);
+  // BTTS-Yes (a high-scoring bet) must NOT land in the low-total cluster.
+  assert.notEqual(correlationKey("Both Teams to Score — Yes", home, away), "total:under");
+});
+
 test("sizePrematch: correlated cluster is capped like a single position", () => {
   // medium max_position_pct = 5% of 1000 = $50. A cluster already holding $48
   // leaves only $2 of correlated room even though match/comp room is ample.
