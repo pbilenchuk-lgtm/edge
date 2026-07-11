@@ -65,6 +65,12 @@ export const EXIT_PHANTOM_GAP = (() => { const n = Number(process.env.EXIT_PHANT
 // fill is a phantom/stale book (BTTS-No evaluated at 74.5¢, filled at 1.2¢), not the
 // bet the strategist decided. Don't open it. Env-tunable.
 export const ENTRY_PHANTOM_DIVERGENCE = (() => { const n = Number(process.env.ENTRY_PHANTOM_DIVERGENCE); return Number.isFinite(n) && n > 0 ? n : 25; })();
+// Re-entry cooldown (ms): after a pair CLOSES a market at a LOSS, don't let the live
+// reassessment re-enter that same market for this long. Stops the falling-knife churn
+// — exit −$5, re-enter lower, exit −$8, repeat — on a noisy/thin book (the Mjallby-Yes
+// series). A WINNING close (take-profit) does not cool down: re-buying a dip after
+// banking profit is legitimate. Env-tunable.
+export const REENTRY_COOLDOWN_MS = (() => { const n = Number(process.env.REENTRY_COOLDOWN_MS); return Number.isFinite(n) && n >= 0 ? n : 600_000; })();
 
 /** A live match that only JUST kicked off — still ~pre-match. True iff the score is
  *  0:0 and kickoff was within the grace window. Uses wall-clock-since-kickoff (from
@@ -806,7 +812,9 @@ export async function strategistReassess(
       if (pct > 0 && dec.picks.length) {
         const budget = stratBudget(c.budget, pct);
         const cfg = getProfileConfig(db, profile);
-        const liveHeld = R.betsForMatch(db, m.id, sid).filter((b) => (b.status === "open" || b.status === "proposed") && (b.risk_profile_id ?? "medium") === profile);
+        const pairBets = R.betsForMatch(db, m.id, sid).filter((b) => (b.risk_profile_id ?? "medium") === profile);
+        const liveHeld = pairBets.filter((b) => b.status === "open" || b.status === "proposed");
+        const myPairSettled = pairBets.filter((b) => b.status === "settled_lost"); // for the re-entry cooldown
         const held = new Set(liveHeld.map((b) => norm(b.market_label)));
         // §9.3 cap is per-COMPETITION and per-pair (open + proposed − realized).
         let exposure = strategyCompExposure(db, comp, sid, profile) - strategyCompRealized(db, comp, sid, profile);
@@ -826,6 +834,16 @@ export async function strategistReassess(
           if (ourProb == null) { unfilled.push(`«${mk.label}» — нет оценки`); continue; }
           if (pick.prob != null) R.setMarketAiProb(db, mk.id, pick.prob);
           if (held.has(norm(mk.label))) continue;                       // already in this market
+          // Re-entry cooldown: this pair CLOSED this market at a LOSS within the window
+          // → don't chase it lower on a noisy book (see REENTRY_COOLDOWN_MS). Only an
+          // EARLY/PARTIAL losing close cools down (a real end-of-match settlement can't
+          // occur mid-live); a winning close never does.
+          const cutoff = nowMs - REENTRY_COOLDOWN_MS;
+          const recentLoss = myPairSettled.some((x) => x.status === "settled_lost"
+            && (x.settled_by === "early" || x.settled_by === "partial")
+            && norm(x.market_label) === norm(mk.label)
+            && x.settled_at != null && Date.parse(x.settled_at) >= cutoff);
+          if (recentLoss) { unfilled.push(`«${mk.label}» — недавний убыточный выход, кулдаун на перезаход (reentry_cooldown)`); continue; }
           const implied = impliedMap.get(mk.label)?.implied ?? mk.price / 100;
           const cKey = correlationKey(mk.label, m.home, m.away);
           const r = sizePrematch({ ourProb, priceCents: mk.price, implied, calibration, liquidity: liqNum(mk.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg, allowLargeEdge: true });

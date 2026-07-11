@@ -616,6 +616,32 @@ test("strategistReassess opens a fresh entry on a live trigger (no prior positio
   assert.ok(!res2.entries.some((e) => e.matchId === mid), "no re-entry without a trigger or position");
 });
 
+test("strategistReassess: re-entry cooldown blocks re-buying a market this pair just closed at a LOSS", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.clearShares(db, comp.id); // isolate to ONE (strategy, profile) pair
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, risk_profile_id: "medium", pct: 50 });
+  const now = "2026-07-11T14:00:00Z";
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Mjallby", away: "AIK", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Mjallby — Yes", price: 26, ai_prob: 0.55, liquidity: "3000", external_ref: "t", snapshot_at: "t", is_closing: false });
+  // this pair closed «Mjallby — Yes» at a LOSS 5 min ago (early cash-out).
+  R.insertBet(db, { id: "loss", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Mjallby — Yes", status: "settled_lost", proposed_price: 34, entry_price: 34, current_price: 20, closing_price: 20, ai_prob: 0.5, stake: 30, rationale: "r", entered_minute: "предматч", result: "lost", payout: 17, settled_by: "early", settled_at: "2026-07-11T13:55:00Z", created_at: "t" });
+  const mock = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [{ label: "Mjallby — Yes", conviction: "высокая", reason: "докупаю падение", prob: 0.55 }], exits: [], note: "" }) }] }) }) as any);
+
+  // within the 10-min cooldown → the re-entry is blocked (no falling-knife chase).
+  const res = await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => now }, { newEventMatchIds: new Set([mid]), max: 50 });
+  assert.ok(!res.entries.some((e) => e.market === "Mjallby — Yes"), "cooldown blocks re-entry into the just-lost market");
+  assert.equal(R.betsForMatch(db, mid, strat.id).filter((b) => b.status === "proposed").length, 0, "no fresh proposal within the cooldown");
+
+  // move the losing close OUTSIDE the window → the pair may re-enter (price had time to confirm).
+  R.updateBet(db, "loss", { settled_at: "2026-07-11T13:40:00Z" });
+  const res2 = await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => now }, { newEventMatchIds: new Set([mid]), max: 50 });
+  assert.ok(res2.entries.some((e) => e.market === "Mjallby — Yes"), "past the cooldown, re-entry is allowed");
+});
+
 test("strategistReassess sizes off the strategist's LIVE prob, refreshing the stale market ai_prob", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
