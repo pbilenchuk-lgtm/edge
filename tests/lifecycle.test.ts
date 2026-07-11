@@ -831,7 +831,7 @@ test("runLiveCycle reacts to a live goal, and quiet re-runs don't re-fire the st
   assert.equal(r2.triggers, 0, "known event doesn't re-trigger");
 });
 
-test("runLiveCycle reassesses on the 5-min heartbeat with no on-pitch event", async () => {
+test("runLiveCycle reassesses on the periodic heartbeat with no on-pitch event", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0 && c.external_league === "fifa.world")!;
@@ -860,6 +860,76 @@ test("runLiveCycle reassesses on the 5-min heartbeat with no on-pitch event", as
   assert.ok(notes.length > before, "periodic heartbeat still wrote a reassessment note");
   assert.equal(notes[notes.length - 1].trigger, "time", "labelled as a periodic (time) reassessment");
   assert.match(notes[notes.length - 1].body, /Держу/, "narrative note carries the strategist's read");
+});
+
+test("runLiveCycle: an on-pitch event reassesses IMMEDIATELY, independent of the periodic heartbeat (events don't wait)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0 && c.external_league === "fifa.world")!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  for (const c of R.listCompetitions(db)) for (const mm of R.listMatches(db, c.id)) R.updateMatch(db, mm.id, { state: "finished" }); // isolate `mid`
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Colombia", away: "Ghana", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 40, ai_prob: 0.5, liquidity: null, external_ref: null, snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, market_label: "Under 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 40, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+  const now = "2026-07-11T20:00:00Z";
+  const mock = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [], note: "реагирую" }) }] }) }) as any);
+  const provider = (events: any[]): SportsProvider => ({
+    name: "mock",
+    async scoreboard(_s, league) { return league === "fifa.world" ? [{ externalRef: "E1", home: "Colombia", away: "Ghana", state: "live", minute: 30, scoreHome: 1, scoreAway: 0, final: false }] : []; },
+    async matchDetail() { return { lineupOut: true, lineups: { home: null, away: null }, events }; },
+  });
+
+  // Pass 1 (no events): the periodic heartbeat writes the FIRST reassessment (never reassessed before).
+  const r1 = await runLiveCycle(db, provider([]), { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => now });
+  assert.equal(r1.triggers, 0, "no on-pitch event → periodic-only");
+  assert.equal(R.reassessmentsForMatch(db, mid).at(-1)!.trigger, "time", "pass 1 is a periodic (time) reassessment");
+
+  // Pass 2 at the SAME instant → the periodic heartbeat is NOT due (just reassessed 0 min ago),
+  // but a fresh GOAL arrives: it must reassess RIGHT NOW, not wait for the 10-min interval.
+  const r2 = await runLiveCycle(db, provider([{ key: "g1", minute: 14, type: "goal", team: "Colombia", text: "Goal!" }]), { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => now });
+  assert.equal(r2.triggers, 1, "the goal triggered a reassessment despite the heartbeat not being due");
+  assert.equal(R.reassessmentsForMatch(db, mid).at(-1)!.trigger, "goal", "event-driven — labelled 'goal', not 'time'");
+});
+
+test("strategistReassess THROTTLES a repeat partial take-profit (partial_tp_throttle) but NEVER a defensive exit or a full close", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  for (const c of R.listCompetitions(db)) for (const mm of R.listMatches(db, c.id)) R.updateMatch(db, mm.id, { state: "finished" }); // isolate cases
+  const now = "2026-07-11T20:10:00Z";
+  const setup = (mid: string, openId: string) => {
+    R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 60, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+    R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: null, snapshot_at: "t", is_closing: false });
+    R.insertBet(db, { id: openId, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Under 2.5", status: "open", proposed_price: 40, entry_price: 40, current_price: 55, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+    // a partial fixation 2 min ago (< 8-min throttle window)
+    R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Under 2.5", status: "settled_won", proposed_price: 40, entry_price: 40, current_price: 52, closing_price: 52, ai_prob: 0.6, stake: 30, rationale: "частичная фиксация 30%", entered_minute: "10'", result: "won", payout: 39, settled_by: "partial", settled_at: "2026-07-11T20:08:00Z", created_at: "2026-07-11T20:08:00Z" });
+  };
+  const runWith = (exit: any) => strategistReassess(db, { fetchImpl: (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [exit] }) }] }) })) as any, env: { ANTHROPIC_API_KEY: "k" }, now: () => now });
+
+  // (1) a repeat partial TAKE-PROFIT, 2 min after the last partial → THROTTLED (held, no nibble).
+  const m1 = R.uid(); setup(m1, "tp-open");
+  const r1 = await runWith({ market: "Under 2.5", fraction: 0.5, reason: "take_price: цена достигла оценки, edge исчерпан", trigger: "take_price" });
+  assert.ok(!r1.exits.some((e) => e.matchId === m1), "repeat partial take-profit is throttled");
+  assert.equal(R.getBet(db, "tp-open")!.stake, 100, "position untouched — no further nibble");
+  assert.ok(R.tradeLogForMatch(db, m1).some((l) => l.type === "hold" && /partial_tp_throttle/.test(l.text)), "throttle logged");
+  R.updateMatch(db, m1, { state: "finished" });
+
+  // (2) a DEFENSIVE exit (thesis_stop) with the SAME recent partial → NOT throttled, executes.
+  const m2 = R.uid(); setup(m2, "def-open");
+  const r2 = await runWith({ market: "Under 2.5", fraction: 0.5, reason: "thesis_stop — гол сломал сценарий", trigger: "thesis_stop" });
+  assert.ok(r2.exits.some((e) => e.matchId === m2), "a defensive exit is never throttled");
+  assert.ok(R.getBet(db, "def-open")!.stake! < 100, "position reduced by the defensive exit");
+  R.updateMatch(db, m2, { state: "finished" });
+
+  // (3) a FULL take-profit close (fraction 1) → not a partial → not throttled.
+  const m3 = R.uid(); setup(m3, "full-open");
+  const r3 = await runWith({ market: "Under 2.5", fraction: 1, reason: "take_price — фиксирую полностью", trigger: "take_price" });
+  assert.ok(r3.exits.some((e) => e.matchId === m3), "a full close is never throttled");
+  assert.ok(R.getBet(db, "full-open")!.status.startsWith("settled"), "position fully closed");
 });
 
 test("captureOpenOdds locks the kickoff price (first write wins)", () => {

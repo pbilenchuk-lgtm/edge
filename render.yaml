@@ -46,6 +46,18 @@ services:
         value: "30"      # odds/exits/analyze/enter cadence (pre-match)
       - key: DISCOVER_INTERVAL_HR
         value: "24"      # Polymarket parse cadence (matches surface ~7 days out)
+      # LLM-cost + churn levers (live). The periodic reassessment HEARTBEAT is the slow,
+      # cheap safety net — on-pitch events (goal/red/penalty) and price moves fire their
+      # OWN reassessment immediately and DON'T wait for it. Data/stats stay dense
+      # (STATS_INTERVAL_MIN) while the expensive LLM heartbeat runs slower. A repeat
+      # partial take-profit on one position is throttled to PARTIAL_TP_THROTTLE_MIN (a
+      # stop / thesis_stop / counter_scenario defensive exit is NEVER throttled).
+      - key: REASSESS_INTERVAL_MIN
+        value: "10"      # periodic LLM reassessment heartbeat (min); events fire immediately regardless
+      - key: STATS_INTERVAL_MIN
+        value: "5"       # match-stats snapshot cadence (data layer — kept dense)
+      - key: PARTIAL_TP_THROTTLE_MIN
+        value: "8"       # min minutes between partial TAKE-PROFIT fixations on one position (0 disables)
       # Live Claude analysis needs a key. sync:false means Render PROMPTS you for
       # the value in the dashboard on first deploy and KEEPS it across redeploys.
       # Recommended over entering the key in the UI: the env var is read before

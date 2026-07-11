@@ -67,6 +67,12 @@ export const EXIT_PHANTOM_GAP = (() => { const n = Number(process.env.EXIT_PHANT
 // HOLD instead: let the position ride to a deeper book / real settlement. Only on a REAL
 // book and only on a LARGE full-stake slip (normal exits slip 0–1¢). Env-tunable.
 export const EXIT_SLIPPAGE_BLOCK = (() => { const n = Number(process.env.EXIT_SLIPPAGE_BLOCK); return Number.isFinite(n) && n > 0 ? n : 15; })();
+// A partial TAKE-PROFIT fixation must not repeat on the same position more often than
+// this many minutes. The periodic reassessment heartbeat, on a slowly-drifting price,
+// otherwise nibbles a position to death — ten partial fixations in 20 min (Norway–England
+// BTTS-No, 38¢→55¢). ONLY throttles take-profit: a DEFENSIVE exit (stop / thesis_stop /
+// counter_scenario) and a FULL close are NEVER delayed. 0 disables. Env-tunable.
+export const PARTIAL_TP_THROTTLE_MIN = (() => { const n = Number(process.env.PARTIAL_TP_THROTTLE_MIN); return Number.isFinite(n) && n >= 0 ? n : 8; })();
 // An entry's edge was sized against the price the strategist EVALUATED. If the book
 // has since moved so the executable fill lands at a rail (≤2¢/≥98¢, effectively
 // resolved) or this far from the evaluated price, the market we sized is gone — the
@@ -836,6 +842,26 @@ export async function strategistReassess(
         // second would size off the already-shrunk stake → over-fixation.
         if (exitedIds.has(b.id)) continue;
         exitedIds.add(b.id);
+        // Take-profit CHURN throttle: the periodic heartbeat, on a drifting price, provokes a
+        // partial fixation every cycle (ten in 20 min). Cap it — one partial TAKE-PROFIT per
+        // position per PARTIAL_TP_THROTTLE_MIN. A DEFENSIVE exit (stop / thesis_stop /
+        // counter_scenario) and a FULL close (fraction≥1) are NEVER throttled; classification
+        // fails toward EXECUTING, so a defensive exit is never delayed by a misread.
+        const exBlob = `${ex.trigger ?? ""} ${ex.reason ?? ""}`.toLowerCase();
+        const defensiveExit = /thesis_stop|counter_scenario|\bstop\b|стоп|слома|сломан|красн|удал|травм/.test(exBlob);
+        const takeProfitExit = /take_price|take_profit|тейк|фикс|прибыл|edge (исчерп|закры)|цена (дош|дости)|на пике/.test(exBlob);
+        if (PARTIAL_TP_THROTTLE_MIN > 0 && ex.fraction < 1 && takeProfitExit && !defensiveExit) {
+          const prof = b.risk_profile_id ?? "medium";
+          const lastPartialMs = R.betsForMatch(db, m.id, sid)
+            .filter((x) => x.settled_by === "partial" && (x.risk_profile_id ?? "medium") === prof && norm(x.market_label) === norm(b.market_label) && x.settled_at)
+            .reduce((mx, x) => Math.max(mx, Date.parse(x.settled_at as string)), 0);
+          if (lastPartialMs && nowMs - lastPartialMs < PARTIAL_TP_THROTTLE_MIN * 60_000) {
+            const holdKey = `«${b.market_label}» тейк`;
+            const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
+            if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `частичная фиксация ${holdKey} отложена — последняя ${Math.round((nowMs - lastPartialMs) / 60_000)}м назад < ${PARTIAL_TP_THROTTLE_MIN}м (partial_tp_throttle); держим ногу`, created_at: now });
+            continue;
+          }
+        }
         // Fill the (partial) close against the real bid book — exit slippage into P&L.
         const basis = (b.stake ?? 0) * Math.min(ex.fraction, 1);
         const sell = await sellVwapCents(mk, b.entry_price, basis, poly, deps, mk.price);
@@ -1062,10 +1088,13 @@ export async function runAutoCycle(
 // so it fires an immediate reassessment like a goal / red card.
 const LIVE_TRIGGER_TYPES = new Set(["goal", "red_card", "penalty"]);
 
-// The strategist reassesses at LEAST this often on any live match with open risk,
-// regardless of on-pitch events — so positions are re-evaluated (full/partial
-// exit) and fresh analytics land on a steady heartbeat, not only on goals.
-export const REASSESS_INTERVAL_MIN = 5;
+// The periodic LLM reassessment HEARTBEAT: the slowest, cheapest safety net. On-pitch
+// events (goal / red / penalty) and price_move triggers fire their OWN reassessment
+// immediately and DON'T wait for this interval (see the reassess-trigger union in
+// runLiveCycle) — this is only the "nothing happened, re-check for creep" cadence. It's
+// the main LLM-cost + micro-churn lever, so it's deliberately slower than the data/stats
+// cadence (a quiet 0:0 shouldn't burn a reassessment every few minutes). Env-tunable.
+export const REASSESS_INTERVAL_MIN = (() => { const n = Number(process.env.REASSESS_INTERVAL_MIN); return Number.isFinite(n) && n >= 1 ? n : 10; })();
 // Safety ceiling on (strategy, profile) pairs reassessed for ONE match per run —
 // high enough to cover every real pair (≈ strategies × profiles) so none is
 // starved, low enough to bound a pathological config.
@@ -1076,9 +1105,10 @@ const MAX_PAIRS_PER_MATCH = 24;
 // short retention the market snapshots use — keep them for years. Env-overridable.
 export const SNAPSHOT_RETENTION_DAYS = Math.max(1, Number(process.env.SNAPSHOT_RETENTION_DAYS ?? 1095));
 
-// Match-stats snapshots land on the SAME cadence as the periodic reassessment
-// (user: «статистику каждые 5 минут, так же как и переоценку»).
-export const STATS_INTERVAL_MIN = REASSESS_INTERVAL_MIN;
+// Match-stats snapshots are DATA (layer 1) — decoupled from the LLM reassessment
+// heartbeat so the possession/shots feed stays dense (raw material for lag/CLV research)
+// even as the expensive reassessment cadence is dialled slower. Default 5 min. Env-tunable.
+export const STATS_INTERVAL_MIN = (() => { const n = Number(process.env.STATS_INTERVAL_MIN); return Number.isFinite(n) && n >= 1 ? n : 5; })();
 
 /** Format the stored ESPN team-stats JSON into one compact «home–away» line, e.g.
  *  "владение 58%–42% · удары 7–4 · в створ 3–1". Returns null if there's nothing. */
