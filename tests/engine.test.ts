@@ -249,6 +249,22 @@ test("dedupeMatches drops a market-less provider clone but keeps the tradeable t
   assert.ok(R.getBet(db, "b1"), "bet preserved");
 });
 
+test("dedupeMatches merges the Tromsø/Tromso split — ø doesn't NFD-decompose, so it needs letter-folding", async () => {
+  const { dedupeMatches } = await import("../src/lib/engine.js");
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const mkMatch = (id: string, home: string, away: string) => R.insertMatch(db, { id, competition_id: comp.id, home, away, state: "live", lineup_out: true, kickoff_at: null, minute: 40, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+  // Polymarket row (quotes) vs the ESPN clone with the ø spelling + a suffix — SAME fixture.
+  mkMatch("poly", "Tromsø IL", "Vålerenga Fotball");
+  mkMatch("clone", "Tromso", "Valerenga");
+  R.insertMarket(db, { id: R.uid(), match_id: "poly", label: "Over 1.5", price: 78, ai_prob: 0.6, liquidity: "4800", external_ref: "tok", snapshot_at: "t", is_closing: false });
+
+  assert.equal(dedupeMatches(db), 1, "the quote-less ø-clone is merged away");
+  assert.ok(R.getMatch(db, "poly"), "tradeable Polymarket twin kept");
+  assert.equal(R.getMatch(db, "clone"), null, "ESPN ø-clone gone (no more no-quotes duplicate)");
+});
+
 test("enrichFromEspn reconciles a short-named esports match (e.g. 'T1') the provider reports finished", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

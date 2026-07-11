@@ -20,6 +20,7 @@ import { settleBet, resolveFootballMarket } from "./settlement.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig } from "./polymarket.js";
 import { liquidationCents } from "./execution.js";
+import { isIso } from "./time.js";
 import type { SportsProvider } from "./sports.js";
 
 export interface EngineConfig {
@@ -425,7 +426,11 @@ export function upsertImportedMatch(
   }
   const match: Match = {
     id: R.uid(), competition_id: competitionId, home: status.home, away: status.away,
-    state: status.state, lineup_out: status.state !== "upcoming", kickoff_at: status.detail ?? null,
+    // kickoff_at is an ISO timestamp OR null — never a raw provider label. ESPN's
+    // status.detail for an upcoming game is a human string ("Sat, July 11th at 12:00
+    // PM EDT"); storing it verbatim both DISPLAYED the wrong timezone and broke every
+    // ISO-based gate (hoursUntil/justKickedOff/advanceClocks read it as "no kickoff").
+    state: status.state, lineup_out: status.state !== "upcoming", kickoff_at: isIso(status.detail) ? status.detail : null,
     minute: status.minute, score_home: status.scoreHome, score_away: status.scoreAway,
     final_score: status.state === "finished" ? `${status.scoreHome ?? 0}:${status.scoreAway ?? 0}` : null,
     kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: status.externalRef,
@@ -772,12 +777,22 @@ export async function importPolymarketMatches(
 // Generic club suffixes carry no identity — "Manchester United" and "Newcastle
 // United" must NOT match on "united". Matching needs a distinctive token.
 const TEAM_STOPWORDS = new Set(["fc", "afc", "sc", "cf", "ac", "as", "cd", "sv", "fk", "if", "bk", "club", "united", "city", "town", "county", "calcio", "sporting", "real", "athletic", "atletico"]);
+// Fold the special letters NFD does NOT decompose to ASCII — ø/æ/ß/… are single
+// code points, not base+combining, so `normalize("NFD")` leaves them intact. Without
+// this, "Tromsø" (Polymarket) and "Tromso" (ESPN) tokenized to different tokens and
+// nameMatch failed → the same fixture imported twice (an ESPN-only twin with no
+// quotes and a raw non-ISO kickoff string). Fold BEFORE NFD so the two paths agree.
+function foldLetters(s: string): string {
+  return s
+    .replace(/ø/g, "o").replace(/æ/g, "ae").replace(/œ/g, "oe").replace(/ß/g, "ss")
+    .replace(/đ/g, "d").replace(/ð/g, "d").replace(/ł/g, "l").replace(/þ/g, "th").replace(/ħ/g, "h").replace(/ı/g, "i");
+}
 function teamTokens(name: string): Set<string> {
   // Keep tokens ≥3 chars, OR short ones that carry a digit — esports orgs are
   // routinely 2-char names ("T1", "G2", "C9"). Dropping those left such a match
   // with an EMPTY token set, so nameMatch always failed and the fixture could
   // never reconcile with the provider (it hung "live" forever on the timer).
-  return new Set(name.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 3 || /\d/.test(w)));
+  return new Set(foldLetters(name.toLowerCase()).normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 3 || /\d/.test(w)));
 }
 /** Do two team names refer to the same club/nation? Requires every token of the
  *  shorter name to appear in the longer (so "West Ham" ⊂ "West Ham United" ok,
