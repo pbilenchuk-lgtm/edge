@@ -267,11 +267,16 @@ export function hasLiveData(db: Database, m: Match): boolean {
  *  or a provider minute past 0. Non-lineup sports write match_live only from the live
  *  board, so the row itself is the signal there. */
 export function liveDelivering(db: Database, m: Match, sport: string): boolean {
+  // Real in-match event (goal/card/…) — the strongest, unforgeable proof.
   if (R.eventsForMatch(db, m.id).some((e) => e.type !== "stats" && e.type !== "other")) return true;
-  const live = R.getMatchLive(db, m.id);
-  if (!R.LINEUP_SPORTS.has(sport)) return !!live;
-  if (live?.stats) return true;
-  return m.minute != null && m.minute > 0;
+  // Non-lineup sports write match_live only from the live board, so the row is the signal.
+  if (!R.LINEUP_SPORTS.has(sport)) return !!R.getMatchLive(db, m.id);
+  // Football: the ONLY reliable "provider is delivering in-play" signal is a real
+  // ADVANCING minute. NOT match_live.stats — ESPN returns a zeros stats object even
+  // for a fixture it still shows as "pre" (Orlando–Kansas sat at 0' for 28min with a
+  // stats row), which false-positived this gate. A real live match always carries a
+  // provider minute > 0; a frozen/pre one does not.
+  return m.state === "live" && m.minute != null && m.minute > 0;
 }
 
 interface EntryExec { skip: boolean; priceCents: number; stake: number; note?: string }

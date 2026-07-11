@@ -35,12 +35,12 @@ function liveDataStatus(db: Database, matchId: string): { ok: boolean; via: stri
   const realEvents = R.eventsForMatch(db, matchId).filter((e) => e.type !== "stats" && e.type !== "other");
   const football = R.listCompetitions(db).some((c) => c.id === m?.competition_id && c.sport_id === "football");
   if (m?.state === "live") {
-    // Live: require real delivery (event / live stats / provider minute past 0).
+    // Live: require real delivery — an event, or a real ADVANCING minute. NOT
+    // match_live.stats (ESPN returns a zeros stats object even for a "pre" fixture).
     if (realEvents.length) return { ok: true, via: `${realEvents.length} реальных событий` };
     if (!football && live) return { ok: true, via: "match_live (не-футбол: live-борд)" };
-    if (live?.stats) return { ok: true, via: "match_live со статистикой (провайдер отдаёт live)" };
     if (m.minute != null && m.minute > 0) return { ok: true, via: `провайдерская минута ${m.minute}'` };
-    return { ok: false, via: `LIVE по таймеру, но провайдер live-состояние НЕ отдаёт (${live ? "есть только составы, минута 0', без статы/событий" : "нет match_live"}) → провайдер показывает матч как «pre»/лагает; autoEnter НЕ входит (иначе слепой капитал)` };
+    return { ok: false, via: `LIVE по таймеру, но провайдер live НЕ отдаёт (минута 0', нет событий${live?.stats ? "; статы есть, но это нули pre-матча" : ""}) → провайдер показывает «pre»/лагает; autoEnter НЕ входит (иначе слепой капитал)` };
   }
   // Pre-kickoff: the fixture being confirmed (match_live / lineups) is enough — a
   // fill here is a pre-match entry, no live feed needed.
