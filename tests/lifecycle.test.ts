@@ -675,6 +675,29 @@ test("live-unanalysed match: back-fill analyses it (feeds live reassess) but SKI
   assert.ok(!R.artifactsForMatch(db, "m-lineup").some((a) => a.kind === "battle_sheet"), "NO battle_sheet — pre-match proposals don't fire on a live match");
 });
 
+test("live match that JUST kicked off (0:0, within grace): pre-match strategist STILL gets its one shot; deep-live still skips", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM assessments; DELETE FROM analysis_artifacts;");
+  const nowIso = "2026-07-11T00:02:00.000Z";
+  const deps = { now: () => nowIso, fetchImpl: mockLLM({ match_type: "group", match_type_reason: "ничья есть", core: { xg_home: 1.5, xg_away: 1.1, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 }, overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 8, notes: "" }, unknowns: [] }), env: { ANTHROPIC_API_KEY: "k" } };
+
+  // FIRST analysis lands 2 min after kickoff (scheduler gap spanned the whistle),
+  // score still 0:0 → justKickedOff → the pre-match strategist gets its shot.
+  R.updateMatch(db, "m-lineup", { state: "live", minute: 2, score_home: 0, score_away: 0, kickoff_at: "2026-07-11T00:00:00.000Z" });
+  const ran = await autoAnalyze(db, deps, { liveOnly: true });
+  assert.ok(ran.find((a) => a.matchId === "m-lineup")?.ok, "just-kicked-off live match analysed");
+  assert.ok(R.artifactsForMatch(db, "m-lineup").some((a) => a.kind === "battle_sheet"), "battle_sheet produced — pre-match strategist ran despite live (just kicked off)");
+
+  // Contrast: a live match 30 min past kickoff is genuinely into the game — the
+  // pre-match window is closed, the strategist is skipped (live reassess owns it).
+  db.exec("DELETE FROM assessments; DELETE FROM analysis_artifacts;");
+  R.updateMatch(db, "m-lineup", { state: "live", minute: 30, score_home: 0, score_away: 0, kickoff_at: "2026-07-10T23:32:00.000Z" });
+  await autoAnalyze(db, deps, { liveOnly: true });
+  assert.ok(R.artifactsForMatch(db, "m-lineup").some((a) => a.kind === "distribution"), "distribution still produced (live reassess not blind)");
+  assert.ok(!R.artifactsForMatch(db, "m-lineup").some((a) => a.kind === "battle_sheet"), "NO battle_sheet — 30' in, past the grace, pre-match strategist skipped");
+});
+
 test("autoRunStrategists re-runs the engine for a NEW roster pair, without re-analysis, self-limiting", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

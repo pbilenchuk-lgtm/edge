@@ -37,6 +37,28 @@ import type { Confidence, ReassessTrigger } from "./types.js";
 // (post-lineup) reassessment.
 export const ANALYZE_PRE_HOURS = 12;
 export const LINEUP_HOURS = 1;
+// When a match's FIRST analysis lands just after kickoff (a scheduler gap spanned
+// the whistle), the pre-match strategist is normally skipped in live. But within
+// this grace of kickoff — score still 0:0, prices essentially unmoved — the
+// pre-match theses are still valid, so the strategist gets its one shot rather
+// than forfeiting the whole match (Pre-match Value only defends existing positions
+// in live; Overreaction needs an armed trigger; live-xG needs an xG stream — so a
+// forfeited pre-match pass leaves the match completely un-traded). Env-tunable.
+export const EARLY_LIVE_STRATEGIST_GRACE_MIN = (() => {
+  const n = Number(process.env.EARLY_LIVE_STRATEGIST_GRACE_MIN);
+  return Number.isFinite(n) && n >= 0 ? n : 10;
+})();
+/** A live match that only JUST kicked off — still ~pre-match. True iff the score is
+ *  0:0 and kickoff was within the grace window. Uses wall-clock-since-kickoff (from
+ *  the reliable kickoff_at), NOT the ESPN clock minute, which can freeze at 0 on a
+ *  stuck fixture and would wrongly qualify a match that's really 30' in. */
+function justKickedOff(m: Match, nowMs: number): boolean {
+  if ((m.score_home ?? 0) !== 0 || (m.score_away ?? 0) !== 0) return false;
+  const h = hoursUntil(m.kickoff_at, nowMs);       // null if kickoff unknown → not eligible (conservative)
+  if (h == null) return false;
+  const minsSinceKickoff = -h * 60;                // kickoff in the past → positive
+  return minsSinceKickoff >= 0 && minsSinceKickoff <= EARLY_LIVE_STRATEGIST_GRACE_MIN;
+}
 // Hours past kickoff after which a clock-only match (ESPN never finished it) is
 // auto-finished — generous enough to cover a long match + stoppage/extra time.
 export const FINISH_HOURS = 4;
@@ -184,9 +206,13 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
     if (jobActive(R.getAnalysisJob(db, m.id), Date.now())) continue; // a run is in flight
     // A LIVE match reaching analysis here was NEVER analysed pre-kickoff (e.g. a
     // scheduler gap spanned kickoff). Produce the analysis so the live reassessment
-    // isn't blind, but SKIP the pre-match strategist pass — live entries belong to
+    // isn't blind, and SKIP the pre-match strategist pass — live entries belong to
     // the live-window reassessment (its own prompt), not a stale pre-match proposal.
-    const r = await analyzeMatch(db, m.id, deps, { skipStrategists: m.state === "live" });
+    // EXCEPTION: if the match only just kicked off (justKickedOff — 0:0, within the
+    // grace of the whistle, prices still pre-match), give the pre-match strategist
+    // its one shot; forfeiting it would leave the match wholly un-traded.
+    const skipStrat = m.state === "live" && !justKickedOff(m, nowMs);
+    const r = await analyzeMatch(db, m.id, deps, { skipStrategists: skipStrat });
     out.push({ matchId: m.id, match: `${m.home}–${m.away}`, stage, ok: r.ok, bets: r.betsCreated ?? 0 });
   }
   return out;
