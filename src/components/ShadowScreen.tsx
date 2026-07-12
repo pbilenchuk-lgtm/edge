@@ -89,11 +89,24 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
   const { pool, analytics, config, projection } = data;
   const [filter, setFilter] = useState<"all" | "blocked" | "contention">("all");
   const [cat, setCat] = useState<string>("");
+  const [grouped, setGrouped] = useState(false);
 
   const events = useMemo(() => data.events.filter((e) =>
     (filter === "all" || (filter === "blocked" ? e.verdict !== "allowed" : e.contention)) && (!cat || e.category === cat)
   ), [data.events, filter, cat]);
   const categories = useMemo(() => Array.from(new Set(data.events.map((e) => e.category))), [data.events]);
+  const groups = useMemo(() => {
+    const m = new Map<string, { match: string; count: number; req: number; reserved: number; allowed: number; blocked: number; trimmed: number; projBlocked: number; isLive: boolean }>();
+    for (const e of events) {
+      const g = m.get(e.matchId) ?? { match: e.matchLabel, count: 0, req: 0, reserved: 0, allowed: 0, blocked: 0, trimmed: 0, projBlocked: 0, isLive: false };
+      g.count++; g.req += e.sizeRequested; g.reserved += e.sizeReserved;
+      if (e.verdict === "allowed") g.allowed++; else if (e.verdict === "blocked") g.blocked++; else g.trimmed++;
+      if (e.projVerdict === "blocked") g.projBlocked++;
+      g.isLive = g.isLive || e.isLive;
+      m.set(e.matchId, g);
+    }
+    return [...m.values()].sort((a, b) => b.count - a.count);
+  }, [events]);
 
   // Verdict: is capital the bottleneck? deficit rate = share of decisions not fully funded.
   const deficit = Math.round((analytics.blockedPct + analytics.trimmedPct) * 10) / 10;
@@ -297,9 +310,28 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
               {categories.map((c) => <option key={c} value={c}>{data.categoryNames[c] ?? c}</option>)}
             </select>
           )}
+          <button style={{ ...S.ghost, ...(grouped ? { color: TEXT, borderColor: "#4a4a5c" } : {}) }} onClick={() => setGrouped((v) => !v)} title="свернуть события по матчу">по матчу</button>
           <button style={S.ghost} onClick={() => exportCsv(events)} title="скачать текущую выборку в CSV">CSV</button>
         </div>
         <div style={{ ...S.card, padding: 0, overflow: "auto", maxHeight: 420 }}>
+          {grouped ? (
+            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 620 }}>
+              <thead><tr>{["матч", "входов", "запрошено", "зарезерв.", "принят / урез. / блок", "проекц. отказы"].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+              <tbody>
+                {groups.length === 0 && <tr><td colSpan={6} style={S.empty}>Событий нет.</td></tr>}
+                {groups.map((g) => (
+                  <tr key={g.match}>
+                    <td style={S.td} title={g.match}>{g.match.length > 30 ? g.match.slice(0, 29) + "…" : g.match}{g.isLive && <span style={{ ...S.pill, background: "#2a1a1c", color: RED, marginLeft: 6, fontSize: 9.5, padding: "1px 6px" }}>LIVE</span>}</td>
+                    <td style={{ ...S.td, fontFamily: MONO }}>{g.count}</td>
+                    <td style={{ ...S.td, fontFamily: MONO }}>{usd(g.req)}</td>
+                    <td style={{ ...S.td, fontFamily: MONO }}>{usd(g.reserved)}</td>
+                    <td style={{ ...S.td, fontFamily: MONO }}><span style={{ color: GREEN }}>{g.allowed}</span> / <span style={{ color: AMBER }}>{g.trimmed}</span> / <span style={{ color: RED }}>{g.blocked}</span></td>
+                    <td style={{ ...S.td, fontFamily: MONO, color: g.projBlocked > 0 ? RED : MUTE }}>{g.projBlocked || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
           <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 720 }}>
             <thead><tr>{["время", "матч", "категория", "стратегия", "запрос → резерв", "проекция", "вердикт", "причина", "free"].map((h) => <th key={h} style={S.th} title={h === "проекция" ? "размер при сайзинге от единого банка (worst case)" : undefined}>{h}</th>)}</tr></thead>
             <tbody>
@@ -322,6 +354,7 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
               })}
             </tbody>
           </table>
+          )}
         </div>
       </div>
 
