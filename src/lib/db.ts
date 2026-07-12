@@ -136,6 +136,7 @@ export function initSchema(db: Database): void {
     "ALTER TABLE strategy_versions ADD COLUMN prompt_live TEXT",
     "ALTER TABLE bets ADD COLUMN risk_profile_id TEXT",
     "ALTER TABLE shadow_events ADD COLUMN config_snapshot TEXT",
+    "ALTER TABLE shadow_events ADD COLUMN intensity REAL",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }

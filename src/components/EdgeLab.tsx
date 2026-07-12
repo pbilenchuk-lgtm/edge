@@ -596,9 +596,10 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       </div>
 
       <div style={S.screenSwitch} className="el-screen-switch">
-        {[["matches", "Матчи"], ["feed", "Лента"], ["portfolio", "Портфель"], ["metrics", "Метрики"], ["shadow", "Бюджет (shadow)"], ["strategies", "Стратегии"], ["models", "Настройки"]].map(([k, lbl]) => (
-          <button key={k} onClick={() => setScreen(k)} style={{ ...S.screenBtn, ...(screen === k ? S.screenOn : {}) }}>{lbl}</button>
-        ))}
+        {[["matches", "Матчи"], ["feed", "Лента"], ["portfolio", "Портфель"], ["metrics", "Метрики"], ["shadow", "Бюджет (shadow)"], ["strategies", "Стратегии"], ["models", "Настройки"]].map(([k, lbl]) => {
+          const alert = k === "shadow" && screen !== "shadow" && ((shadow?.analytics?.blocked ?? 0) + (shadow?.analytics?.trimmed ?? 0) > 0 || (shadow?.projection?.blocked ?? 0) > 0);
+          return <button key={k} onClick={() => setScreen(k)} style={{ ...S.screenBtn, ...(screen === k ? S.screenOn : {}) }} title={alert ? "капитал упирался в лимит — загляни" : undefined}>{lbl}{alert && <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#ff6b6b", marginLeft: 6, verticalAlign: "middle" }} />}</button>;
+        })}
       </div>
 
       {(screen === "matches" || screen === "strategies") && (

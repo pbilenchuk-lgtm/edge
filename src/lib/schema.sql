@@ -410,6 +410,9 @@ CREATE TABLE IF NOT EXISTS shadow_events (
   config_snapshot TEXT,                    -- JSON of the ShadowConfig IN EFFECT at decision time —
                                            -- so «this block happened under a 40% cap, not 30%» stays
                                            -- attributable after the settings are later changed
+  intensity      REAL,                     -- the pre-cap Kelly×edge fraction (size / sizing-base) —
+                                           -- budget-independent, so the projection can re-size the
+                                           -- entry against a bank-derived base (worst-case sizing)
   created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_ev_time ON shadow_events(created_at);

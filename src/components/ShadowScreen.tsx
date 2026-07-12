@@ -61,8 +61,8 @@ const S: Record<string, React.CSSProperties> = {
 };
 
 function exportCsv(events: ShadowView["events"]) {
-  const cols = ["time", "match", "category", "strategy", "profile", "source", "edge", "requested", "reserved", "verdict", "reason", "contention", "free"];
-  const rows = events.map((e) => [e.at, e.matchLabel, e.category, e.strategyLabel, e.profileId, e.isLive ? "live" : "prematch", e.edge, e.sizeRequested, e.sizeReserved, e.verdict, e.reason ?? "", e.contention ? "1" : "0", e.freeAt ?? ""]);
+  const cols = ["time", "match", "category", "strategy", "profile", "source", "edge", "requested", "reserved", "verdict", "reason", "contention", "free", "proj_size", "proj_verdict"];
+  const rows = events.map((e) => [e.at, e.matchLabel, e.category, e.strategyLabel, e.profileId, e.isLive ? "live" : "prematch", e.edge, e.sizeRequested, e.sizeReserved, e.verdict, e.reason ?? "", e.contention ? "1" : "0", e.freeAt ?? "", e.projSize ?? "", e.projVerdict ?? ""]);
   const csv = [cols, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
   const url = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
   const a = document.createElement("a"); a.href = url; a.download = `shadow-events-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
@@ -86,7 +86,7 @@ function Meter({ name, used, cap }: { name: string; used: number; cap: number })
 }
 
 export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowView; onSave: (config: any) => Promise<any>; onReplay: (config: any) => Promise<any> }) {
-  const { pool, analytics, config } = data;
+  const { pool, analytics, config, projection } = data;
   const [filter, setFilter] = useState<"all" | "blocked" | "contention">("all");
   const [cat, setCat] = useState<string>("");
 
@@ -236,9 +236,27 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
         </div>
       </div>
 
+      {/* PROJECTION — worst-case «sizing from the single bank» */}
+      <div>
+        <div style={S.secLbl}>Проекция · сайзинг от единого банка</div>
+        <div style={{ ...S.card, borderColor: "#4a5a3a" }}>
+          <div style={{ ...S.hint, marginBottom: 12 }}>
+            факт выше считает дефицит на размерах от изолированных бюджетов пар (~$1000) — в реале сайзинг пойдёт от общего банка ({usd(config.bankTotal)}), и размеры будут крупнее. Здесь каждый вход пересчитан как <b>Kelly×edge × доступная база</b> (free − остаток, урезано потолками), пул сам себя тормозит по мере заполнения. <b style={{ color: AMBER }}>Верхняя граница (worst case)</b>: считается для ВСЕХ текущих пар — боевых в реале будет меньше.
+          </div>
+          <div style={S.tileGrid}>
+            <Tile label="пик утилизации" value={`${projection.peakUtilPct}%`} sub={`факт ${Math.round(pctOf(pool.reserved, pool.bank))}%`} color={projection.peakUtilPct >= 90 ? RED : projection.peakUtilPct >= 70 ? AMBER : GREEN} />
+            <Tile label="средняя утилизация" value={`${projection.avgUtilPct}%`} />
+            <Tile label="не влезло" value={`${projection.blockedPct}%`} sub={`${projection.blocked} из ${projection.total}`} color={projection.blocked > 0 ? RED : GREEN} />
+            <Tile label="спроецировано" value={usd(projection.totalProjected)} sub="суммарный размер" color={BLUE} />
+            <Tile label="упущенный P&L" value={<>{projection.missedPnl >= 0 ? "+" : ""}{usd2(projection.missedPnl)}</>} sub="входы без места" color={projection.missedPnl >= 0 ? GREEN : RED} />
+          </div>
+          <div style={{ ...S.hint, marginTop: 10 }}>если пик утилизации приближается к 90–100% или «не влезло» &gt; 0 — банка {usd(config.bankTotal)} при реальных размерах не хватит. Подбери потолки/банк в «Калибровке» ниже.</div>
+        </div>
+      </div>
+
       {/* DEFICIT DETAIL */}
       <div>
-        <div style={S.secLbl}>Аналитика дефицита</div>
+        <div style={S.secLbl}>Аналитика дефицита (факт)</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12 }}>
           <div style={S.card}>
             <div style={{ ...S.hint, marginBottom: 10 }}>почему входы не получали полный размер</div>
@@ -283,9 +301,9 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
         </div>
         <div style={{ ...S.card, padding: 0, overflow: "auto", maxHeight: 420 }}>
           <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 720 }}>
-            <thead><tr>{["время", "матч", "категория", "стратегия", "запрос → резерв", "вердикт", "причина", "free"].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <thead><tr>{["время", "матч", "категория", "стратегия", "запрос → резерв", "проекция", "вердикт", "причина", "free"].map((h) => <th key={h} style={S.th} title={h === "проекция" ? "размер при сайзинге от единого банка (worst case)" : undefined}>{h}</th>)}</tr></thead>
             <tbody>
-              {events.length === 0 && <tr><td colSpan={8} style={S.empty}>{data.events.length ? "Под фильтр ничего не попало." : "Событий пока нет.\nОни появляются при каждом входе реальной симуляции — allowed / blocked / trimmed."}</td></tr>}
+              {events.length === 0 && <tr><td colSpan={9} style={S.empty}>{data.events.length ? "Под фильтр ничего не попало." : "Событий пока нет.\nОни появляются при каждом входе реальной симуляции — allowed / blocked / trimmed."}</td></tr>}
               {events.slice(0, 150).map((e) => {
                 const v = VERDICT[e.verdict as keyof typeof VERDICT] ?? VERDICT.allowed;
                 return (
@@ -295,6 +313,7 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
                     <td style={{ ...S.td, color: "#c4cdd9" }}>{e.category}</td>
                     <td style={S.td}>{e.strategyLabel} <span style={{ color: MUTE }}>/{e.profileId}</span></td>
                     <td style={{ ...S.td, fontFamily: MONO }}>{usd(e.sizeRequested)} <span style={{ color: MUTE }}>→</span> {usd(e.sizeReserved)}</td>
+                    <td style={{ ...S.td, fontFamily: MONO, color: e.projVerdict === "blocked" ? RED : "#c4cdd9" }} title="сайзинг от банка (worst case)">{e.projVerdict === "blocked" ? "нет места" : e.projSize != null ? usd(e.projSize) : "—"}</td>
                     <td style={S.td}><span style={{ ...S.pill, background: v.bg, color: v.color }}>{v.ru}</span></td>
                     <td style={{ ...S.td, color: e.reason ? "#c4cdd9" : MUTE }}>{e.reason ? (REASON_RU[e.reason] ?? e.reason) : "—"}</td>
                     <td style={{ ...S.td, color: MUTE, fontFamily: MONO }}>{e.freeAt != null ? usd(e.freeAt) : "—"}</td>

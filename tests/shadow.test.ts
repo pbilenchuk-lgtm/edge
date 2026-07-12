@@ -6,7 +6,7 @@ import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import {
   SHADOW_DEFAULTS, shadowOnEntries, shadowOnExit, shadowPoolState, sweepSettled,
-  shadowAnalytics, loadShadowConfig, saveShadowConfig, shadowReplay,
+  shadowAnalytics, loadShadowConfig, saveShadowConfig, shadowReplay, shadowProject,
   type ShadowConfig, type ShadowEntryRequest, type ReplayEntry,
 } from "../src/lib/shadow.js";
 
@@ -200,6 +200,26 @@ test("shadow replay: a reserve is released after the lag, so a later entry gets 
   assert.equal(shadowReplay(entries, c).allowed, 2, "the freed capital funds the later entry");
   // with a longer lag the reserve is still locked at 21:00 → the later entry is trimmed.
   assert.equal(shadowReplay(entries, cfg({ ...c, settlementLagMin: 120 })).allowed, 1, "a longer lag keeps capital locked → deficit");
+});
+
+test("shadow projection: re-sizes each entry as intensity × dynamic base; the pool self-throttles as it fills", () => {
+  const c = cfg({ bankTotal: 1000, cashReservePct: 0, liveBufferPct: 0, capMatchPct: 1, capCategoryPct: 1, capStrategyPct: 1 });
+  const mk = (matchId: string): ReplayEntry => ({ at: "2026-07-11T20:00:00Z", size: 999, edge: 0.1, isLive: false, matchId, competitionId: "c", strategyId: "s", exitAt: null, realPnl: 0, intensity: 0.1 });
+  // two same-tick prematch entries at intensity 0.1: first 0.1×1000=100, second 0.1×(1000−100)=90.
+  const { summary } = shadowProject([mk("m1"), mk("m2")], c);
+  assert.equal(summary.funded, 2);
+  assert.equal(summary.blocked, 0);
+  assert.equal(summary.totalProjected, 190, "later same-tick entry sizes off the reduced free (100 then 90)");
+  assert.equal(summary.peakUtilPct, 19, "utilisation climbs — far above the isolated-budget sizes");
+});
+
+test("shadow projection: a size squeezed below the minimum counts as blocked (deficit), missed P&L booked", () => {
+  const c = cfg({ bankTotal: 1000, cashReservePct: 0, liveBufferPct: 0, capMatchPct: 1, capCategoryPct: 1, capStrategyPct: 1 });
+  const tiny: ReplayEntry = { at: "2026-07-11T20:00:00Z", size: 100, edge: 0.1, isLive: false, matchId: "m", competitionId: "c", strategyId: "s", exitAt: null, realPnl: 40, intensity: 0.0005 };
+  const { summary, results } = shadowProject([tiny], c);
+  assert.equal(results[0].verdict, "blocked", "0.0005×1000 = $0.50 < $1 minimum → the bank had no room");
+  assert.equal(summary.blocked, 1);
+  assert.equal(summary.missedPnl, 40, "the blocked entry's real P&L is the deficit's cost");
 });
 
 test("shadow: config precedence — defaults < env < saved app_meta (user settings win)", () => {

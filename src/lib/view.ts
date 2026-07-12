@@ -13,7 +13,7 @@ import { SPORT_LABELS, isNoiseMarket } from "./polymarket.js";
 import { resolveFootballMarket } from "./settlement.js";
 import { maxLiveMinutes, liveDelivering } from "./lifecycle.js";
 import { listRiskProfileViews, type RiskProfileView } from "./riskConfig.js";
-import { loadShadowConfig, shadowPoolState, shadowAnalytics, type ShadowConfig, type ShadowPoolState, type ShadowAnalytics } from "./shadow.js";
+import { loadShadowConfig, shadowPoolState, shadowAnalytics, buildReplayEntries, shadowProject, type ShadowConfig, type ShadowPoolState, type ShadowAnalytics, type ProjectionSummary } from "./shadow.js";
 import type { StrategyParams, Match, Bet } from "./types.js";
 
 export interface MarketView {
@@ -128,6 +128,8 @@ export interface ShadowEventView {
   strategyId: string; strategyLabel: string; profileId: string;
   sizeRequested: number; sizeReserved: number; verdict: string; reason: string | null;
   isLive: boolean; edge: number; contention: boolean; freeAt: number | null;
+  /** projection: size the entry would get from a bank-derived base + its verdict */
+  projSize: number | null; projVerdict: string | null;
 }
 export interface ShadowView {
   enabled: boolean;
@@ -135,6 +137,8 @@ export interface ShadowView {
   pool: ShadowPoolState;
   events: ShadowEventView[];
   analytics: ShadowAnalytics;
+  /** worst-case «sizing from the single bank» projection (upper bound on utilisation) */
+  projection: ProjectionSummary;
   categoryNames: Record<string, string>;
   strategyNames: Record<string, string>;
   matchNames: Record<string, string>;
@@ -370,11 +374,18 @@ export function buildAppData(db: Database, env = process.env): AppData {
   const catNames: Record<string, string> = {}; for (const c of competitions) catNames[c.id] = c.name;
   const stratNames: Record<string, string> = {}; for (const s of strategies) stratNames[s.id] = s.name;
   const matchLabel: Record<string, string> = {}; for (const m of allMatches) matchLabel[m.id] = `${m.home} — ${m.away}`;
+  // Worst-case projection: re-size every recorded entry from a bank-derived base and
+  // simulate the pool timeline. `results` align to R.allShadowEvents order.
+  const allShadowEv = R.allShadowEvents(db);
+  const proj = shadowProject(buildReplayEntries(db), shadowConfig);
+  const projById = new Map<string, { size: number; verdict: string }>();
+  allShadowEv.forEach((e, i) => { const r = proj.results[i]; if (r) projById.set(e.id, r); });
   const shadow: ShadowView = {
     enabled: shadowConfig.enabled,
     config: shadowConfig,
     pool: shadowPoolState(db, shadowConfig, new Date(nowMs).toISOString()),
     analytics: shadowAnalytics(db, shadowConfig),
+    projection: proj.summary,
     categoryNames: catNames, strategyNames: stratNames, matchNames: matchLabel,
     settlingQueue: R.allShadowReserves(db)
       .filter((r) => r.state === "settling" && r.settle_at)
@@ -386,6 +397,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
       strategyLabel: stratNames[e.strategy_id] ?? e.strategy_id, profileId: e.profile_id,
       sizeRequested: e.size_requested, sizeReserved: e.size_reserved, verdict: e.verdict, reason: e.reason,
       isLive: !!e.is_live, edge: e.edge, contention: !!e.contention, freeAt: e.free_at,
+      projSize: projById.get(e.id)?.size ?? null, projVerdict: projById.get(e.id)?.verdict ?? null,
     })),
   };
 

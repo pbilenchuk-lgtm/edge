@@ -109,6 +109,9 @@ export function shadowPoolState(db: Database, cfg: ShadowConfig, nowIso: string)
 export interface ShadowEntryRequest {
   betId: string; matchId: string; competitionId: string; strategyId: string;
   profileId: string; size: number; edge: number; isLive: boolean;
+  /** pre-cap Kelly×edge fraction (size / sizing-base) — budget-independent; lets the
+   *  projection re-size this entry against a bank-derived base. 0 if not computable. */
+  intensity?: number;
 }
 export type ShadowVerdict = "allowed" | "blocked" | "trimmed";
 
@@ -196,7 +199,7 @@ export function shadowOnEntries(db: Database, requests: ShadowEntryRequest[], cf
         strategy_id: d.req.strategyId, profile_id: d.req.profileId, size_requested: round2(d.req.size),
         size_reserved: d.reserved, verdict: d.verdict, reason: d.reason, is_live: d.req.isLive ? 1 : 0,
         edge: d.req.edge, contention: contended ? 1 : 0, free_at: d.freeAt, pool_snapshot: d.snap,
-        config_snapshot: configSnap, created_at: nowIso,
+        config_snapshot: configSnap, intensity: d.req.intensity ?? null, created_at: nowIso,
       });
     } catch { /* best-effort */ }
   }
@@ -282,7 +285,7 @@ export function shadowAnalytics(db: Database, cfg: ShadowConfig): ShadowAnalytic
 export interface ReplayEntry {
   at: string; size: number; edge: number; isLive: boolean;
   matchId: string; competitionId: string; strategyId: string;
-  exitAt: string | null; realPnl: number | null;
+  exitAt: string | null; realPnl: number | null; intensity?: number;
 }
 export interface ReplaySummary {
   total: number; allowed: number; blocked: number; trimmed: number;
@@ -301,8 +304,97 @@ export function buildReplayEntries(db: Database): ReplayEntry[] {
       matchId: e.match_id, competitionId: e.competition_id, strategyId: e.strategy_id,
       exitAt: settled ? (bet!.settled_at ?? null) : null,
       realPnl: settled && bet!.payout != null && bet!.stake != null ? bet!.payout - bet!.stake : null,
+      intensity: e.intensity ?? 0,
     };
   });
+}
+
+/** Minimal meaningful projected size — below this, the dynamic base is judged too squeezed
+ *  to place a real bet, so the projection counts it as blocked (capital was the bottleneck). */
+export const SHADOW_PROJ_MIN = (() => { const n = Number(process.env.SHADOW_PROJ_MIN_SIZE); return Number.isFinite(n) && n > 0 ? n : 1; })();
+
+// Capital actually available to THIS entry right now: pool room (live may dip into the
+// buffer, prematch may not; cash floor inviolable) capped by the three ceilings. The base
+// the projection sizes Kelly against — cut by the caps BEFORE sizing, so the projection
+// never requests what it would itself block (only a sub-minimum size counts as blocked).
+function availableBase(t: PoolTotals, req: EntryReq, cfg: ShadowConfig): number {
+  const bank = cfg.bankTotal;
+  const freeGeneral = bank - t.used;
+  const liveBufferFree = Math.max(0, cfg.liveBufferPct * bank - t.liveUsed);
+  const cashFloor = cfg.cashReservePct * bank;
+  const poolRoom = req.isLive ? freeGeneral - cashFloor : freeGeneral - cashFloor - liveBufferFree;
+  return Math.max(0, Math.min(
+    poolRoom,
+    cfg.capMatchPct * bank - (t.match[req.matchId] ?? 0),
+    cfg.capCategoryPct * bank - (t.cat[req.competitionId] ?? 0),
+    cfg.capStrategyPct * bank - (t.strat[req.strategyId] ?? 0),
+  ));
+}
+function reserveInto(t: PoolTotals, req: EntryReq, amt: number): void {
+  t.used += amt; if (req.isLive) t.liveUsed += amt;
+  t.cat[req.competitionId] = (t.cat[req.competitionId] ?? 0) + amt;
+  t.strat[req.strategyId] = (t.strat[req.strategyId] ?? 0) + amt;
+  t.match[req.matchId] = (t.match[req.matchId] ?? 0) + amt;
+}
+
+export interface ProjectionSummary {
+  total: number; funded: number; blocked: number; blockedPct: number;
+  missedPnl: number; peakUtilPct: number; avgUtilPct: number; totalProjected: number;
+}
+
+/** PROJECTION — the «what utilisation would a single bank actually see» model. Unlike the
+ *  actual pool (fixed sizes from isolated $1000 budgets), each entry is RE-SIZED here as
+ *  intensity(Kelly×edge) × dynamic base, base = availableBase() at that moment. So the pool
+ *  self-throttles (more open → smaller free → smaller new bets) — the competition dynamic the
+ *  isolated-budget sizes hide. Deterministic edge-order within a tick; a reserve frees after
+ *  the lag. WORST CASE / upper bound: it sizes for ALL current pairs; live will have fewer.
+ *  Returns a summary + per-entry result aligned to the input order (for the ledger column). */
+export function shadowProject(entries: ReplayEntry[], cfg: ShadowConfig): { summary: ProjectionSummary; results: { size: number; verdict: "allowed" | "blocked" }[] } {
+  const lagMs = cfg.settlementLagMin * 60_000;
+  const t = emptyTotals();
+  const reservedOf = new Map<ReplayEntry, number>();
+  const freeEvents: { ms: number; e: ReplayEntry }[] = [];
+  const results: { size: number; verdict: "allowed" | "blocked" }[] = new Array(entries.length);
+  const idxOf = new Map<ReplayEntry, number>(); entries.forEach((e, i) => idxOf.set(e, i));
+  let funded = 0, blocked = 0, missedPnl = 0, peak = 0, utilSum = 0, utilN = 0, totalProjected = 0;
+  const byTime = new Map<number, ReplayEntry[]>();
+  for (const e of entries) { const ms = Date.parse(e.at) || 0; const a = byTime.get(ms) ?? []; a.push(e); byTime.set(ms, a); }
+  const sweep = (upto: number) => {
+    for (let i = freeEvents.length - 1; i >= 0; i--) if (freeEvents[i].ms <= upto) {
+      const e = freeEvents[i].e, r = reservedOf.get(e) ?? 0;
+      if (r > 0) { t.used -= r; if (e.isLive) t.liveUsed -= r; t.cat[e.competitionId] -= r; t.strat[e.strategyId] -= r; t.match[e.matchId] -= r; }
+      freeEvents.splice(i, 1);
+    }
+  };
+  for (const ms of [...byTime.keys()].sort((a, b) => a - b)) {
+    sweep(ms);
+    for (const e of byTime.get(ms)!.slice().sort((a, b) => (b.edge - a.edge) || (a.at < b.at ? -1 : 1))) {
+      const base = availableBase(t, e, cfg);
+      const size = round2((e.intensity ?? 0) * base);
+      const idx = idxOf.get(e)!;
+      if (size < SHADOW_PROJ_MIN) {
+        results[idx] = { size: 0, verdict: "blocked" };
+        blocked++;
+        if (e.realPnl != null) missedPnl += e.realPnl; // the bank had no room to place it at all
+      } else {
+        results[idx] = { size, verdict: "allowed" };
+        funded++; totalProjected += size;
+        reserveInto(t, e, size); reservedOf.set(e, size);
+        if (e.exitAt) freeEvents.push({ ms: (Date.parse(e.exitAt) || ms) + lagMs, e });
+      }
+      const util = cfg.bankTotal > 0 ? (t.used / cfg.bankTotal) * 100 : 0;
+      peak = Math.max(peak, util); utilSum += util; utilN++;
+    }
+  }
+  const total = entries.length;
+  return {
+    summary: {
+      total, funded, blocked, blockedPct: total ? round2((blocked / total) * 100) : 0,
+      missedPnl: round2(missedPnl), peakUtilPct: round2(peak), avgUtilPct: utilN ? round2(utilSum / utilN) : 0,
+      totalProjected: round2(totalProjected),
+    },
+    results,
+  };
 }
 
 /** Deterministically REPLAY the recorded entry stream under a CANDIDATE config — without

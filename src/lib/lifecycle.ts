@@ -532,10 +532,18 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, price: ex.priceCents, stake: ex.stake });
       // Mirror this fill into the shadow batch. edge = our prob − executed price; a fill
       // while the match is already live counts as a live-triggered entry (live_buffer).
+      // intensity = the budget-INDEPENDENT pre-cap Kelly×edge fraction (size / sizing-base),
+      // exactly as sizePrematch computes it — so the shadow projection can re-size the entry
+      // against a bank-derived base instead of the isolated $1000 pair budget.
+      const pcfg = getProfileConfig(db, b.risk_profile_id ?? "medium");
+      const pp = ex.priceCents / 100, ourP = b.ai_prob ?? 0;
+      const kEdge = pp > 0 && pp < 1 ? (ourP - pp) / (1 - pp) : 0;
+      const kFrac = Math.min(Math.max(pcfg.sizing.kelly_fraction_base, pcfg.sizing.kelly_fraction_clamp[0]), pcfg.sizing.kelly_fraction_clamp[1]);
+      const intensity = kEdge > 0 ? Math.min(kFrac * kEdge, pcfg.sizing.max_position_pct) : 0;
       shadowReqs.push({
         betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id,
         profileId: b.risk_profile_id ?? "medium", size: ex.stake, edge: round2((b.ai_prob ?? 0) - ex.priceCents / 100),
-        isLive: m.state === "live",
+        isLive: m.state === "live", intensity: Math.round(intensity * 10000) / 10000,
       });
     }
   }
