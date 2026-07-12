@@ -20,7 +20,7 @@ import { settleBet, resolveFootballMarket } from "./settlement.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig } from "./polymarket.js";
 import { liquidationCents } from "./execution.js";
-import { isIso, warsawClock, durationLabel } from "./time.js";
+import { isIso, finishStamp } from "./time.js";
 import type { SportsProvider } from "./sports.js";
 
 export interface EngineConfig {
@@ -360,13 +360,7 @@ export async function syncMatchStatus(
     // the card can show «завершён 18:07» / «20:00–22:01 · длительность 2 ч 01 мин»
     // instead of a bare «финал». Warsaw everywhere (kickoff too); duration off the ISO
     // kickoff. Best-effort — a missing/again-finished match just keeps what it had.
-    if (from !== "finished" && !match.end_time) {
-      const nowIso = nowFn(deps)();
-      patch.end_time = warsawClock(nowIso);
-      if (isIso(match.kickoff_at)) patch.kickoff_time = warsawClock(match.kickoff_at);
-      const dur = durationLabel(match.kickoff_at, nowIso);
-      if (dur) patch.duration = dur;
-    }
+    if (from !== "finished" && !match.end_time) Object.assign(patch, finishStamp(match.kickoff_at, nowFn(deps)()));
   }
   R.updateMatch(db, match.id, patch);
   const updated = { ...match, ...patch } as Match;
@@ -871,7 +865,10 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       // Never regress state or wipe a known score on a stale/glitchy poll.
       const nextState = STATE_RANK[s.state] >= STATE_RANK[m.state] ? s.state : m.state;
       const sh = scoreHome ?? m.score_home, sa = scoreAway ?? m.score_away;
-      R.updateMatch(db, m.id, { state: nextState, minute: s.minute, score_home: sh, score_away: sa, clock: s.clock ?? null, ...(s.final ? { final_score: `${sh ?? 0}:${sa ?? 0}` } : {}) });
+      // Stamp the Warsaw finish time HERE too: ESPN owns the live→finished transition for
+      // covered matches, so enrich finishes them first and syncMatchStatus (guarded on
+      // from!=="finished") then never stamps — the card would read a bare «финал».
+      R.updateMatch(db, m.id, { state: nextState, minute: s.minute, score_home: sh, score_away: sa, clock: s.clock ?? null, ...(s.final ? { final_score: `${sh ?? 0}:${sa ?? 0}` } : {}), ...(becameFinished && !m.end_time ? finishStamp(m.kickoff_at, now) : {}) });
       if (becameFinished) { const fresh = R.getMatch(db, m.id); if (fresh) settleMatch(db, fresh, deps); }
       const detail = await provider.matchDetail!(sport, league, s.externalRef);
       const homeLineup = detail ? (flip ? detail.lineups.away : detail.lineups.home) : null;

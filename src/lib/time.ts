@@ -39,6 +39,23 @@ export function durationLabel(startIso: string | null | undefined, endIso: strin
   return h > 0 ? `${h} ч ${m} мин` : `${m} мин`;
 }
 
+/** Warsaw finish-stamp fields for a match transitioning into "finished": the finish
+ *  clock (HH:MM Warsaw), the kickoff clock, and the elapsed duration — so a card shows
+ *  «завершён 22:01» / «20:00–22:01 · длительность 2 ч 01 мин» instead of a bare «финал».
+ *  end_time is always set (nowIso is a real instant); kickoff_time/duration only when
+ *  derivable. Apply on EVERY path that flips a match to finished (ESPN enrich, the poll,
+ *  the clock auto-finish) — else covered matches finished via ESPN never get a time. */
+export function finishStamp(
+  kickoffAtIso: string | null | undefined, nowIso: string,
+): { end_time: string | null; kickoff_time?: string; duration?: string } {
+  const patch: { end_time: string | null; kickoff_time?: string; duration?: string } = { end_time: warsawClock(nowIso) };
+  const kt = warsawClock(kickoffAtIso);
+  if (kt) patch.kickoff_time = kt;
+  const dur = durationLabel(kickoffAtIso, nowIso);
+  if (dur) patch.duration = dur;
+  return patch;
+}
+
 /** Hours from `nowMs` until the kickoff (negative if already started); null if unknown. */
 export function hoursUntil(iso: string | null | undefined, nowMs: number): number | null {
   if (!isIso(iso)) return null;

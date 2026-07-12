@@ -286,11 +286,16 @@ test("enrichFromEspn reconciles a short-named esports match (e.g. 'T1') the prov
     async matchDetail() { return { lineupOut: false, lineups: { home: null, away: null }, events: [] }; },
   };
 
-  const res = await enrichFromEspn(db, provider, {});
+  const res = await enrichFromEspn(db, provider, { now: () => "2026-07-06T10:01:00Z" });
   assert.equal(res.enriched, 1, "the short-named esports match now reconciles with the provider");
   const em = R.getMatch(db, eid)!;
   assert.equal(em.state, "finished", "provider 'Finished' status finishes it — no more infinite clock");
   assert.equal(em.final_score, "3:0");
+  // ESPN owns the finish for covered matches, so enrich (not syncMatchStatus) must stamp
+  // the Warsaw finish time — else the card reads a bare «финал» («до сих пор не отображается»).
+  assert.ok(em.end_time, "enrich stamps a Warsaw end_time on the finish it drives");
+  assert.ok(em.kickoff_time, "kickoff_time stamped");
+  assert.equal(em.duration, "2 ч 1 мин", "duration from kickoff→finish");
 });
 
 test("enrichFromEspn aligns scores/lineups when the DB match orientation is reversed", async () => {

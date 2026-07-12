@@ -28,7 +28,7 @@ import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
-import { hoursUntil } from "./time.js";
+import { hoursUntil, finishStamp } from "./time.js";
 import { collectSnapshots } from "./snapshots.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
 
@@ -163,7 +163,8 @@ export function hasLiveMatchInPlay(db: Database): boolean {
  * never clock-finish them and never regress their state.
  */
 export function advanceClocks(db: Database, deps: EngineDeps = {}): void {
-  const nowMs = Date.parse(nowFn(deps)()) || Date.now();
+  const nowIso = nowFn(deps)();
+  const nowMs = Date.parse(nowIso) || Date.now();
   for (const { sport, match: m } of activeMatches(db)) {
     const h = hoursUntil(m.kickoff_at, nowMs);
     if (h == null) continue;
@@ -177,7 +178,7 @@ export function advanceClocks(db: Database, deps: EngineDeps = {}): void {
     if (m.state === "live" && m.minute == null && h <= -NO_COVERAGE_GRACE_H
         && !hasLiveData(db, m)
         && !R.betsForMatch(db, m.id).some((b) => b.status === "open")) {
-      R.updateMatch(db, m.id, { state: "finished", final_score: m.final_score ?? null });
+      R.updateMatch(db, m.id, { state: "finished", final_score: m.final_score ?? null, ...(!m.end_time ? finishStamp(m.kickoff_at, nowIso) : {}) });
       continue;
     }
 
@@ -187,7 +188,7 @@ export function advanceClocks(db: Database, deps: EngineDeps = {}): void {
     // ESPN matches (minute set) are finished by ESPN, never by the clock.
     if (m.state === "live" && m.minute == null && h <= -(maxLiveMinutes(sport) / 60)
         && !R.betsForMatch(db, m.id).some((b) => b.status === "open")) {
-      R.updateMatch(db, m.id, { state: "finished", final_score: m.final_score ?? null });
+      R.updateMatch(db, m.id, { state: "finished", final_score: m.final_score ?? null, ...(!m.end_time ? finishStamp(m.kickoff_at, nowIso) : {}) });
       continue;
     }
 
