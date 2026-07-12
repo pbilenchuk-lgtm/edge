@@ -27,6 +27,8 @@ test("shadow: a fill reserves capital; a close moves it to settling and it frees
   assert.equal(p.reserved, 100, "reserved after the fill");
   assert.equal(p.free, 900);
   assert.equal(last(db).verdict, "allowed");
+  // the config in effect is snapshotted on the event (attributable after later changes)
+  assert.equal(JSON.parse(last(db).config_snapshot as string).bankTotal, 1000, "config snapshot stored per event");
 
   shadowOnExit(db, "b1", 1, c, T0);              // full close → settling
   p = shadowPoolState(db, c, T0);

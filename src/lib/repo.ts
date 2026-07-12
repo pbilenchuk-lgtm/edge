@@ -335,7 +335,8 @@ export interface ShadowEventRow {
   id: string; bet_id: string | null; match_id: string; competition_id: string;
   strategy_id: string; profile_id: string; size_requested: number; size_reserved: number;
   verdict: "allowed" | "blocked" | "trimmed"; reason: string | null; is_live: number;
-  edge: number; contention: number; free_at: number | null; pool_snapshot: string | null; created_at: string;
+  edge: number; contention: number; free_at: number | null; pool_snapshot: string | null;
+  config_snapshot?: string | null; created_at: string;
 }
 export function insertShadowReserve(db: Database, r: ShadowReserveRow): void {
   db.prepare(`INSERT INTO shadow_reserves(id,bet_id,match_id,competition_id,strategy_id,profile_id,size,is_live,edge,state,settle_at,created_at)
@@ -365,8 +366,8 @@ export function releaseSettledShadow(db: Database, nowIso: string): number {
   return Number(info.changes ?? 0);
 }
 export function insertShadowEvent(db: Database, e: ShadowEventRow): void {
-  db.prepare(`INSERT INTO shadow_events(id,bet_id,match_id,competition_id,strategy_id,profile_id,size_requested,size_reserved,verdict,reason,is_live,edge,contention,free_at,pool_snapshot,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(e.id, e.bet_id, e.match_id, e.competition_id, e.strategy_id, e.profile_id, e.size_requested, e.size_reserved, e.verdict, e.reason, e.is_live, e.edge, e.contention, e.free_at, e.pool_snapshot, e.created_at);
+  db.prepare(`INSERT INTO shadow_events(id,bet_id,match_id,competition_id,strategy_id,profile_id,size_requested,size_reserved,verdict,reason,is_live,edge,contention,free_at,pool_snapshot,config_snapshot,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(e.id, e.bet_id, e.match_id, e.competition_id, e.strategy_id, e.profile_id, e.size_requested, e.size_reserved, e.verdict, e.reason, e.is_live, e.edge, e.contention, e.free_at, e.pool_snapshot, e.config_snapshot ?? null, e.created_at);
 }
 export function listShadowEvents(db: Database, limit = 200): ShadowEventRow[] {
   return db.prepare(`SELECT * FROM shadow_events ORDER BY created_at DESC LIMIT ?`).all(limit) as ShadowEventRow[];

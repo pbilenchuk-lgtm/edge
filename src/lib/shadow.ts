@@ -173,13 +173,17 @@ export function shadowOnEntries(db: Database, requests: ShadowEntryRequest[], cf
     decisions.push({ req, verdict, reserved, reason, freeAt: round2(freeGeneral), snap });
   }
   const contended = requests.length > 1 && poolShort;
+  // Snapshot the config IN EFFECT so a decision stays attributable to the caps/floors that
+  // produced it, even after the user later changes settings (cheap now, irrecoverable later).
+  const configSnap = JSON.stringify(cfg);
   for (const d of decisions) {
     try {
       R.insertShadowEvent(db, {
         id: R.uid(), bet_id: d.req.betId, match_id: d.req.matchId, competition_id: d.req.competitionId,
         strategy_id: d.req.strategyId, profile_id: d.req.profileId, size_requested: round2(d.req.size),
         size_reserved: d.reserved, verdict: d.verdict, reason: d.reason, is_live: d.req.isLive ? 1 : 0,
-        edge: d.req.edge, contention: contended ? 1 : 0, free_at: d.freeAt, pool_snapshot: d.snap, created_at: nowIso,
+        edge: d.req.edge, contention: contended ? 1 : 0, free_at: d.freeAt, pool_snapshot: d.snap,
+        config_snapshot: configSnap, created_at: nowIso,
       });
     } catch { /* best-effort */ }
   }

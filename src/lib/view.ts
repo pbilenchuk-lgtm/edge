@@ -137,6 +137,9 @@ export interface ShadowView {
   analytics: ShadowAnalytics;
   categoryNames: Record<string, string>;
   strategyNames: Record<string, string>;
+  matchNames: Record<string, string>;
+  /** closed reserves still in the settlement lag, soonest to free first */
+  settlingQueue: { size: number; settleAt: string; category: string; matchLabel: string; strategyLabel: string }[];
 }
 export interface CronView {
   enabled: boolean; tickMin: number; discoverHr: number; liveSec: number; nextRunAt: string | null;
@@ -372,7 +375,11 @@ export function buildAppData(db: Database, env = process.env): AppData {
     config: shadowConfig,
     pool: shadowPoolState(db, shadowConfig, new Date(nowMs).toISOString()),
     analytics: shadowAnalytics(db, shadowConfig),
-    categoryNames: catNames, strategyNames: stratNames,
+    categoryNames: catNames, strategyNames: stratNames, matchNames: matchLabel,
+    settlingQueue: R.allShadowReserves(db)
+      .filter((r) => r.state === "settling" && r.settle_at)
+      .sort((a, b) => (a.settle_at! < b.settle_at! ? -1 : 1))
+      .map((r) => ({ size: r.size, settleAt: r.settle_at as string, category: catNames[r.competition_id] ?? r.competition_id, matchLabel: matchLabel[r.match_id] ?? r.match_id, strategyLabel: stratNames[r.strategy_id] ?? r.strategy_id })),
     events: R.listShadowEvents(db, 200).map((e) => ({
       id: e.id, at: e.created_at, matchId: e.match_id, matchLabel: matchLabel[e.match_id] ?? e.match_id,
       category: catNames[e.competition_id] ?? e.competition_id, strategyId: e.strategy_id,

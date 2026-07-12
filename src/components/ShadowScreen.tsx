@@ -60,6 +60,15 @@ const S: Record<string, React.CSSProperties> = {
   hint: { fontSize: 11.5, color: MUTE, lineHeight: 1.4 },
 };
 
+function exportCsv(events: ShadowView["events"]) {
+  const cols = ["time", "match", "category", "strategy", "profile", "source", "edge", "requested", "reserved", "verdict", "reason", "contention", "free"];
+  const rows = events.map((e) => [e.at, e.matchLabel, e.category, e.strategyLabel, e.profileId, e.isLive ? "live" : "prematch", e.edge, e.sizeRequested, e.sizeReserved, e.verdict, e.reason ?? "", e.contention ? "1" : "0", e.freeAt ?? ""]);
+  const csv = [cols, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+  const url = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
+  const a = document.createElement("a"); a.href = url; a.download = `shadow-events-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+  URL.revokeObjectURL(url);
+}
+
 function Tile({ label, value, sub, color }: { label: string; value: React.ReactNode; sub?: string; color?: string }) {
   return <div style={S.tile}><div style={S.tLbl}>{label}</div><div style={{ ...S.tVal, color: color ?? TEXT }}>{value}</div>{sub && <div style={S.tSub}>{sub}</div>}</div>;
 }
@@ -170,6 +179,22 @@ export default function ShadowScreen({ data, onSave }: { data: ShadowView; onSav
             <Tile label="свободно" value={usd(spendable)} sub="доступно предматчу" color={GREEN} />
             <Tile label="live-буфер" value={usd(pool.liveBufferUsed)} sub={`из ${usd(pool.liveBufferTotal)} · только live`} />
           </div>
+          {data.settlingQueue.length > 0 && (
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${LINE}` }}>
+              <div style={{ ...S.hint, marginBottom: 6 }}>очередь settling — {usd(pool.settling)} вернётся во «свободно» после лага</div>
+              {data.settlingQueue.slice(0, 8).map((s, i) => {
+                const mins = Math.max(0, Math.round((Date.parse(s.settleAt) - Date.now()) / 60000));
+                return (
+                  <div key={i} style={{ display: "flex", gap: 10, fontSize: 12, padding: "3px 0" }}>
+                    <span style={{ fontFamily: MONO, width: 60, color: PURPLE }}>{usd(s.size)}</span>
+                    <span style={{ width: 118, color: MUTE }}>{mins > 0 ? `через ${mins} мин` : "вот-вот"}</span>
+                    <span style={{ color: "#c4cdd9", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${s.matchLabel} · ${s.strategyLabel}`}>{s.matchLabel}</span>
+                  </div>
+                );
+              })}
+              {data.settlingQueue.length > 8 && <div style={{ ...S.hint, marginTop: 4 }}>…ещё {data.settlingQueue.length - 8}</div>}
+            </div>
+          )}
         </div>
       </div>
 
@@ -186,6 +211,11 @@ export default function ShadowScreen({ data, onSave }: { data: ShadowView; onSav
             <div style={{ ...S.hint, marginBottom: 6 }}>по стратегиям · потолок {Math.round(config.capStrategyPct * 100)}% банка</div>
             {Object.entries(pool.byStrategy).length === 0 ? <div style={{ color: MUTE, fontSize: 12.5, padding: "8px 0" }}>нет открытых резервов</div>
               : Object.entries(pool.byStrategy).sort((a, b) => b[1].used - a[1].used).map(([id, b]) => <Meter key={id} name={data.strategyNames[id] ?? id} used={b.used} cap={b.cap} />)}
+          </div>
+          <div style={S.card}>
+            <div style={{ ...S.hint, marginBottom: 6 }}>по матчам · потолок {Math.round(config.capMatchPct * 100)}% банка</div>
+            {Object.entries(pool.byMatch).length === 0 ? <div style={{ color: MUTE, fontSize: 12.5, padding: "8px 0" }}>нет открытых резервов</div>
+              : Object.entries(pool.byMatch).sort((a, b) => b[1].used - a[1].used).slice(0, 8).map(([id, b]) => <Meter key={id} name={data.matchNames[id] ?? id} used={b.used} cap={b.cap} />)}
           </div>
         </div>
       </div>
@@ -233,6 +263,7 @@ export default function ShadowScreen({ data, onSave }: { data: ShadowView; onSav
               {categories.map((c) => <option key={c} value={c}>{data.categoryNames[c] ?? c}</option>)}
             </select>
           )}
+          <button style={S.ghost} onClick={() => exportCsv(events)} title="скачать текущую выборку в CSV">CSV</button>
         </div>
         <div style={{ ...S.card, padding: 0, overflow: "auto", maxHeight: 420 }}>
           <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 720 }}>
