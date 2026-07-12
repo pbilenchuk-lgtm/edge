@@ -813,24 +813,39 @@ export async function strategistReassess(
     // live reassessment while Live xG (ordered first) ate the budget every run.
     // Run ALL of a due match's pairs; a generous per-match cap only guards a
     // pathological config.
-    const matchStart = calls;
+    // DEDUP ПО ПРОФИЛЯМ (§9.6): суждение стратега — prob, входы, тезисные выходы —
+    // НЕ зависит от риск-профиля (размер и ценовые стоп/тейк считает код), поэтому
+    // зовём модель ОДИН раз на СТРАТЕГИЮ, а не на каждую пару strategy×profile.
+    // Общее решение затем применяем к каждому профилю с его сайзингом. При 3
+    // профилях это ×3 меньше живых LLM-вызовов без потери качества.
+    const byStrategy = new Map<string, { strat: Strategy; profiles: Array<{ profile: string; pct: number }> }>();
     for (const { strat, profile, pct } of pairMap.values()) {
-      if (calls - matchStart >= MAX_PAIRS_PER_MATCH) break;
+      const g = byStrategy.get(strat.id);
+      if (g) g.profiles.push({ profile, pct });
+      else byStrategy.set(strat.id, { strat, profiles: [{ profile, pct }] });
+    }
+    const matchStart = calls;
+    for (const { strat, profiles } of byStrategy.values()) {
+      if (calls - matchStart >= MAX_PAIRS_PER_MATCH) break; // бюджет теперь считает СТРАТЕГИИ, не пары
       if (opts.onlyStrategyId && strat.id !== opts.onlyStrategyId) continue; // manual: one strategy only
       const sid = strat.id;
-      const pairLabel = `${strat.name} · ${profile}`;
-      const myOpen = open.filter((b) => b.strategy_id === sid && (b.risk_profile_id ?? "medium") === profile);
+      // Все открытые позиции стратегии (по всем профилям) — контекст для стратега; в
+      // промпт дедупим по рынку (стратегу важен рынок, не профиль). P&L и ценовой
+      // стоп/тейк на реальный вход каждого профиля считает код в per-profile цикле.
+      const stratOpen = open.filter((b) => b.strategy_id === sid);
+      const seenMkt = new Set<string>();
+      const promptPositions = stratOpen.filter((b) => { const k = norm(b.market_label); if (seenMkt.has(k)) return false; seenMkt.add(k); return true; });
       calls++;
-      // Feed the pair's BATTLE SHEET (the prematch plan) so the live strategist
-      // EXECUTES it (live_triggers / take_price / thesis_stop) rather than
-      // re-deriving — using its LIVE prompt window (prompt_live).
-      const battleSheet = R.artifactsForMatch(db, m.id).find((x) => x.kind === "battle_sheet" && x.label === pairLabel)?.content;
+      // BATTLE SHEET (план прематча) — тезисный (триггеры / take_price / thesis_stop),
+      // а не про размер, и почти одинаков по профилям одной стратегии; берём первый
+      // доступный как представителя (LIVE-окно исполняет его, не переизобретает).
+      const battleSheet = profiles.map((p) => R.artifactsForMatch(db, m.id).find((x) => x.kind === "battle_sheet" && x.label === `${strat.name} · ${p.profile}`)?.content).find(Boolean);
       const dec = await strategistDecide({
         strategyName: strat.name, strategyPrompt: strat.prompt_live ?? strat.prompt,
         match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, minuteApprox },
         assessment: { confidence: assess?.confidence ?? "средняя", short: assess?.short ?? "", verdict: assess?.verdict ?? "" },
         markets: markets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob, liquidity: mk.liquidity != null ? Number(mk.liquidity) : null, openCents: mk.label in opens ? opens[mk.label] : null })),
-        openPositions: myOpen.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
+        openPositions: promptPositions.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
         context: [ctx, battleSheet ? `БОЕВОЙ ЛИСТ (план из предматча — исполняй его, не переизобретай):\n${battleSheet}` : null].filter(Boolean).join("\n\n") || undefined,
         // LIVE-переоценка исполняет уже сформированный боевой лист — держим её на
         // более дешёвой модели (model_live), а предматч-вход остаётся на model.
@@ -847,154 +862,159 @@ export async function strategistReassess(
         continue;
       }
       touched.add(sid);
-      // Track what ACTUALLY happened, so the reassessment note (written AFTER the
-      // exits/entries below) states reality — not the LLM's intent. Otherwise the
-      // note musing "держу BTTS No" showed even when no such position was ever
-      // opened (picks gated / abstained), reading like positions that don't exist.
-      const enteredMarkets: string[] = [], exitedMarkets: string[] = [], unfilled: string[] = [];
+      // Одно решение — на КАЖДЫЙ профиль: выходы бьют только по позициям профиля,
+      // входы сайзятся его risk_config (§9.6), заметка переоценки — своя.
+      for (const { profile, pct } of profiles) {
+        const myOpen = open.filter((b) => b.strategy_id === sid && (b.risk_profile_id ?? "medium") === profile);
+        // Track what ACTUALLY happened, so the reassessment note (written AFTER the
+        // exits/entries below) states reality — not the LLM's intent. Otherwise the
+        // note musing "держу BTTS No" showed even when no such position was ever
+        // opened (picks gated / abstained), reading like positions that don't exist.
+        const enteredMarkets: string[] = [], exitedMarkets: string[] = [], unfilled: string[] = [];
 
-      // (a) EXITS — full or partial fixation on this strategy's open positions.
-      const exitedIds = new Set<string>();
-      for (const ex of dec.exits) {
-        // Resolve the strategist's (possibly paraphrased) exit label to a real
-        // open position — exact first, then the safe fuzzy match, so an exit the
-        // model asked for isn't silently dropped and the position left open.
-        const b = myOpen.find((x) => norm(x.market_label) === norm(ex.market)) ?? myOpen.find((x) => sameMarketLabel(x.market_label, ex.market));
-        const mk = b && markets.find((x) => x.label === b.market_label);
-        if (!b || !mk || mk.price == null || b.entry_price == null) continue;
-        // Dedup on the RESOLVED bet id, not the label: two paraphrased exits
-        // ("Under 2.5" / "Under 2.5 goals") map to the same position and the
-        // second would size off the already-shrunk stake → over-fixation.
-        if (exitedIds.has(b.id)) continue;
-        exitedIds.add(b.id);
-        // Take-profit CHURN throttle: the periodic heartbeat, on a drifting price, provokes a
-        // partial fixation every cycle (ten in 20 min). Cap it — one partial TAKE-PROFIT per
-        // position per PARTIAL_TP_THROTTLE_MIN. A DEFENSIVE exit (stop / thesis_stop /
-        // counter_scenario) and a FULL close (fraction≥1) are NEVER throttled; classification
-        // fails toward EXECUTING, so a defensive exit is never delayed by a misread.
-        const exBlob = `${ex.trigger ?? ""} ${ex.reason ?? ""}`.toLowerCase();
-        const defensiveExit = /thesis_stop|counter_scenario|\bstop\b|стоп|слома|сломан|красн|удал|травм/.test(exBlob);
-        const takeProfitExit = /take_price|take_profit|тейк|фикс|прибыл|edge (исчерп|закры)|цена (дош|дости)|на пике/.test(exBlob);
-        if (PARTIAL_TP_THROTTLE_MIN > 0 && ex.fraction < 1 && takeProfitExit && !defensiveExit) {
-          const prof = b.risk_profile_id ?? "medium";
-          const lastPartialMs = R.betsForMatch(db, m.id, sid)
-            .filter((x) => x.settled_by === "partial" && (x.risk_profile_id ?? "medium") === prof && norm(x.market_label) === norm(b.market_label) && x.settled_at)
-            .reduce((mx, x) => Math.max(mx, Date.parse(x.settled_at as string)), 0);
-          if (lastPartialMs && nowMs - lastPartialMs < PARTIAL_TP_THROTTLE_MIN * 60_000) {
-            const holdKey = `«${b.market_label}» тейк`;
+        // (a) EXITS — full or partial fixation on this strategy's open positions.
+        const exitedIds = new Set<string>();
+        for (const ex of dec.exits) {
+          // Resolve the strategist's (possibly paraphrased) exit label to a real
+          // open position — exact first, then the safe fuzzy match, so an exit the
+          // model asked for isn't silently dropped and the position left open.
+          const b = myOpen.find((x) => norm(x.market_label) === norm(ex.market)) ?? myOpen.find((x) => sameMarketLabel(x.market_label, ex.market));
+          const mk = b && markets.find((x) => x.label === b.market_label);
+          if (!b || !mk || mk.price == null || b.entry_price == null) continue;
+          // Dedup on the RESOLVED bet id, not the label: two paraphrased exits
+          // ("Under 2.5" / "Under 2.5 goals") map to the same position and the
+          // second would size off the already-shrunk stake → over-fixation.
+          if (exitedIds.has(b.id)) continue;
+          exitedIds.add(b.id);
+          // Take-profit CHURN throttle: the periodic heartbeat, on a drifting price, provokes a
+          // partial fixation every cycle (ten in 20 min). Cap it — one partial TAKE-PROFIT per
+          // position per PARTIAL_TP_THROTTLE_MIN. A DEFENSIVE exit (stop / thesis_stop /
+          // counter_scenario) and a FULL close (fraction≥1) are NEVER throttled; classification
+          // fails toward EXECUTING, so a defensive exit is never delayed by a misread.
+          const exBlob = `${ex.trigger ?? ""} ${ex.reason ?? ""}`.toLowerCase();
+          const defensiveExit = /thesis_stop|counter_scenario|\bstop\b|стоп|слома|сломан|красн|удал|травм/.test(exBlob);
+          const takeProfitExit = /take_price|take_profit|тейк|фикс|прибыл|edge (исчерп|закры)|цена (дош|дости)|на пике/.test(exBlob);
+          if (PARTIAL_TP_THROTTLE_MIN > 0 && ex.fraction < 1 && takeProfitExit && !defensiveExit) {
+            const prof = b.risk_profile_id ?? "medium";
+            const lastPartialMs = R.betsForMatch(db, m.id, sid)
+              .filter((x) => x.settled_by === "partial" && (x.risk_profile_id ?? "medium") === prof && norm(x.market_label) === norm(b.market_label) && x.settled_at)
+              .reduce((mx, x) => Math.max(mx, Date.parse(x.settled_at as string)), 0);
+            if (lastPartialMs && nowMs - lastPartialMs < PARTIAL_TP_THROTTLE_MIN * 60_000) {
+              const holdKey = `«${b.market_label}» тейк`;
+              const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
+              if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `частичная фиксация ${holdKey} отложена — последняя ${Math.round((nowMs - lastPartialMs) / 60_000)}м назад < ${PARTIAL_TP_THROTTLE_MIN}м (partial_tp_throttle); держим ногу`, created_at: now });
+              continue;
+            }
+          }
+          // Fill the (partial) close against the real bid book — exit slippage into P&L.
+          const basis = (b.stake ?? 0) * Math.min(ex.fraction, 1);
+          const sell = await sellVwapCents(mk, b.entry_price, basis, poly, deps, mk.price);
+          // Phantom-bid guard, SYMMETRIC with the deterministic exit path (evaluateExits):
+          // a strategist exit (thesis_stop / counter_scenario) must NOT dump into a degenerate
+          // bid (≤FLOOR¢) sitting ≥GAP¢ below the mark — that's a momentarily-broken book, not
+          // the real value. HOLD and let the position ride to real settlement / a real book next
+          // cycle, exactly as a mechanical stop would. Only on a REAL book (fromBook) and only
+          // for phantom-LOW bids: a genuine take-profit (high bid) or a modelled parametric price
+          // is unaffected. Log at most once per continuous hold period for this market.
+          if (sell.fromBook && sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP) {
+            const holdKey = `«${b.market_label}»`;
             const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
-            if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `частичная фиксация ${holdKey} отложена — последняя ${Math.round((nowMs - lastPartialMs) / 60_000)}м назад < ${PARTIAL_TP_THROTTLE_MIN}м (partial_tp_throttle); держим ногу`, created_at: now });
+            if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отклонён по ${holdKey}: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${ex.reason}); держим до реального рынка/сеттла (exit_phantom_block)`, created_at: now });
             continue;
           }
-        }
-        // Fill the (partial) close against the real bid book — exit slippage into P&L.
-        const basis = (b.stake ?? 0) * Math.min(ex.fraction, 1);
-        const sell = await sellVwapCents(mk, b.entry_price, basis, poly, deps, mk.price);
-        // Phantom-bid guard, SYMMETRIC with the deterministic exit path (evaluateExits):
-        // a strategist exit (thesis_stop / counter_scenario) must NOT dump into a degenerate
-        // bid (≤FLOOR¢) sitting ≥GAP¢ below the mark — that's a momentarily-broken book, not
-        // the real value. HOLD and let the position ride to real settlement / a real book next
-        // cycle, exactly as a mechanical stop would. Only on a REAL book (fromBook) and only
-        // for phantom-LOW bids: a genuine take-profit (high bid) or a modelled parametric price
-        // is unaffected. Log at most once per continuous hold period for this market.
-        if (sell.fromBook && sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP) {
-          const holdKey = `«${b.market_label}»`;
-          const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
-          if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отклонён по ${holdKey}: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${ex.reason}); держим до реального рынка/сеттла (exit_phantom_block)`, created_at: now });
-          continue;
-        }
-        // Slippage guard, SYMMETRIC with evaluateExits: don't dump the full stake through a
-        // thin book when the best bid can pay far more than the dump realizes — that gap is a
-        // depth artifact, not the value. HOLD and let it ride to a deeper book / settlement.
-        if (sell.fromBook && sell.bestBidCents != null && (sell.bestBidCents - sell.cents) >= EXIT_SLIPPAGE_BLOCK) {
-          const holdKey = `«${b.market_label}»`;
-          const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
-          if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отклонён по ${holdKey}: фулл-стейк VWAP ${sell.cents}¢ против бида ${sell.bestBidCents}¢ (слип −${Math.round((sell.bestBidCents - sell.cents) * 10) / 10}¢) — книга не держит размер (${ex.reason}); держим до реального рынка/сеттла (exit_slippage_block)`, created_at: now });
-          continue;
-        }
-        const { pnl, partial } = closeBetPortion(db, b, ex.fraction, sell.cents, minuteLabel(m), now);
-        const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
-        const trg = ex.trigger ? ` (${ex.trigger})` : ""; // which v3 live trigger fired (take_price / counter_scenario / …)
-        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag})${trg} @ ${sell.cents}¢ · стратег: ${ex.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
-        out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}`, pnl });
-        exitedMarkets.push(`${b.market_label} (${tag})`);
-        touched.add(sid);
-      }
-
-      // (b) ENTRIES — live positions the trigger/plan opened (buyback, xG add).
-      // Only a pair with an ACTIVE share can open (pct=0 = exit-only pair whose
-      // share was removed). Code sizes/gates via the profile's risk_config (§9.6,
-      // module #3/#5); the strategist re-estimates the live prob, edge is off the
-      // de-vigged price. Dedup against markets this pair already holds/proposed.
-      if (pct > 0 && dec.picks.length) {
-        const budget = stratBudget(c.budget, pct);
-        const cfg = getProfileConfig(db, profile);
-        const pairBets = R.betsForMatch(db, m.id, sid).filter((b) => (b.risk_profile_id ?? "medium") === profile);
-        const liveHeld = pairBets.filter((b) => b.status === "open" || b.status === "proposed");
-        const myPairSettled = pairBets.filter((b) => b.status === "settled_lost"); // for the re-entry cooldown
-        const held = new Set(liveHeld.map((b) => norm(b.market_label)));
-        // §9.3 cap is per-COMPETITION and per-pair (open + proposed − realized).
-        let exposure = strategyCompExposure(db, comp, sid, profile) - strategyCompRealized(db, comp, sid, profile);
-        let matchExposure = myOpen.reduce((s, b) => s + (b.stake ?? 0), 0);
-        // Same-event correlation exposure, seeded from held/proposed positions so
-        // a live add to a correlated market stacks against them (see correlationKey).
-        const clusterExp = new Map<string, number>();
-        for (const b of liveHeld) { const k = correlationKey(b.market_label, m.home, m.away); if (k) clusterExp.set(k, (clusterExp.get(k) ?? 0) + (b.stake ?? 0)); }
-        for (const pick of dec.picks) {
-          const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
-          if (!mk || mk.price == null) { unfilled.push(`«${pick.label}» — нет рынка`); continue; }
-          // LIVE re-scoring: size off the strategist's OWN current probability (it
-          // re-estimates from the live score/minute — a 0:2 game's "Over 1.5" is
-          // ~1.0, not the stale pre-match prob). Fall back to the stored prob only
-          // if none given. Refresh the market ai_prob so the UI edge is live too.
-          const ourProb = pick.prob != null ? pick.prob : mk.ai_prob;
-          if (ourProb == null) { unfilled.push(`«${mk.label}» — нет оценки`); continue; }
-          if (pick.prob != null) R.setMarketAiProb(db, mk.id, pick.prob);
-          if (held.has(norm(mk.label))) continue;                       // already in this market
-          // Re-entry cooldown: this pair CLOSED this market at a LOSS within the window
-          // → don't chase it lower on a noisy book (see REENTRY_COOLDOWN_MS). Only an
-          // EARLY/PARTIAL losing close cools down (a real end-of-match settlement can't
-          // occur mid-live); a winning close never does.
-          const cutoff = nowMs - REENTRY_COOLDOWN_MS;
-          const recentLoss = myPairSettled.some((x) => x.status === "settled_lost"
-            && (x.settled_by === "early" || x.settled_by === "partial")
-            && norm(x.market_label) === norm(mk.label)
-            && x.settled_at != null && Date.parse(x.settled_at) >= cutoff);
-          if (recentLoss) { unfilled.push(`«${mk.label}» — недавний убыточный выход, кулдаун на перезаход (reentry_cooldown)`); continue; }
-          const implied = impliedMap.get(mk.label)?.implied ?? mk.price / 100;
-          const cKey = correlationKey(mk.label, m.home, m.away);
-          const r = sizePrematch({ ourProb, priceCents: mk.price, implied, calibration, liquidity: liqNum(mk.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg, allowLargeEdge: true });
-          if (r.status !== "enter") { unfilled.push(`«${mk.label}» — ${r.reason}`); continue; }
-          exposure += r.stake; matchExposure += r.stake;
-          if (cKey) clusterExp.set(cKey, (clusterExp.get(cKey) ?? 0) + r.stake);
-          held.add(norm(mk.label));
-          R.insertBet(db, {
-            id: R.uid(), match_id: m.id, strategy_id: sid, risk_profile_id: profile, market_label: mk.label,
-            status: "proposed", proposed_price: mk.price, entry_price: null, current_price: null,
-            closing_price: null, ai_prob: ourProb, stake: r.stake,
-            rationale: `переоценка (лайв): «${mk.label}» edge ${(r.edge * 100).toFixed(1)}%. ${pick.reason || r.reason}.`,
-            entered_minute: null, result: null, payout: null, created_at: now,
-          });
-          out.entries.push({ matchId: m.id, strategyId: sid, market: mk.label, stake: r.stake });
-          enteredMarkets.push(mk.label);
+          // Slippage guard, SYMMETRIC with evaluateExits: don't dump the full stake through a
+          // thin book when the best bid can pay far more than the dump realizes — that gap is a
+          // depth artifact, not the value. HOLD and let it ride to a deeper book / settlement.
+          if (sell.fromBook && sell.bestBidCents != null && (sell.bestBidCents - sell.cents) >= EXIT_SLIPPAGE_BLOCK) {
+            const holdKey = `«${b.market_label}»`;
+            const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
+            if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отклонён по ${holdKey}: фулл-стейк VWAP ${sell.cents}¢ против бида ${sell.bestBidCents}¢ (слип −${Math.round((sell.bestBidCents - sell.cents) * 10) / 10}¢) — книга не держит размер (${ex.reason}); держим до реального рынка/сеттла (exit_slippage_block)`, created_at: now });
+            continue;
+          }
+          const { pnl, partial } = closeBetPortion(db, b, ex.fraction, sell.cents, minuteLabel(m), now);
+          const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
+          const trg = ex.trigger ? ` (${ex.trigger})` : ""; // which v3 live trigger fired (take_price / counter_scenario / …)
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag})${trg} @ ${sell.cents}¢ · стратег: ${ex.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+          out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}`, pnl });
+          exitedMarkets.push(`${b.market_label} (${tag})`);
           touched.add(sid);
         }
-      }
 
-      // Reassessment note (Переоценки tab) — written AFTER acting, LEADING with
-      // the FACTUAL result so it can't imply positions that weren't opened.
-      const facts: string[] = [];
-      if (enteredMarkets.length) facts.push(`вошёл: ${enteredMarkets.join(", ")}`);
-      if (exitedMarkets.length) facts.push(`вышел: ${exitedMarkets.join(", ")}`);
-      if (!enteredMarkets.length && !exitedMarkets.length) facts.push(myOpen.length ? `держу ${myOpen.length} поз.` : "позиций нет, вход не сделан");
-      if (unfilled.length) facts.push(`не вошёл: ${unfilled.slice(0, 3).join("; ")}`);
-      const branchNote = dec.currentBranch ? ` [ветка: ${dec.currentBranch}]` : ""; // which of the 6 outcome branches the match is in now
-      const noteBody = `${facts.join(" · ")}${branchNote}.${dec.note?.trim() ? " " + dec.note.trim() : ""}`;
-      R.insertReassessment(db, {
-        id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m),
-        body: noteBody, confidence: assess?.confidence ?? null,
-        trigger: labelFor.get(m.id) ?? "time", created_at: now,
-      });
+        // (b) ENTRIES — live positions the trigger/plan opened (buyback, xG add).
+        // Only a pair with an ACTIVE share can open (pct=0 = exit-only pair whose
+        // share was removed). Code sizes/gates via the profile's risk_config (§9.6,
+        // module #3/#5); the strategist re-estimates the live prob, edge is off the
+        // de-vigged price. Dedup against markets this pair already holds/proposed.
+        if (pct > 0 && dec.picks.length) {
+          const budget = stratBudget(c.budget, pct);
+          const cfg = getProfileConfig(db, profile);
+          const pairBets = R.betsForMatch(db, m.id, sid).filter((b) => (b.risk_profile_id ?? "medium") === profile);
+          const liveHeld = pairBets.filter((b) => b.status === "open" || b.status === "proposed");
+          const myPairSettled = pairBets.filter((b) => b.status === "settled_lost"); // for the re-entry cooldown
+          const held = new Set(liveHeld.map((b) => norm(b.market_label)));
+          // §9.3 cap is per-COMPETITION and per-pair (open + proposed − realized).
+          let exposure = strategyCompExposure(db, comp, sid, profile) - strategyCompRealized(db, comp, sid, profile);
+          let matchExposure = myOpen.reduce((s, b) => s + (b.stake ?? 0), 0);
+          // Same-event correlation exposure, seeded from held/proposed positions so
+          // a live add to a correlated market stacks against them (see correlationKey).
+          const clusterExp = new Map<string, number>();
+          for (const b of liveHeld) { const k = correlationKey(b.market_label, m.home, m.away); if (k) clusterExp.set(k, (clusterExp.get(k) ?? 0) + (b.stake ?? 0)); }
+          for (const pick of dec.picks) {
+            const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
+            if (!mk || mk.price == null) { unfilled.push(`«${pick.label}» — нет рынка`); continue; }
+            // LIVE re-scoring: size off the strategist's OWN current probability (it
+            // re-estimates from the live score/minute — a 0:2 game's "Over 1.5" is
+            // ~1.0, not the stale pre-match prob). Fall back to the stored prob only
+            // if none given. Refresh the market ai_prob so the UI edge is live too.
+            const ourProb = pick.prob != null ? pick.prob : mk.ai_prob;
+            if (ourProb == null) { unfilled.push(`«${mk.label}» — нет оценки`); continue; }
+            if (pick.prob != null) R.setMarketAiProb(db, mk.id, pick.prob);
+            if (held.has(norm(mk.label))) continue;                       // already in this market
+            // Re-entry cooldown: this pair CLOSED this market at a LOSS within the window
+            // → don't chase it lower on a noisy book (see REENTRY_COOLDOWN_MS). Only an
+            // EARLY/PARTIAL losing close cools down (a real end-of-match settlement can't
+            // occur mid-live); a winning close never does.
+            const cutoff = nowMs - REENTRY_COOLDOWN_MS;
+            const recentLoss = myPairSettled.some((x) => x.status === "settled_lost"
+              && (x.settled_by === "early" || x.settled_by === "partial")
+              && norm(x.market_label) === norm(mk.label)
+              && x.settled_at != null && Date.parse(x.settled_at) >= cutoff);
+            if (recentLoss) { unfilled.push(`«${mk.label}» — недавний убыточный выход, кулдаун на перезаход (reentry_cooldown)`); continue; }
+            const implied = impliedMap.get(mk.label)?.implied ?? mk.price / 100;
+            const cKey = correlationKey(mk.label, m.home, m.away);
+            const r = sizePrematch({ ourProb, priceCents: mk.price, implied, calibration, liquidity: liqNum(mk.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg, allowLargeEdge: true });
+            if (r.status !== "enter") { unfilled.push(`«${mk.label}» — ${r.reason}`); continue; }
+            exposure += r.stake; matchExposure += r.stake;
+            if (cKey) clusterExp.set(cKey, (clusterExp.get(cKey) ?? 0) + r.stake);
+            held.add(norm(mk.label));
+            R.insertBet(db, {
+              id: R.uid(), match_id: m.id, strategy_id: sid, risk_profile_id: profile, market_label: mk.label,
+              status: "proposed", proposed_price: mk.price, entry_price: null, current_price: null,
+              closing_price: null, ai_prob: ourProb, stake: r.stake,
+              rationale: `переоценка (лайв): «${mk.label}» edge ${(r.edge * 100).toFixed(1)}%. ${pick.reason || r.reason}.`,
+              entered_minute: null, result: null, payout: null, created_at: now,
+            });
+            out.entries.push({ matchId: m.id, strategyId: sid, market: mk.label, stake: r.stake });
+            enteredMarkets.push(mk.label);
+            touched.add(sid);
+          }
+        }
+
+        // Reassessment note (Переоценки tab) — written AFTER acting, LEADING with
+        // the FACTUAL result so it can't imply positions that weren't opened.
+        const facts: string[] = [];
+        if (enteredMarkets.length) facts.push(`вошёл: ${enteredMarkets.join(", ")}`);
+        if (exitedMarkets.length) facts.push(`вышел: ${exitedMarkets.join(", ")}`);
+        if (!enteredMarkets.length && !exitedMarkets.length) facts.push(myOpen.length ? `держу ${myOpen.length} поз.` : "позиций нет, вход не сделан");
+        if (unfilled.length) facts.push(`не вошёл: ${unfilled.slice(0, 3).join("; ")}`);
+        const branchNote = dec.currentBranch ? ` [ветка: ${dec.currentBranch}]` : ""; // which of the 6 outcome branches the match is in now
+        const noteBody = `${facts.join(" · ")}${branchNote}.${dec.note?.trim() ? " " + dec.note.trim() : ""}`;
+        R.insertReassessment(db, {
+          id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m),
+          body: noteBody, confidence: assess?.confidence ?? null,
+          trigger: labelFor.get(m.id) ?? "time", created_at: now,
+        });
+      }
     }
   }
   for (const sid of touched) recomputeMetrics(db, sid, deps);

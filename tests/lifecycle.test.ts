@@ -721,6 +721,32 @@ test("module 5: live reassess uses the LIVE prompt + battle sheet, sizes by risk
   assert.ok(res.entries.some((e) => e.market === "A wins"));
 });
 
+test("live reassess DEDUPS across risk profiles: ONE LLM call per strategy, shared pick sized per profile (§9.6)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  R.insertStrategy(db, { id: "sD", sport_id: "football", name: "Dedup", tag: null, color: "#fff", version: 1, model: "Claude Opus 4.8", model_live: "Claude Sonnet 5", prompt: "p", prompt_live: "LIVE-БОДИ", params: {}, created_at: "t" });
+  R.clearShares(db, comp.id);
+  // one strategy funded on THREE risk profiles — the old code fired 3 LLM calls
+  for (const pid of ["aggressive", "medium", "conservative"])
+    R.setShare(db, { competition_id: comp.id, strategy_id: "sD", risk_profile_id: pid, pct: 20 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "A wins", price: 40, ai_prob: 0.7, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+
+  let calls = 0;
+  const mock = (async () => { calls++; return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [{ label: "A wins", prob: 0.7, conviction: "высокая", reason: "edge" }], exits: [], note: "" }) }] }) }; }) as any;
+  // triggeredOnly isolates to the one triggered match (the seed has other live matches)
+  const res = await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } }, { newEventMatchIds: new Set([mid]), triggeredOnly: true, max: 50, onlyStrategyId: "sD" });
+
+  assert.equal(calls, 1, "ONE strategist call for the strategy, not one per (strategy × profile) pair");
+  assert.equal(res.llmCalls, 1, "run-level llmCalls counts one, not three");
+  // the single shared judgment is applied to each funded profile with its own sizing
+  const proposed = R.betsForMatch(db, mid, "sD").filter((b) => b.status === "proposed");
+  const profs = new Set(proposed.map((b) => b.risk_profile_id));
+  assert.ok(profs.size >= 2, `shared pick entered on multiple profiles (got ${[...profs].join(",")})`);
+});
+
 test("strategistReassess opens a fresh entry on a live trigger (no prior position)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
