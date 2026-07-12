@@ -49,6 +49,24 @@ export async function POST(req: Request) {
         }
         return ok(saveShadowConfig(db, clean as any, new Date().toISOString()) as any);
       }
+      case "shadowReplay": {
+        // Offline what-if calibration: replay the recorded entry stream under a CANDIDATE
+        // config vs the current one. Read-only — writes nothing, doesn't touch history.
+        const { loadShadowConfig, buildReplayEntries, shadowReplay } = await import("@/lib/shadow");
+        const cur = loadShadowConfig(db);
+        const src = (body.config ?? {}) as Record<string, unknown>;
+        const cand: any = { ...cur };
+        if ("enabled" in src) cand.enabled = !!src.enabled;
+        const pcts = new Set(["liveBufferPct", "capCategoryPct", "capStrategyPct", "capMatchPct", "cashReservePct"]);
+        for (const k of ["bankTotal", "settlementLagMin", ...pcts]) {
+          if (!(k in src)) continue;
+          const n = Number(src[k]);
+          if (!Number.isFinite(n) || n < 0) return bad(`Некорректное значение: ${k}`);
+          cand[k] = pcts.has(k) ? Math.min(1, n) : n;
+        }
+        const entries = buildReplayEntries(db);
+        return ok({ baseline: shadowReplay(entries, cur), candidate: shadowReplay(entries, cand), sampleSize: entries.length } as any);
+      }
       case "setTreasury": {
         const amount = Math.round(Number(body.amount));
         if (!isFinite(amount) || amount < 0) return bad("Некорректная сумма");

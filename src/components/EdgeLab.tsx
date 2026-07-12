@@ -710,12 +710,14 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       ) : screen === "metrics" ? (
         <MetricsScreen catalog={catalog} quality={QUALITY} stats={strategyStats} />
       ) : screen === "shadow" ? (
-        <ShadowScreen data={shadow} onSave={async (config: any) => {
-          const r = await mutate({ type: "setShadowConfig", config });
-          if (r && r.ok !== false) { await reloadApp().catch(() => {}); toast("ok", "Настройки shadow сохранены"); }
-          else toast("err", r?.error || "Не удалось сохранить настройки shadow");
-          return r;
-        }} />
+        <ShadowScreen data={shadow}
+          onSave={async (config: any) => {
+            const r = await mutate({ type: "setShadowConfig", config });
+            if (r && r.ok !== false) { await reloadApp().catch(() => {}); toast("ok", "Настройки shadow сохранены"); }
+            else toast("err", r?.error || "Не удалось сохранить настройки shadow");
+            return r;
+          }}
+          onReplay={async (config: any) => mutate({ type: "shadowReplay", config })} />
       ) : (
         <ModelsScreen providers={providers} setProviders={setProviders} total={TOTAL_BALANCE} allocated={allocatedSum} cron={initial.cron}
           onSetTotal={async (amount: number) => {

@@ -112,6 +112,44 @@ export interface ShadowEntryRequest {
 }
 export type ShadowVerdict = "allowed" | "blocked" | "trimmed";
 
+// Running pool usage while evaluating a batch/timeline. `used` sums BOTH reserved and
+// settling (both hold capital until settling frees), so free = bank − used.
+interface PoolTotals { used: number; liveUsed: number; cat: Record<string, number>; strat: Record<string, number>; match: Record<string, number>; }
+interface EntryReq { size: number; edge: number; isLive: boolean; competitionId: string; strategyId: string; matchId: string; }
+const emptyTotals = (): PoolTotals => ({ used: 0, liveUsed: 0, cat: {}, strat: {}, match: {} });
+
+/** THE single-source allocation decision for one entry against a running pool — used by
+ *  BOTH the live evaluator and the offline replay so they can never drift. Mutates `t`
+ *  when capital is reserved. Prematch keeps the live buffer; live may spend it; the
+ *  cash floor is inviolable; per-match/category/strategy ceilings cap concentration. */
+function decideEntry(t: PoolTotals, req: EntryReq, cfg: ShadowConfig): { verdict: ShadowVerdict; reserved: number; reason: string | null; freeAt: number; liveBufferFree: number } {
+  const bank = cfg.bankTotal, size = round2(req.size);
+  const freeGeneral = bank - t.used;
+  const liveBufferFree = Math.max(0, cfg.liveBufferPct * bank - t.liveUsed);
+  const cashFloor = cfg.cashReservePct * bank;
+  const rooms: { room: number; reason: string }[] = [
+    { room: freeGeneral - cashFloor, reason: freeGeneral <= 0.01 ? "insufficient_free" : "cash_reserve" },
+    { room: cfg.capMatchPct * bank - (t.match[req.matchId] ?? 0), reason: "cap_match" },
+    { room: cfg.capCategoryPct * bank - (t.cat[req.competitionId] ?? 0), reason: "cap_category" },
+    { room: cfg.capStrategyPct * bank - (t.strat[req.strategyId] ?? 0), reason: "cap_strategy" },
+  ];
+  if (!req.isLive) rooms.push({ room: freeGeneral - cashFloor - liveBufferFree, reason: "live_buffer" });
+  let binding = rooms[0];
+  for (const r of rooms) if (r.room < binding.room) binding = r;
+  const minRoom = round2(binding.room);
+  let verdict: ShadowVerdict, reserved: number, reason: string | null;
+  if (minRoom <= 0.01) { verdict = "blocked"; reserved = 0; reason = binding.reason; }
+  else if (minRoom < size) { verdict = "trimmed"; reserved = minRoom; reason = binding.reason; }
+  else { verdict = "allowed"; reserved = size; reason = null; }
+  if (reserved > 0) {
+    t.used += reserved; if (req.isLive) t.liveUsed += reserved;
+    t.cat[req.competitionId] = (t.cat[req.competitionId] ?? 0) + reserved;
+    t.strat[req.strategyId] = (t.strat[req.strategyId] ?? 0) + reserved;
+    t.match[req.matchId] = (t.match[req.matchId] ?? 0) + reserved;
+  }
+  return { verdict, reserved, reason, freeAt: round2(freeGeneral), liveBufferFree: round2(liveBufferFree) };
+}
+
 /** Evaluate a BATCH of real fills against the shared pool, as if they'd all asked for
  *  money this tick. Higher-edge entries win first (deterministic sort). Each records one
  *  shadow_event (allowed / blocked / trimmed + reason) and, when funded, reserves capital.
@@ -119,58 +157,33 @@ export type ShadowVerdict = "allowed" | "blocked" | "trimmed";
 export function shadowOnEntries(db: Database, requests: ShadowEntryRequest[], cfg: ShadowConfig, nowIso: string): void {
   if (!cfg.enabled || !requests.length) return;
   sweepSettled(db, nowIso);
-  // running totals, seeded from existing reserves so a live add stacks on prior cycles
-  const rows = R.allShadowReserves(db);
   const bank = cfg.bankTotal;
-  let totalUsed = 0, liveUsed = 0;
-  const catUsed: Record<string, number> = {}, stratUsed: Record<string, number> = {}, matchUsed: Record<string, number> = {};
-  for (const r of rows) {
-    totalUsed += r.size; if (r.is_live) liveUsed += r.size;
-    catUsed[r.competition_id] = (catUsed[r.competition_id] ?? 0) + r.size;
-    stratUsed[r.strategy_id] = (stratUsed[r.strategy_id] ?? 0) + r.size;
-    matchUsed[r.match_id] = (matchUsed[r.match_id] ?? 0) + r.size;
+  // running totals, seeded from existing reserves so a live add stacks on prior cycles
+  const t = emptyTotals();
+  for (const r of R.allShadowReserves(db)) {
+    t.used += r.size; if (r.is_live) t.liveUsed += r.size;
+    t.cat[r.competition_id] = (t.cat[r.competition_id] ?? 0) + r.size;
+    t.strat[r.strategy_id] = (t.strat[r.strategy_id] ?? 0) + r.size;
+    t.match[r.match_id] = (t.match[r.match_id] ?? 0) + r.size;
   }
-  const capMatch = cfg.capMatchPct * bank, capCat = cfg.capCategoryPct * bank, capStrat = cfg.capStrategyPct * bank;
-  const cashFloor = cfg.cashReservePct * bank;
   // Edge-priority: the pool funds the strongest first; ties broken by betId for determinism.
   const ordered = [...requests].sort((a, b) => (b.edge - a.edge) || (a.betId < b.betId ? -1 : 1));
-  // Contention = more than one entry competed AND at least one was pool-limited this tick.
-  let poolShort = false;
+  let poolShort = false; // contention = >1 entry competed AND ≥1 was pool-limited this tick
   const decisions: { req: ShadowEntryRequest; verdict: ShadowVerdict; reserved: number; reason: string | null; freeAt: number; snap: string }[] = [];
   for (const req of ordered) {
-    const size = round2(req.size);
-    const freeGeneral = bank - totalUsed;
-    const liveBufferFree = Math.max(0, cfg.liveBufferPct * bank - liveUsed);
-    // Room under each constraint; the tightest binds. Prematch also keeps the live buffer.
-    const rooms: { room: number; reason: string }[] = [
-      { room: freeGeneral - cashFloor, reason: freeGeneral <= 0.01 ? "insufficient_free" : "cash_reserve" },
-      { room: capMatch - (matchUsed[req.matchId] ?? 0), reason: "cap_match" },
-      { room: capCat - (catUsed[req.competitionId] ?? 0), reason: "cap_category" },
-      { room: capStrat - (stratUsed[req.strategyId] ?? 0), reason: "cap_strategy" },
-    ];
-    if (!req.isLive) rooms.push({ room: freeGeneral - cashFloor - liveBufferFree, reason: "live_buffer" });
-    let binding = rooms[0];
-    for (const r of rooms) if (r.room < binding.room) binding = r;
-    const minRoom = round2(binding.room);
-    let verdict: ShadowVerdict, reserved: number, reason: string | null;
-    if (minRoom <= 0.01) { verdict = "blocked"; reserved = 0; reason = binding.reason; poolShort ||= isPoolReason(binding.reason); }
-    else if (minRoom < size) { verdict = "trimmed"; reserved = minRoom; reason = binding.reason; poolShort ||= isPoolReason(binding.reason); }
-    else { verdict = "allowed"; reserved = size; reason = null; }
-    if (reserved > 0) {
-      totalUsed += reserved; if (req.isLive) liveUsed += reserved;
-      catUsed[req.competitionId] = (catUsed[req.competitionId] ?? 0) + reserved;
-      stratUsed[req.strategyId] = (stratUsed[req.strategyId] ?? 0) + reserved;
-      matchUsed[req.matchId] = (matchUsed[req.matchId] ?? 0) + reserved;
+    const d = decideEntry(t, req, cfg);
+    if (d.verdict !== "allowed" && d.reason && isPoolReason(d.reason)) poolShort = true;
+    if (d.reserved > 0) {
       try {
         R.insertShadowReserve(db, {
           id: R.uid(), bet_id: req.betId, match_id: req.matchId, competition_id: req.competitionId,
-          strategy_id: req.strategyId, profile_id: req.profileId, size: reserved, is_live: req.isLive ? 1 : 0,
+          strategy_id: req.strategyId, profile_id: req.profileId, size: d.reserved, is_live: req.isLive ? 1 : 0,
           edge: req.edge, state: "reserved", settle_at: null, created_at: nowIso,
         });
       } catch { /* best-effort */ }
     }
-    const snap = JSON.stringify({ bank, reserved: round2(bank - freeGeneral), settling: 0, free: round2(freeGeneral), liveBufferFree: round2(liveBufferFree) });
-    decisions.push({ req, verdict, reserved, reason, freeAt: round2(freeGeneral), snap });
+    const snap = JSON.stringify({ bank, reserved: round2(bank - d.freeAt), settling: 0, free: d.freeAt, liveBufferFree: d.liveBufferFree });
+    decisions.push({ req, verdict: d.verdict, reserved: d.reserved, reason: d.reason, freeAt: d.freeAt, snap });
   }
   const contended = requests.length > 1 && poolShort;
   // Snapshot the config IN EFFECT so a decision stays attributable to the caps/floors that
@@ -264,4 +277,70 @@ export function shadowAnalytics(db: Database, cfg: ShadowConfig): ShadowAnalytic
     trimmedPct: total ? round2((trimmed / total) * 100) : 0,
     byReason, missedPnl: round2(missedPnl), contentionEvents, utilization,
   };
+}
+
+export interface ReplayEntry {
+  at: string; size: number; edge: number; isLive: boolean;
+  matchId: string; competitionId: string; strategyId: string;
+  exitAt: string | null; realPnl: number | null;
+}
+export interface ReplaySummary {
+  total: number; allowed: number; blocked: number; trimmed: number;
+  blockedPct: number; trimmedPct: number; byReason: Record<string, number>;
+  missedPnl: number; peakUtilPct: number;
+}
+
+/** Reconstruct the historical entry stream from the ledger + the real bets — entry time
+ *  from the event, exit time + realised P&L from the bet. Raw material for offline replay. */
+export function buildReplayEntries(db: Database): ReplayEntry[] {
+  return R.allShadowEvents(db).map((e) => {
+    const bet = e.bet_id ? R.getBet(db, e.bet_id) : null;
+    const settled = !!bet && (bet.status === "settled_won" || bet.status === "settled_lost");
+    return {
+      at: e.created_at, size: e.size_requested, edge: e.edge, isLive: !!e.is_live,
+      matchId: e.match_id, competitionId: e.competition_id, strategyId: e.strategy_id,
+      exitAt: settled ? (bet!.settled_at ?? null) : null,
+      realPnl: settled && bet!.payout != null && bet!.stake != null ? bet!.payout - bet!.stake : null,
+    };
+  });
+}
+
+/** Deterministically REPLAY the recorded entry stream under a CANDIDATE config — without
+ *  touching stored history. Reconstructs the reserve→settling→free timeline (entries batch
+ *  by identical timestamp, edge-priority via the SAME decideEntry the live path uses; a
+ *  close frees its reserve after the candidate's lag) and reports the resulting deficit.
+ *  This is the calibration tool — «what if the bank were $3000 / the buffer 15%?». */
+export function shadowReplay(entries: ReplayEntry[], cfg: ShadowConfig): ReplaySummary {
+  const lagMs = cfg.settlementLagMin * 60_000;
+  const t = emptyTotals();
+  const reservedOf = new Map<ReplayEntry, number>();
+  const freeEvents: { ms: number; e: ReplayEntry }[] = [];
+  const s: ReplaySummary = { total: 0, allowed: 0, blocked: 0, trimmed: 0, blockedPct: 0, trimmedPct: 0, byReason: {}, missedPnl: 0, peakUtilPct: 0 };
+  // Group ENTERs by identical timestamp so a same-cycle batch competes together (edge-priority).
+  const byTime = new Map<number, ReplayEntry[]>();
+  for (const e of entries) { const ms = Date.parse(e.at) || 0; const a = byTime.get(ms) ?? []; a.push(e); byTime.set(ms, a); }
+  const sweep = (upto: number) => {
+    for (let i = freeEvents.length - 1; i >= 0; i--) if (freeEvents[i].ms <= upto) {
+      const e = freeEvents[i].e, r = reservedOf.get(e) ?? 0;
+      if (r > 0) { t.used -= r; if (e.isLive) t.liveUsed -= r; t.cat[e.competitionId] -= r; t.strat[e.strategyId] -= r; t.match[e.matchId] -= r; }
+      freeEvents.splice(i, 1);
+    }
+  };
+  for (const ms of [...byTime.keys()].sort((a, b) => a - b)) {
+    sweep(ms); // release reserves whose (exit + lag) has elapsed by this batch's time
+    for (const e of byTime.get(ms)!.slice().sort((a, b) => (b.edge - a.edge) || (a.at < b.at ? -1 : 1))) {
+      const d = decideEntry(t, e, cfg);
+      s.total++;
+      if (d.verdict === "allowed") s.allowed++; else if (d.verdict === "blocked") s.blocked++; else s.trimmed++;
+      if (d.verdict !== "allowed" && d.reason) s.byReason[d.reason] = (s.byReason[d.reason] ?? 0) + 1;
+      const unfunded = e.size > 0 ? (e.size - d.reserved) / e.size : 0;
+      if (unfunded > 0 && e.realPnl != null) s.missedPnl += e.realPnl * unfunded;
+      s.peakUtilPct = Math.max(s.peakUtilPct, cfg.bankTotal > 0 ? (t.used / cfg.bankTotal) * 100 : 0);
+      if (d.reserved > 0) { reservedOf.set(e, d.reserved); if (e.exitAt) freeEvents.push({ ms: (Date.parse(e.exitAt) || ms) + lagMs, e }); }
+    }
+  }
+  s.blockedPct = s.total ? round2((s.blocked / s.total) * 100) : 0;
+  s.trimmedPct = s.total ? round2((s.trimmed / s.total) * 100) : 0;
+  s.missedPnl = round2(s.missedPnl); s.peakUtilPct = round2(s.peakUtilPct);
+  return s;
 }

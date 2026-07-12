@@ -6,7 +6,8 @@ import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import {
   SHADOW_DEFAULTS, shadowOnEntries, shadowOnExit, shadowPoolState, sweepSettled,
-  shadowAnalytics, loadShadowConfig, saveShadowConfig, type ShadowConfig, type ShadowEntryRequest,
+  shadowAnalytics, loadShadowConfig, saveShadowConfig, shadowReplay,
+  type ShadowConfig, type ShadowEntryRequest, type ReplayEntry,
 } from "../src/lib/shadow.js";
 
 const T0 = "2026-07-11T20:00:00Z";
@@ -171,6 +172,34 @@ test("shadow: the autoEnter hook records ONE shadow event + reserve when a real 
   assert.equal(evs.length, 1, "the fill produced exactly one shadow event (single-source hook)");
   assert.equal(evs[0].verdict, "allowed", "with an empty $5000 pool the $100 fill is allowed");
   assert.equal(R.shadowReservedForBet(db, "sb")!.size, 100, "and $100 is reserved in the shadow pool");
+});
+
+test("shadow replay: a smaller bank creates deficit (edge-priority), a trimmed loser gives negative missed P&L", () => {
+  const entries: ReplayEntry[] = [
+    { at: "2026-07-11T20:00:00Z", size: 600, edge: 0.15, isLive: false, matchId: "m1", competitionId: "c1", strategyId: "s1", exitAt: null, realPnl: 100 },
+    { at: "2026-07-11T20:00:00Z", size: 600, edge: 0.05, isLive: false, matchId: "m2", competitionId: "c1", strategyId: "s1", exitAt: null, realPnl: -50 },
+  ];
+  const flat = { cashReservePct: 0, liveBufferPct: 0, capMatchPct: 1, capCategoryPct: 1, capStrategyPct: 1 };
+  const big = shadowReplay(entries, cfg({ bankTotal: 5000, ...flat }));
+  assert.equal(big.blocked + big.trimmed, 0, "a big bank funds both in full");
+
+  const small = shadowReplay(entries, cfg({ bankTotal: 1000, ...flat }));
+  assert.equal(small.allowed, 1, "higher-edge entry funded in full");
+  assert.equal(small.trimmed, 1, "lower-edge entry trimmed to the remaining $400");
+  assert.ok(small.blockedPct + small.trimmedPct > 0, "the smaller bank shows a deficit");
+  assert.ok(small.missedPnl < 0, "the trimmed leg was a loser → deficit AVOIDED a loss (negative missed P&L)");
+});
+
+test("shadow replay: a reserve is released after the lag, so a later entry gets the freed capital", () => {
+  const entries: ReplayEntry[] = [
+    { at: "2026-07-11T20:00:00Z", size: 900, edge: 0.2, isLive: false, matchId: "m1", competitionId: "c1", strategyId: "s1", exitAt: "2026-07-11T20:10:00Z", realPnl: 0 },
+    { at: "2026-07-11T21:00:00Z", size: 900, edge: 0.1, isLive: false, matchId: "m2", competitionId: "c2", strategyId: "s2", exitAt: null, realPnl: 0 },
+  ];
+  const c = cfg({ bankTotal: 1000, cashReservePct: 0, liveBufferPct: 0, capMatchPct: 1, capCategoryPct: 1, capStrategyPct: 1, settlementLagMin: 45 });
+  // entry1 reserves 900 at 20:00, closes 20:10, frees at 20:55; entry2 at 21:00 sees it freed.
+  assert.equal(shadowReplay(entries, c).allowed, 2, "the freed capital funds the later entry");
+  // with a longer lag the reserve is still locked at 21:00 → the later entry is trimmed.
+  assert.equal(shadowReplay(entries, cfg({ ...c, settlementLagMin: 120 })).allowed, 1, "a longer lag keeps capital locked → deficit");
 });
 
 test("shadow: config precedence — defaults < env < saved app_meta (user settings win)", () => {

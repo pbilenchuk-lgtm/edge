@@ -85,7 +85,7 @@ function Meter({ name, used, cap }: { name: string; used: number; cap: number })
   );
 }
 
-export default function ShadowScreen({ data, onSave }: { data: ShadowView; onSave: (config: any) => Promise<any> }) {
+export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowView; onSave: (config: any) => Promise<any>; onReplay: (config: any) => Promise<any> }) {
   const { pool, analytics, config } = data;
   const [filter, setFilter] = useState<"all" | "blocked" | "contention">("all");
   const [cat, setCat] = useState<string>("");
@@ -136,6 +136,22 @@ export default function ShadowScreen({ data, onSave }: { data: ShadowView; onSav
       cashReservePct: Number(form.cashReservePct) / 100,
     }).catch(() => {});
     setSaving(false);
+  };
+
+  // Calibration / what-if: replay the recorded stream under a candidate config (read-only).
+  const [cand, setCand] = useState<any>(toForm(config));
+  const [replay, setReplay] = useState<{ baseline: any; candidate: any; sampleSize: number } | null>(null);
+  const [running, setRunning] = useState(false);
+  const runReplay = async () => {
+    setRunning(true);
+    const r = await onReplay({
+      enabled: true, bankTotal: Number(cand.bankTotal), settlementLagMin: Number(cand.settlementLagMin),
+      liveBufferPct: Number(cand.liveBufferPct) / 100, capCategoryPct: Number(cand.capCategoryPct) / 100,
+      capStrategyPct: Number(cand.capStrategyPct) / 100, capMatchPct: Number(cand.capMatchPct) / 100,
+      cashReservePct: Number(cand.cashReservePct) / 100,
+    }).catch(() => null);
+    if (r && r.ok !== false) setReplay({ baseline: r.baseline, candidate: r.candidate, sampleSize: r.sampleSize });
+    setRunning(false);
   };
 
   return (
@@ -317,6 +333,58 @@ export default function ShadowScreen({ data, onSave }: { data: ShadowView; onSav
             {dirty && <button style={S.ghost} onClick={() => setForm(toForm(config))}>Отменить</button>}
             <span style={S.hint}>применяется с момента изменения — история не пересчитывается</span>
           </div>
+        </div>
+      </div>
+
+      {/* CALIBRATION — offline what-if replay */}
+      <div>
+        <div style={S.secLbl}>Калибровка «что-если»</div>
+        <div style={S.card}>
+          <div style={{ ...S.hint, marginBottom: 12 }}>прогнать всю записанную историю решений с ДРУГИМИ настройками — детерминированно, оффлайн, не трогая историю. Так подбираются потолки по данным, а не на глаз.</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(148px, 1fr))", gap: 14 }}>
+            <SetField label="банк" hint="кандидат"><span style={S.adorn}><span style={S.adornUnit}>$</span><input style={{ ...S.input, borderRadius: 0, borderWidth: "0 0 0 1px", width: 84 }} type="number" step={100} value={cand.bankTotal} onChange={(e) => setCand({ ...cand, bankTotal: e.target.value })} /></span></SetField>
+            <SetField label="лаг резолва" hint="кандидат"><span style={S.adorn}><input style={{ ...S.input, borderRadius: 0, border: "none", width: 60 }} type="number" step={5} value={cand.settlementLagMin} onChange={(e) => setCand({ ...cand, settlementLagMin: e.target.value })} /><span style={S.adornUnit}>мин</span></span></SetField>
+            <PctField label="live-буфер" hint="кандидат" v={cand.liveBufferPct} on={(x) => setCand({ ...cand, liveBufferPct: x })} />
+            <PctField label="неснижаемый остаток" hint="кандидат" v={cand.cashReservePct} on={(x) => setCand({ ...cand, cashReservePct: x })} />
+            <PctField label="потолок категории" hint="кандидат" v={cand.capCategoryPct} on={(x) => setCand({ ...cand, capCategoryPct: x })} />
+            <PctField label="потолок стратегии" hint="кандидат" v={cand.capStrategyPct} on={(x) => setCand({ ...cand, capStrategyPct: x })} />
+            <PctField label="потолок матча" hint="кандидат" v={cand.capMatchPct} on={(x) => setCand({ ...cand, capMatchPct: x })} />
+          </div>
+          <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <button style={{ ...S.btn, opacity: running ? 0.5 : 1 }} onClick={runReplay} disabled={running}>{running ? "Считаю…" : "Прогнать историю"}</button>
+            <button style={S.ghost} onClick={() => setCand(toForm(config))}>= текущие</button>
+            {analytics.total === 0 && <span style={S.hint}>история пуста — прогонять пока нечего</span>}
+          </div>
+          {replay && (
+            <div style={{ marginTop: 16, overflowX: "auto" }}>
+              <div style={{ ...S.hint, marginBottom: 8 }}>сравнение на {replay.sampleSize} записанных решениях</div>
+              <table style={{ borderCollapse: "collapse", minWidth: 460 }}>
+                <thead><tr>{["метрика", "сейчас", "кандидат", "Δ"].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {([
+                    ["дефицит входов", (x: any) => `${Math.round((x.blockedPct + x.trimmedPct) * 10) / 10}%`, true],
+                    ["заблокировано", (x: any) => `${x.blocked}`, true],
+                    ["урезано", (x: any) => `${x.trimmed}`, true],
+                    ["упущенный P&L", (x: any) => usd2(x.missedPnl), true],
+                    ["пик утилизации", (x: any) => `${x.peakUtilPct}%`, false],
+                  ] as const).map(([label, fmt, lowerBetter]) => {
+                    const bv = fmt(replay.baseline), cv = fmt(replay.candidate);
+                    const bn = parseFloat(String(bv).replace(/[^0-9.\-]/g, "")) || 0, cn = parseFloat(String(cv).replace(/[^0-9.\-]/g, "")) || 0;
+                    const delta = Math.round((cn - bn) * 100) / 100;
+                    const good = delta === 0 ? MUTE : (lowerBetter ? delta < 0 : delta > 0) ? GREEN : RED;
+                    return (
+                      <tr key={label}>
+                        <td style={{ ...S.td, color: "#c4cdd9" }}>{label}</td>
+                        <td style={{ ...S.td, fontFamily: MONO }}>{bv}</td>
+                        <td style={{ ...S.td, fontFamily: MONO, fontWeight: 700 }}>{cv}</td>
+                        <td style={{ ...S.td, fontFamily: MONO, color: good }}>{delta > 0 ? "+" : ""}{delta}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </div>
     </main>
