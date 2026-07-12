@@ -133,6 +133,7 @@ export function initSchema(db: Database): void {
     "ALTER TABLE matches ADD COLUMN clock TEXT",
     "ALTER TABLE match_live ADD COLUMN stats TEXT",
     "ALTER TABLE strategies ADD COLUMN prompt_live TEXT",
+    "ALTER TABLE strategies ADD COLUMN model_live TEXT",
     "ALTER TABLE strategy_versions ADD COLUMN prompt_live TEXT",
     "ALTER TABLE bets ADD COLUMN risk_profile_id TEXT",
     "ALTER TABLE shadow_events ADD COLUMN config_snapshot TEXT",

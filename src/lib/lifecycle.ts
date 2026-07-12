@@ -832,7 +832,9 @@ export async function strategistReassess(
         markets: markets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob, liquidity: mk.liquidity != null ? Number(mk.liquidity) : null, openCents: mk.label in opens ? opens[mk.label] : null })),
         openPositions: myOpen.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
         context: [ctx, battleSheet ? `БОЕВОЙ ЛИСТ (план из предматча — исполняй его, не переизобретай):\n${battleSheet}` : null].filter(Boolean).join("\n\n") || undefined,
-      }, strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
+        // LIVE-переоценка исполняет уже сформированный боевой лист — держим её на
+        // более дешёвой модели (model_live), а предматч-вход остаётся на model.
+      }, strat.model_live ?? strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
       out.llmCalls++;
       if (!dec.ok) {
         // The reassessment could NOT be produced (LLM/budget outage, invalid JSON).

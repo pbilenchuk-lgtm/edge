@@ -64,7 +64,7 @@ export interface MatchView {
 export interface LineupView { team: string; formation: string | null; starters: string[] }
 export interface StrategyView {
   id: string; name: string; tag: string | null; color: string; version: number;
-  sport: string; model: string | null; prompt: string; promptLive: string | null; params: StrategyParams;
+  sport: string; model: string | null; modelLive: string | null; prompt: string; promptLive: string | null; params: StrategyParams;
 }
 export interface QualityView {
   brier: number | null; clv: number | null; samples: number;
@@ -186,7 +186,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
 
   const catalog: StrategyView[] = strategies.map((s) => ({
     id: s.id, name: s.name, tag: s.tag, color: s.color ?? "#8b95a5", version: s.version,
-    sport: s.sport_id, model: s.model, prompt: s.prompt, promptLive: s.prompt_live, params: s.params,
+    sport: s.sport_id, model: s.model, modelLive: s.model_live, prompt: s.prompt, promptLive: s.prompt_live, params: s.params,
   }));
 
   // analytics maps

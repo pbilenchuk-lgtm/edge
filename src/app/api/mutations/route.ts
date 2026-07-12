@@ -88,20 +88,23 @@ export async function POST(req: Request) {
         return ok();
       }
       case "createStrategy": {
-        const { sport, name, prompt, promptLive, model, params } = body;
+        const { sport, name, prompt, promptLive, model, modelLive, params } = body;
         const count = R.listStrategies(db).length;
         const id = "s" + Date.now();
         R.insertStrategy(db, {
           id, sport_id: sport, name, tag: "custom", color: PALETTE[count % PALETTE.length],
           version: 1, prompt, prompt_live: promptLive ?? null, params: params ?? extractThresholdsHeuristic(prompt),
-          model: model ?? null, created_at: new Date().toISOString(),
+          // New custom strategies default the live-reassess tier to Sonnet 5 (cheap,
+          // near-Opus on plan execution); the pricier `model` drives prematch entry.
+          model: model ?? null, model_live: modelLive ?? "Claude Sonnet 5", created_at: new Date().toISOString(),
         });
         return ok({ id, color: PALETTE[count % PALETTE.length] });
       }
       case "patchStrategy": {
         const { id, patch } = body;
-        // Frontend sends promptLive (camelCase); the repo column is prompt_live.
+        // Frontend sends camelCase; repo columns are snake_case.
         if (patch && patch.promptLive !== undefined) { patch.prompt_live = patch.promptLive; delete patch.promptLive; }
+        if (patch && patch.modelLive !== undefined) { patch.model_live = patch.modelLive; delete patch.modelLive; }
         R.updateStrategy(db, id, patch);
         return ok();
       }

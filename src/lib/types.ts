@@ -88,7 +88,8 @@ export interface Strategy {
   prompt: string;              // предматч-окно стратега
   prompt_live: string | null;  // live-окно стратега (может отсутствовать)
   params: StrategyParams;
-  model: string | null;
+  model: string | null;       // модель для ПРЕДМАТЧ-входа (формирование тезиса)
+  model_live: string | null;  // модель для LIVE-переоценки (исполнение боевого листа); null → падаем на model
   created_at: string;
 }
 

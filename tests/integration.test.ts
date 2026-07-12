@@ -13,7 +13,7 @@ import {
 } from "../src/lib/polymarket.js";
 import {
   resolveModel, apiKeyFor, callLLM, generateStrategyName, heuristicName,
-  effectiveEnv, providerEnabled, parseJsonLoose, repairJson,
+  effectiveEnv, providerEnabled, parseJsonLoose, repairJson, strategistDecide,
 } from "../src/lib/llm.js";
 import { extractThresholds } from "../src/lib/thresholds.js";
 import { analyzeMatch } from "../src/lib/analysis.js";
@@ -153,7 +153,7 @@ test("migrateStrategyRoster: retires legacy wc, assigns the trio (aggressive) to
   seedRiskProfiles(db, "t");
   // simulate the pre-transition prod state: only the legacy strategy, funded comps
   R.upsertSport(db, "football", "Футбол");
-  R.insertStrategy(db, { id: "wc", sport_id: "football", name: "Мундиаль", tag: null, color: "#e8a838", version: 1, model: null, prompt: "x", prompt_live: null, params: {}, created_at: "t" });
+  R.insertStrategy(db, { id: "wc", sport_id: "football", name: "Мундиаль", tag: null, color: "#e8a838", version: 1, model: null, model_live: null, prompt: "x", prompt_live: null, params: {}, created_at: "t" });
   for (const id of ["pm-a", "pm-b"]) {
     R.upsertCompetition(db, { id, sport_id: "football", name: id, budget: 100, external_league: null, created_at: "t" });
     R.setShare(db, { competition_id: id, strategy_id: "wc", pct: 100 });
@@ -181,7 +181,7 @@ test("migrateStrategyRoster: retires legacy wc, assigns the trio (aggressive) to
 test("two-phase strategy: prompt_live persists through insert, version bump keeps it", () => {
   const db = openDb(":memory:");
   seedDatabase(db);
-  R.insertStrategy(db, { id: "s2p", sport_id: "football", name: "Two-Phase", tag: null, color: "#fff", version: 1, model: null, prompt: "предматч тело", prompt_live: "live тело", params: {}, created_at: "t" });
+  R.insertStrategy(db, { id: "s2p", sport_id: "football", name: "Two-Phase", tag: null, color: "#fff", version: 1, model: null, model_live: null, prompt: "предматч тело", prompt_live: "live тело", params: {}, created_at: "t" });
   assert.equal(R.getStrategy(db, "s2p")!.prompt_live, "live тело");
   // editing the live prompt only
   R.updateStrategy(db, "s2p", { prompt_live: "новое live" });
@@ -607,6 +607,34 @@ test("callLLM: a 529 overloaded IS retried; retries exhausted returns the last e
   );
   assert.equal(res.ok, false);
   assert.equal(calls, 3, "1 + 2 retries all hit the wall");
+});
+
+test("strategistDecide: caches the rules+methodology prefix in the system block, not the volatile user turn", async () => {
+  let captured: any = null;
+  const fake = (async (_url: string, init: any) => {
+    captured = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ content: [{ text: '{"picks":[],"note":"hold"}' }] }) };
+  }) as unknown as typeof fetch;
+  const res = await strategistDecide(
+    {
+      strategyName: "Overreaction", strategyPrompt: "МЕТОДОЛОГИЯ-МАРКЕР-42: выкупай переоценку.",
+      match: { home: "A", away: "B", sport: "football", state: "live", minute: 60, scoreHome: 1, scoreAway: 0, minuteApprox: null },
+      assessment: { confidence: "средняя", short: "s", verdict: "v" },
+      markets: [{ label: "Over 2.5", priceCents: 55, aiProb: null, liquidity: 100, openCents: 50 }],
+      openPositions: [],
+    },
+    "Claude Sonnet 5",
+    { env: { ANTHROPIC_API_KEY: "sk-ant-x" }, fetchImpl: fake },
+  );
+  assert.equal(res.ok, true);
+  // system is a cache-control content block, and the methodology lives there (stable prefix)…
+  assert.ok(Array.isArray(captured.system), "system sent as content blocks");
+  assert.equal(captured.system[0].cache_control?.type, "ephemeral", "cache_control ephemeral on the prefix");
+  assert.ok(captured.system[0].text.includes("МЕТОДОЛОГИЯ-МАРКЕР-42"), "methodology is in the cached system prefix");
+  // …and NOT duplicated into the per-tick user turn (which carries only volatile match/markets).
+  const userTurn = captured.messages[0].content;
+  assert.ok(!userTurn.includes("МЕТОДОЛОГИЯ-МАРКЕР-42"), "methodology not re-sent in the volatile user turn");
+  assert.ok(userTurn.includes("МАТЧ:"), "user turn carries the volatile match block");
 });
 
 test("llm: name generation and threshold extraction fall back without a key", async () => {

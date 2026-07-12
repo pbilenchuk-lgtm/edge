@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS strategies (
   prompt     TEXT NOT NULL,        -- предматч-окно стратега (цельный промт словами)
   prompt_live TEXT,                -- live-окно стратега (может отсутствовать)
   params     TEXT NOT NULL DEFAULT '{}',  -- jsonb: пороги, извлечённые движком (§3.2)
-  model      TEXT,
+  model      TEXT,                 -- модель предматч-входа
+  model_live TEXT,                 -- модель live-переоценки (null → падаем на model)
   created_at TEXT NOT NULL
 );
 

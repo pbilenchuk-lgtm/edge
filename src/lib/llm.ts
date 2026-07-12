@@ -92,6 +92,12 @@ export interface LLMRequest {
   retries?: number;
   /** Base backoff (ms) between retries; doubles each attempt. Default 400. */
   retryBackoffMs?: number;
+  /** Anthropic prompt caching: mark the `system` block as a cacheable prefix
+   *  (cache_control ephemeral). Only helps when `system` is a large STABLE prefix
+   *  reused across many calls (e.g. the live strategist's rules + methodology,
+   *  resent every reassess of a match). Ignored for openai/google (their caching
+   *  is automatic). Below the model's min cacheable size it silently no-ops. */
+  cacheSystem?: boolean;
 }
 
 export type LLMResult =
@@ -201,6 +207,13 @@ function buildRequest(
 ): { url: string; init: RequestInit } {
   const maxTokens = req.maxTokens ?? 1024;
   if (provider === "anthropic") {
+    // Prompt caching: when the caller flags a large stable prefix, send `system`
+    // as a content block with cache_control so the repeated live-reassess calls
+    // for one match read it at ~0.1× instead of re-billing it every tick.
+    const system = req.system == null ? undefined
+      : req.cacheSystem
+        ? [{ type: "text", text: req.system, cache_control: { type: "ephemeral" } }]
+        : req.system;
     return {
       url: "https://api.anthropic.com/v1/messages",
       init: {
@@ -213,7 +226,7 @@ function buildRequest(
         body: JSON.stringify({
           model: apiId,
           max_tokens: maxTokens,
-          system: req.system,
+          ...(system !== undefined ? { system } : {}),
           messages: [{ role: "user", content: req.prompt }],
         }),
       },
@@ -759,8 +772,13 @@ export async function strategistDecide(
       "В ЛЮБОМ входе, включая actions(add/open_new), поле prob ОБЯЗАТЕЛЬНО — без него движок посчитает размер по УСТАРЕВШЕЙ предматч-оценке. И бери market как ПОЛНЫЙ ярлык из списка ДОСЛОВНО (сторона уже в ярлыке: «… — No», «Over 2.5» и т.п.); НЕ дроби на market+side отдельными полями — иначе рынок не найдётся и вход потеряется. " +
       "ВЫХОДЫ — exits ИЛИ actions с action:'reduce'/'close' ИЛИ exit_checks с сработавшим trigger_hit; поля выхода: {market|position (ДОСЛОВНО, ПОЛНЫЙ ярлык), fraction (или action reduce≈частично/close=1), reason, trigger/trigger_hit (напр. take_price/thesis_stop/counter_scenario/goal_scored)}. Закрытие можно указать в exits, в actions ИЛИ в exit_checks — движок объединит и не закроет дважды. " +
       "Опционально на верхнем уровне: match_shape, current_branch (лайв), portfolio_correlation:{both_lose_on_scores,both_lose_weight,coverage_note}, rejected_markets:[{market,reason}], flagged:[{market,reason}], note/notes. " +
-      "Пусто — значит воздержаться. Без текста вне JSON.",
-    prompt: `СТРАТЕГИЯ «${input.strategyName}» (методология):\n${input.strategyPrompt}\n\nМАТЧ: ${input.match.home} — ${input.match.away} (${input.match.sport}, ${input.match.state}${liveMin}, счёт ${score}).\nОценка аналитики: уверенность ${input.assessment.confidence}. ${input.assessment.short} Итог: ${input.assessment.verdict}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы + статистика + события матча — твои триггеры переоценки):\n${input.context}\n` : ""}\nРЫНКИ (цена в ¢, движение от старта = направление price_move, ликвидность = глубина):\n${mkList}\n\nОТКРЫТЫЕ ПОЗИЦИИ:\n${posList}\n${!scoreKnown && input.match.state === "live" ? `\nВАЖНО: провайдер пока не отдаёт счёт/минуту по этому матчу — опирайся на ДВИЖЕНИЕ ЦЕН (price_move от старта) и ликвидность как основной сигнал, оценивай prob по ним. Не отказывайся от решения только из-за отсутствия счёта.` : ""}\nРеши по методологии: во что входить (picks) и что закрывать/фиксировать (exits, можно частично).`,
+      "Пусто — значит воздержаться. Без текста вне JSON." +
+      // Methodology lives in the SYSTEM block (not the user turn) so the stable
+      // prefix — rules + this strategy's methodology — is cacheable and read at
+      // ~0.1× on every reassess tick of the same match instead of re-billed.
+      `\n\nМЕТОДОЛОГИЯ СТРАТЕГИИ «${input.strategyName}» (твой единственный свод правил):\n${input.strategyPrompt}`,
+    cacheSystem: true,
+    prompt: `МАТЧ: ${input.match.home} — ${input.match.away} (${input.match.sport}, ${input.match.state}${liveMin}, счёт ${score}).\nОценка аналитики: уверенность ${input.assessment.confidence}. ${input.assessment.short} Итог: ${input.assessment.verdict}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы + статистика + события матча — твои триггеры переоценки):\n${input.context}\n` : ""}\nРЫНКИ (цена в ¢, движение от старта = направление price_move, ликвидность = глубина):\n${mkList}\n\nОТКРЫТЫЕ ПОЗИЦИИ:\n${posList}\n${!scoreKnown && input.match.state === "live" ? `\nВАЖНО: провайдер пока не отдаёт счёт/минуту по этому матчу — опирайся на ДВИЖЕНИЕ ЦЕН (price_move от старта) и ликвидность как основной сигнал, оценивай prob по ним. Не отказывайся от решения только из-за отсутствия счёта.` : ""}\nРеши по методологии: во что входить (picks) и что закрывать/фиксировать (exits, можно частично).`,
     // The v3/v2 output schema is RICH (pre_match_positions with tree-reasoning +
     // portfolio_correlation, or live_triggers_armed / live_entry_config). At the
     // old 900 the JSON was truncated mid-object → "невалидный JSON" on EVERY pair

@@ -1483,7 +1483,7 @@ function StrategyScreen({ sportId, sportLabel, catalog, setCatalog, competitions
   const availableModels = providers.filter((p: any) => p.hasKey).flatMap((p: any) => p.models);
 
   const addStrategy = async (draft: any) => {
-    const res = await mutate({ type: "createStrategy", sport: sportId, name: draft.name, prompt: draft.prompt, promptLive: draft.promptLive, model: draft.model, params: draft.params });
+    const res = await mutate({ type: "createStrategy", sport: sportId, name: draft.name, prompt: draft.prompt, promptLive: draft.promptLive, model: draft.model, modelLive: draft.modelLive, params: draft.params });
     const id = res.id || "s" + Date.now();
     setCatalog((c: any) => [...c, { ...draft, id, version: 1, sport: sportId, color: res.color || PALETTE[c.length % PALETTE.length], tag: "custom" }]);
     setModal(null);
@@ -1550,7 +1550,7 @@ function StrategyScreen({ sportId, sportLabel, catalog, setCatalog, competitions
       </div>
 
       {sportStrats.length === 0 && <div style={S.empty}>В категории «{sportLabel}» пока нет стратегий.</div>}
-      {sportStrats.map((st: any) => <StrategyCard key={st.id} st={st} overall={stratOverall(competitions, matchDb, st.id, sportId, compBudget, shares)} availableModels={availableModels} onSetModel={(m: string) => updateStrategy(st.id, { model: m })} onGoModels={onGoModels} onEdit={() => setModal({ type: "edit", stratId: st.id })} onImprove={() => setModal({ type: "improve", stratId: st.id })} onDelete={() => deleteStrategy(st.id, st.name)} />)}
+      {sportStrats.map((st: any) => <StrategyCard key={st.id} st={st} overall={stratOverall(competitions, matchDb, st.id, sportId, compBudget, shares)} availableModels={availableModels} onSetModel={(m: string) => updateStrategy(st.id, { model: m })} onSetModelLive={(m: string) => updateStrategy(st.id, { modelLive: m })} onGoModels={onGoModels} onEdit={() => setModal({ type: "edit", stratId: st.id })} onImprove={() => setModal({ type: "improve", stratId: st.id })} onDelete={() => deleteStrategy(st.id, st.name)} />)}
 
       {/* Risk profiles — the named threshold/sizing configs (Окно 4). Added from a
           prompt (human values) → «вытащить и захардкодить» → validated config. */}
@@ -2085,7 +2085,7 @@ function ProviderCard({ p, onSaved }: any) {
   );
 }
 
-function StrategyCard({ st, overall, availableModels, onSetModel, onGoModels, onEdit, onImprove, onDelete }: any) {
+function StrategyCard({ st, overall, availableModels, onSetModel, onSetModelLive, onGoModels, onEdit, onImprove, onDelete }: any) {
   const [open, setOpen] = useState(false);
   return (
     <section style={{ ...S.card, borderColor: st.color + "55" }}>
@@ -2102,8 +2102,12 @@ function StrategyCard({ st, overall, availableModels, onSetModel, onGoModels, on
       {open && (
         <div style={S.stratDetail}>
           <div style={S.modelPickRow}>
-            <span style={S.modelPickLbl}>Модель стратегии:</span>
+            <span style={S.modelPickLbl}>Модель входа (предматч):</span>
             <ModelSelect value={st.model || ""} models={availableModels} onChange={onSetModel} onGoModels={onGoModels} />
+          </div>
+          <div style={S.modelPickRow}>
+            <span style={S.modelPickLbl}>Модель live-переоценки:</span>
+            <ModelSelect value={st.modelLive || st.model || ""} models={availableModels} onChange={onSetModelLive} onGoModels={onGoModels} />
           </div>
           <div style={S.promptLabel}>① Предматч-окно</div>
           <pre style={S.promptBox}>{st.prompt}</pre>
@@ -2194,6 +2198,7 @@ function PromptModal({ title, strat, availableModels, onGoModels, onClose, onSav
   const [prompt, setPrompt] = useState(strat?.prompt || "");
   const [promptLive, setPromptLive] = useState(strat?.promptLive || "");
   const [model, setModel] = useState(strat?.model || (availableModels[0] || ""));
+  const [modelLive, setModelLive] = useState(strat?.modelLive || "Claude Sonnet 5");
   const [gen, setGen] = useState(false);
   const genName = async () => {
     setGen(true);
@@ -2212,14 +2217,16 @@ function PromptModal({ title, strat, availableModels, onGoModels, onClose, onSav
         <button style={S.genNameBtn} onClick={genName} disabled={!prompt.trim() || gen} title="Придумать название">{gen ? "…" : "✨ придумать"}</button>
       </div>
       {!prompt.trim() && <div style={S.genHint}>сначала опиши предматч-промт — из него сгенерируется название</div>}
-      <label style={S.fieldLabel}>Модель, на которой думает стратегия</label>
+      <label style={S.fieldLabel}>Модель предматч-входа (формирует денежный тезис)</label>
       <ModelSelect value={model} models={availableModels} onChange={setModel} onGoModels={onGoModels} />
+      <label style={S.fieldLabel}>Модель live-переоценки (исполняет боевой лист — дешевле)</label>
+      <ModelSelect value={modelLive} models={availableModels} onChange={setModelLive} onGoModels={onGoModels} />
       <label style={S.fieldLabel}>① Предматч-окно (что открыть до матча + заготовки live-плана)</label>
       <textarea style={S.textarea} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={"# ПРЕДМАТЧ\nОчисти цену от vig (код), edge посчитан, риск-конфиг — закон…"} />
       <label style={S.fieldLabel}>② Лайв-окно (как вести/выкупать/защищать в игре)</label>
       <textarea style={S.textarea} value={promptLive} onChange={(e) => setPromptLive(e.target.value)} placeholder={"# LIVE\nИсполняешь заготовки из боевого листа: событие + цена → действие…"} />
       {!promptLive.trim() && <div style={S.genHint}>без лайв-окна стратегия не сможет вести позиции в игре (модуль 5)</div>}
-      <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Отмена</button><button style={{ ...S.saveBtn, opacity: canSave ? 1 : 0.4 }} disabled={!canSave} onClick={() => onSave({ name, prompt, promptLive, model, params: {}, tag: "custom" })}>Сохранить</button></div>
+      <div style={S.modalActions}><button style={S.cancelBtn} onClick={onClose}>Отмена</button><button style={{ ...S.saveBtn, opacity: canSave ? 1 : 0.4 }} disabled={!canSave} onClick={() => onSave({ name, prompt, promptLive, model, modelLive, params: {}, tag: "custom" })}>Сохранить</button></div>
     </Modal>
   );
 }

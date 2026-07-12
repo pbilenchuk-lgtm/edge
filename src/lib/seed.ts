@@ -60,11 +60,11 @@ export function seedDatabase(db: Database): void {
 
   // --- strategies (§2.5) with params re-extracted from the prompt (§3.2) ---
   const strats: Array<Omit<Parameters<typeof R.insertStrategy>[1], "params" | "prompt_live">> = [
-    { id: "edge", sport_id: "football", name: "Edge Tiered", tag: "лесенка", color: "#e8a838", version: 1, model: "Claude Opus 4.8", created_at: T,
+    { id: "edge", sport_id: "football", name: "Edge Tiered", tag: "лесенка", color: "#e8a838", version: 1, model: "Claude Opus 4.8", model_live: "Claude Sonnet 5", created_at: T,
       prompt: "Входи ТОЛЬКО при уверенности «высокая» и когда рынок не впитал информацию.\nРазмер по лесенке: edge>=10% -> 20%; 7-10% -> 15%; 5-7% -> 10%; 3-5% -> 5%.\nМожно несколько ставок на матч. Переоценка на голах.\nОграничители: не более 20% на ставку, стоп -25%." },
-    { id: "flat", sport_id: "football", name: "Flat", tag: "фикс 5%", color: "#5b9bd5", version: 1, model: "Claude Haiku 4.5", created_at: T,
+    { id: "flat", sport_id: "football", name: "Flat", tag: "фикс 5%", color: "#5b9bd5", version: 1, model: "Claude Haiku 4.5", model_live: "Claude Haiku 4.5", created_at: T,
       prompt: "Входи на любой edge >= 3%. Размер всегда 5%. Выход по финалу.\nОграничители: не более 5% на ставку." },
-    { id: "kelly", sport_id: "football", name: "Kelly ½", tag: "half-kelly", color: "#70b56a", version: 1, model: "Claude Sonnet 5", created_at: T,
+    { id: "kelly", sport_id: "football", name: "Kelly ½", tag: "half-kelly", color: "#70b56a", version: 1, model: "Claude Sonnet 5", model_live: "Claude Sonnet 5", created_at: T,
       prompt: "Входи при edge >= 2%. Размер = 0.5*edge/(odds-1), максимум 25%.\nПереоценка на голах. Ограничители: не более 25% на ставку, стоп -30%." },
   ];
   for (const s of strats)
@@ -706,17 +706,17 @@ export function seedMinimal(db: Database): void {
   // the strategist LLM only writes the plan (code does the money math).
   R.insertStrategy(db, {
     id: "overreaction", sport_id: "football", name: "Overreaction", tag: "выкуп переоценки", color: "#e8a838",
-    version: 1, model: "Claude Opus 4.8", created_at: T,
+    version: 1, model: "Claude Opus 4.8", model_live: "Claude Sonnet 5", created_at: T,
     prompt: STRAT_OVERREACTION_PREMATCH, prompt_live: STRAT_OVERREACTION_LIVE, params: {},
   });
   R.insertStrategy(db, {
     id: "prematch_value", sport_id: "football", name: "Pre-match Value", tag: "предматч value", color: "#5b9bd5",
-    version: 1, model: "Claude Opus 4.8", created_at: T,
+    version: 1, model: "Claude Opus 4.8", model_live: "Claude Sonnet 5", created_at: T,
     prompt: STRAT_PMVALUE_PREMATCH, prompt_live: STRAT_PMVALUE_LIVE, params: {},
   });
   R.insertStrategy(db, {
     id: "live_xg", sport_id: "football", name: "Live xG Momentum", tag: "live xG", color: "#70b56a",
-    version: 1, model: "Claude Opus 4.8", created_at: T,
+    version: 1, model: "Claude Opus 4.8", model_live: "Claude Sonnet 5", created_at: T,
     prompt: STRAT_LIVEXG_PREMATCH, prompt_live: STRAT_LIVEXG_LIVE, params: {},
   });
 
@@ -843,7 +843,7 @@ export function migrateSeedStrategists(db: Database, now: string): void {
   R.upsertSport(db, "football", SPORT_LABELS["football"] ?? "Футбол");
   for (const d of STRATEGIST_DEFS) {
     if (R.getStrategy(db, d.id)) continue;
-    R.insertStrategy(db, { id: d.id, sport_id: "football", name: d.name, tag: d.tag, color: d.color, version: 1, model: "Claude Opus 4.8", created_at: now, prompt: d.prompt, prompt_live: d.prompt_live, params: {} });
+    R.insertStrategy(db, { id: d.id, sport_id: "football", name: d.name, tag: d.tag, color: d.color, version: 1, model: "Claude Opus 4.8", model_live: "Claude Sonnet 5", created_at: now, prompt: d.prompt, prompt_live: d.prompt_live, params: {} });
   }
 }
 

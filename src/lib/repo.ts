@@ -144,11 +144,11 @@ export function analyticsPromptFor(
 // ---------- strategies ----------
 export function insertStrategy(db: Database, s: Strategy): void {
   db.prepare(
-    `INSERT INTO strategies(id,sport_id,name,tag,color,version,prompt,prompt_live,params,model,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO strategies(id,sport_id,name,tag,color,version,prompt,prompt_live,params,model,model_live,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     s.id, s.sport_id, s.name, s.tag, s.color, s.version, s.prompt, s.prompt_live ?? null,
-    JSON.stringify(s.params), s.model, s.created_at,
+    JSON.stringify(s.params), s.model, s.model_live ?? null, s.created_at,
   );
 }
 export function listStrategies(db: Database, sportId?: string): Strategy[] {
@@ -178,11 +178,11 @@ export function saveStrategyVersion(
 }
 export function updateStrategy(
   db: Database, id: string,
-  patch: Partial<Pick<Strategy, "name" | "prompt" | "prompt_live" | "model" | "tag">> & { params?: StrategyParams },
+  patch: Partial<Pick<Strategy, "name" | "prompt" | "prompt_live" | "model" | "model_live" | "tag">> & { params?: StrategyParams },
 ): void {
   const cols: string[] = [];
   const vals: unknown[] = [];
-  for (const k of ["name", "prompt", "prompt_live", "model", "tag"] as const)
+  for (const k of ["name", "prompt", "prompt_live", "model", "model_live", "tag"] as const)
     if (patch[k] !== undefined) { cols.push(`${k}=?`); vals.push(patch[k]); }
   if (patch.params !== undefined) { cols.push(`params=?`); vals.push(JSON.stringify(patch.params)); }
   if (!cols.length) return;
@@ -207,7 +207,7 @@ export function deleteStrategy(db: Database, id: string): void {
   ]) db.prepare(sql).run(id);
 }
 function mapStrategy(r: any): Strategy {
-  return { ...r, prompt_live: r.prompt_live ?? null, params: safeJson<StrategyParams>(r.params, {}) };
+  return { ...r, prompt_live: r.prompt_live ?? null, model_live: r.model_live ?? null, params: safeJson<StrategyParams>(r.params, {}) };
 }
 
 // ---------- match live (ESPN link + lineups) & events ----------

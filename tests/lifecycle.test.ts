@@ -699,7 +699,7 @@ test("module 5: live reassess uses the LIVE prompt + battle sheet, sizes by risk
   seedDatabase(db);
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
   // a two-phase strategy with a DISTINCT live prompt, assigned on the aggressive profile
-  R.insertStrategy(db, { id: "s5", sport_id: "football", name: "S5", tag: null, color: "#fff", version: 1, model: null, prompt: "ПРЕДМАТЧ-ТЕЛО-XYZ", prompt_live: "ЛАЙВ-ТЕЛО-QWE", params: {}, created_at: "t" });
+  R.insertStrategy(db, { id: "s5", sport_id: "football", name: "S5", tag: null, color: "#fff", version: 1, model: null, model_live: null, prompt: "ПРЕДМАТЧ-ТЕЛО-XYZ", prompt_live: "ЛАЙВ-ТЕЛО-QWE", params: {}, created_at: "t" });
   R.clearShares(db, comp.id);
   R.setShare(db, { competition_id: comp.id, strategy_id: "s5", risk_profile_id: "aggressive", pct: 60 });
   const mid = R.uid();
