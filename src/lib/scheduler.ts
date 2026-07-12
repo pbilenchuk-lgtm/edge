@@ -26,6 +26,31 @@ let started = false;
 // DB-backed so it survives the process restart that kills the in-process loop.
 const LAST_LIVE_TICK_KEY = "last_live_tick_ms";
 
+// QUIET BOOT WINDOW. For the first BOOT_GRACE_MS after the process starts, NO
+// heavy engine cycle runs — not the scheduler passes, not a health-ping-driven
+// heartbeat catch-up. Why: node:sqlite is SYNCHRONOUS, so a full cycle (discover
+// + 12 provider snapshots + LLM) both spikes RSS past the 512Mi instance ceiling
+// AND blocks the event loop. Running one during Render's post-deploy health-check
+// window made /api/health unanswerable (Render: "no open HTTP ports") and OOM-
+// killed the process → the deploy's health check timed out and the deploy Failed,
+// leaving prod frozen on old code. Staying idle until the port is up and health is
+// green lets the deploy succeed; the engine starts a couple of minutes in.
+// Trade-off: after a restart mid-live-match, live management resumes only after the
+// grace (bounded, ~2 min). Tunable via BOOT_GRACE_SEC (0 disables — e.g. for tests).
+const bootAtMs = Date.now();
+// Grace defaults to 120s in production (Render), 0 elsewhere — so tests and local
+// dev keep the immediate-run behavior and only the deployed instance gets the quiet
+// boot window. Override explicitly with BOOT_GRACE_SEC.
+function bootGraceMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.BOOT_GRACE_SEC;
+  const def = env.NODE_ENV === "production" ? 120 : 0;
+  const sec = raw != null && raw !== "" && Number.isFinite(Number(raw)) ? Number(raw) : def;
+  return Math.max(0, sec) * 1000;
+}
+function inBootGrace(env?: Record<string, string | undefined>): boolean {
+  return Date.now() - bootAtMs < bootGraceMs(env);
+}
+
 /**
  * Deploy-independent CATCH-UP heartbeat. The scheduler is in-process (setInterval),
  * so it dies whenever the web process restarts — a redeploy, a crash, or (what bit
@@ -43,6 +68,9 @@ export async function heartbeat(
   opts: { db?: ReturnType<typeof getDb>; nowMs?: number } = {},
 ): Promise<{ ran: boolean; reason?: string; live?: boolean }> {
   if ((env.AUTO_TICK ?? "false").toLowerCase() !== "true") return { ran: false, reason: "AUTO_TICK off" };
+  // Don't let Render's rapid post-deploy health pings drive a heavy catch-up cycle
+  // during the boot window — that's exactly what OOM'd / blocked the health check.
+  if (inBootGrace(env)) return { ran: false, reason: "boot grace" };
   const tickMin = Math.max(1, Number(env.TICK_INTERVAL_MIN ?? 30));
   const staleMs = Math.max(10, tickMin * 2) * 60_000; // overdue = no full cycle within ~2× the tick
   let db: ReturnType<typeof getDb>;
@@ -130,6 +158,7 @@ export function startScheduler(env: Record<string, string | undefined> = process
   // resource doubling is a 502 contributor on a small instance).
 
   const run = async () => {
+    if (inBootGrace(env)) return; // stay quiet until the deploy's health check is green
     const tok = tryAcquireEngine();
     if (!tok) return; // don't overlap with a live/manual/slow pass
     // Everything that can throw goes INSIDE the try so `finally` always clears
@@ -163,6 +192,7 @@ export function startScheduler(env: Record<string, string | undefined> = process
   // Fast live loop — only does work while a match is in play; logs to the cron
   // journal only when something actually happened (so it doesn't flood it).
   const liveRun = async () => {
+    if (inBootGrace(env)) return; // stay quiet until the deploy's health check is green
     const tok = tryAcquireEngine();
     if (!tok) return;    // yield to a running full/live/manual pass
     const at = new Date(Date.now()).toISOString();
@@ -192,8 +222,11 @@ export function startScheduler(env: Record<string, string | undefined> = process
     }
   };
 
-  console.log(`[scheduler] on — live ${liveSec}s, tick ${tickMin}m, discover ${discoverHr}h`);
-  setTimeout(run, 5_000);               // first full pass shortly after boot (discovers)
+  const graceMs = bootGraceMs(env);
+  console.log(`[scheduler] on — live ${liveSec}s, tick ${tickMin}m, discover ${discoverHr}h, boot-grace ${Math.round(graceMs / 1000)}s`);
+  // First full pass fires just AFTER the quiet boot window (so health goes green
+  // first); the intervals below also self-gate via inBootGrace() as a backstop.
+  setTimeout(run, graceMs + 5_000); // first full pass once the deploy is live (discovers)
   setInterval(run, tickMin * 60_000);   // then every tickMin
   setInterval(liveRun, liveSec * 1000); // fast real-time loop for in-play matches
   setInterval(() => void heartbeat(env), 60_000); // catch-up watchdog — recover a stalled cron within a minute of the process being alive
