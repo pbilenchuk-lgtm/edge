@@ -1,217 +1,322 @@
 "use client";
 
-// «Бюджет (shadow)» — observe-only view of the shadow capital allocator. Shows how one
-// shared limited bank would have lived (reserved / settling / free, per-category and
-// per-strategy ceilings), the ledger of allowed/blocked/trimmed entry decisions, the
-// deficit analytics (the whole point — how often + where capital was the bottleneck, and
-// the realised P&L we'd have missed), and editable settings. Never touches real money.
+// «Бюджет (shadow)» — observe-only view of the shadow capital allocator. Answers ONE
+// question at a glance — «would a single limited bank have been squeezed?» — then lets you
+// drill down: where the money sits, where concentration builds, the ledger of every
+// allowed/blocked/trimmed decision, and the settings. It never touches real money.
 
 import { useMemo, useState } from "react";
 import type { ShadowView } from "@/lib/view";
 
-const usd = (n: number) => `$${(Math.round(n * 100) / 100).toLocaleString("ru-RU")}`;
-const pct = (n: number) => `${Math.round(n * 10) / 10}%`;
+// Design tokens — mirror the app shell (EdgeLab `S`) so the tab reads as native.
+const INK = "#12161d", PANEL = "#1a2029", PANEL2 = "#212936", LINE = "#2c3543", TEXT = "#e6e9ef", MUTE = "#8b95a5";
+const BLUE = "#5b9bd5", GREEN = "#5fd08a", AMBER = "#e8a838", RED = "#ff6b6b", PURPLE = "#c98bdb", HELD = "#3b4658";
+const MONO = "'JetBrains Mono', monospace";
+
+const usd = (n: number) => `$${Math.round(n).toLocaleString("ru-RU")}`;
+const usd2 = (n: number) => `$${(Math.round(n * 100) / 100).toLocaleString("ru-RU", { minimumFractionDigits: n % 1 ? 2 : 0 })}`;
+const pctOf = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : 0);
+
 const REASON_RU: Record<string, string> = {
-  insufficient_free: "нет свободных", cash_reserve: "неснижаемый остаток", live_buffer: "буфер live",
+  insufficient_free: "нет свободных средств", cash_reserve: "неснижаемый остаток", live_buffer: "буфер под live",
   cap_match: "потолок матча", cap_category: "потолок категории", cap_strategy: "потолок стратегии",
 };
-const VERDICT_RU: Record<string, string> = { allowed: "принят", blocked: "заблокирован", trimmed: "урезан" };
-const VERDICT_COLOR: Record<string, string> = { allowed: "#70b56a", blocked: "#e07a5f", trimmed: "#e8a838" };
+const VERDICT = {
+  allowed: { ru: "принят", color: GREEN, bg: "#16241c" },
+  blocked: { ru: "заблокирован", color: RED, bg: "#2a1a1c" },
+  trimmed: { ru: "урезан", color: AMBER, bg: "#2a2413" },
+} as const;
 
-const st: Record<string, React.CSSProperties> = {
-  wrap: { maxWidth: 1080, margin: "0 auto", padding: "8px 16px 48px", color: "#e6e6ea" },
-  h: { fontSize: 15, fontWeight: 700, margin: "22px 0 10px", color: "#cfcfe0" },
-  card: { background: "#17171d", border: "1px solid #2a2a33", borderRadius: 10, padding: 16 },
-  row: { display: "flex", gap: 16, flexWrap: "wrap" },
-  stat: { flex: "1 1 120px", minWidth: 110 },
-  statN: { fontSize: 20, fontWeight: 700 },
-  statL: { fontSize: 11, color: "#8a8a99", marginTop: 2 },
-  bar: { height: 10, borderRadius: 5, background: "#26262f", overflow: "hidden", display: "flex", marginTop: 12 },
-  th: { textAlign: "left", fontSize: 11, color: "#8a8a99", fontWeight: 600, padding: "6px 8px", borderBottom: "1px solid #2a2a33", whiteSpace: "nowrap" },
-  td: { fontSize: 12, padding: "6px 8px", borderBottom: "1px solid #202028", whiteSpace: "nowrap" },
-  chip: { fontSize: 11, padding: "2px 8px", borderRadius: 12, border: "1px solid #33333f", cursor: "pointer", background: "transparent", color: "#cfcfe0" },
-  chipOn: { background: "#2b2b38", borderColor: "#4a4a5c" },
-  capBar: { position: "relative", height: 8, borderRadius: 4, background: "#26262f", overflow: "hidden", flex: 1, minWidth: 80 },
-  input: { width: 90, background: "#0f0f14", border: "1px solid #33333f", borderRadius: 6, color: "#e6e6ea", padding: "5px 8px", fontSize: 13 },
-  btn: { background: "#3a5bbf", border: "none", borderRadius: 7, color: "#fff", padding: "8px 16px", fontSize: 13, cursor: "pointer", fontWeight: 600 },
-  muted: { color: "#8a8a99", fontSize: 12 },
+const S: Record<string, React.CSSProperties> = {
+  wrap: { fontFamily: "'Inter', system-ui, sans-serif", color: TEXT, display: "flex", flexDirection: "column", gap: 14 },
+  head: { display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" },
+  h1: { fontSize: 19, fontWeight: 800, letterSpacing: "0.01em" },
+  sub: { fontSize: 12.5, color: MUTE },
+  secLbl: { fontSize: 11, color: MUTE, textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 700, marginBottom: 8 },
+  card: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16 },
+  tileGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(112px, 1fr))", gap: 10 },
+  tile: { background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: "10px 12px" },
+  tLbl: { fontSize: 10, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em" },
+  tVal: { fontSize: 18, fontWeight: 800, fontFamily: MONO, marginTop: 3, whiteSpace: "nowrap" },
+  tSub: { fontSize: 10.5, color: MUTE, fontFamily: MONO, marginTop: 1 },
+  legend: { display: "flex", gap: 16, flexWrap: "wrap", marginTop: 10, fontSize: 11.5, color: MUTE },
+  dot: { width: 9, height: 9, borderRadius: 2, display: "inline-block", marginRight: 6, verticalAlign: "baseline" },
+  meterRow: { display: "flex", alignItems: "center", gap: 10, padding: "5px 0", fontSize: 12.5 },
+  meterName: { width: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  meterTrack: { flex: 1, minWidth: 90, height: 8, borderRadius: 4, background: "#0e1219", overflow: "hidden" },
+  meterNum: { width: 150, textAlign: "right", fontFamily: MONO, fontSize: 12, color: "#b8c1cf" },
+  seg: { display: "inline-flex", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: 3, gap: 2 },
+  segBtn: { background: "transparent", border: "none", color: MUTE, fontSize: 12, fontWeight: 600, padding: "5px 12px", borderRadius: 6, cursor: "pointer", whiteSpace: "nowrap" },
+  segOn: { background: "#2f3a4a", color: TEXT },
+  th: { textAlign: "left", fontSize: 10, color: MUTE, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", padding: "8px 10px", borderBottom: `1px solid ${LINE}`, whiteSpace: "nowrap", position: "sticky", top: 0, background: PANEL },
+  td: { fontSize: 12.5, padding: "7px 10px", borderBottom: "1px solid #232c38", whiteSpace: "nowrap" },
+  pill: { display: "inline-block", fontSize: 11, fontWeight: 700, padding: "2px 9px", borderRadius: 20 },
+  input: { width: 74, background: INK, border: `1px solid ${LINE}`, borderRadius: 7, color: TEXT, padding: "6px 8px", fontSize: 13, fontFamily: MONO, textAlign: "right" },
+  adorn: { display: "inline-flex", alignItems: "center", background: INK, border: `1px solid ${LINE}`, borderRadius: 7, overflow: "hidden" },
+  adornUnit: { fontSize: 11, color: MUTE, padding: "0 8px" },
+  btn: { background: AMBER, border: "none", borderRadius: 8, color: "#1a1200", padding: "9px 18px", fontSize: 13, cursor: "pointer", fontWeight: 800 },
+  ghost: { background: "transparent", border: `1px solid ${LINE}`, borderRadius: 8, color: MUTE, padding: "9px 14px", fontSize: 12.5, cursor: "pointer", fontWeight: 600 },
+  empty: { color: MUTE, textAlign: "center", padding: "26px 12px", fontSize: 13, lineHeight: 1.5 },
+  hint: { fontSize: 11.5, color: MUTE, lineHeight: 1.4 },
 };
 
-function Bucket({ label, used, cap }: { label: string; used: number; cap: number }) {
+function Tile({ label, value, sub, color }: { label: string; value: React.ReactNode; sub?: string; color?: string }) {
+  return <div style={S.tile}><div style={S.tLbl}>{label}</div><div style={{ ...S.tVal, color: color ?? TEXT }}>{value}</div>{sub && <div style={S.tSub}>{sub}</div>}</div>;
+}
+
+function Meter({ name, used, cap }: { name: string; used: number; cap: number }) {
   const frac = cap > 0 ? Math.min(1, used / cap) : 0;
-  const col = frac > 0.9 ? "#e07a5f" : frac > 0.7 ? "#e8a838" : "#5b9bd5";
+  const col = frac >= 0.9 ? RED : frac >= 0.7 ? AMBER : BLUE;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", fontSize: 12 }}>
-      <div style={{ width: 190, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={label}>{label}</div>
-      <div style={st.capBar}><div style={{ width: `${frac * 100}%`, height: "100%", background: col }} /></div>
-      <div style={{ width: 130, textAlign: "right", color: "#a8a8b8" }}>{usd(used)} <span style={{ color: "#6a6a77" }}>/ {usd(cap)}</span></div>
+    <div style={S.meterRow}>
+      <div style={S.meterName} title={name}>{name}</div>
+      <div style={S.meterTrack}><div style={{ width: `${frac * 100}%`, height: "100%", background: col, borderRadius: 4 }} /></div>
+      <div style={S.meterNum}>{usd(used)} <span style={{ color: MUTE }}>/ {usd(cap)}</span> · {pctOf(used, cap)}%</div>
     </div>
   );
 }
 
 export default function ShadowScreen({ data, onSave }: { data: ShadowView; onSave: (config: any) => Promise<any> }) {
   const { pool, analytics, config } = data;
-  const [onlyBlocked, setOnlyBlocked] = useState(false);
+  const [filter, setFilter] = useState<"all" | "blocked" | "contention">("all");
   const [cat, setCat] = useState<string>("");
-  const [form, setForm] = useState<any>({ ...config });
-  const [saving, setSaving] = useState(false);
 
   const events = useMemo(() => data.events.filter((e) =>
-    (!onlyBlocked || e.verdict !== "allowed") && (!cat || e.category === cat)
-  ), [data.events, onlyBlocked, cat]);
+    (filter === "all" || (filter === "blocked" ? e.verdict !== "allowed" : e.contention)) && (!cat || e.category === cat)
+  ), [data.events, filter, cat]);
   const categories = useMemo(() => Array.from(new Set(data.events.map((e) => e.category))), [data.events]);
 
-  const reservedFrac = pool.bank > 0 ? pool.reserved / pool.bank : 0;
-  const settlingFrac = pool.bank > 0 ? pool.settling / pool.bank : 0;
-  const bufFrac = pool.bank > 0 ? pool.liveBufferFree / pool.bank : 0;
+  // Verdict: is capital the bottleneck? deficit rate = share of decisions not fully funded.
+  const deficit = Math.round((analytics.blockedPct + analytics.trimmedPct) * 10) / 10;
+  const peakUtil = analytics.utilization.length ? Math.max(...analytics.utilization.map((p) => pctOf(p.reserved, pool.bank))) : pctOf(pool.reserved, pool.bank);
+  const status = analytics.total === 0
+    ? { color: MUTE, bg: PANEL2, word: "нет данных", line: "Событий пока нет — появятся при первых входах реальной симуляции." }
+    : deficit === 0
+      ? { color: GREEN, bg: "#16241c", word: "капитал свободен", line: `Ни один вход не упёрся в лимит банка. Пиковая утилизация ${peakUtil}%.` }
+      : deficit < 10
+        ? { color: GREEN, bg: "#16241c", word: "запас есть", line: `Капитал был узким местом лишь в ${deficit}% решений. Пик утилизации ${peakUtil}%.` }
+        : deficit < 25
+          ? { color: AMBER, bg: "#2a2413", word: "капитал поджимает", line: `${deficit}% входов не получили полный размер из-за лимитов. Стоит присмотреться.` }
+          : { color: RED, bg: "#2a1a1c", word: "капитал — узкое место", line: `${deficit}% решений упёрлись в лимит банка. Общий пул тесен для текущего потока входов.` };
 
+  // Capital bar segments (sum = bank): reserved | settling | live-buffer held | spendable free.
+  const spendable = Math.max(0, pool.free - pool.liveBufferFree);
+  const segs = [
+    { v: pool.reserved, c: BLUE, l: "резерв" },
+    { v: pool.settling, c: PURPLE, l: "settling" },
+    { v: pool.liveBufferFree, c: HELD, l: "буфер live" },
+    { v: spendable, c: GREEN, l: "свободно" },
+  ];
+
+  // Settings form: percentages shown as WHOLE numbers (40, not 0.4). Convert on save.
+  const toForm = (c: typeof config) => ({
+    enabled: c.enabled, bankTotal: c.bankTotal, settlementLagMin: c.settlementLagMin,
+    liveBufferPct: Math.round(c.liveBufferPct * 100), capCategoryPct: Math.round(c.capCategoryPct * 100),
+    capStrategyPct: Math.round(c.capStrategyPct * 100), capMatchPct: Math.round(c.capMatchPct * 100),
+    cashReservePct: Math.round(c.cashReservePct * 100),
+  });
+  const [form, setForm] = useState<any>(toForm(config));
+  const [saving, setSaving] = useState(false);
+  const dirty = JSON.stringify(form) !== JSON.stringify(toForm(config));
   const save = async () => {
     setSaving(true);
-    const patch = {
+    await onSave({
       enabled: !!form.enabled, bankTotal: Number(form.bankTotal), settlementLagMin: Number(form.settlementLagMin),
-      liveBufferPct: Number(form.liveBufferPct), capCategoryPct: Number(form.capCategoryPct),
-      capStrategyPct: Number(form.capStrategyPct), capMatchPct: Number(form.capMatchPct), cashReservePct: Number(form.cashReservePct),
-    };
-    await onSave(patch).catch(() => {});
+      liveBufferPct: Number(form.liveBufferPct) / 100, capCategoryPct: Number(form.capCategoryPct) / 100,
+      capStrategyPct: Number(form.capStrategyPct) / 100, capMatchPct: Number(form.capMatchPct) / 100,
+      cashReservePct: Number(form.cashReservePct) / 100,
+    }).catch(() => {});
     setSaving(false);
   };
-  const num = (k: string, step = 1) => (
-    <input style={st.input} type="number" step={step} value={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.value })} />
-  );
 
   return (
-    <main style={st.wrap}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginTop: 6 }}>
-        <div style={{ fontSize: 18, fontWeight: 800 }}>Бюджет (shadow)</div>
-        <div style={st.muted}>{data.enabled ? "теневой аллокатор наблюдает" : "выключен"} · один общий банк {usd(config.bankTotal)} · не влияет на изолированные бюджеты пар</div>
+    <main style={S.wrap}>
+      <div style={S.head}>
+        <div style={S.h1}>Бюджет (shadow)</div>
+        <div style={S.sub}>теневая симуляция ОДНОГО общего банка {usd(config.bankTotal)} · только наблюдает, не влияет на изолированные бюджеты пар</div>
       </div>
 
-      {/* 1 — POOL STATE */}
-      <div style={st.h}>Состояние пула</div>
-      <div style={st.card}>
-        <div style={st.row}>
-          <div style={st.stat}><div style={st.statN}>{usd(pool.bank)}</div><div style={st.statL}>банк</div></div>
-          <div style={st.stat}><div style={{ ...st.statN, color: "#5b9bd5" }}>{usd(pool.reserved)}</div><div style={st.statL}>резерв (открытые)</div></div>
-          <div style={st.stat}><div style={{ ...st.statN, color: "#c98bdb" }}>{usd(pool.settling)}</div><div style={st.statL}>settling (резолв)</div></div>
-          <div style={st.stat}><div style={{ ...st.statN, color: "#70b56a" }}>{usd(pool.free)}</div><div style={st.statL}>свободно</div></div>
-          <div style={st.stat}><div style={st.statN}>{usd(pool.liveBufferUsed)} <span style={{ fontSize: 12, color: "#6a6a77" }}>/ {usd(pool.liveBufferTotal)}</span></div><div style={st.statL}>live-буфер (занято)</div></div>
-          <div style={st.stat}><div style={st.statN}>{usd(pool.cashFloor)}</div><div style={st.statL}>неснижаемый остаток</div></div>
-        </div>
-        <div style={st.bar} title={`резерв ${usd(pool.reserved)} · settling ${usd(pool.settling)} · live-буфер свободен ${usd(pool.liveBufferFree)}`}>
-          <div style={{ width: `${reservedFrac * 100}%`, background: "#5b9bd5" }} />
-          <div style={{ width: `${settlingFrac * 100}%`, background: "#c98bdb" }} />
-          <div style={{ width: `${bufFrac * 100}%`, background: "#3a3a48" }} />
-        </div>
-        <div style={{ ...st.muted, marginTop: 6 }}>синий — резерв · фиолетовый — settling · серый — live-буфер (свободен, недоступен предматчу)</div>
-
-        <div style={{ display: "flex", gap: 28, marginTop: 18, flexWrap: "wrap" }}>
-          <div style={{ flex: "1 1 340px" }}>
-            <div style={{ ...st.statL, marginBottom: 4 }}>по категориям (потолок {pct(config.capCategoryPct * 100)})</div>
-            {Object.entries(pool.byCategory).length === 0 && <div style={st.muted}>нет резервов</div>}
-            {Object.entries(pool.byCategory).map(([id, b]) => <Bucket key={id} label={data.categoryNames[id] ?? id} used={b.used} cap={b.cap} />)}
+      {/* VERDICT HERO — the one-glance answer */}
+      <div style={{ ...S.card, borderColor: `${status.color}44`, background: status.bg, display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flex: "1 1 320px" }}>
+          <div style={{ width: 12, height: 12, borderRadius: "50%", background: status.color, flexShrink: 0, boxShadow: `0 0 12px ${status.color}88` }} />
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: status.color, textTransform: "uppercase", letterSpacing: "0.03em" }}>{status.word}</div>
+            <div style={{ fontSize: 12.5, color: "#c4cdd9", marginTop: 3, lineHeight: 1.4, maxWidth: 460 }}>{status.line}</div>
           </div>
-          <div style={{ flex: "1 1 340px" }}>
-            <div style={{ ...st.statL, marginBottom: 4 }}>по стратегиям (потолок {pct(config.capStrategyPct * 100)})</div>
-            {Object.entries(pool.byStrategy).length === 0 && <div style={st.muted}>нет резервов</div>}
-            {Object.entries(pool.byStrategy).map(([id, b]) => <Bucket key={id} label={data.strategyNames[id] ?? id} used={b.used} cap={b.cap} />)}
-          </div>
+        </div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <Tile label="дефицит входов" value={`${deficit}%`} sub={`${analytics.blocked} блок · ${analytics.trimmed} урез`} color={status.color} />
+          <Tile label="упущенный P&L" value={<>{analytics.missedPnl >= 0 ? "+" : ""}{usd2(analytics.missedPnl)}</>} sub="из-за дефицита" color={analytics.missedPnl >= 0 ? GREEN : RED} />
+          <Tile label="пик утилизации" value={`${peakUtil}%`} sub={`конкуренций ${analytics.contentionEvents}`} />
         </div>
       </div>
 
-      {/* 3 — DEFICIT ANALYTICS (main value) */}
-      <div style={st.h}>Аналитика дефицита</div>
-      <div style={st.card}>
-        <div style={st.row}>
-          <div style={st.stat}><div style={st.statN}>{analytics.total}</div><div style={st.statL}>всего решений</div></div>
-          <div style={st.stat}><div style={{ ...st.statN, color: "#e07a5f" }}>{pct(analytics.blockedPct)}</div><div style={st.statL}>заблокировано ({analytics.blocked})</div></div>
-          <div style={st.stat}><div style={{ ...st.statN, color: "#e8a838" }}>{pct(analytics.trimmedPct)}</div><div style={st.statL}>урезано ({analytics.trimmed})</div></div>
-          <div style={st.stat}><div style={st.statN}>{analytics.contentionEvents}</div><div style={st.statL}>решений в конкуренции</div></div>
-          <div style={st.stat}><div style={{ ...st.statN, color: analytics.missedPnl >= 0 ? "#70b56a" : "#e07a5f" }}>{analytics.missedPnl >= 0 ? "+" : ""}{usd(analytics.missedPnl)}</div><div style={st.statL}>упущенный P&L дефицита</div></div>
+      {/* CAPITAL — where the money sits */}
+      <div>
+        <div style={S.secLbl}>Капитал пула</div>
+        <div style={S.card}>
+          <div style={{ display: "flex", height: 16, borderRadius: 6, overflow: "hidden", background: "#0e1219" }} title="разбивка банка">
+            {segs.map((s, i) => s.v > 0 && <div key={i} style={{ width: `${(s.v / pool.bank) * 100}%`, background: s.c }} title={`${s.l}: ${usd(s.v)}`} />)}
+          </div>
+          <div style={S.legend}>
+            {segs.map((s, i) => <span key={i}><span style={{ ...S.dot, background: s.c }} />{s.l} {usd(s.v)}</span>)}
+            <span style={{ marginLeft: "auto", color: MUTE }}>неснижаемый остаток {usd(pool.cashFloor)}</span>
+          </div>
+          <div style={{ ...S.tileGrid, marginTop: 14 }}>
+            <Tile label="банк" value={usd(pool.bank)} />
+            <Tile label="резерв" value={usd(pool.reserved)} sub={`${pctOf(pool.reserved, pool.bank)}% банка`} color={BLUE} />
+            <Tile label="settling" value={usd(pool.settling)} sub={`резолв ${config.settlementLagMin} мин`} color={PURPLE} />
+            <Tile label="свободно" value={usd(spendable)} sub="доступно предматчу" color={GREEN} />
+            <Tile label="live-буфер" value={usd(pool.liveBufferUsed)} sub={`из ${usd(pool.liveBufferTotal)} · только live`} />
+          </div>
         </div>
-        {Object.keys(analytics.byReason).length > 0 && (
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
-            {Object.entries(analytics.byReason).sort((a, b) => b[1] - a[1]).map(([r, n]) => (
-              <span key={r} style={{ ...st.chip, cursor: "default" }}>{REASON_RU[r] ?? r}: <b>{n}</b></span>
+      </div>
+
+      {/* CONCENTRATION — where limits build */}
+      <div>
+        <div style={S.secLbl}>Концентрация под потолками</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12 }}>
+          <div style={S.card}>
+            <div style={{ ...S.hint, marginBottom: 6 }}>по категориям · потолок {Math.round(config.capCategoryPct * 100)}% банка</div>
+            {Object.entries(pool.byCategory).length === 0 ? <div style={{ color: MUTE, fontSize: 12.5, padding: "8px 0" }}>нет открытых резервов</div>
+              : Object.entries(pool.byCategory).sort((a, b) => b[1].used - a[1].used).map(([id, b]) => <Meter key={id} name={data.categoryNames[id] ?? id} used={b.used} cap={b.cap} />)}
+          </div>
+          <div style={S.card}>
+            <div style={{ ...S.hint, marginBottom: 6 }}>по стратегиям · потолок {Math.round(config.capStrategyPct * 100)}% банка</div>
+            {Object.entries(pool.byStrategy).length === 0 ? <div style={{ color: MUTE, fontSize: 12.5, padding: "8px 0" }}>нет открытых резервов</div>
+              : Object.entries(pool.byStrategy).sort((a, b) => b[1].used - a[1].used).map(([id, b]) => <Meter key={id} name={data.strategyNames[id] ?? id} used={b.used} cap={b.cap} />)}
+          </div>
+        </div>
+      </div>
+
+      {/* DEFICIT DETAIL */}
+      <div>
+        <div style={S.secLbl}>Аналитика дефицита</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12 }}>
+          <div style={S.card}>
+            <div style={{ ...S.hint, marginBottom: 10 }}>почему входы не получали полный размер</div>
+            {Object.keys(analytics.byReason).length === 0 ? <div style={{ color: MUTE, fontSize: 12.5 }}>отказов не было — банк покрывал все входы</div>
+              : Object.entries(analytics.byReason).sort((a, b) => b[1] - a[1]).map(([r, n]) => {
+                  const max = Math.max(...Object.values(analytics.byReason));
+                  return (
+                    <div key={r} style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", fontSize: 12.5 }}>
+                      <div style={{ width: 150 }}>{REASON_RU[r] ?? r}</div>
+                      <div style={S.meterTrack}><div style={{ width: `${(n / max) * 100}%`, height: "100%", background: AMBER, borderRadius: 4 }} /></div>
+                      <div style={{ width: 34, textAlign: "right", fontFamily: MONO, fontSize: 12 }}>{n}</div>
+                    </div>
+                  );
+                })}
+            <div style={{ ...S.hint, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${LINE}` }}>
+              <b style={{ color: analytics.missedPnl >= 0 ? GREEN : RED }}>{analytics.missedPnl >= 0 ? "+" : ""}{usd2(analytics.missedPnl)}</b> — суммарный реальный P&L входов, которым пул отказал (они исполнились в изолированной симуляции). Плюс = дефицит стоил денег; минус = уберёг от убытка.
+            </div>
+          </div>
+          <div style={S.card}>
+            <div style={{ ...S.hint, marginBottom: 10 }}>утилизация пула во времени</div>
+            <Spark points={analytics.utilization} bank={pool.bank} />
+          </div>
+        </div>
+      </div>
+
+      {/* LEDGER */}
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+          <div style={{ ...S.secLbl, margin: 0 }}>Лента решений</div>
+          <div style={{ ...S.seg, marginLeft: "auto" }}>
+            {([["all", "все"], ["blocked", "с отказом"], ["contention", "конкуренция"]] as const).map(([k, l]) => (
+              <button key={k} style={{ ...S.segBtn, ...(filter === k ? S.segOn : {}) }} onClick={() => setFilter(k)}>{l}</button>
             ))}
           </div>
-        )}
-        <Spark points={analytics.utilization} bank={pool.bank} />
+          {categories.length > 1 && (
+            <select style={{ ...S.segBtn, ...S.seg, padding: "5px 8px", color: TEXT }} value={cat} onChange={(e) => setCat(e.target.value)}>
+              <option value="">все категории</option>
+              {categories.map((c) => <option key={c} value={c}>{data.categoryNames[c] ?? c}</option>)}
+            </select>
+          )}
+        </div>
+        <div style={{ ...S.card, padding: 0, overflow: "auto", maxHeight: 420 }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 720 }}>
+            <thead><tr>{["время", "матч", "категория", "стратегия", "запрос → резерв", "вердикт", "причина", "free"].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <tbody>
+              {events.length === 0 && <tr><td colSpan={8} style={S.empty}>{data.events.length ? "Под фильтр ничего не попало." : "Событий пока нет.\nОни появляются при каждом входе реальной симуляции — allowed / blocked / trimmed."}</td></tr>}
+              {events.slice(0, 150).map((e) => {
+                const v = VERDICT[e.verdict as keyof typeof VERDICT] ?? VERDICT.allowed;
+                return (
+                  <tr key={e.id}>
+                    <td style={{ ...S.td, color: MUTE, fontFamily: MONO }}>{new Date(e.at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}</td>
+                    <td style={S.td} title={e.matchLabel}>{e.matchLabel.length > 24 ? e.matchLabel.slice(0, 23) + "…" : e.matchLabel}{e.isLive && <span style={{ ...S.pill, background: "#2a1a1c", color: RED, marginLeft: 6, fontSize: 9.5, padding: "1px 6px" }}>LIVE</span>}{e.contention && <span title="конкуренция за пул" style={{ color: AMBER, marginLeft: 6 }}>⚔</span>}</td>
+                    <td style={{ ...S.td, color: "#c4cdd9" }}>{e.category}</td>
+                    <td style={S.td}>{e.strategyLabel} <span style={{ color: MUTE }}>/{e.profileId}</span></td>
+                    <td style={{ ...S.td, fontFamily: MONO }}>{usd(e.sizeRequested)} <span style={{ color: MUTE }}>→</span> {usd(e.sizeReserved)}</td>
+                    <td style={S.td}><span style={{ ...S.pill, background: v.bg, color: v.color }}>{v.ru}</span></td>
+                    <td style={{ ...S.td, color: e.reason ? "#c4cdd9" : MUTE }}>{e.reason ? (REASON_RU[e.reason] ?? e.reason) : "—"}</td>
+                    <td style={{ ...S.td, color: MUTE, fontFamily: MONO }}>{e.freeAt != null ? usd(e.freeAt) : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      {/* 2 — EVENT LEDGER */}
-      <div style={st.h}>Лента shadow-событий</div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
-        <button style={{ ...st.chip, ...(onlyBlocked ? st.chipOn : {}) }} onClick={() => setOnlyBlocked((v) => !v)}>только заблок./урезан.</button>
-        <select style={{ ...st.chip, padding: "3px 8px" }} value={cat} onChange={(e) => setCat(e.target.value)}>
-          <option value="">все категории</option>
-          {categories.map((c) => <option key={c} value={c}>{data.categoryNames[c] ?? c}</option>)}
-        </select>
-        <span style={st.muted}>{events.length} событий</span>
-      </div>
-      <div style={{ ...st.card, padding: 0, overflowX: "auto" }}>
-        <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 760 }}>
-          <thead><tr>
-            {["время", "матч", "категория", "стратегия", "запрошено", "зарезерв.", "вердикт", "причина", "free"].map((h) => <th key={h} style={st.th}>{h}</th>)}
-          </tr></thead>
-          <tbody>
-            {events.length === 0 && <tr><td colSpan={9} style={{ ...st.td, color: "#8a8a99", textAlign: "center", padding: 18 }}>Событий нет — появятся при входах реальной симуляции.</td></tr>}
-            {events.slice(0, 120).map((e) => (
-              <tr key={e.id}>
-                <td style={st.td}>{new Date(e.at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}</td>
-                <td style={st.td} title={e.matchLabel}>{e.matchLabel.length > 26 ? e.matchLabel.slice(0, 25) + "…" : e.matchLabel}{e.isLive && <span style={{ color: "#e07a5f", marginLeft: 5, fontSize: 10 }}>LIVE</span>}{e.contention && <span title="конкуренция за пул" style={{ color: "#e8a838", marginLeft: 5 }}>⚔</span>}</td>
-                <td style={st.td}>{e.category}</td>
-                <td style={st.td}>{e.strategyLabel} <span style={{ color: "#6a6a77" }}>/{e.profileId}</span></td>
-                <td style={st.td}>{usd(e.sizeRequested)}</td>
-                <td style={st.td}>{usd(e.sizeReserved)}</td>
-                <td style={{ ...st.td, color: VERDICT_COLOR[e.verdict], fontWeight: 600 }}>{VERDICT_RU[e.verdict] ?? e.verdict}</td>
-                <td style={st.td}>{e.reason ? (REASON_RU[e.reason] ?? e.reason) : "—"}</td>
-                <td style={{ ...st.td, color: "#8a8a99" }}>{e.freeAt != null ? usd(e.freeAt) : "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* 4 — SETTINGS */}
-      <div style={st.h}>Настройки</div>
-      <div style={st.card}>
-        <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
-            <input type="checkbox" checked={!!form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /> включён
+      {/* SETTINGS */}
+      <div>
+        <div style={S.secLbl}>Настройки</div>
+        <div style={S.card}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 14, cursor: "pointer" }}>
+            <input type="checkbox" checked={!!form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />
+            <span style={{ fontWeight: 600 }}>аллокатор включён</span>
+            <span style={S.hint}>— когда выключен, новые входы не оцениваются (история сохраняется)</span>
           </label>
-          <Field label="банк, $">{num("bankTotal", 100)}</Field>
-          <Field label="live-буфер (0..1)">{num("liveBufferPct", 0.05)}</Field>
-          <Field label="лаг резолва, мин">{num("settlementLagMin", 5)}</Field>
-          <Field label="потолок категории">{num("capCategoryPct", 0.05)}</Field>
-          <Field label="потолок стратегии">{num("capStrategyPct", 0.05)}</Field>
-          <Field label="потолок матча">{num("capMatchPct", 0.05)}</Field>
-          <Field label="неснижаемый остаток">{num("cashReservePct", 0.05)}</Field>
-        </div>
-        <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12 }}>
-          <button style={{ ...st.btn, opacity: saving ? 0.6 : 1 }} onClick={save} disabled={saving}>{saving ? "Сохраняю…" : "Сохранить"}</button>
-          <span style={st.muted}>применяется с момента изменения — история не пересчитывается</span>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14 }}>
+            <SetField label="банк" hint="общий пул">
+              <span style={S.adorn}><span style={S.adornUnit}>$</span><input style={{ ...S.input, borderRadius: 0, borderWidth: "0 0 0 1px", width: 84 }} type="number" step={100} value={form.bankTotal} onChange={(e) => setForm({ ...form, bankTotal: e.target.value })} /></span>
+            </SetField>
+            <SetField label="лаг резолва" hint="от закрытия до возврата средств">
+              <span style={S.adorn}><input style={{ ...S.input, borderRadius: 0, border: "none", width: 60 }} type="number" step={5} value={form.settlementLagMin} onChange={(e) => setForm({ ...form, settlementLagMin: e.target.value })} /><span style={S.adornUnit}>мин</span></span>
+            </SetField>
+            <PctField label="live-буфер" hint="держится под live-входы" v={form.liveBufferPct} on={(x) => setForm({ ...form, liveBufferPct: x })} />
+            <PctField label="неснижаемый остаток" hint="никогда не тратится" v={form.cashReservePct} on={(x) => setForm({ ...form, cashReservePct: x })} />
+            <PctField label="потолок категории" hint="макс на одну категорию" v={form.capCategoryPct} on={(x) => setForm({ ...form, capCategoryPct: x })} />
+            <PctField label="потолок стратегии" hint="макс на одну стратегию" v={form.capStrategyPct} on={(x) => setForm({ ...form, capStrategyPct: x })} />
+            <PctField label="потолок матча" hint="макс на один матч" v={form.capMatchPct} on={(x) => setForm({ ...form, capMatchPct: x })} />
+          </div>
+          <div style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <button style={{ ...S.btn, opacity: saving || !dirty ? 0.5 : 1, cursor: saving || !dirty ? "default" : "pointer" }} onClick={save} disabled={saving || !dirty}>{saving ? "Сохраняю…" : "Сохранить"}</button>
+            {dirty && <button style={S.ghost} onClick={() => setForm(toForm(config))}>Отменить</button>}
+            <span style={S.hint}>применяется с момента изменения — история не пересчитывается</span>
+          </div>
         </div>
       </div>
     </main>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><span style={{ fontSize: 11, color: "#8a8a99" }}>{label}</span>{children}</div>;
+function SetField({ label, hint, children }: { label: string; hint: string; children: React.ReactNode }) {
+  return <div style={{ display: "flex", flexDirection: "column", gap: 5 }}><span style={{ fontSize: 12, fontWeight: 600 }}>{label}</span>{children}<span style={S.hint}>{hint}</span></div>;
+}
+function PctField({ label, hint, v, on }: { label: string; hint: string; v: number; on: (x: number) => void }) {
+  return <SetField label={label} hint={hint}><span style={S.adorn}><input style={{ ...S.input, borderRadius: 0, border: "none", width: 56 }} type="number" step={5} min={0} max={100} value={v} onChange={(e) => on(Number(e.target.value))} /><span style={S.adornUnit}>%</span></span></SetField>;
 }
 
 function Spark({ points, bank }: { points: { t: string; free: number; reserved: number }[]; bank: number }) {
-  if (points.length < 2 || bank <= 0) return null;
-  const W = 100, H = 28;
-  const path = (key: "free" | "reserved") => points.map((p, i) => `${(i / (points.length - 1)) * W},${H - Math.max(0, Math.min(1, p[key] / bank)) * H}`).join(" ");
+  if (points.length < 2 || bank <= 0) return <div style={{ color: MUTE, fontSize: 12.5, padding: "18px 0", textAlign: "center" }}>мало данных для графика</div>;
+  const W = 100, H = 30;
+  const y = (val: number) => H - Math.max(0, Math.min(1, val / bank)) * H;
+  const line = (key: "free" | "reserved") => points.map((p, i) => `${(i / (points.length - 1)) * W},${y(p[key])}`).join(" ");
+  const area = `${line("reserved")} ${W},${H} 0,${H}`;
+  const peak = Math.max(...points.map((p) => pctOf(p.reserved, bank)));
   return (
-    <div style={{ marginTop: 16 }}>
-      <div style={{ ...st.statL, marginBottom: 4 }}>утилизация пула во времени (последние {points.length} решений)</div>
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: 60, background: "#0f0f14", borderRadius: 6 }}>
-        <polyline points={path("reserved")} fill="none" stroke="#5b9bd5" strokeWidth={0.8} vectorEffect="non-scaling-stroke" />
-        <polyline points={path("free")} fill="none" stroke="#70b56a" strokeWidth={0.8} vectorEffect="non-scaling-stroke" />
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: 84, background: INK, borderRadius: 8, border: `1px solid ${LINE}` }}>
+        <polygon points={area} fill={`${BLUE}22`} />
+        <polyline points={line("reserved")} fill="none" stroke={BLUE} strokeWidth={1} vectorEffect="non-scaling-stroke" />
+        <polyline points={line("free")} fill="none" stroke={GREEN} strokeWidth={1} vectorEffect="non-scaling-stroke" />
       </svg>
-      <div style={{ ...st.muted, marginTop: 4 }}>зелёный — свободно · синий — резерв</div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 11.5, color: MUTE }}>
+        <span><span style={{ ...S.dot, background: BLUE }} />резерв (пик {peak}%)</span>
+        <span><span style={{ ...S.dot, background: GREEN }} />свободно · {points.length} решений</span>
+      </div>
     </div>
   );
 }
