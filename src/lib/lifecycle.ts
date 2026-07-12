@@ -29,6 +29,7 @@ import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
 import { hoursUntil, finishStamp } from "./time.js";
+import { loadShadowConfig, shadowOnEntries, shadowOnExit, type ShadowEntryRequest } from "./shadow.js";
 import { collectSnapshots } from "./snapshots.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
 
@@ -473,6 +474,9 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
   // Per-token order-book cache for the whole entry cycle: two profiles of one strategy
   // filling the same market must not each hit the (uncached) CLOB endpoint.
   const bookCache = new Map<string, OrderBookFetch>();
+  // Shadow allocator: collect this cycle's real fills, then evaluate them as ONE batch
+  // against the shared limited bank (observe-only — never changes what actually filled).
+  const shadowReqs: ShadowEntryRequest[] = [];
   for (const { sport, match: m } of activeMatches(db)) {
     // Don't DEPLOY capital on a lineup-sport match before its lineups are out —
     // pre-lineup we still analyze and PROPOSE possible bets (shown as
@@ -526,8 +530,16 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       openKey.add(key);
       R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "enter", text: `вход «${b.market_label}» @ ${ex.priceCents}¢ · $${ex.stake}${ex.note ? ` · ${ex.note}` : ""}`, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, price: ex.priceCents, stake: ex.stake });
+      // Mirror this fill into the shadow batch. edge = our prob − executed price; a fill
+      // while the match is already live counts as a live-triggered entry (live_buffer).
+      shadowReqs.push({
+        betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id,
+        profileId: b.risk_profile_id ?? "medium", size: ex.stake, edge: round2((b.ai_prob ?? 0) - ex.priceCents / 100),
+        isLive: m.state === "live",
+      });
     }
   }
+  try { if (shadowReqs.length) shadowOnEntries(db, shadowReqs, loadShadowConfig(db, deps.env), now); } catch { /* observe-only, never break real entries */ }
   return out;
 }
 
@@ -553,6 +565,7 @@ function closeBetEarly(db: Database, bet: { id: string; stake: number | null; en
   // the predictive metrics (Brier/CLV) so trading P&L doesn't masquerade as
   // prediction accuracy.
   R.updateBet(db, bet.id, { status: pnl >= 0 ? "settled_won" : "settled_lost", result: pnl >= 0 ? "won" : "lost", payout, closing_price: currentPriceCents, settled_by: "early", settled_at: now });
+  try { shadowOnExit(db, bet.id, 1, loadShadowConfig(db), now); } catch { /* shadow is observe-only, never break a real close */ }
   return pnl;
 }
 
@@ -583,6 +596,7 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
     result: pnl >= 0 ? "won" : "lost", payout, settled_by: "partial", settled_at: now, created_at: now,
   });
   R.updateBet(db, bet.id, { stake: round2(stake - closed) }); // keep the remainder open
+  try { shadowOnExit(db, bet.id, fraction, loadShadowConfig(db), now); } catch { /* observe-only */ }
   return { pnl, partial: true };
 }
 

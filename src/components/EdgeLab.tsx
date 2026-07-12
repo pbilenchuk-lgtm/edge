@@ -7,6 +7,7 @@
 // ============================================================
 import React, { useState, useRef, useEffect } from "react";
 import type { AppData } from "@/lib/view";
+import ShadowScreen from "./ShadowScreen";
 
 const INK = "#12161d", PANEL = "#1a2029", PANEL2 = "#212936", LINE = "#2c3543", TEXT = "#e6e9ef", MUTE = "#8b95a5";
 const PALETTE = ["#e8a838", "#5b9bd5", "#70b56a", "#c98bdb", "#e07a5f", "#4fc3c7"];
@@ -286,6 +287,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [QUALITY, setQuality] = useState(initial.quality);
   const [EVENT_FEED, setEventFeed] = useState(initial.eventFeed);
   const [strategyStats, setStrategyStats] = useState(initial.strategyStats);
+  const [shadow, setShadow] = useState(initial.shadow);
 
   const [screen, setScreen] = useState("matches");
   const toastId = useRef(0);
@@ -440,6 +442,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     if (!app || app.error) return;
     if (app.matchDb) setMatchDb(app.matchDb);
     if (app.catalog) setCatalog(app.catalog);
+    if (app.shadow) setShadow(app.shadow);
     // Sync the catalog of sports/competitions too, so newly discovered matches
     // and tournaments appear (and their live-dot lights) without a page reload.
     if (app.competitions) setCompetitions(app.competitions);
@@ -593,7 +596,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       </div>
 
       <div style={S.screenSwitch} className="el-screen-switch">
-        {[["matches", "Матчи"], ["feed", "Лента"], ["portfolio", "Портфель"], ["metrics", "Метрики"], ["strategies", "Стратегии"], ["models", "Настройки"]].map(([k, lbl]) => (
+        {[["matches", "Матчи"], ["feed", "Лента"], ["portfolio", "Портфель"], ["metrics", "Метрики"], ["shadow", "Бюджет (shadow)"], ["strategies", "Стратегии"], ["models", "Настройки"]].map(([k, lbl]) => (
           <button key={k} onClick={() => setScreen(k)} style={{ ...S.screenBtn, ...(screen === k ? S.screenOn : {}) }}>{lbl}</button>
         ))}
       </div>
@@ -706,6 +709,13 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
         <FeedScreen feed={EVENT_FEED} />
       ) : screen === "metrics" ? (
         <MetricsScreen catalog={catalog} quality={QUALITY} stats={strategyStats} />
+      ) : screen === "shadow" ? (
+        <ShadowScreen data={shadow} onSave={async (config: any) => {
+          const r = await mutate({ type: "setShadowConfig", config });
+          if (r && r.ok !== false) { await reloadApp().catch(() => {}); toast("ok", "Настройки shadow сохранены"); }
+          else toast("err", r?.error || "Не удалось сохранить настройки shadow");
+          return r;
+        }} />
       ) : (
         <ModelsScreen providers={providers} setProviders={setProviders} total={TOTAL_BALANCE} allocated={allocatedSum} cron={initial.cron}
           onSetTotal={async (amount: number) => {

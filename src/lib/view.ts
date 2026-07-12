@@ -13,6 +13,7 @@ import { SPORT_LABELS, isNoiseMarket } from "./polymarket.js";
 import { resolveFootballMarket } from "./settlement.js";
 import { maxLiveMinutes, liveDelivering } from "./lifecycle.js";
 import { listRiskProfileViews, type RiskProfileView } from "./riskConfig.js";
+import { loadShadowConfig, shadowPoolState, shadowAnalytics, type ShadowConfig, type ShadowPoolState, type ShadowAnalytics } from "./shadow.js";
 import type { StrategyParams, Match, Bet } from "./types.js";
 
 export interface MarketView {
@@ -118,6 +119,24 @@ export interface AppData {
   strategyStats: Record<string, StrategyStats>;
   /** named risk presets (Окно 4); a competition assigns (strategy, profile) pairs */
   riskProfiles: RiskProfileView[];
+  /** shadow capital allocator (observe-only «Бюджет (shadow)» tab) */
+  shadow: ShadowView;
+}
+
+export interface ShadowEventView {
+  id: string; at: string; matchId: string; matchLabel: string; category: string;
+  strategyId: string; strategyLabel: string; profileId: string;
+  sizeRequested: number; sizeReserved: number; verdict: string; reason: string | null;
+  isLive: boolean; edge: number; contention: boolean; freeAt: number | null;
+}
+export interface ShadowView {
+  enabled: boolean;
+  config: ShadowConfig;
+  pool: ShadowPoolState;
+  events: ShadowEventView[];
+  analytics: ShadowAnalytics;
+  categoryNames: Record<string, string>;
+  strategyNames: Record<string, string>;
 }
 export interface CronView {
   enabled: boolean; tickMin: number; discoverHr: number; liveSec: number; nextRunAt: string | null;
@@ -343,7 +362,27 @@ export function buildAppData(db: Database, env = process.env): AppData {
 
   const strategyStats = computeStrategyStats(strategies, allMatches, betsByMatch, pricesByMatch);
 
-  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, shareRows, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskProfiles: listRiskProfileViews(db) };
+  // Shadow allocator view (observe-only). Cheap: a few small reads + JS aggregation.
+  const shadowConfig = loadShadowConfig(db, env);
+  const catNames: Record<string, string> = {}; for (const c of competitions) catNames[c.id] = c.name;
+  const stratNames: Record<string, string> = {}; for (const s of strategies) stratNames[s.id] = s.name;
+  const matchLabel: Record<string, string> = {}; for (const m of allMatches) matchLabel[m.id] = `${m.home} — ${m.away}`;
+  const shadow: ShadowView = {
+    enabled: shadowConfig.enabled,
+    config: shadowConfig,
+    pool: shadowPoolState(db, shadowConfig, new Date(nowMs).toISOString()),
+    analytics: shadowAnalytics(db, shadowConfig),
+    categoryNames: catNames, strategyNames: stratNames,
+    events: R.listShadowEvents(db, 200).map((e) => ({
+      id: e.id, at: e.created_at, matchId: e.match_id, matchLabel: matchLabel[e.match_id] ?? e.match_id,
+      category: catNames[e.competition_id] ?? e.competition_id, strategyId: e.strategy_id,
+      strategyLabel: stratNames[e.strategy_id] ?? e.strategy_id, profileId: e.profile_id,
+      sizeRequested: e.size_requested, sizeReserved: e.size_reserved, verdict: e.verdict, reason: e.reason,
+      isLive: !!e.is_live, edge: e.edge, contention: !!e.contention, freeAt: e.free_at,
+    })),
+  };
+
+  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, shareRows, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskProfiles: listRiskProfileViews(db), shadow };
   // node:sqlite rows have a null prototype; React Server Components can't pass
   // those to a client component. A JSON round-trip yields plain objects.
   return JSON.parse(JSON.stringify(payload));

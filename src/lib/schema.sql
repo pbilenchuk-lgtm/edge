@@ -361,3 +361,53 @@ CREATE TABLE IF NOT EXISTS provider_match_map (
 
 -- §2.15 event_feed — агрегируется из bets/reassessments/trade_log/matches (view),
 -- поэтому отдельной таблицы нет: строится в репозитории по времени.
+
+-- ============================================================
+-- SHADOW capital allocator (Окно «Бюджет (shadow)») — a PARALLEL, observe-only
+-- layer that models one shared limited bank ($5000) competing across categories /
+-- matches, WITHOUT touching the real isolated per-pair budgets or any money path.
+-- Written from the same execution points as real fills/closes (single-source hook).
+-- ============================================================
+
+-- shadow_reserves — the LIVE pool: one row per open position that shadow reserved
+-- (state='reserved'), plus 'settling' rows created on close that free after the lag.
+-- free = bank_total − Σreserved − Σsettling(not yet released). Swept lazily by settle_at.
+CREATE TABLE IF NOT EXISTS shadow_reserves (
+  id            TEXT PRIMARY KEY,
+  bet_id        TEXT NOT NULL,            -- the real open bet this mirrors
+  match_id      TEXT NOT NULL,
+  competition_id TEXT NOT NULL,           -- = category
+  strategy_id   TEXT NOT NULL,
+  profile_id    TEXT NOT NULL,
+  size          REAL NOT NULL,            -- $ currently reserved (or settling) for this row
+  is_live       INTEGER NOT NULL DEFAULT 0, -- 1 = live-triggered entry (may use live_buffer)
+  edge          REAL NOT NULL DEFAULT 0,
+  state         TEXT NOT NULL DEFAULT 'reserved', -- 'reserved' | 'settling'
+  settle_at     TEXT,                     -- when a 'settling' row returns to free (else NULL)
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_res_bet ON shadow_reserves(bet_id);
+CREATE INDEX IF NOT EXISTS idx_shadow_res_state ON shadow_reserves(state);
+
+-- shadow_events — the immutable ledger of every entry decision the shadow pool made:
+-- allowed / blocked / trimmed, with the reason and a snapshot of the pool at the time.
+CREATE TABLE IF NOT EXISTS shadow_events (
+  id             TEXT PRIMARY KEY,
+  bet_id         TEXT,
+  match_id       TEXT NOT NULL,
+  competition_id TEXT NOT NULL,
+  strategy_id    TEXT NOT NULL,
+  profile_id     TEXT NOT NULL,
+  size_requested REAL NOT NULL,
+  size_reserved  REAL NOT NULL DEFAULT 0,  -- what shadow actually reserved (0 if blocked; < requested if trimmed)
+  verdict        TEXT NOT NULL,            -- 'allowed' | 'blocked' | 'trimmed'
+  reason         TEXT,                     -- insufficient_free|cash_reserve|cap_match|cap_category|cap_strategy|live_buffer
+  is_live        INTEGER NOT NULL DEFAULT 0,
+  edge           REAL NOT NULL DEFAULT 0,
+  contention     INTEGER NOT NULL DEFAULT 0, -- 1 = decided amid same-tick competition for the pool
+  free_at        REAL,                     -- free $ at the moment of decision
+  pool_snapshot  TEXT,                     -- JSON: {bank,reserved,settling,free,liveBufferFree}
+  created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_ev_time ON shadow_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_shadow_ev_verdict ON shadow_events(verdict);

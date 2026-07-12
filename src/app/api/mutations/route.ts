@@ -33,6 +33,22 @@ export async function POST(req: Request) {
         R.setCompetitionBudget(db, compId, Math.round(amount));
         return ok({ free: freeBalance(total, R.listCompetitions(db)) });
       }
+      case "setShadowConfig": {
+        // Observe-only shadow allocator settings. Whitelist + sanitise; % fields clamp to
+        // [0,1]. Applies from now forward (history is not recomputed — spec §69).
+        const { saveShadowConfig } = await import("@/lib/shadow");
+        const src = (body.config ?? {}) as Record<string, unknown>;
+        const clean: Record<string, number | boolean> = {};
+        const pcts = new Set(["liveBufferPct", "capCategoryPct", "capStrategyPct", "capMatchPct", "cashReservePct"]);
+        if ("enabled" in src) clean.enabled = !!src.enabled;
+        for (const k of ["bankTotal", "settlementLagMin", ...pcts]) {
+          if (!(k in src)) continue;
+          const n = Number(src[k]);
+          if (!Number.isFinite(n) || n < 0) return bad(`Некорректное значение: ${k}`);
+          clean[k] = pcts.has(k) ? Math.min(1, n) : n;
+        }
+        return ok(saveShadowConfig(db, clean as any, new Date().toISOString()) as any);
+      }
       case "setTreasury": {
         const amount = Math.round(Number(body.amount));
         if (!isFinite(amount) || amount < 0) return bad("Некорректная сумма");

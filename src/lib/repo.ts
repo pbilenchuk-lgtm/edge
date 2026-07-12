@@ -325,6 +325,56 @@ export function metaSet(db: Database, key: string, value: string, now: string): 
   ).run(key, value, now);
 }
 
+// ---------- shadow allocator (observe-only capital pool) ----------
+export interface ShadowReserveRow {
+  id: string; bet_id: string; match_id: string; competition_id: string;
+  strategy_id: string; profile_id: string; size: number; is_live: number;
+  edge: number; state: "reserved" | "settling"; settle_at: string | null; created_at: string;
+}
+export interface ShadowEventRow {
+  id: string; bet_id: string | null; match_id: string; competition_id: string;
+  strategy_id: string; profile_id: string; size_requested: number; size_reserved: number;
+  verdict: "allowed" | "blocked" | "trimmed"; reason: string | null; is_live: number;
+  edge: number; contention: number; free_at: number | null; pool_snapshot: string | null; created_at: string;
+}
+export function insertShadowReserve(db: Database, r: ShadowReserveRow): void {
+  db.prepare(`INSERT INTO shadow_reserves(id,bet_id,match_id,competition_id,strategy_id,profile_id,size,is_live,edge,state,settle_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(r.id, r.bet_id, r.match_id, r.competition_id, r.strategy_id, r.profile_id, r.size, r.is_live, r.edge, r.state, r.settle_at, r.created_at);
+}
+export function allShadowReserves(db: Database): ShadowReserveRow[] {
+  return db.prepare(`SELECT * FROM shadow_reserves`).all() as ShadowReserveRow[];
+}
+export function shadowReservedForBet(db: Database, betId: string): ShadowReserveRow | null {
+  return (db.prepare(`SELECT * FROM shadow_reserves WHERE bet_id=? AND state='reserved' LIMIT 1`).get(betId) as ShadowReserveRow | undefined) ?? null;
+}
+export function updateShadowReserve(db: Database, id: string, patch: { size?: number; state?: string; settle_at?: string | null }): void {
+  const sets: string[] = [], vals: (string | number | null)[] = [];
+  if (patch.size != null) { sets.push("size=?"); vals.push(patch.size); }
+  if (patch.state != null) { sets.push("state=?"); vals.push(patch.state); }
+  if ("settle_at" in patch) { sets.push("settle_at=?"); vals.push(patch.settle_at ?? null); }
+  if (!sets.length) return;
+  vals.push(id);
+  db.prepare(`UPDATE shadow_reserves SET ${sets.join(",")} WHERE id=?`).run(...vals);
+}
+export function deleteShadowReserve(db: Database, id: string): void {
+  db.prepare(`DELETE FROM shadow_reserves WHERE id=?`).run(id);
+}
+/** Free every 'settling' row whose lag has elapsed (settle_at <= now). Returns freed count. */
+export function releaseSettledShadow(db: Database, nowIso: string): number {
+  const info = db.prepare(`DELETE FROM shadow_reserves WHERE state='settling' AND settle_at IS NOT NULL AND settle_at <= ?`).run(nowIso);
+  return Number(info.changes ?? 0);
+}
+export function insertShadowEvent(db: Database, e: ShadowEventRow): void {
+  db.prepare(`INSERT INTO shadow_events(id,bet_id,match_id,competition_id,strategy_id,profile_id,size_requested,size_reserved,verdict,reason,is_live,edge,contention,free_at,pool_snapshot,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(e.id, e.bet_id, e.match_id, e.competition_id, e.strategy_id, e.profile_id, e.size_requested, e.size_reserved, e.verdict, e.reason, e.is_live, e.edge, e.contention, e.free_at, e.pool_snapshot, e.created_at);
+}
+export function listShadowEvents(db: Database, limit = 200): ShadowEventRow[] {
+  return db.prepare(`SELECT * FROM shadow_events ORDER BY created_at DESC LIMIT ?`).all(limit) as ShadowEventRow[];
+}
+export function allShadowEvents(db: Database): ShadowEventRow[] {
+  return db.prepare(`SELECT * FROM shadow_events`).all() as ShadowEventRow[];
+}
+
 // ---------- matches ----------
 export function insertMatch(db: Database, m: Match): void {
   db.prepare(
