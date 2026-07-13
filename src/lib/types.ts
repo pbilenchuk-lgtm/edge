@@ -181,6 +181,11 @@ export interface Bet {
   settled_by?: string | null;
   /** When the bet was closed/settled (ISO) — for the closures-log timestamp. */
   settled_at?: string | null;
+  /** JSON snapshot of the decision-time context (edge/kelly/probs/calibration/phase/
+   *  score/thinness/exitPlan/…) for risk-profile analytics. Forward-only (not backfilled). */
+  entry_meta?: string | null;
+  /** System epoch string at entry — lets analytics segregate pre/post-fix eras. */
+  code_version?: string | null;
 }
 
 export interface Reassessment {

@@ -25,6 +25,7 @@ import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
 import { exitDecision, winsOnEventOccurrence } from "./thresholds.js";
+import { CODE_VERSION, serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
@@ -659,6 +660,14 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
 
       R.updateBet(db, b.id, { status: "open", entry_price: ex.priceCents, current_price: ex.priceCents, stake: ex.stake, entered_minute: minuteLabel(m) });
       openKey.add(key);
+      // Augment the decision-time snapshot with what's only known at FILL: the actual
+      // filled size and the entry slippage (measurement only — no money-path effect).
+      const em = parseEntryMeta(b.entry_meta);
+      if (em) {
+        em.sizeFilled = ex.stake;
+        if (ex.cost) em.entrySlipCents = ex.cost.slipCents;
+        R.updateBet(db, b.id, { entry_meta: serializeEntryMeta(em) });
+      }
       if (ex.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, ex.cost, now);
       R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "enter", text: `вход «${b.market_label}» @ ${ex.priceCents}¢ · $${ex.stake}${ex.note ? ` · ${ex.note}` : ""}`, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, price: ex.priceCents, stake: ex.stake });
@@ -1251,12 +1260,24 @@ export async function strategistReassess(
             exposure += r.stake; matchExposure += r.stake;
             if (cKey) clusterExp.set(cKey, (clusterExp.get(cKey) ?? 0) + r.stake);
             held.add(norm(mk.label));
+            // Decision-time snapshot for a LIVE entry — includes the game-state live_prob_adjusted.
+            const liveMin = m.minute ?? minuteApprox;
+            const liveEntryMeta: BetEntryMeta = {
+              phase: "live", minute: liveMin, scoreHome: m.score_home ?? null, scoreAway: m.score_away ?? null,
+              edge: round2(r.edge), aiProb: round2(ourProb), derivedProb: mk.ai_prob != null ? round2(mk.ai_prob) : null,
+              marketPrice: mk.price, impliedProb: round2(implied), liveProbAdjusted: gsProbByLabel.get(mk.label)?.prob ?? null,
+              kellyFraction: round2(r.kellyFraction), sizeRequested: round2(r.stake), sizeFilled: null, entrySlipCents: null,
+              calibration: calibration != null ? round2(calibration) : null,
+              branchWeightSum: pick.branchWeightSum != null ? round2(pick.branchWeightSum) : null,
+              phantomCheck: pick.phantomCheck ?? null, marketThinnessUsd: liqNum(mk.liquidity),
+              winsOnEvent: winsOnEventOccurrence(mk.label), exitPlan: pick.exitPlan ?? null,
+            };
             R.insertBet(db, {
               id: R.uid(), match_id: m.id, strategy_id: sid, risk_profile_id: profile, market_label: mk.label,
               status: "proposed", proposed_price: mk.price, entry_price: null, current_price: null,
               closing_price: null, ai_prob: ourProb, stake: r.stake,
               rationale: `переоценка (лайв): «${mk.label}» edge ${(r.edge * 100).toFixed(1)}%. ${pick.reason || r.reason}.`,
-              entered_minute: null, result: null, payout: null, created_at: now,
+              entered_minute: null, result: null, payout: null, entry_meta: serializeEntryMeta(liveEntryMeta), code_version: CODE_VERSION, created_at: now,
             });
             out.entries.push({ matchId: m.id, strategyId: sid, market: mk.label, stake: r.stake });
             enteredMarkets.push(mk.label);

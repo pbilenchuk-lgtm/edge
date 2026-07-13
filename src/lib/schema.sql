@@ -218,6 +218,9 @@ CREATE TABLE IF NOT EXISTS bets (
   payout         REAL,
   settled_by     TEXT,             -- null=resolution, 'early'|'partial'=cash-out (excluded from metrics)
   settled_at     TEXT,             -- when the bet was closed/settled (for the closures log time)
+  entry_meta     TEXT,             -- JSON snapshot at decision time (edge/kelly/probs/calibration/
+                                   -- phase/score/thinness/exitPlan/…) for risk-profile analytics
+  code_version   TEXT,             -- system epoch at entry — segregate pre/post-fix eras in analysis
   created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bets_match_strat ON bets(match_id, strategy_id);

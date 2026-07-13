@@ -18,6 +18,8 @@ import { footballLabelProb } from "./footballMarkets.js";
 import { impliedProbs, probSumFlags, sizePrematch, correlationKey } from "./strategist.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
+import { winsOnEventOccurrence } from "./thresholds.js";
+import { CODE_VERSION, serializeEntryMeta, type BetEntryMeta } from "./betMeta.js";
 
 export interface AnalyzeDeps {
   fetchImpl?: typeof fetch;
@@ -323,12 +325,25 @@ export async function runStrategists(
       if (r.status !== "enter") { skipped++; continue; }
       exposure += r.stake; matchExposure += r.stake; entries++;
       if (cKey) clusterExp.set(cKey, (clusterExp.get(cKey) ?? 0) + r.stake);
+      // Decision-time snapshot for risk-profile analytics (measurement only; forward-only).
+      const entryMeta: BetEntryMeta = {
+        phase: match.state === "live" ? "live" : "prematch",
+        minute: match.state === "live" ? match.minute ?? null : null,
+        scoreHome: match.score_home ?? null, scoreAway: match.score_away ?? null,
+        edge: round3(r.edge), aiProb: round3(ourProb), derivedProb: m.ai_prob != null ? round3(m.ai_prob) : null,
+        marketPrice: m.price, impliedProb: round3(implied), liveProbAdjusted: null,
+        kellyFraction: round3(r.kellyFraction), sizeRequested: round2p(r.stake), sizeFilled: null, entrySlipCents: null,
+        calibration: calibration != null ? round3(calibration) : null,
+        branchWeightSum: pick?.branchWeightSum != null ? round3(pick.branchWeightSum) : null,
+        phantomCheck: pick?.phantomCheck ?? null, marketThinnessUsd: parseLiq(m.liquidity),
+        winsOnEvent: winsOnEventOccurrence(m.label), exitPlan: pick?.exitPlan ?? null,
+      };
       R.insertBet(db, {
         id: R.uid(), match_id: matchId, strategy_id: strat.id, risk_profile_id: profile, market_label: m.label,
         status: "proposed", proposed_price: m.price, entry_price: null, current_price: null,
         closing_price: null, ai_prob: ourProb, stake: r.stake,
         rationale: `«${m.label}»: edge ${(r.edge * 100).toFixed(1)}% (наша ${(ourProb * 100).toFixed(0)}% vs рынок ${(implied * 100).toFixed(0)}%). ${pick?.reason || r.reason}.${pickTreeNote(pick)}`,
-        entered_minute: null, result: null, payout: null, created_at: now(),
+        entered_minute: null, result: null, payout: null, entry_meta: serializeEntryMeta(entryMeta), code_version: CODE_VERSION, created_at: now(),
       });
     }
     // A pick the strategist named that resolves to NO real market (a mislabel, or a
@@ -363,6 +378,7 @@ export async function runStrategists(
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 const round3 = (x: number) => Math.round(x * 1000) / 1000;
+const round2p = (x: number) => Math.round(x * 100) / 100;
 
 // A market label with the "(Home vs. Away)" team qualifier stripped — so Polymarket's
 // duplicate listings of the SAME outcome collapse to one canonical key. E.g.

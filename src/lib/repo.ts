@@ -830,12 +830,12 @@ export function setMarketAiProb(db: Database, marketId: string, prob: number): v
 export function insertBet(db: Database, b: Bet): void {
   db.prepare(
     `INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,proposed_price,entry_price,
-       current_price,closing_price,ai_prob,stake,rationale,entered_minute,result,payout,settled_by,settled_at,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       current_price,closing_price,ai_prob,stake,rationale,entered_minute,result,payout,settled_by,settled_at,entry_meta,code_version,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     b.id, b.match_id, b.strategy_id, b.risk_profile_id ?? null, b.market_label, b.status, b.proposed_price, b.entry_price,
     b.current_price, b.closing_price, b.ai_prob, b.stake, b.rationale, b.entered_minute,
-    b.result, b.payout, b.settled_by ?? null, b.settled_at ?? null, b.created_at,
+    b.result, b.payout, b.settled_by ?? null, b.settled_at ?? null, b.entry_meta ?? null, b.code_version ?? null, b.created_at,
   );
 }
 export function updateBet(db: Database, id: string, patch: Partial<Bet>): void {
