@@ -320,6 +320,7 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
           )}
           <button style={{ ...S.ghost, ...(grouped ? { color: TEXT, borderColor: "#4a4a5c" } : {}) }} onClick={() => setGrouped((v) => !v)} title="свернуть события по матчу">по матчу</button>
           <button style={S.ghost} onClick={() => exportCsv(events)} title="скачать текущую выборку в CSV">CSV</button>
+          <a style={{ ...S.ghost, textDecoration: "none" }} href="/api/shadow-log" title="полный лог распоряжения бюджетом по ВСЕМ матчам (markdown) — для оффлайн-аналитики и оптимизации потолков/буфера">глобальный лог</a>
         </div>
         <div style={{ ...S.card, padding: 0, overflow: "auto", maxHeight: 420 }}>
           {grouped ? (

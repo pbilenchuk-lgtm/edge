@@ -25,6 +25,7 @@
     "tick:once": "node --experimental-sqlite --import tsx scripts/tick.ts",
     "export:log": "node --experimental-sqlite --import tsx scripts/export-match-log.ts",
     "melt:report": "node --experimental-sqlite --import tsx scripts/melt-report.ts",
+    "shadow:report": "node --experimental-sqlite --import tsx scripts/shadow-report.ts",
     "test": "node --experimental-sqlite --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
