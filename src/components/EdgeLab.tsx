@@ -580,7 +580,23 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 
       <div style={S.treasury}>
         <div style={S.trBrand}><span style={S.mark}>&#9670;</span><span style={S.trBrandTxt}>EDGE LAB</span></div>
-        {/* Money-by-strategy summary moved to the Metrics tab; «Подтянуть матчи» to Настройки. */}
+        {/* Compact real-bank glance (labels + values only — full detail on the Бюджет tab). */}
+        {shadow?.money && (() => {
+          const mo = shadow.money;
+          const cells: [string, string, string][] = [
+            ["Баланс", fmtMoney0(mo.balance), mo.balance >= mo.bank ? "#5fd08a" : "#ff6b6b"],
+            ["Свободно", fmtMoney0(mo.free), "#5fd08a"],
+            ["Заинвестировано", fmtMoney0(mo.invested), "#7fb4e8"],
+            ["Итог", `${mo.netRealized >= 0 ? "+" : ""}${fmtMoney0(mo.netRealized)}`, mo.netRealized >= 0 ? "#5fd08a" : "#ff6b6b"],
+            ["В процессе", `${mo.openPnl >= 0 ? "+" : ""}${fmtMoney0(mo.openPnl)}`, mo.openPnl >= 0 ? "#5fd08a" : "#ff6b6b"],
+          ];
+          return cells.map(([lbl, val, color]) => (
+            <React.Fragment key={lbl}>
+              <div style={S.trDiv} />
+              <div style={S.trCell}><div style={S.trLbl}>{lbl}</div><div style={{ ...S.trVal, color }}>{val}</div></div>
+            </React.Fragment>
+          ));
+        })()}
       </div>
 
       <div style={S.screenSwitch} className="el-screen-switch">
