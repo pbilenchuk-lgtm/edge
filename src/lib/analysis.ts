@@ -366,12 +366,21 @@ export async function runStrategists(
     // A no-entry SKIP is a strategy-level fact (the shared decision opened nothing); log it
     // ONCE, not once per profile — `reused` is true for the 2nd+ profile of the same strategy.
     // A profile that DID enter has entries>0 and logs nothing here, so its entry isn't hidden.
-    if (!reused && entries === 0 && (armedN > 0 || armedConfig)) {
-      const what = armedN > 0 ? `заряжено ${armedN} триггер(ов) выкупа на live` : "настроен порог live-xG входа";
-      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `предматч-входов нет — ${what}`, created_at: now() });
-    } else if (!reused && entries === 0 && (skipped + flagged) > 0) {
-      const why = flagged > 0 && skipped === 0 ? `флаги предохранителей (${flagged})` : `нет достаточного края (${skipped} рынк. ниже порога edge)`;
-      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — ${why}`, created_at: now() });
+    if (!reused && entries === 0) {
+      // Build a TRUTHFUL no-entry reason. `!dec.ok` (outage) is already logged above as
+      // "стратег недоступен" — don't double-log it here as an edge/skip verdict.
+      if (armedN > 0 || armedConfig) {
+        const what = armedN > 0 ? `заряжено ${armedN} триггер(ов) выкупа на live` : "настроен порог live-xG входа";
+        R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `предматч-входов нет — ${what}`, created_at: now() });
+      } else if (dec.ok && Array.isArray(picksArr) && picksArr.length === 0) {
+        // Стратег СОЗНАТЕЛЬНО вернул пустой список picks — это полный пропуск матча его
+        // решением. Движок затем авто-скипает КАЖДЫЙ рынок (нет pick → skip), так что
+        // `skipped` == число рынков, и старое «N рынков ниже порога edge» — ложь движка.
+        R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — стратег вернул 0 picks (полный пропуск)`, created_at: now() });
+      } else if (dec.ok && (skipped + flagged) > 0) {
+        const why = flagged > 0 && skipped === 0 ? `флаги предохранителей (${flagged})` : `нет достаточного края (${skipped} рынк. ниже порога edge)`;
+        R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — ${why}`, created_at: now() });
+      }
     }
     decisions.push({ strategy: pairLabel, entries, skipped });
     betsCreated += entries;

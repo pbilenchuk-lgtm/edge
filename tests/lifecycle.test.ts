@@ -756,6 +756,69 @@ test("strategistReassess supports partial fixation (fraction)", async () => {
   assert.equal(settled!.risk_profile_id, "aggressive", "partial fixation keeps the profile");
 });
 
+test("strategistReassess deterministic gate: PMV with an empty portfolio skips the LLM on a periodic tick", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const pmv: any = { id: "prematch_value", sport_id: "football", name: "Pre-match Value", tag: "pmv", color: "#000", version: 1, prompt: "p", prompt_live: "pl", params: {}, model: "Claude Opus 4.8", model_live: "Claude Opus 4.8", created_at: "t" };
+  for (const t of ["trade_log","reassessments","bets","markets","assessments","analysis_jobs","match_events","match_live","market_open","matches","strategy_shares"]) db.exec(`DELETE FROM ${t}`);
+  R.insertStrategy(db, pmv);
+  R.setShare(db, { competition_id: comp.id, strategy_id: pmv.id, pct: 50 });
+  const mid = R.uid();
+  // Live, delivering (minute>0), 0:0 — but PMV holds NO position. Its live role is
+  // "defend open positions"; empty portfolio → nothing to do → skip WITHOUT an LLM call.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  let called = 0;
+  const failFetch = (async () => { called++; throw new Error("LLM must not be called for an empty PMV portfolio"); }) as any;
+  // Periodic tick: match is in the reassess set but has no event label → labelFor default "time".
+  const res = await strategistReassess(db, { fetchImpl: failFetch, env: { ANTHROPIC_API_KEY: "k" } }, { newEventMatchIds: new Set([mid]) });
+  assert.equal(called, 0, "no HTTP/LLM call was made");
+  assert.equal(res.llmCalls, 0, "no LLM call counted");
+  assert.ok(R.tradeLogForMatch(db, mid).some((e) => e.type === "skip" && /пустой портфель/.test(e.text)), "deterministic skip logged");
+});
+
+test("strategistReassess deterministic gate: overreaction with no live trigger skips the LLM at 0:0", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const ovr: any = { id: "overreaction", sport_id: "football", name: "Overreaction", tag: "ovr", color: "#000", version: 1, prompt: "p", prompt_live: "pl", params: {}, model: "Claude Opus 4.8", model_live: "Claude Opus 4.8", created_at: "t" };
+  for (const t of ["trade_log","reassessments","bets","markets","assessments","analysis_jobs","match_events","match_live","market_open","matches","strategy_shares"]) db.exec(`DELETE FROM ${t}`);
+  R.insertStrategy(db, ovr);
+  R.setShare(db, { competition_id: comp.id, strategy_id: ovr.id, pct: 50 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 20, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  // A goal-keyed buyback trigger armed for early minutes — but the score is still 0:0, so the
+  // triggering event (an underdog goal) has NOT happened → no live setup → skip, no LLM call.
+  R.saveArtifact(db, { match_id: mid, kind: "battle_sheet", label: `${ovr.name} · medium`, stage: "prematch", content: JSON.stringify({ live_triggers_armed: [{ scenario_trigger: "андердог забивает ранний гол", buyback_target: 60, time_window: "до ~30'" }] }), model: "m", created_at: "t" });
+  let called = 0;
+  const failFetch = (async () => { called++; throw new Error("LLM must not be called with no live overreaction trigger"); }) as any;
+  const res = await strategistReassess(db, { fetchImpl: failFetch, env: { ANTHROPIC_API_KEY: "k" } }, { newEventMatchIds: new Set([mid]) });
+  assert.equal(called, 0, "no HTTP/LLM call was made");
+  assert.equal(res.llmCalls, 0, "no LLM call counted");
+  assert.ok(R.tradeLogForMatch(db, mid).some((e) => e.type === "skip" && /нет заряженного триггера/.test(e.text)), "deterministic skip logged");
+});
+
+test("strategistReassess deterministic gate: a REAL event (goal) still runs overreaction even at empty portfolio", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const ovr: any = { id: "overreaction", sport_id: "football", name: "Overreaction", tag: "ovr", color: "#000", version: 1, prompt: "p", prompt_live: "pl", params: {}, model: "Claude Opus 4.8", model_live: "Claude Opus 4.8", created_at: "t" };
+  for (const t of ["trade_log","reassessments","bets","markets","assessments","analysis_jobs","match_events","match_live","market_open","matches","strategy_shares"]) db.exec(`DELETE FROM ${t}`);
+  R.insertStrategy(db, ovr);
+  R.setShare(db, { competition_id: comp.id, strategy_id: ovr.id, pct: 50 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 20, score_home: 0, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  R.saveArtifact(db, { match_id: mid, kind: "battle_sheet", label: `${ovr.name} · medium`, stage: "prematch", content: JSON.stringify({ live_triggers_armed: [{ scenario_trigger: "андердог забивает ранний гол", buyback_target: 60, time_window: "до ~30'" }] }), model: "m", created_at: "t" });
+  // A goal event (real trigger, not a periodic heartbeat) — the gate must NOT skip it.
+  let called = 0;
+  const mock = (async () => { called++; return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [], note: "нет выкупа" }) }] }) }; }) as any;
+  await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } }, { newEventMatchIds: new Set([mid]), labelFor: new Map([[mid, "goal"]]) });
+  assert.ok(called > 0, "a real goal event runs the strategist despite the empty portfolio");
+});
+
 test("verifyExitTrigger: a defensive tag with only an echoed reason → discretionary + flagged; substantive kept", () => {
   // the Argentina–Switzerland pollution: trigger counter_scenario, reason just the word itself
   assert.deepEqual(verifyExitTrigger("counter_scenario", "counter_scenario"), { trigger: "discretionary", flagged: true });

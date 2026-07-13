@@ -33,6 +33,7 @@ import { strategistDecide, effectiveEnv } from "./llm.js";
 import { hoursUntil, finishStamp } from "./time.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit, type ShadowEntryRequest } from "./shadow.js";
 import { collectSnapshots } from "./snapshots.js";
+import { overreactionShouldCall } from "./reassessGate.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
 
 // Timing gates (hours before kickoff). Pre-match assessment opens ~12h out;
@@ -1078,11 +1079,33 @@ export async function strategistReassess(
       const stratOpen = open.filter((b) => b.strategy_id === sid);
       const seenMkt = new Set<string>();
       const promptPositions = stratOpen.filter((b) => { const k = norm(b.market_label); if (seenMkt.has(k)) return false; seenMkt.add(k); return true; });
-      calls++;
       // BATTLE SHEET (план прематча) — тезисный (триггеры / take_price / thesis_stop),
       // а не про размер, и почти одинаков по профилям одной стратегии; берём первый
       // доступный как представителя (LIVE-окно исполняет его, не переизобретает).
       const battleSheet = profiles.map((p) => R.artifactsForMatch(db, m.id).find((x) => x.kind === "battle_sheet" && x.label === `${strat.name} · ${p.profile}`)?.content).find(Boolean);
+      // ── ДЕТЕРМИНИСТИЧЕСКИЙ ПРЕ-LLM ГЕЙТ (§9.6: не денежное решение — только «может ли
+      // стратег вообще действовать сейчас?»). На ПЕРИОДИЧЕСКОМ тике (heartbeat, не событие)
+      // с ПУСТЫМ портфелем пропускаем LLM, когда стратегу заведомо нечего делать — это
+      // live-близнец предматчевой «Модели Б». Реальное событие (isPeriodic=false: гол /
+      // красная / движение цены) всегда идёт в стратега как раньше. Fail-open: любая
+      // неоднозначность → зовём стратега.
+      if (isPeriodic(m.id) && !stratOpen.length) {
+        let skipReason: string | null = null;
+        if (sid === "prematch_value") {
+          // Live-роль PMV — «защита открытого»; открытой позиции нет → защищать нечего.
+          skipReason = "PMV live: пустой портфель — защищать нечего (детерминированный пропуск, без LLM)";
+        } else if (sid === "overreaction" && !overreactionShouldCall(battleSheet ?? null, { totalGoals: (m.score_home ?? 0) + (m.score_away ?? 0), minute: m.minute ?? minuteApprox })) {
+          // Вход overreaction возможен ТОЛЬКО через заряженный buyback-триггер; нет ни одного
+          // с выполненными детерминированными предусловиями (событие/глубина + окно) → пропуск.
+          skipReason = "Overreaction: нет заряженного триггера с выполненными предусловиями (событие/окно) — детерминированный пропуск, без LLM";
+        }
+        // live_xg здесь НЕ гейтим — он открывает по потоку live-xG (нужно суждение LLM).
+        if (skipReason) {
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "skip", text: skipReason, created_at: now });
+          continue;
+        }
+      }
+      calls++;
       // Pre-registered counter_scenario conditions per market (structured field in the plan) —
       // used to verify a counter_scenario exit tag against the live score/minute (trigger honesty).
       const csCondByMarket = new Map<string, string>();

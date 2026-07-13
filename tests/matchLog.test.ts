@@ -66,5 +66,9 @@ test("buildMatchLog: says so when there are no shadow decisions for the match", 
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "upcoming", lineup_out: false, kickoff_at: "2026-07-13T13:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   const log = buildMatchLog(db, mid);
   assert.match(log, /Теневой бюджет/);
-  assert.match(log, /нет теневых решений по этому матчу/);
+  // Allocator is ON by default → the empty case says "no fills yet", not the old ambiguous line.
+  assert.match(log, /аллокатор включён/);
+  // Turning the allocator OFF changes the empty-case message to the disabled wording.
+  R.metaSet(db, "shadow_config", JSON.stringify({ enabled: false }), "2026-07-13T13:00:00Z");
+  assert.match(buildMatchLog(db, mid), /аллокатор ВЫКЛЮЧЕН/);
 });

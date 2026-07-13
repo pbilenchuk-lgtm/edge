@@ -9,6 +9,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { summarizeFillCosts } from "./fillCosts.js";
+import { loadShadowConfig } from "./shadow.js";
 
 /** Resolve a match by exact id, else a case-insensitive team-name substring.
  *  Prefers the most recent match when several fixtures match the same query. */
@@ -129,7 +130,12 @@ export function buildMatchLog(db: Database, matchId: string): string {
   const shEvents = R.shadowEventsForMatch(db, m.id);
   const shReserves = R.shadowReservesForMatch(db, m.id);
   if (!shEvents.length && !shReserves.length) {
-    L.push("(нет теневых решений по этому матчу — аллокатор выключен, или входов ещё не было)");
+    // Disambiguate the empty case: an OFF allocator never modelled this match, vs an ON
+    // allocator that simply saw no fills yet — two very different states that used to read
+    // identically ("аллокатор выключен, или входов ещё не было").
+    L.push(loadShadowConfig(db).enabled
+      ? "(аллокатор включён — но по этому матчу ещё не было ни входов, ни решений пула)"
+      : "(теневой аллокатор ВЫКЛЮЧЕН — shadow-слой по этому матчу не считался)");
   } else {
     const reqSum = round0(shEvents.reduce((s, e) => s + e.size_requested, 0));
     const resSum = round0(shEvents.reduce((s, e) => s + e.size_reserved, 0));
