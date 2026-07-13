@@ -2024,7 +2024,33 @@ function ModelsScreen({ providers, setProviders, total, allocated, cron, onSetTo
       ))}
 
       <CronPanel cron={cron} />
+      <ReportsPanel />
     </main>
+  );
+}
+
+// Read-only measurement exports (computed on the fly from historical snapshots).
+function ReportsPanel() {
+  const btn = (href: string, label: string, primary: boolean) => (
+    <a href={href} target="_blank" rel="noreferrer" style={{
+      ...S.discoverBtn, textDecoration: "none", display: "inline-block", fontSize: 12, padding: "6px 12px",
+      ...(primary ? {} : { background: "transparent", color: "#9aa4b2", border: `1px solid ${LINE}` }),
+    }}>{label}</a>
+  );
+  return (
+    <section style={S.card}>
+      <div style={S.cronTitle}>Отчёты (замеры)</div>
+      <div style={{ ...S.modelsSub, marginBottom: 10 }}>
+        <b>Overreaction latency</b> — сколько цены теряется на лаге «событие → детекция → LLM → филл»
+        (медианный <code>missed_cents</code> + вердикт carve-out). Считается на лету из исторических
+        снапшотов, только чтение. Если камбэк-матчей ещё мало — отчёт скажет «недостаточно данных».
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {btn("/api/overreaction-latency?format=csv", "📥 Скачать CSV", true)}
+        {btn("/api/overreaction-latency", "📄 Отчёт (.md)", false)}
+        {btn("/api/overreaction-latency?format=json", "{ } JSON", false)}
+      </div>
+    </section>
   );
 }
 
