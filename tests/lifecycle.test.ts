@@ -767,6 +767,38 @@ test("strategistReassess hands the model minute estimate, price movement, liquid
   assert.match(sentPrompt, /провайдер пока не отдаёт счёт/, "no-score fallback guidance included");
 });
 
+test("strategistReassess feeds the strategist a game-state live_prob_adjusted for melting options (Fix 1)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const mid = R.uid();
+  // The reference case decision point: Argentina 1:0 Switzerland at 54' (where the
+  // system cut the position). Switzerland Over 0.5 is a melting option — the game-
+  // state layer must supply P(Switzerland scores) from score-state+time, NOT the
+  // strategist's back-extrapolation of accumulated tempo (the buggy ~34%).
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Argentina", away: "Switzerland", state: "live", lineup_out: true, kickoff_at: null, minute: 54, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Switzerland Over 0.5", price: 40, ai_prob: 0.4, liquidity: "2000", external_ref: "TOKS", snapshot_at: "t", is_closing: false });
+  // Stored analysis core (base artifact) — where the full-match xG comes from.
+  R.saveArtifact(db, { match_id: mid, kind: "base", stage: "live", content: JSON.stringify({ ok: true, core: { xg_home: 1.6, xg_away: 1.05, home_share_1h: 0.5, away_share_1h: 0.45, poisson_correction: 0 } }), model: "m", created_at: "t" });
+  // An open position so the pair reassesses even without a fresh trigger.
+  R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Switzerland Over 0.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 40, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+
+  let sentPrompt = "";
+  const mock = (async (_url: any, init: any) => {
+    const body = JSON.parse(init.body);
+    sentPrompt += "\n" + body.messages.map((m: any) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n");
+    return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [], note: "ok" }) }] }) } as any;
+  }) as unknown as typeof fetch;
+  await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => "t" }, { newEventMatchIds: new Set([mid]), max: 50 });
+  assert.match(sentPrompt, /Switzerland Over 0\.5:[^\n]*game-state P=/, "melting option carries a game-state P next to its price");
+  // The number must be the un-buggy game-state estimate (≥45%), not the ~34% back-extrapolation.
+  const mrow = sentPrompt.match(/Switzerland Over 0\.5:[^\n]*game-state P=(\d+)%/);
+  assert.ok(mrow, "game-state P parsed from the market line");
+  assert.ok(Number(mrow![1]) >= 45, `game-state P should be ≥45%, got ${mrow![1]}%`);
+});
+
 test("strategistReassess closes a position the strategy prompt says to cut", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

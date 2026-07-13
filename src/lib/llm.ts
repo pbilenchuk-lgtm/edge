@@ -593,7 +593,7 @@ export interface StrategistInput {
   strategyName: string; strategyPrompt: string;
   match: { home: string; away: string; sport: string; state: string; minute: number | null; scoreHome: number | null; scoreAway: number | null; minuteApprox?: number | null };
   assessment: { confidence: string; short: string; verdict: string };
-  markets: { label: string; priceCents: number; aiProb: number | null; liquidity?: number | null; openCents?: number | null; conflict?: string | null }[];
+  markets: { label: string; priceCents: number; aiProb: number | null; liquidity?: number | null; openCents?: number | null; conflict?: string | null; liveProbAdjusted?: { prob: number; note: string } | null }[];
   openPositions: { market: string; entryCents: number; currentCents: number }[];
   context?: string; // real lineups + in-match events (ESPN) — the reassessment triggers
 }
@@ -747,8 +747,15 @@ export async function strategistDecide(
       : "";
     const liq = m.liquidity != null ? `, ликв. $${Math.round(m.liquidity)}` : "";
     const ai = m.aiProb != null ? `, предматч. оценка ${(m.aiProb * 100).toFixed(0)}%` : "";
+    // Game-state-adjusted live probability for a MELTING option (тающий опцион) —
+    // P(событие наступит за остаток) от score-state + времени, посчитанная КОДОМ
+    // (liveProb.ts), НЕ экстраполяция накопленного темпа. Стоит РЯДОМ с ценой, чтобы
+    // live-edge мерился против game-state-числа, а не против прикидки от прошлого xG.
+    const gsAdj = m.liveProbAdjusted != null
+      ? `, game-state P=${(m.liveProbAdjusted.prob * 100).toFixed(0)}% (${m.liveProbAdjusted.note})`
+      : "";
     const conflict = m.conflict ? `  ${m.conflict}` : "";
-    return `- ${m.label}: ${m.priceCents}¢${move}${liq}${ai}${conflict}`;
+    return `- ${m.label}: ${m.priceCents}¢${move}${liq}${ai}${gsAdj}${conflict}`;
   }).join("\n");
   const posList = input.openPositions.length
     ? input.openPositions.map((p) => `- ${p.market}: вход ${p.entryCents}¢ → сейчас ${p.currentCents}¢`).join("\n")
@@ -766,6 +773,7 @@ export async function strategistDecide(
       "Ты — трейдер на прогнозных рынках, действующий СТРОГО по методологии из промта стратегии (это твой единственный свод правил). На основе оценки матча, дерева исходов и цен реши ДЕЙСТВИЯ. " +
       "Правила: входи в рынок ТОЛЬКО если методология это разрешает и ты можешь назвать конкретную причину, почему цена неверна; не давай конфликтующих ставок на один матч; уважай стадию (предматч/лайв); выход может быть ЧАСТИЧНЫМ (fraction 0..1: 0.5 = половина, 1 = полностью). " +
       "Для КАЖДОГО входа укажи prob — свою АКТУАЛЬНУЮ вероятность (0..1), что рынок сыграет ДА на ТЕКУЩИЙ момент (счёт/минута/события). НЕ копируй «предматч. оценку» — в лайве она устаревает (при 0:2 «Over 1.5» ≈ 1.0); пересчитай. " +
+      "Где у рынка есть «game-state P=…%» — это P(события за остаток) от счёта и времени, посчитанная кодом (отстающий обязан раскрываться, голы кластеризуются в концовке). Для тающего опциона (ставка на наступление события: командный Over 0.5/1.5, BTTS-Yes) считай edge против этого числа, а НЕ против экстраполяции прошлого темпа. " +
       "ВАЖНО ПРО РАЗМЕР: РАЗМЕР СЧИТАЕТ ДВИЖОК по твоему prob и риск-профилю (Kelly, кэпы). Твои size_pct/kelly_fraction/role — справочные, на реальную ставку НЕ влияют; честный prob — единственное, что двигает размер. " +
       "ФОРМАТ ВЫХОДА — строгий JSON. Ключи входов и выходов могут называться как в твоей методологии, все они принимаются как синонимы: " +
       "ВХОДЫ — picks ИЛИ pre_match_positions ИЛИ actions с action:'add'/'open_new'; поля входа: {label|market (ДОСЛОВНО из списка), prob|our_prob, conviction:'низкая'|'средняя'|'высокая'(опц.), reason, и опционально role:'anchor'|'satellite', lives_in_branches:[], branch_weight_sum, phantom_check, total_check, exit:{take_price,thesis_stop,counter_scenario_stop}}. " +

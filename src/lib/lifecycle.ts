@@ -22,7 +22,8 @@ import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBookResult, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
 import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricSellAvgCents, takerFeeCents } from "./execution.js";
 import type { Bet, Market, Strategy } from "./types.js";
-import { analyzeMatch, runStrategists, jobActive, strategistContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
+import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
+import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
 import { exitDecision, winsOnEventOccurrence } from "./thresholds.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
 import { getProfileConfig } from "./riskConfig.js";
@@ -899,6 +900,27 @@ export async function strategistReassess(
     // Match facts + the outcome tree / match_shape / scenarios the strategist
     // reasons over (single-sourced; the pair's battle sheet is appended below).
     const ctx = strategistContext(db, m.id);
+    // GAME-STATE live probability for MELTING options (тающие опционы: командный
+    // Over 0.5/1.5, BTTS-Yes). The strategist previously back-extrapolated P from
+    // accumulated tempo and cut Switzerland Over 0.5 at 31–43¢ minutes before the
+    // goal. Supply a code-computed P(event in the remainder) from score-state+time
+    // NEXT TO the price, per market — so live edge is judged against game-state,
+    // not an LLM guess. §9.6 preserved: code supplies the number, the LLM judges.
+    // Uses the provider minute, else the timer estimate; null core → no adjustment.
+    const lpCfg = loadLiveProbConfig(env);
+    const core = footballCore(db, m.id);
+    const liveMinute = m.minute ?? minuteApprox;
+    const gsProbByLabel = new Map<string, { prob: number; note: string }>();
+    if (core && sport === "football") {
+      for (const mk of markets) {
+        const adj = liveAdjustedProb(mk.label, {
+          home: m.home, away: m.away,
+          scoreHome: m.score_home, scoreAway: m.score_away,
+          minute: liveMinute, core,
+        }, lpCfg);
+        if (adj) gsProbByLabel.set(mk.label, adj);
+      }
+    }
 
     // PAIRS to run (LIVE branch of the unified engine — same (strategy, profile)
     // unit as the prematch pass): pairs with an active share (can enter) plus any
@@ -956,7 +978,7 @@ export async function strategistReassess(
         strategyName: strat.name, strategyPrompt: strat.prompt_live ?? strat.prompt,
         match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, minuteApprox },
         assessment: { confidence: assess?.confidence ?? "средняя", short: assess?.short ?? "", verdict: assess?.verdict ?? "" },
-        markets: markets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob, liquidity: mk.liquidity != null ? Number(mk.liquidity) : null, openCents: mk.label in opens ? opens[mk.label] : null })),
+        markets: markets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob, liquidity: mk.liquidity != null ? Number(mk.liquidity) : null, openCents: mk.label in opens ? opens[mk.label] : null, liveProbAdjusted: gsProbByLabel.get(mk.label) ?? null })),
         openPositions: promptPositions.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
         context: [ctx, battleSheet ? `БОЕВОЙ ЛИСТ (план из предматча — исполняй его, не переизобретай):\n${battleSheet}` : null].filter(Boolean).join("\n\n") || undefined,
         // LIVE-переоценка исполняет уже сформированный боевой лист — держим её на

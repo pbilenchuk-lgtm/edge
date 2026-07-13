@@ -420,6 +420,32 @@ function calibrationFromArtifact(db: Database, matchId: string): number | null {
   try { const v = JSON.parse(art.content)?.calibration?.xg_confidence; return typeof v === "number" ? v : null; }
   catch { return null; }
 }
+/** The full-match FootballCore (xg + 1st-half shares) from the stored analysis —
+ *  the game-state live-prob layer (liveProb.ts) needs the base λ per team. Prefer
+ *  the ASSEMBLED distribution core (base folded with the category modifier + any
+ *  overrides — the number the market derivation actually used); fall back to the
+ *  raw `base` artifact. Football-only (no such artifact otherwise) → null. */
+export function footballCore(
+  db: Database, matchId: string,
+): { xg_home: number; xg_away: number; home_share_1h: number; away_share_1h: number } | null {
+  const arts = R.artifactsForMatch(db, matchId);
+  const readCore = (kind: string) => {
+    const art = arts.find((x) => x.kind === kind);
+    if (!art) return null;
+    try {
+      const c = JSON.parse(art.content)?.core;
+      if (c && Number.isFinite(c.xg_home) && Number.isFinite(c.xg_away)) {
+        return {
+          xg_home: Number(c.xg_home), xg_away: Number(c.xg_away),
+          home_share_1h: Number.isFinite(c.home_share_1h) ? Number(c.home_share_1h) : 0.44,
+          away_share_1h: Number.isFinite(c.away_share_1h) ? Number(c.away_share_1h) : 0.44,
+        };
+      }
+    } catch { /* malformed artifact → try the next source */ }
+    return null;
+  };
+  return readCore("distribution") ?? readCore("base");
+}
 /** Parse a liquidity string ("$2.5M", "1234", "780K") to a number, or null. */
 function parseLiq(s: string | null): number | null {
   if (s == null) return null;
