@@ -448,3 +448,19 @@ CREATE TABLE IF NOT EXISTS fill_costs (
 );
 CREATE INDEX IF NOT EXISTS idx_fill_costs_match ON fill_costs(match_id);
 CREATE INDEX IF NOT EXISTS idx_fill_costs_time ON fill_costs(created_at);
+
+-- provider_coverage — a per (provider, league) coverage map. "fixture not resolved" for
+-- e.g. Sportmonks on swe.1 is a COVERAGE fact (the provider doesn't map the league), not a
+-- per-match one — so after N consecutive not-resolved failures we mute the whole league and
+-- drop to a SLOW re-probe instead of hammering the resolve every tick on every match of that
+-- league. Soft, not permanent: mappings can appear late, so a re-probe window stays open. A
+-- TIMEOUT (network) is transient and never counted here.
+CREATE TABLE IF NOT EXISTS provider_coverage (
+  provider     TEXT NOT NULL,
+  league       TEXT NOT NULL,
+  consec_fail  INTEGER NOT NULL DEFAULT 0,   -- consecutive not-resolved failures
+  muted_until  TEXT,                          -- ISO: skip normal calls until this, slow-probe only
+  last_probe_at TEXT,                          -- ISO: last time we actually called the provider
+  updated_at   TEXT NOT NULL,
+  PRIMARY KEY (provider, league)
+);

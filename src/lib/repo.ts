@@ -999,6 +999,19 @@ export function pruneSnapshots(db: Database, olderThanIso: string): number {
 }
 
 // provider_match_map — resolved external match id per provider (cache).
+export interface ProviderCoverageRow {
+  provider: string; league: string; consec_fail: number;
+  muted_until: string | null; last_probe_at: string | null; updated_at: string;
+}
+export function getProviderCoverage(db: Database, provider: string, league: string): ProviderCoverageRow | null {
+  return (db.prepare(`SELECT * FROM provider_coverage WHERE provider=? AND league=?`).get(provider, league) as ProviderCoverageRow | undefined) ?? null;
+}
+export function upsertProviderCoverage(db: Database, r: ProviderCoverageRow): void {
+  db.prepare(`INSERT INTO provider_coverage(provider,league,consec_fail,muted_until,last_probe_at,updated_at)
+    VALUES(?,?,?,?,?,?)
+    ON CONFLICT(provider,league) DO UPDATE SET consec_fail=excluded.consec_fail, muted_until=excluded.muted_until, last_probe_at=excluded.last_probe_at, updated_at=excluded.updated_at`)
+    .run(r.provider, r.league, r.consec_fail, r.muted_until, r.last_probe_at, r.updated_at);
+}
 export function getProviderRef(db: Database, matchId: string, provider: string): { provider_ref: string | null; resolved_at: string } | null {
   const r = db.prepare(`SELECT provider_ref,resolved_at FROM provider_match_map WHERE match_id=? AND provider=?`).get(matchId, provider);
   return r ?? null;

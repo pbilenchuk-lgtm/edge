@@ -383,21 +383,33 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 const round3 = (x: number) => Math.round(x * 1000) / 1000;
 const round2p = (x: number) => Math.round(x * 100) / 100;
 
-// A market label with the "(Home vs. Away)" team qualifier stripped — so Polymarket's
-// duplicate listings of the SAME outcome collapse to one canonical key. E.g.
-// "Draw (Spain vs. Belgium) — Yes" and "Draw — Yes" → "draw — yes". Only a
-// parenthetical that actually reads like "… vs …" is removed, so real parentheticals
-// (handicaps "(-1.5)") are left intact.
+// Group KEY that strips a "(Home vs. Away)" qualifier so labels that LOOK like the same
+// outcome ("Draw (Spain vs. Belgium) — Yes" and "Draw — Yes") land in one bucket — used
+// ONLY to detect a price conflict between look-alikes. It does NOT assert they ARE one
+// outcome. Only a parenthetical that reads like "… vs …" is stripped; real ones
+// (handicaps "(-1.5)") stay intact.
 const canonOutcome = (label: string): string =>
   norm(label.replace(/\([^)]*\bvs\.?\b[^)]*\)/gi, " "));
-const CONFLICT_CENTS = 8; // ≥ this price gap between two listings of one outcome = data artifact, not edge
+const CONFLICT_CENTS = 8; // ≥ this price gap between two look-alike listings = do-not-trade signal
 /**
- * Detect DUPLICATE-OUTCOME markets whose prices CONTRADICT each other — Polymarket
- * sometimes lists the same outcome twice ("Draw" vs "Draw (Spain vs. Belgium)"),
- * and when the two prices diverge (41.5¢ vs 24.6¢ for the same 24% draw), the
- * cheaper-looking side is a phantom edge, not a real one. Returns a per-label note
- * for every market caught in such a conflict, so the strategist SEES it every time
- * (instead of relying on the model to notice) and the entry loop can refuse it.
+ * ⚠️ DO NOT "collapse/dedup" these markets. Empirically established on Spain–Belgium:
+ * a bare "Draw" and "Draw (Spain vs. Belgium)" are TWO DIFFERENT Polymarket contracts —
+ * different tokens, different RESOLUTION CONDITIONS — not one outcome listed twice. Proof:
+ * at 1:1 live one Draw sat at 100¢ (reacts to "a draw on the scoreboard NOW" — HT/current
+ * state) while the other sat at 31.6¢ (draw AT 90'). One outcome cannot cost 100 and 31.6
+ * at once ⇒ the outcomes differ. Merging them would CREATE a bug (trade one contract at the
+ * other's price), not remove one.
+ *
+ * So this function only FLAGS+BLOCKS: when two look-alikes' prices diverge ≥CONFLICT_CENTS,
+ * every member gets a note so the strategist sees it and the entry loop refuses it. That
+ * guard holds the money while the REAL fix waits in the backlog (no rush):
+ *   (1) PROVENANCE first — token-check whether the bare "Draw" even belongs to THIS match
+ *       or was dragged in by the importer from another event; step 1 is research, not code.
+ *   (2) if it belongs — SPLIT the semantics: each token gets its own resolution condition
+ *       and its own ai_prob — do NOT dedup.
+ *   (3) same class covers "broken labels" (e.g. "Team — Yes" = 100¢): a token with an
+ *       unclear resolution condition, resolved by the same provenance pass.
+ * Returns a per-label conflict note for every market caught, so the model isn't relied on.
  */
 export function duplicateOutcomeConflicts(markets: { label: string; priceCents: number }[]): Map<string, string> {
   const groups = new Map<string, { label: string; priceCents: number }[]>();

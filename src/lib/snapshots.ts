@@ -16,6 +16,7 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { loadPolymarketConfig, fetchMidpointCents, type PolymarketConfig } from "./polymarket.js";
 import { loadProvidersConfig, activeProviders, fetchProvider, type MatchRef } from "./providers.js";
+import { shouldCallProvider, classifyFetchOutcome, nextCoverage } from "./providerCoverage.js";
 import { hoursUntil } from "./time.js";
 import type { Match } from "./types.js";
 
@@ -116,13 +117,23 @@ export async function collectSnapshots(db: Database, deps: EngineDeps = {}): Pro
   const nowMs = Date.parse(batchAt) || Date.now();
   const matches = relevantMatches(db, nowMs);
   let written = 0;
+  // league per competition — the coverage key ("swe.1" etc.). Sportmonks not mapping a
+  // league is a league-wide fact, so we mute the (provider, league) pair, not each fixture.
+  const leagueOf = new Map(R.listCompetitions(db).map((c) => [c.id, c.external_league ?? null]));
 
   for (const { match: m } of matches) {
     const phase = phaseFor(m.state);
     const mref: MatchRef = { home: m.home, away: m.away, kickoffIso: m.kickoff_at ?? m.kickoff_time ?? null };
+    const league = leagueOf.get(m.competition_id) ?? null;
 
     // --- one row per sports provider (raw + extracted) ---
     for (const p of provs) {
+      // Coverage negative-cache: if this (provider, league) is muted (the provider keeps
+      // failing to resolve the league) and the slow re-probe window hasn't elapsed, skip the
+      // call entirely — no dead ~950ms resolve, no snapshot row. The mute auto-lifts for a
+      // periodic re-probe, so a late-appearing mapping is still picked up.
+      const cov = league ? R.getProviderCoverage(db, p, league) : null;
+      if (league && !shouldCallProvider(cov, nowMs)) continue;
       const cached = R.getProviderRef(db, m.id, p);
       let r;
       try {
@@ -130,6 +141,9 @@ export async function collectSnapshots(db: Database, deps: EngineDeps = {}): Pro
       } catch (e) {
         r = { ok: false, httpStatus: null, providerRef: cached?.provider_ref ?? null, minute: null, raw: null, extracted: null, latencyMs: 0, resolvedRef: cached?.provider_ref ?? null, error: e instanceof Error ? e.message : String(e) };
       }
+      // Update the league coverage from this outcome (resolved clears it; a run of
+      // not-resolved mutes it; a transient/timeout never mutes a genuinely covered league).
+      if (league) { try { R.upsertProviderCoverage(db, nextCoverage(p, league, cov, classifyFetchOutcome(r), batchAt)); } catch { /* best-effort */ } }
       // Cache the resolved id (even a null "not found" so we don't research every tick;
       // it refreshes whenever a later pass does resolve it).
       if (!cached || cached.provider_ref !== r.resolvedRef) R.setProviderRef(db, m.id, p, r.resolvedRef);
