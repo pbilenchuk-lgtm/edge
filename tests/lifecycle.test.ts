@@ -1408,6 +1408,20 @@ test("runStrategists (Model A): ONE strategist call per strategy, shared across 
   const proposed = R.betsForMatch(db, mid, strat.id).filter((b) => b.status === "proposed");
   assert.equal(proposed.length, 3, "all three profiles sized the SAME shared pick — a nested subset of one candidate list, not divergent LLM picks");
   assert.ok(proposed.every((b) => b.market_label === "Over 2.5"), "identical market across profiles (determinism restored)");
+  // A/B knob: bets carry the combined epoch label, and entry_meta records the actual models.
+  const { effectiveCodeVersion, bumpModelEpoch } = await import("../src/lib/codeEpoch.js");
+  const { parseEntryMeta } = await import("../src/lib/betMeta.js");
+  assert.ok(proposed.every((b) => b.code_version === effectiveCodeVersion(db)), "stamped with the effective code·model epoch");
+  assert.match(proposed[0].code_version ?? "", /·m1$/, "baseline model epoch m1");
+  const em = parseEntryMeta(proposed[0].entry_meta);
+  assert.ok(em?.models?.strategist, "the strategist model that produced the pick is captured");
+
+  // Flip a model → next epoch → new bets carry ·m2 (the segmentation boundary for the A/B).
+  bumpModelEpoch(db, "t");
+  R.clearProposedBets(db, mid);
+  await runStrategists(db, mid, { now: () => "t", fetchImpl, env: { ANTHROPIC_API_KEY: "k" } });
+  const after = R.betsForMatch(db, mid, strat.id).filter((b) => b.status === "proposed");
+  assert.ok(after.length > 0 && after.every((b) => /·m2$/.test(b.code_version ?? "")), "post-flip bets land in the next epoch");
 });
 
 test("autoRunStrategists re-runs the engine for a NEW roster pair, without re-analysis, self-limiting", async () => {

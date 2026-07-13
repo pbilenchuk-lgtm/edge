@@ -17,6 +17,7 @@ export async function POST(req: Request) {
     const { extractThresholds, extractThresholdsHeuristic } = await import("@/lib/thresholds");
     const { heuristicName, proposeImprovement, effectiveEnv } = await import("@/lib/llm");
     const { parseRiskProfile, loadRiskConfig } = await import("@/lib/riskConfig");
+    const { bumpModelEpoch } = await import("@/lib/codeEpoch");
 
     const db = getDb();
     let body: any;
@@ -105,7 +106,16 @@ export async function POST(req: Request) {
         // Frontend sends camelCase; repo columns are snake_case.
         if (patch && patch.promptLive !== undefined) { patch.prompt_live = patch.promptLive; delete patch.promptLive; }
         if (patch && patch.modelLive !== undefined) { patch.model_live = patch.modelLive; delete patch.modelLive; }
+        // A/B knob: if this patch actually CHANGES a model assignment, start a fresh
+        // model epoch so bets from here on carry a new "…·mN" label the «Профили» tab
+        // segments on. Compare against current so a no-op save doesn't spawn an epoch.
+        const before = R.getStrategy(db, id);
+        const modelChanged = before && (
+          (patch?.model !== undefined && patch.model !== before.model) ||
+          (patch?.model_live !== undefined && patch.model_live !== before.model_live)
+        );
         R.updateStrategy(db, id, patch);
+        if (modelChanged) bumpModelEpoch(db, new Date().toISOString());
         return ok();
       }
       case "deleteStrategy": {
@@ -174,7 +184,10 @@ export async function POST(req: Request) {
         return ok();
       }
       case "setAnalyticsModel": {
+        // A/B knob for the ANALYSIS tier (Слой 1+2): a real change starts a new epoch.
+        const cur = R.analyticsPromptRow(db, "sport", body.sportId)?.model ?? null;
         R.setAnalyticsModel(db, body.sportId, body.model);
+        if (body.model !== cur) bumpModelEpoch(db, new Date().toISOString());
         return ok();
       }
       case "parseThresholds": {

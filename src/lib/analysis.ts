@@ -19,7 +19,8 @@ import { impliedProbs, probSumFlags, sizePrematch, correlationKey } from "./stra
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
 import { winsOnEventOccurrence } from "./thresholds.js";
-import { CODE_VERSION, serializeEntryMeta, type BetEntryMeta } from "./betMeta.js";
+import { serializeEntryMeta, type BetEntryMeta } from "./betMeta.js";
+import { effectiveCodeVersion } from "./codeEpoch.js";
 
 export interface AnalyzeDeps {
   fetchImpl?: typeof fetch;
@@ -337,13 +338,14 @@ export async function runStrategists(
         branchWeightSum: pick?.branchWeightSum != null ? round3(pick.branchWeightSum) : null,
         phantomCheck: pick?.phantomCheck ?? null, marketThinnessUsd: parseLiq(m.liquidity),
         winsOnEvent: winsOnEventOccurrence(m.label), exitPlan: pick?.exitPlan ?? null,
+        models: { analysis: model, strategist: stratModel }, // ground truth for the A/B
       };
       R.insertBet(db, {
         id: R.uid(), match_id: matchId, strategy_id: strat.id, risk_profile_id: profile, market_label: m.label,
         status: "proposed", proposed_price: m.price, entry_price: null, current_price: null,
         closing_price: null, ai_prob: ourProb, stake: r.stake,
         rationale: `«${m.label}»: edge ${(r.edge * 100).toFixed(1)}% (наша ${(ourProb * 100).toFixed(0)}% vs рынок ${(implied * 100).toFixed(0)}%). ${pick?.reason || r.reason}.${pickTreeNote(pick)}`,
-        entered_minute: null, result: null, payout: null, entry_meta: serializeEntryMeta(entryMeta), code_version: CODE_VERSION, created_at: now(),
+        entered_minute: null, result: null, payout: null, entry_meta: serializeEntryMeta(entryMeta), code_version: effectiveCodeVersion(db), created_at: now(),
       });
     }
     // A pick the strategist named that resolves to NO real market (a mislabel, or a

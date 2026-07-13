@@ -25,7 +25,8 @@ import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
 import { exitDecision, winsOnEventOccurrence } from "./thresholds.js";
-import { CODE_VERSION, serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
+import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
+import { effectiveCodeVersion } from "./codeEpoch.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
@@ -1299,13 +1300,15 @@ export async function strategistReassess(
               branchWeightSum: pick.branchWeightSum != null ? round2(pick.branchWeightSum) : null,
               phantomCheck: pick.phantomCheck ?? null, marketThinnessUsd: liqNum(mk.liquidity),
               winsOnEvent: winsOnEventOccurrence(mk.label), exitPlan: pick.exitPlan ?? null,
+              // Live entries run the live-reassess tier (model_live), falling back to model → Opus.
+              models: { analysis: null, strategist: strat.model_live ?? strat.model ?? "Claude Opus 4.8" },
             };
             R.insertBet(db, {
               id: R.uid(), match_id: m.id, strategy_id: sid, risk_profile_id: profile, market_label: mk.label,
               status: "proposed", proposed_price: mk.price, entry_price: null, current_price: null,
               closing_price: null, ai_prob: ourProb, stake: r.stake,
               rationale: `переоценка (лайв): «${mk.label}» edge ${(r.edge * 100).toFixed(1)}%. ${pick.reason || r.reason}.`,
-              entered_minute: null, result: null, payout: null, entry_meta: serializeEntryMeta(liveEntryMeta), code_version: CODE_VERSION, created_at: now,
+              entered_minute: null, result: null, payout: null, entry_meta: serializeEntryMeta(liveEntryMeta), code_version: effectiveCodeVersion(db), created_at: now,
             });
             out.entries.push({ matchId: m.id, strategyId: sid, market: mk.label, stake: r.stake });
             enteredMarkets.push(mk.label);

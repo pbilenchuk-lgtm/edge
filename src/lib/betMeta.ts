@@ -41,6 +41,10 @@ export interface BetEntryMeta {
   marketThinnessUsd: number | null; // known book depth/liquidity at entry ($)
   winsOnEvent: boolean;             // melting option (bet ON an event) vs directional
   exitPlan: unknown | null;         // the pre-written exit plan (take_price/thesis/counter/time_stop)
+  // Ground-truth model attribution for the A/B: which model produced THIS bet's
+  // analysis + strategist decision. Optional (legacy/minimal paths omit it). The
+  // epoch on `code_version` segments coarsely; this records exactly what ran.
+  models?: { analysis?: string | null; strategist?: string | null } | null;
 }
 
 /** Serialise an entry-meta snapshot (drops undefineds; stable for CSV/analytics). */
