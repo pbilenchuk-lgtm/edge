@@ -433,7 +433,7 @@ battle_sheet (live_triggers_armed), live-состояние (счёт, врем�
 }
 \`\`\``;
 
-export const STRAT_PMVALUE_PREMATCH = `# [ОКНО: ПРЕДМАТЧ] СТРАТЕГ 2 — PRE-MATCH VALUE (v3.2 · 6-branch)
+export const STRAT_PMVALUE_PREMATCH = `# [ОКНО: ПРЕДМАТЧ] СТРАТЕГ 2 — PRE-MATCH VALUE (v3.3 · 6-branch)
 
 Предматчевая часть стратега pre-match value. Основная фаза. Ты входишь до матча на расхождении оценки с очищенной ценой. Ты НЕ считаешь edge механически — ты РАССУЖДАЕШЬ ПО ДЕРЕВУ ИСХОДОВ (6 MECE-веток) как аналитик: смотришь, в каких ветвях живёт каждая ставка, строишь портфель. Live — только защита.
 
@@ -523,7 +523,7 @@ distribution, котировки, risk_config. В distribution:
 
 Честно: тонкий/фантомный edge → «пропуск». Не создавай иллюзию предсказательной силы. На фаворитских ликвидных матчах чаще всего верный ответ — малый портфель в производных или полный пропуск.`;
 
-export const STRAT_PMVALUE_LIVE = `# [ОКНО: LIVE] СТРАТЕГ 2 — PRE-MATCH VALUE (v3.2 · 6-branch · защитная фаза)
+export const STRAT_PMVALUE_LIVE = `# [ОКНО: LIVE] СТРАТЕГ 2 — PRE-MATCH VALUE (v3.3 · 6-branch · защитная фаза)
 
 Live-часть pre-match value. Live — НЕ источник альфы, а ЗАЩИТА открытых пред-матч позиций. Новых входов не ищешь (выкуп переоценки и xG-моментум — другие стратеги). Ведёшь открытое по ТОМУ ЖЕ дереву, по которому строился портфель. Не изобретаешь стратегию — исполняешь прописанные выходы.
 
@@ -554,6 +554,7 @@ battle_sheet (pre_match_positions с exit-планами, portfolio_correlation)
 - **counter_scenario** (матч пошёл по контр-ветке позиции — напр. держишь Under, матч ушёл в fav_concedes: фаворит забил, соперник тоже) → режь/закрывай по прописанному плану.
 - **liquidity_time_stop** (рынок пересыхает) → выйти, пока есть контрагент.
 - РАЗЛИЧАЙ, что событие ломает: гол соперника убивает BTTS No / «мало голов», но НЕ «фаворит победит». Режь только сломанную ногу, сильную держи.
+- **тающий опцион** (ставка на НАСТУПЛЕНИЕ события: командный Over 0.5/1.5, BTTS-Yes): цена, пришедшая к вероятности, экстраполированной из ПРОШЕДШЕГО темпа, — это НЕ закрытый edge. Прежде чем резать по take_price/edge_closed, сверься с \`live_prob_adjusted\` (game-state: кто отстаёт и обязан раскрываться, сколько осталось до конца, замены/джокеры). Резать тающий опцион на дне перед режимным сдвигом — типовая ошибка (кейс Argentina–Switzerland: срез по 31-43¢ на 54', гол на 64', рынок 95¢). Для такой позиции задавай time_stop (минута, после которой не досиживаешь до нуля), а не режь по цене раньше времени.
 
 ### Шаг 3. Частичная фиксация на реальных пиках
 Снимай трети/половины на РЕАЛЬНЫХ пиках (0:0 к перерыву если играешь Under/BTTS No — это пик ветки draw_0_0; перед выходом джокера; перед 2-м таймом). Режь СЛАБУЮ ногу портфеля, держи сильную. Не фиксируй из импульса.
@@ -804,13 +805,13 @@ const STRATEGIST_DEFS: Array<Pick<Parameters<typeof R.insertStrategy>[1], "id" |
 // never re-clobbers a later user edit that keeps the tag. Bumping the tag (e.g.
 // v3 → v3.1) re-applies once on the next boot. Archives the prior prompt via the
 // version bump, so the change is reversible.
-const PMVALUE_VERSION = "v3.2 · 6-branch";
+const PMVALUE_VERSION = "v3.3 · 6-branch";
 export function migratePrematchValueV3(db: Database): void {
   const s = R.getStrategy(db, "prematch_value");
   if (!s) return;
   const current = s.prompt.includes(PMVALUE_VERSION) && (s.prompt_live ?? "").includes(PMVALUE_VERSION);
   if (current) return;
-  R.saveStrategyVersion(db, "prematch_value", STRAT_PMVALUE_PREMATCH, s.params, "prompts → v3.2 (edge may not rest on a factor already in xG/derived)");
+  R.saveStrategyVersion(db, "prematch_value", STRAT_PMVALUE_PREMATCH, s.params, "prompts → v3.3 (melting-option exit: check live_prob_adjusted / set time_stop before cutting on price)");
   R.updateStrategy(db, "prematch_value", { prompt_live: STRAT_PMVALUE_LIVE });
 }
 // Same pattern for Overreaction: marker-guarded on "OVERREACTION (v3)" (present in

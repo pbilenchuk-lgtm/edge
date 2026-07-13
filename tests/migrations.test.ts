@@ -256,14 +256,32 @@ test("migratePrematchValueV3: brings prompts to v3 once, bumps version, idempote
 
   migratePrematchValueV3(db);
   const s = R.getStrategy(db, "prematch_value")!;
-  assert.ok(s.prompt.includes("v3.2 · 6-branch"), "prematch prompt updated to v3.2");
-  assert.ok((s.prompt_live ?? "").includes("v3.2 · 6-branch"), "live prompt updated to v3.2");
+  assert.ok(s.prompt.includes("v3.3 · 6-branch"), "prematch prompt updated to v3.3");
+  assert.ok((s.prompt_live ?? "").includes("v3.3 · 6-branch"), "live prompt updated to v3.3");
   assert.ok(s.prompt.includes("outcome_scenarios"), "v3 references the 6-branch tree");
-  assert.ok(s.prompt.includes("Edge НЕ может опираться на фактор, уже сидящий в базе"), "v3.2 carries the self-attributed-edge guard");
+  assert.ok(s.prompt.includes("Edge НЕ может опираться на фактор, уже сидящий в базе"), "v3.2 self-attributed-edge guard retained");
+  // v3.3 (Fix 4): the live window tells the strategist to check live_prob_adjusted /
+  // set time_stop before cutting a melting option on price.
+  assert.ok((s.prompt_live ?? "").includes("live_prob_adjusted"), "live prompt references the game-state number");
+  assert.ok((s.prompt_live ?? "").includes("тающий опцион"), "live prompt names the melting-option case");
   assert.equal(s.version, v0 + 1, "version bumped once (prior archived)");
 
   migratePrematchValueV3(db); // marker present now → no-op
   assert.equal(R.getStrategy(db, "prematch_value")!.version, v0 + 1, "idempotent: no re-bump on re-run");
+});
+
+test("migratePrematchValueV3: upgrades an existing v3.2 DB to v3.3 (real upgrade path)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  migrateSeedStrategists(db, "2026-01-01T00:00:00Z");
+  // Simulate a production DB already at v3.2 (headers only — the guard keys on the marker).
+  R.updateStrategy(db, "prematch_value", { prompt: "PRE-MATCH VALUE (v3.2 · 6-branch) старый", prompt_live: "PRE-MATCH VALUE (v3.2 · 6-branch · защитная фаза) старый" });
+  const v0 = R.getStrategy(db, "prematch_value")!.version;
+  migratePrematchValueV3(db);
+  const s = R.getStrategy(db, "prematch_value")!;
+  assert.ok((s.prompt_live ?? "").includes("v3.3 · 6-branch"), "v3.2 → v3.3 applied");
+  assert.ok((s.prompt_live ?? "").includes("live_prob_adjusted"), "melting-option guidance now present");
+  assert.equal(s.version, v0 + 1, "version bumped once on the v3.2→v3.3 upgrade");
 });
 
 test("migrateOverreactionV2: brings prompts to v2 once, bumps version, idempotent", () => {
