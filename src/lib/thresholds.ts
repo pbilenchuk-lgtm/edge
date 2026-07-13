@@ -258,7 +258,28 @@ export interface ExitInput {
   entryPriceCents: number; // price we bought at
   currentPriceCents: number;
 }
-export interface ExitDecision { exit: boolean; reason: string; pnlFrac: number }
+export interface ExitDecision { exit: boolean; reason: string; pnlFrac: number; kind: "take_profit" | "stop" | "edge_gone" | "hold" }
+
+/**
+ * Direction of optionality for the deterministic PRICE stop (audit: Argentina–Switzerland).
+ * TRUE = the bet WINS when a future match event occurs (a goal) and only LOSES by time
+ * running out — its price is a MELTING OPTION: it decays with every scoreless minute and
+ * spikes the instant the event lands. A price stop is a category error here — it liquidates
+ * the option at its cheapest right before it can pay (stop −44% @ 30.8¢ on 62', Switzerland
+ * scored on 67' → 100¢). FALSE = directional (win/advance/handicap) or "loses on the event"
+ * (Under, No, clean-sheet): there each goal is an IRREVERSIBLE step toward zero (Örgryte
+ * Under 2.5 in a goal storm), so the price stop must stay. Deterministic label mapping;
+ * anything unknown → false (keep the stop = current behaviour). Extend by adding patterns.
+ */
+export function winsOnEventOccurrence(label: string): boolean {
+  const l = label.toLowerCase();
+  // Over N.5 totals — team or match ("Over 2.5", "Argentina Over 1.5", "Switzerland Over 0.5").
+  // Wins by a goal happening; loses only by the whistle. (Under is the mirror — never matches.)
+  if (/\bover\s+\d/.test(l)) return true;
+  // Both Teams to Score — Yes / BTTS Yes: wins when the missing side scores. ("— No" never matches.)
+  if (/(both teams to score|btts)\b.*\byes\b/.test(l)) return true;
+  return false;
+}
 
 /** Defaults when the strategy prompt doesn't specify exit rules. */
 export const DEFAULT_TAKE_PROFIT = 0.5; // +50% of position value
@@ -275,13 +296,13 @@ export function exitDecision(inp: ExitInput): ExitDecision {
   const pnlFrac = entryPriceCents > 0 ? currentPriceCents / entryPriceCents - 1 : 0;
   const tp = params.takeProfit ?? DEFAULT_TAKE_PROFIT;
   const sl = params.exitStop ?? DEFAULT_EXIT_STOP;
-  if (pnlFrac >= tp) return { exit: true, reason: `тейк-профит +${(pnlFrac * 100).toFixed(0)}%`, pnlFrac };
-  if (pnlFrac <= -Math.abs(sl)) return { exit: true, reason: `стоп ${(pnlFrac * 100).toFixed(0)}%`, pnlFrac };
+  if (pnlFrac >= tp) return { exit: true, reason: `тейк-профит +${(pnlFrac * 100).toFixed(0)}%`, pnlFrac, kind: "take_profit" };
+  if (pnlFrac <= -Math.abs(sl)) return { exit: true, reason: `стоп ${(pnlFrac * 100).toFixed(0)}%`, pnlFrac, kind: "stop" };
   // "Edge gone" auto-exit is opt-OUT: strategies that manage exits via the
   // strategist (edgeExit:false) skip this so the fast loop doesn't cash out —
   // and re-enter — every tick the model prob dips under the price (in-match churn).
-  if (params.edgeExit !== false && aiProb * 100 - currentPriceCents <= 0) return { exit: true, reason: `край исчез (ИИ ${(aiProb * 100).toFixed(0)}% ≤ ${currentPriceCents}¢)`, pnlFrac };
-  return { exit: false, reason: "держим", pnlFrac };
+  if (params.edgeExit !== false && aiProb * 100 - currentPriceCents <= 0) return { exit: true, reason: `край исчез (ИИ ${(aiProb * 100).toFixed(0)}% ≤ ${currentPriceCents}¢)`, pnlFrac, kind: "edge_gone" };
+  return { exit: false, reason: "держим", pnlFrac, kind: "hold" };
 }
 
 /** Base fraction before caps, from whichever rule the strategy uses. */

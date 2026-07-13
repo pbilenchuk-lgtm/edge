@@ -23,7 +23,7 @@ import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBookResult
 import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricSellAvgCents, takerFeeCents } from "./execution.js";
 import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
-import { exitDecision } from "./thresholds.js";
+import { exitDecision, winsOnEventOccurrence } from "./thresholds.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
@@ -68,6 +68,15 @@ export const EXIT_PHANTOM_GAP = (() => { const n = Number(process.env.EXIT_PHANT
 // HOLD instead: let the position ride to a deeper book / real settlement. Only on a REAL
 // book and only on a LARGE full-stake slip (normal exits slip 0–1¢). Env-tunable.
 export const EXIT_SLIPPAGE_BLOCK = (() => { const n = Number(process.env.EXIT_SLIPPAGE_BLOCK); return Number.isFinite(n) && n > 0 ? n : 15; })();
+// TIME-DECAY FLOOR for "wins on event occurrence" markets (Over, BTTS Yes, team-to-score),
+// which are EXEMPT from the price stop (their price is a melting option — see
+// winsOnEventOccurrence). Exempt ≠ hold the corpse to the whistle: an option that is BOTH
+// deep-dust (≤ FLOOR¢) AND late (≥ MIN') is a spent lottery ticket — close it deterministically
+// to salvage the pennies instead of riding to a 0¢ settle. The DUST price is also the ET
+// safety: in a live knockout with extra time still to come, «team scores ≥1» is not ≤ a few ¢
+// unless genuinely dead — so this never cuts a live ET option. Env-tunable.
+export const EXIT_TIME_FLOOR_CENTS = (() => { const n = Number(process.env.EXIT_TIME_FLOOR_CENTS); return Number.isFinite(n) && n > 0 ? n : 4; })();
+export const EXIT_TIME_FLOOR_MIN = (() => { const n = Number(process.env.EXIT_TIME_FLOOR_MIN); return Number.isFinite(n) && n > 0 ? n : 80; })();
 // A partial TAKE-PROFIT fixation must not repeat on the same position more often than
 // this many minutes. The periodic reassessment heartbeat, on a slowly-drifting price,
 // otherwise nibbles a position to death — ten partial fixations in 20 min (Norway–England
@@ -651,7 +660,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // sooner), not per-strategy params. edgeExit:false — the strategist manages
       // edge/thesis exits in live (module 5); this net only catches extreme moves.
       const ex = getProfileConfig(db, b.risk_profile_id ?? "medium").exits;
-      const d = exitDecision({ params: { takeProfit: ex.take_profit_pct, exitStop: ex.hard_stop_pct, edgeExit: false }, aiProb: b.ai_prob ?? 1, entryPriceCents: b.entry_price, currentPriceCents: sell.cents });
+      let d = exitDecision({ params: { takeProfit: ex.take_profit_pct, exitStop: ex.hard_stop_pct, edgeExit: false }, aiProb: b.ai_prob ?? 1, entryPriceCents: b.entry_price, currentPriceCents: sell.cents });
       if (!d.exit) continue;
       // Log a HOLD at most once per continuous hold period for THIS market (guillemets
       // delimit the label so «Over 1.5» ≠ «Over 1.5 goals»; scan a recent window so two
@@ -663,6 +672,24 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text, created_at: now });
         }
       };
+      // OPTIONALITY GATE (audit: Argentina–Switzerland). For a market that WINS on a future
+      // event (Over / BTTS Yes / team-to-score), the price is a MELTING OPTION — a price STOP
+      // liquidates it at its cheapest right before it can pay (stop −44% @ 30.8¢ on 62',
+      // Switzerland scored on 67' → 100¢). Suppress the STOP for these; take-profit + edge-gone
+      // still fire, and the strategist still manages thesis/counter exits. A genuinely spent
+      // option (deep-dust AND late) is instead closed by the time-decay floor — exempt is NOT
+      // "ride the corpse to settlement". Under / No / clean-sheet / directional keep the stop
+      // (each goal there is an irreversible step down — Örgryte Under 2.5 in a goal storm).
+      if (d.kind === "stop" && winsOnEventOccurrence(b.market_label)) {
+        const minNum = m.minute != null ? m.minute
+          : (isIsoTs(m.kickoff_at) ? Math.min(maxLiveMinutes(sport), Math.max(0, Math.floor(((Date.parse(now) || Date.now()) - Date.parse(m.kickoff_at as string)) / 60_000))) : 0);
+        if (sell.cents <= EXIT_TIME_FLOOR_CENTS && minNum >= EXIT_TIME_FLOOR_MIN) {
+          d = { exit: true, reason: `тайм-флор: ${sell.cents}¢ на ${minNum}' — опцион на событие истёк (time_decay_floor)`, pnlFrac: d.pnlFrac, kind: "stop" };
+        } else {
+          holdOnce(`ценовой стоп подавлен по ${holdKey}: рынок выигрывает от наступления события — цена тает по времени, это не слом тезиса (price_stop_exempt); держим до стратег-выхода / тайм-флора / сеттла`);
+          continue;
+        }
+      }
       // Phantom-bid guard: a stop firing on a degenerate bid (≤FLOOR¢) that sits far
       // below the mid is dumping into a momentarily-broken book, not managing risk —
       // HOLD, let it settle on the real result. (A take-profit can no longer fire on a
