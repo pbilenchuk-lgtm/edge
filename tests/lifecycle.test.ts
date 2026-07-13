@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision, winsOnEventOccurrence } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger } from "../src/lib/lifecycle.js";
 import { analyzeMatch, runStrategists } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
@@ -677,6 +677,42 @@ test("strategistReassess supports partial fixation (fraction)", async () => {
   // the partial-fixation child must carry the SAME profile — else per-profile PnL
   // attribution is polluted (the «overreaction/?» rows in the logs).
   assert.equal(settled!.risk_profile_id, "aggressive", "partial fixation keeps the profile");
+});
+
+test("verifyExitTrigger: a defensive tag with only an echoed reason → discretionary + flagged; substantive kept", () => {
+  // the Argentina–Switzerland pollution: trigger counter_scenario, reason just the word itself
+  assert.deepEqual(verifyExitTrigger("counter_scenario", "counter_scenario"), { trigger: "discretionary", flagged: true });
+  assert.deepEqual(verifyExitTrigger("thesis_stop", "thesis_stop"), { trigger: "discretionary", flagged: true });
+  // substantive justification → kept as-is
+  assert.deepEqual(verifyExitTrigger("counter_scenario", "0:0 к 60' наступил, гости без момента — режу"), { trigger: "counter_scenario", flagged: false });
+  // non-defensive triggers are never scrutinised
+  assert.deepEqual(verifyExitTrigger("take_price", ""), { trigger: "take_price", flagged: false });
+  assert.deepEqual(verifyExitTrigger(undefined, "x"), { trigger: undefined, flagged: false });
+});
+
+test("strategistReassess STALENESS guard: an event repriced the market between decision and fill → exit deferred, reassess", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Argentina", away: "Switzerland", state: "live", lineup_out: true, kickoff_at: null, minute: 64, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  // The strategist reasons on the STORED snapshot: 35¢. But the fresh book is already 95¢
+  // (Switzerland just scored). Its exit "cut the loser, edge closed" is from a stale reality.
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Switzerland Over 0.5", price: 35, ai_prob: 0.4, liquidity: "2000", external_ref: "TOKS", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "stale-bet", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Switzerland Over 0.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 35, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  // /book → the fresh 95¢ book (post-goal); anything else → the stale strategist exit decision.
+  const fetchImpl = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book")
+    ? { bids: [{ price: "0.95", size: "100000" }], asks: [{ price: "0.97", size: "500" }] }
+    : { content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Switzerland Over 0.5", fraction: 0.65, reason: "edge закрыт, цена пришла к оценке — фиксирую 2/3", trigger: "take_price" }] }) }] }) })) as unknown as typeof fetch;
+  await strategistReassess(db, { fetchImpl, polymarket: poly, env: { ANTHROPIC_API_KEY: "k" }, now: () => "t" }, { newEventMatchIds: new Set([mid]), max: 50 });
+  assert.equal(R.getBet(db, "stale-bet")!.status, "open", "stale-reality exit deferred — position NOT sold on a decision from a different price");
+  assert.ok(!R.betsForMatch(db, mid).some((b) => b.status.startsWith("settled")), "no partial booked");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "hold" && /exit_staleness_reassess/.test(l.text)), "staleness deferral logged for reassessment");
 });
 
 test("strategistReassess hands the model minute estimate, price movement, liquidity and a no-score note", async () => {

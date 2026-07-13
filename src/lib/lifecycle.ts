@@ -96,6 +96,31 @@ export function strategistDegraded(db: Database, nowMs: number): boolean {
   const lastFail = Number(R.metaGet(db, LAST_STRATEGIST_FAIL_KEY) ?? 0);
   return lastFail > lastOk && nowMs - lastFail <= STRATEGIST_STALE_MIN * 60_000;
 }
+
+// EXECUTION STALENESS (audit: Argentina–Switzerland 64'). The strategist DECIDES on the stored
+// price snapshot (mk.price) but its exits FILL on a fresh order book. If a match event repriced
+// the market in the seconds between (the 64' race: decision reasoned on 35¢, book was already
+// 95¢ after the goal), the fill executes a decision from a DIFFERENT reality. When the fresh top
+// bid diverges from the decision snapshot by ≥ this many cents, don't execute — reassess on fresh
+// data next cycle. Normal drift is 0–5¢; only an event moves it this far. Env-tunable.
+export const EXIT_STALE_GAP = (() => { const n = Number(process.env.EXIT_STALE_GAP); return Number.isFinite(n) && n > 0 ? n : 20; })();
+
+/** A DEFENSIVE trigger tag (counter_scenario / thesis_stop) claims a pre-registered adverse
+ *  condition materialised. Audit (Argentina–Switzerland): the strategist tagged exits
+ *  `counter_scenario` whose condition ("0:0 к 60'") had NOT occurred (score 1:0, 45'), with a
+ *  reason that merely echoed the trigger word — polluting trigger stats (a real firing becomes
+ *  indistinguishable from "exited by feel, called it that"). Deterministic honesty check: a
+ *  defensive tag whose reason carries NO substantive justification beyond the trigger word is
+ *  UNVERIFIED → recorded as `discretionary`, flagged. Substantive-reason defensive exits are
+ *  kept as-is. (Full score/minute verification against a STRUCTURED exit plan is a follow-up —
+ *  the plan is currently free text.) */
+export function verifyExitTrigger(trigger: string | undefined | null, reason: string): { trigger: string | undefined; flagged: boolean } {
+  const t = trigger ?? undefined;
+  if (!t || !/counter_scenario|thesis_stop/i.test(t)) return { trigger: t, flagged: false };
+  // Strip the trigger token(s) from the reason; if nothing substantive remains, it's an echo.
+  const residue = (reason ?? "").toLowerCase().replace(/counter[_\s]?scenario|thesis[_\s]?stop/gi, "").replace(/[^a-zа-яё0-9]+/gi, " ").trim();
+  return residue.length === 0 ? { trigger: "discretionary", flagged: true } : { trigger: t, flagged: false };
+}
 // A partial TAKE-PROFIT fixation must not repeat on the same position more often than
 // this many minutes. The periodic reassessment heartbeat, on a slowly-drifting price,
 // otherwise nibbles a position to death — ten partial fixations in 20 min (Norway–England
@@ -991,11 +1016,28 @@ export async function strategistReassess(
             if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отклонён по ${holdKey}: фулл-стейк VWAP ${sell.cents}¢ против бида ${sell.bestBidCents}¢ (слип −${Math.round((sell.bestBidCents - sell.cents) * 10) / 10}¢) — книга не держит размер (${ex.reason}); держим до реального рынка/сеттла (exit_slippage_block)`, created_at: now });
             continue;
           }
+          // STALENESS GUARD (audit) — AFTER the phantom/slippage guards, so a degenerate bid is
+          // caught as a broken book, not misread as a reprice. On a real, non-degenerate book: if
+          // the fresh TOP BID diverged from the decision snapshot (mk.price) by a material amount,
+          // reality moved between decision and execution — a goal/red repriced the market (the 64'
+          // race: decided at 35¢, book already 95¢; or the reverse — decided at 95¢, crashed to
+          // 35¢). Don't execute a decision from a different reality: skip and let the next cycle
+          // re-decide on fresh data (the same event triggers that reassessment). Symmetric to entry.
+          if (sell.fromBook && sell.bestBidCents != null && mk.price != null && Math.abs(sell.bestBidCents - mk.price) >= EXIT_STALE_GAP) {
+            const holdKey = `«${b.market_label}»`;
+            const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
+            if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отложен по ${holdKey}: решение по ${mk.price}¢, книга уже ${sell.bestBidCents}¢ (Δ${Math.round(Math.abs(sell.bestBidCents - mk.price))}¢) — событие/сдвиг между решением и исполнением; переоценка на свежих данных (exit_staleness_reassess)`, created_at: now });
+            continue;
+          }
           const { pnl, partial } = closeBetPortion(db, b, ex.fraction, sell.cents, minuteLabel(m), now);
           const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
-          const trg = ex.trigger ? ` (${ex.trigger})` : ""; // which v3 live trigger fired (take_price / counter_scenario / …)
-          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag})${trg} @ ${sell.cents}¢ · стратег: ${ex.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
-          out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}`, pnl });
+          // Trigger honesty: a defensive tag with no substantive reason is unverified — record the
+          // honest trigger so stats aren't polluted with unbacked counter_scenario/thesis firings.
+          const ver = verifyExitTrigger(ex.trigger, ex.reason ?? "");
+          const trg = ver.trigger ? ` (${ver.trigger})` : ""; // which live trigger fired (verified)
+          const flagNote = ver.flagged ? ` · тег «${ex.trigger}» без обоснования → discretionary (trigger_unverified)` : "";
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag})${trg} @ ${sell.cents}¢ · стратег: ${ex.reason}${flagNote}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+          out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}${flagNote}`, pnl });
           exitedMarkets.push(`${b.market_label} (${tag})`);
           touched.add(sid);
         }
