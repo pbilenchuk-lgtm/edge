@@ -844,6 +844,24 @@ test("strategistReassess hands the model minute estimate, price movement, liquid
   assert.match(sentPrompt, /провайдер пока не отдаёт счёт/, "no-score fallback guidance included");
 });
 
+test("strategistReassess writes ONE reassessment note per strategy when profiles don't diverge (dedup)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  // Fund the strategy on TWO profiles; no open positions → the abstain note is identical.
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, risk_profile_id: "medium", pct: 25 });
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, risk_profile_id: "aggressive", pct: 25 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 60, ai_prob: 0.6, liquidity: "2000", external_ref: "T", snapshot_at: "t", is_closing: false });
+  R.insertMatchEvent(db, { id: R.uid(), match_id: mid, event_key: "g1", minute: 28, type: "goal", team: "A", text: "goal", created_at: "t" });
+  const mock = mockLLM({ picks: [], exits: [], note: "воздерживаюсь, сетапа нет" });
+  await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => "t" }, { newEventMatchIds: new Set([mid]), triggeredOnly: true, max: 50 });
+  const mine = R.reassessmentsForMatch(db, mid).filter((r) => r.strategy_id === strat.id);
+  assert.equal(mine.length, 1, "one identical abstain note, not one per profile");
+});
+
 test("strategistReassess feeds the strategist a game-state live_prob_adjusted for melting options (Fix 1)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

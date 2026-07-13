@@ -1117,6 +1117,11 @@ export async function strategistReassess(
       try { R.metaSet(db, LAST_STRATEGIST_OK_KEY, String(nowMs), now); } catch {}
       // Одно решение — на КАЖДЫЙ профиль: выходы бьют только по позициям профиля,
       // входы сайзятся его risk_config (§9.6), заметка переоценки — своя.
+      // Дедуп заметок: суждение стратега общее (Модель А), поэтому в частом случае
+      // «ничего не сделано» текст заметки идентичен по всем профилям — пишем его ОДИН
+      // раз на стратегию за тик, а не ×N профилей (иначе вкладка «Переоценки» и таблица
+      // раздуваются четырьмя одинаковыми строками, как в логе Djurgården–Halmstad).
+      const seenReassessBodies = new Set<string>();
       for (const { profile, pct } of profiles) {
         const myOpen = open.filter((b) => b.strategy_id === sid && (b.risk_profile_id ?? "medium") === profile);
         // Track what ACTUALLY happened, so the reassessment note (written AFTER the
@@ -1294,11 +1299,16 @@ export async function strategistReassess(
         if (unfilled.length) facts.push(`не вошёл: ${unfilled.slice(0, 3).join("; ")}`);
         const branchNote = dec.currentBranch ? ` [ветка: ${dec.currentBranch}]` : ""; // which of the 6 outcome branches the match is in now
         const noteBody = `${facts.join(" · ")}${branchNote}.${dec.note?.trim() ? " " + dec.note.trim() : ""}`;
-        R.insertReassessment(db, {
-          id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m),
-          body: noteBody, confidence: assess?.confidence ?? null,
-          trigger: labelFor.get(m.id) ?? "time", created_at: now,
-        });
+        // Only write a note whose text we haven't already written for this strategy this
+        // tick — a profile that acted differently produces a distinct body and is kept.
+        if (!seenReassessBodies.has(noteBody)) {
+          seenReassessBodies.add(noteBody);
+          R.insertReassessment(db, {
+            id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m),
+            body: noteBody, confidence: assess?.confidence ?? null,
+            trigger: labelFor.get(m.id) ?? "time", created_at: now,
+          });
+        }
       }
     }
   }

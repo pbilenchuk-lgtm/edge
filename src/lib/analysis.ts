@@ -363,11 +363,14 @@ export async function runStrategists(
     // "edge insufficient".
     const armedN = dec.ok && Array.isArray(dec.liveTriggersArmed) ? dec.liveTriggersArmed.length : 0;
     const armedConfig = dec.ok && !!dec.liveEntryConfig;
-    if (entries === 0 && (armedN > 0 || armedConfig)) {
+    // A no-entry SKIP is a strategy-level fact (the shared decision opened nothing); log it
+    // ONCE, not once per profile — `reused` is true for the 2nd+ profile of the same strategy.
+    // A profile that DID enter has entries>0 and logs nothing here, so its entry isn't hidden.
+    if (!reused && entries === 0 && (armedN > 0 || armedConfig)) {
       const what = armedN > 0 ? `заряжено ${armedN} триггер(ов) выкупа на live` : "настроен порог live-xG входа";
       R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `предматч-входов нет — ${what}`, created_at: now() });
-    } else if (entries === 0 && (skipped + flagged) > 0) {
-      const why = flagged > 0 && skipped === 0 ? `флаги предохранителей (${flagged})` : `край недостаточен (${skipped} ниже порога)`;
+    } else if (!reused && entries === 0 && (skipped + flagged) > 0) {
+      const why = flagged > 0 && skipped === 0 ? `флаги предохранителей (${flagged})` : `нет достаточного края (${skipped} рынк. ниже порога edge)`;
       R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — ${why}`, created_at: now() });
     }
     decisions.push({ strategy: pairLabel, entries, skipped });
