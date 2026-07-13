@@ -77,6 +77,25 @@ export const EXIT_SLIPPAGE_BLOCK = (() => { const n = Number(process.env.EXIT_SL
 // unless genuinely dead — so this never cuts a live ET option. Env-tunable.
 export const EXIT_TIME_FLOOR_CENTS = (() => { const n = Number(process.env.EXIT_TIME_FLOOR_CENTS); return Number.isFinite(n) && n > 0 ? n : 4; })();
 export const EXIT_TIME_FLOOR_MIN = (() => { const n = Number(process.env.EXIT_TIME_FLOOR_MIN); return Number.isFinite(n) && n > 0 ? n : 80; })();
+// DEGRADED-MODE fallback for the price-stop exemption. The exemption above trades away the
+// deterministic stop on the assumption that the STRATEGIST layer (thesis / counter_scenario
+// exits) is watching those melting-option positions instead. When that layer is DOWN (credit
+// outage → HTTP 400, network) the exempt positions have no live managing exit at all — the
+// exact window the exemption opens if the LLM is blind. So: track the strategist's last OK vs
+// last FAIL, and if the most recent strategist outcome was a failure AND it's recent (an active
+// outage, not just an idle quiet period), RESTORE the price stop to exempt markets until the
+// strategist recovers. The insurance auto-returns exactly when the thing it was traded for is gone.
+const LAST_STRATEGIST_OK_KEY = "last_strategist_ok_ms";
+const LAST_STRATEGIST_FAIL_KEY = "last_strategist_fail_ms";
+export const STRATEGIST_STALE_MIN = (() => { const n = Number(process.env.STRATEGIST_STALE_MIN); return Number.isFinite(n) && n > 0 ? n : 45; })();
+/** True when the strategist layer is in an ACTIVE outage: its most recent outcome was a
+ *  failure and that failure is recent (within STRATEGIST_STALE_MIN). A quiet period with no
+ *  reassessments is NOT degraded (last fail is stale) — only a live, currently-failing layer. */
+export function strategistDegraded(db: Database, nowMs: number): boolean {
+  const lastOk = Number(R.metaGet(db, LAST_STRATEGIST_OK_KEY) ?? 0);
+  const lastFail = Number(R.metaGet(db, LAST_STRATEGIST_FAIL_KEY) ?? 0);
+  return lastFail > lastOk && nowMs - lastFail <= STRATEGIST_STALE_MIN * 60_000;
+}
 // A partial TAKE-PROFIT fixation must not repeat on the same position more often than
 // this many minutes. The periodic reassessment heartbeat, on a slowly-drifting price,
 // otherwise nibbles a position to death — ten partial fixations in 20 min (Norway–England
@@ -622,6 +641,10 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
   const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
   const out: ExitItem[] = [];
   const touched = new Set<string>();
+  // Degraded-mode: when the strategist layer is in an active outage, the price-stop exemption
+  // for melting-option markets is UNSAFE (nothing else manages those positions) — restore the
+  // stop for this pass. Computed once per cycle. See strategistDegraded / the OPTIONALITY GATE.
+  const degraded = strategistDegraded(db, Date.parse(now) || Date.now());
   // One order-book fetch per TOKEN per cycle — profiles sharing a market reuse it.
   const bookCache = new Map<string, OrderBookFetch>();
   for (const { sport, match: m } of activeMatches(db)) {
@@ -680,7 +703,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // option (deep-dust AND late) is instead closed by the time-decay floor — exempt is NOT
       // "ride the corpse to settlement". Under / No / clean-sheet / directional keep the stop
       // (each goal there is an irreversible step down — Örgryte Under 2.5 in a goal storm).
-      if (d.kind === "stop" && winsOnEventOccurrence(b.market_label)) {
+      if (d.kind === "stop" && winsOnEventOccurrence(b.market_label) && !degraded) {
         const minNum = m.minute != null ? m.minute
           : (isIsoTs(m.kickoff_at) ? Math.min(maxLiveMinutes(sport), Math.max(0, Math.floor(((Date.parse(now) || Date.now()) - Date.parse(m.kickoff_at as string)) / 60_000))) : 0);
         if (sell.cents <= EXIT_TIME_FLOOR_CENTS && minNum >= EXIT_TIME_FLOOR_MIN) {
@@ -689,6 +712,10 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           holdOnce(`ценовой стоп подавлен по ${holdKey}: рынок выигрывает от наступления события — цена тает по времени, это не слом тезиса (price_stop_exempt); держим до стратег-выхода / тайм-флора / сеттла`);
           continue;
         }
+      } else if (d.kind === "stop" && winsOnEventOccurrence(b.market_label) && degraded) {
+        // Strategist layer is down → the exemption's guardian is blind. Let the price stop
+        // fire (insurance restored) and note WHY, so the log distinguishes it from a normal stop.
+        d = { ...d, reason: `${d.reason} · стратег-слой недоступен, ценовой стоп восстановлен (degraded_mode)` };
       }
       // Phantom-bid guard: a stop firing on a degenerate bid (≤FLOOR¢) that sits far
       // below the mid is dumping into a momentarily-broken book, not managing risk —
@@ -885,10 +912,16 @@ export async function strategistReassess(
         // post-match analysis can't tell "model chose to hold" from "model was
         // unreachable". The run-level count (out.llmFail) surfaces in the cron log.
         out.llmFail++;
+        // Stamp the strategist-layer OUTAGE so the deterministic exit net can restore the
+        // price stop to exempt markets while the LLM is blind (degraded-mode fallback).
+        try { R.metaSet(db, LAST_STRATEGIST_FAIL_KEY, String(nowMs), now); } catch {}
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "skip", text: `переоценка не выполнена — стратег недоступен (${dec.error || "нет ответа ИИ"})`, created_at: now });
         continue;
       }
       touched.add(sid);
+      // The strategist layer is alive — record it so the exit net keeps trusting it to manage
+      // the melting-option positions (and doesn't restore the price stop).
+      try { R.metaSet(db, LAST_STRATEGIST_OK_KEY, String(nowMs), now); } catch {}
       // Одно решение — на КАЖДЫЙ профиль: выходы бьют только по позициям профиля,
       // входы сайзятся его risk_config (§9.6), заметка переоценки — своя.
       for (const { profile, pct } of profiles) {

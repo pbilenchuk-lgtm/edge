@@ -440,6 +440,27 @@ test("evaluateExits: price stop is SUPPRESSED for a melting-option market, KEPT 
   assert.ok(R.tradeLogForMatch(db, m3).some((l) => l.type === "exit" && /time_decay_floor/.test(l.text)), "floor exit logged");
 });
 
+test("evaluateExits degraded-mode: an active strategist outage RESTORES the price stop to exempt markets", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Argentina", away: "Switzerland", state: "live", lineup_out: true, kickoff_at: null, minute: 62, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Switzerland Over 0.5", price: 18, ai_prob: 0.6, liquidity: "2000", external_ref: "TOKG", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "deg-bet", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Switzerland Over 0.5", status: "open", proposed_price: 40, entry_price: 40, current_price: 18, closing_price: null, ai_prob: 0.6, stake: 40, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  // Strategist layer in an ACTIVE outage: most recent outcome is a RECENT failure (credit 400).
+  R.metaSet(db, "last_strategist_fail_ms", String(Date.now()), "t");
+  const deep = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? { asks: [{ price: "0.90", size: "500" }], bids: [{ price: "0.18", size: "100000" }] } : {}) })) as unknown as typeof fetch;
+  const ex = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: deep });
+  assert.ok(ex.some((e) => e.matchId === mid), "exempt Over 0.5 IS stopped while the strategist layer is down (exemption's guardian is blind)");
+  assert.ok(R.getBet(db, "deg-bet")!.status.startsWith("settled"), "stop executed — insurance restored");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "exit" && /degraded_mode/.test(l.text)), "degraded_mode noted on the restored stop");
+});
+
 test("evaluateExits decides the take-profit on the EXECUTABLE bid, not a phantom-inflated mid", async () => {
   const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
   const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
