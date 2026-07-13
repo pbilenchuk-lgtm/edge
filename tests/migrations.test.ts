@@ -319,6 +319,9 @@ test("INVARIANT: each strategist's context carries the data its prompt reference
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "France", away: "Morocco", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   R.upsertMatchLive(db, { match_id: mid, espn_event_id: null, league: null, home_lineup: JSON.stringify({ team: "France", formation: "4-3-3", starters: ["Maignan", "Koundé"] }), away_lineup: JSON.stringify({ team: "Morocco", formation: "4-1-4-1", starters: ["Bounou"] }), stats: null, updated_at: "t" });
   R.insertProviderSnapshot(db, { match_id: mid, batch_at: "2026-01-01T00:05:00Z", provider: "sportmonks", phase: "live", ok: true, http_status: 200, provider_ref: "x", minute: 30, latency_ms: 100, extracted: { xg: { present: true, home: 1.2, away: 0.3 } }, raw: null });
+  // Live substitutions — the delta block the master prompt's "джокеры" reasoning needs.
+  R.insertMatchEvent(db, { id: R.uid(), match_id: mid, event_key: "s1", minute: 62, type: "sub", team: "Morocco", text: "Substitution: Cheddira on for Ziyech", created_at: "t" });
+  R.insertMatchEvent(db, { id: R.uid(), match_id: mid, event_key: "s2", minute: 62, type: "sub", team: "Morocco", text: "Substitution: Aboukhlal on", created_at: "t" });
   const base = { ok: true, matchType: "knockout" as const, matchTypeReason: "", core: { xg_home: 1.75, xg_away: 1.05, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0.03 }, overrides: [], drivers: [], scenarios: [{ trigger: "ранний гол андердога", prob: 0.25, shifts: null, note: "рынок переоценит" }], calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 0, notes: "" }, unknowns: [] };
   R.saveArtifact(db, { match_id: mid, kind: "distribution", stage: "post_lineup", content: JSON.stringify(assembleFootball(base, null)), model: "x", created_at: "2026-01-01T00:00:00Z" });
 
@@ -339,6 +342,11 @@ test("INVARIANT: each strategist's context carries the data its prompt reference
   assert.match(ctx, /Событийные сценарии \(scenarios\): •/, "event scenarios present AND non-empty");
   // Live xG Momentum needs the live-xG stream with REAL numbers (not an empty line).
   assert.match(ctx, /Live xG \([^)]*\): дом [\d.]+ – [\d.]+ гости · перекос [\d.]+/, "live-xG stream present AND numeric");
+  // SUBSTITUTIONS delta (Fix 3): the block names who/when AND the remaining-subs count
+  // per team — Morocco used 2 of 5, so 3 remain; France made none, so 5 remain.
+  assert.match(ctx, /Замены:.*62'.*Morocco/, "substitutions block present with minute + team");
+  assert.match(ctx, /Осталось замен .*Morocco 3/, "remaining subs computed for the team that subbed (5−2=3)");
+  assert.match(ctx, /France 5/, "the team with no subs still shows the full allowance");
 
   // Cross-check against the source of truth: the distribution's derived tree.
   const dist = JSON.parse(R.artifactsForMatch(db, mid).find((a) => a.kind === "distribution")!.content);

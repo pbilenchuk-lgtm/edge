@@ -457,6 +457,9 @@ function parseLiq(s: string | null): number | null {
   return suf === "m" ? v * 1e6 : suf === "k" ? v * 1e3 : v;
 }
 
+// Max substitutions a team may use (modern football: 5). Env-tunable — a league
+// with a different allowance overrides it. Only drives the "remaining subs" display.
+const MAX_SUBS_PER_TEAM = (() => { const n = Number(process.env.MAX_SUBS_PER_TEAM); return Number.isFinite(n) && n > 0 ? n : 5; })();
 /** Real lineups + in-match events (ESPN) as a compact context string for the
  *  analytics/strategist prompts — this is what makes reassessment meaningful. */
 export function matchContext(db: Database, matchId: string): string | undefined {
@@ -497,6 +500,22 @@ export function matchContext(db: Database, matchId: string): string | undefined 
   // no quote-derived noise reaches the (price-blind) analyst or the strategist.
   const events = R.eventsForMatch(db, matchId).filter((e) => e.type !== "other" && e.type !== "stats");
   if (events.length) parts.push("События: " + events.map((e) => `${e.minute ?? "?"}' ${e.type}${e.team ? " " + e.team : ""}`).join("; "));
+  // SUBSTITUTIONS delta block (live) — who came on/off and when, plus REMAINING subs
+  // per team. The master prompt reasons about "джокеры" (impact subs off the bench)
+  // and a trailing team's remaining changes feed the game-state read (Fix 1/3);
+  // without this the strategist saw subs only mixed into the flat event list and had
+  // no remaining-subs count at all. Football, live-only (no subs pre-match).
+  if (m?.state === "live") {
+    const subs = events.filter((e) => e.type === "sub");
+    if (subs.length) {
+      const line = subs.map((e) => `${e.minute ?? "?"}'${e.team ? " " + e.team : ""}${e.text && e.text.toLowerCase() !== "substitution" ? ` (${e.text})` : ""}`).join("; ");
+      const byTeam = (team: string) => subs.filter((e) => e.team && e.team === team).length;
+      const homeMade = m.home ? byTeam(m.home) : 0, awayMade = m.away ? byTeam(m.away) : 0;
+      const rem = (made: number) => Math.max(0, MAX_SUBS_PER_TEAM - made);
+      parts.push(`Замены: ${line}`);
+      parts.push(`Осталось замен (макс ${MAX_SUBS_PER_TEAM}): ${m.home} ${rem(homeMade)}, ${m.away} ${rem(awayMade)}${homeMade + awayMade < subs.length ? " (часть замен без привязки к команде)" : ""}`);
+    }
+  }
   return parts.length ? parts.join("\n") : undefined;
 }
 /** The 6-branch outcome tree (+ match_shape + event scenarios) formatted for the
