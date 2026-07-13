@@ -207,6 +207,19 @@ test("normalizeStrategistJson: v3 pre_match_positions + rich fields captured (en
   assert.equal(d.note, "value в производных");
 });
 
+test("normalizeStrategistJson: time_stop in the exit plan is captured (Fix 2)", () => {
+  const d = normalizeStrategistJson({
+    picks: [{ label: "Switzerland Over 0.5", prob: 0.5, reason: "тающий опцион", exit: { take_price: "80¢", time_stop: { minute: 80, condition: "не забили", action: "close_half" } } }],
+  });
+  assert.equal(d.picks[0].exitPlan?.time_stop?.minute, 80);
+  assert.equal(d.picks[0].exitPlan?.time_stop?.action, "close_half");
+  // action defaults to a full close; a non-positive/absent minute drops the time_stop.
+  const full = normalizeStrategistJson({ picks: [{ label: "X", prob: 0.4, reason: "r", exit: { time_stop: { minute: 75 } } }] });
+  assert.equal(full.picks[0].exitPlan?.time_stop?.action, "close_full");
+  const none = normalizeStrategistJson({ picks: [{ label: "Y", prob: 0.4, reason: "r", exit: { time_stop: { minute: 0 } } }] });
+  assert.equal(none.picks[0].exitPlan?.time_stop, undefined, "minute<=0 → no time_stop");
+});
+
 test("normalizeStrategistJson: overreaction prematch arms live_triggers (passed through, no picks)", () => {
   const d = normalizeStrategistJson({
     strategist: "overreaction", phase: "prematch",

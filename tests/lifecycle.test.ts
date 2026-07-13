@@ -355,6 +355,49 @@ test("evaluateExits HOLDS a stop that would fill into a PHANTOM bid (exit_phanto
   assert.ok(R.getBet(db, "real-bet")!.status.startsWith("settled"), "real stop settled");
 });
 
+test("evaluateExits fires a planned time_stop when the minute passes and the event hasn't happened (Fix 2)", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const bookFetch = (book: any) => (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
+  const seedTS = () => {
+    const db = openDb(":memory:");
+    seedDatabase(db);
+    db.exec("DELETE FROM bets");
+    const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+    const strat = R.listStrategies(db, "football")[0];
+    R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+    const mid = R.uid();
+    // Switzerland Over 0.5 (melting option), minute 82, planned time_stop at 80'.
+    R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Argentina", away: "Switzerland", state: "live", lineup_out: true, kickoff_at: null, minute: 82, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+    // Battle sheet carries the strategist's exit plan incl. time_stop for this market.
+    R.saveArtifact(db, { match_id: mid, kind: "battle_sheet", label: `${strat.name} · medium`, stage: "prematch", content: JSON.stringify({ positions: [{ market: "Switzerland Over 0.5", exit: { time_stop: { minute: 80, action: "close_full" } } }] }), model: "m", created_at: "t" });
+    const bid = R.uid();
+    R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Switzerland Over 0.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 25, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+    return { db, mid, bid };
+  };
+
+  // (1) Event NOT happened — mark 25¢ at 82' → time_stop CLOSES the position (full).
+  const a = seedTS();
+  R.insertMarket(a.db, { id: R.uid(), match_id: a.mid, label: "Switzerland Over 0.5", price: 25, ai_prob: 0.4, liquidity: "2000", external_ref: "TOKS", snapshot_at: "t", is_closing: false });
+  const exA = await evaluateExits(a.db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.27", size: "500" }], bids: [{ price: "0.24", size: "5000" }] }) });
+  assert.ok(exA.some((e) => e.matchId === a.mid && /time_stop/.test(e.reason)), "time_stop fired past the planned minute");
+  assert.ok(R.getBet(a.db, a.bid)!.status.startsWith("settled"), "melting option closed by the planned time_stop");
+
+  // (2) Event HAPPENED — mark 95¢ (Switzerland scored) → time_stop must NOT fire (resolved).
+  const b = seedTS();
+  R.insertMarket(b.db, { id: R.uid(), match_id: b.mid, label: "Switzerland Over 0.5", price: 95, ai_prob: 0.4, liquidity: "2000", external_ref: "TOKS", snapshot_at: "t", is_closing: false });
+  await evaluateExits(b.db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.97", size: "500" }], bids: [{ price: "0.94", size: "5000" }] }) });
+  assert.ok(!R.tradeLogForMatch(b.db, b.mid).some((l) => /time_stop/.test(l.text)), "resolved market (event happened) is NOT time-stopped");
+
+  // (3) Before the planned minute — mark 25¢ at 70' (time_stop 80') → does NOT fire.
+  const c = seedTS();
+  c.db.exec(`UPDATE matches SET minute = 70 WHERE id = '${c.mid}'`);
+  R.insertMarket(c.db, { id: R.uid(), match_id: c.mid, label: "Switzerland Over 0.5", price: 25, ai_prob: 0.4, liquidity: "2000", external_ref: "TOKS", snapshot_at: "t", is_closing: false });
+  await evaluateExits(c.db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.27", size: "500" }], bids: [{ price: "0.24", size: "5000" }] }) });
+  assert.ok(!R.tradeLogForMatch(c.db, c.mid).some((l) => /time_stop/.test(l.text)), "no time_stop before the planned minute");
+  assert.equal(R.getBet(c.db, c.bid)!.status, "open", "position still open before the planned minute");
+});
+
 test("evaluateExits HOLDS a stop when the full stake would SLIP far below the best bid (exit_slippage_block), executes it on a deep book", async () => {
   const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
   const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });

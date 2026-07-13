@@ -600,7 +600,13 @@ export interface StrategistInput {
 /** The exit plan the strategist attaches to an entry at ENTRY time (the v3
  *  battle-sheet: how this leg should be closed). Free-text triggers the live
  *  window then executes. Optional — a minimal pick carries none of it. */
-export interface StrategistExitPlan { take_price?: string; thesis_stop?: string; counter_scenario_stop?: string }
+export interface StrategistExitPlan {
+  take_price?: string; thesis_stop?: string; counter_scenario_stop?: string;
+  /** Time-conditioned plan for a MELTING option: the minute past which the strategist
+   *  won't sit the position to zero if the event hasn't happened. A DETERMINISTIC layer
+   *  (evaluateExits) fires it — minute is a fact, not an LLM judgment. */
+  time_stop?: { minute: number; condition?: string; action?: "close_full" | "close_half" };
+}
 export interface StrategistPick {
   label: string; conviction: "низкая" | "средняя" | "высокая"; reason: string; prob?: number;
   // v3 tree-reasoning metadata (optional). The ENGINE still sizes from `prob`
@@ -668,8 +674,15 @@ export function normalizeStrategistJson(j: any): Omit<StrategistDecision, "ok" |
     .map((p: any) => {
       const probRaw = Number.isFinite(p.prob) ? p.prob : Number.isFinite(p.our_prob) ? p.our_prob : null;
       const ex = p.exit && typeof p.exit === "object" ? p.exit : null;
+      // time_stop: {minute, condition?, action?} — the strategist's planned time cut for a
+      // melting option. Minute is required and finite; action defaults to a full close.
+      const ts = ex?.time_stop && typeof ex.time_stop === "object" ? ex.time_stop : null;
+      const tsMinute = ts && Number.isFinite(ts.minute) ? Number(ts.minute) : null;
+      const timeStop = tsMinute != null && tsMinute > 0
+        ? { minute: tsMinute, ...(str(ts.condition) ? { condition: str(ts.condition) } : {}), action: (ts.action === "close_half" ? "close_half" : "close_full") as "close_full" | "close_half" }
+        : null;
       const exitPlan: StrategistExitPlan | undefined = ex
-        ? { ...(str(ex.take_price) ? { take_price: str(ex.take_price) } : {}), ...(str(ex.thesis_stop) ? { thesis_stop: str(ex.thesis_stop) } : {}), ...(str(ex.counter_scenario_stop) ? { counter_scenario_stop: str(ex.counter_scenario_stop) } : {}) }
+        ? { ...(str(ex.take_price) ? { take_price: str(ex.take_price) } : {}), ...(str(ex.thesis_stop) ? { thesis_stop: str(ex.thesis_stop) } : {}), ...(str(ex.counter_scenario_stop) ? { counter_scenario_stop: str(ex.counter_scenario_stop) } : {}), ...(timeStop ? { time_stop: timeStop } : {}) }
         : undefined;
       return {
         label: String(p.label ?? p.market),
@@ -776,7 +789,7 @@ export async function strategistDecide(
       "Где у рынка есть «game-state P=…%» — это P(события за остаток) от счёта и времени, посчитанная кодом (отстающий обязан раскрываться, голы кластеризуются в концовке). Для тающего опциона (ставка на наступление события: командный Over 0.5/1.5, BTTS-Yes) считай edge против этого числа, а НЕ против экстраполяции прошлого темпа. " +
       "ВАЖНО ПРО РАЗМЕР: РАЗМЕР СЧИТАЕТ ДВИЖОК по твоему prob и риск-профилю (Kelly, кэпы). Твои size_pct/kelly_fraction/role — справочные, на реальную ставку НЕ влияют; честный prob — единственное, что двигает размер. " +
       "ФОРМАТ ВЫХОДА — строгий JSON. Ключи входов и выходов могут называться как в твоей методологии, все они принимаются как синонимы: " +
-      "ВХОДЫ — picks ИЛИ pre_match_positions ИЛИ actions с action:'add'/'open_new'; поля входа: {label|market (ДОСЛОВНО из списка), prob|our_prob, conviction:'низкая'|'средняя'|'высокая'(опц.), reason, и опционально role:'anchor'|'satellite', lives_in_branches:[], branch_weight_sum, phantom_check, total_check, exit:{take_price,thesis_stop,counter_scenario_stop}}. " +
+      "ВХОДЫ — picks ИЛИ pre_match_positions ИЛИ actions с action:'add'/'open_new'; поля входа: {label|market (ДОСЛОВНО из списка), prob|our_prob, conviction:'низкая'|'средняя'|'высокая'(опц.), reason, и опционально role:'anchor'|'satellite', lives_in_branches:[], branch_weight_sum, phantom_check, total_check, exit:{take_price,thesis_stop,counter_scenario_stop, time_stop:{minute,condition,action:'close_full'|'close_half'} — для тающего опциона минута, после которой не досиживаешь до нуля, если событие не наступило}}. " +
       "В ЛЮБОМ входе, включая actions(add/open_new), поле prob ОБЯЗАТЕЛЬНО — без него движок посчитает размер по УСТАРЕВШЕЙ предматч-оценке. И бери market как ПОЛНЫЙ ярлык из списка ДОСЛОВНО (сторона уже в ярлыке: «… — No», «Over 2.5» и т.п.); НЕ дроби на market+side отдельными полями — иначе рынок не найдётся и вход потеряется. " +
       "ВЫХОДЫ — exits ИЛИ actions с action:'reduce'/'close' ИЛИ exit_checks с сработавшим trigger_hit; поля выхода: {market|position (ДОСЛОВНО, ПОЛНЫЙ ярлык), fraction (или action reduce≈частично/close=1), reason, trigger/trigger_hit (напр. take_price/thesis_stop/counter_scenario/goal_scored)}. Закрытие можно указать в exits, в actions ИЛИ в exit_checks — движок объединит и не закроет дважды. " +
       "Опционально на верхнем уровне: match_shape, current_branch (лайв), portfolio_correlation:{both_lose_on_scores,both_lose_weight,coverage_note}, rejected_markets:[{market,reason}], flagged:[{market,reason}], note/notes. " +

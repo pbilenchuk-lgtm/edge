@@ -78,6 +78,10 @@ export const EXIT_SLIPPAGE_BLOCK = (() => { const n = Number(process.env.EXIT_SL
 // unless genuinely dead — so this never cuts a live ET option. Env-tunable.
 export const EXIT_TIME_FLOOR_CENTS = (() => { const n = Number(process.env.EXIT_TIME_FLOOR_CENTS); return Number.isFinite(n) && n > 0 ? n : 4; })();
 export const EXIT_TIME_FLOOR_MIN = (() => { const n = Number(process.env.EXIT_TIME_FLOOR_MIN); return Number.isFinite(n) && n > 0 ? n : 80; })();
+// A melting option whose mark has reached this ¢ is treated as RESOLVED (event
+// effectively happened / market at ~YES) — a planned time_stop must NOT fire on it
+// (spec: fire only when "событие не наступило"). Env-tunable.
+export const EXIT_TIME_STOP_RESOLVED_CENTS = (() => { const n = Number(process.env.EXIT_TIME_STOP_RESOLVED_CENTS); return Number.isFinite(n) && n > 0 ? n : 90; })();
 // DEGRADED-MODE fallback for the price-stop exemption. The exemption above trades away the
 // deterministic stop on the assumption that the STRATEGIST layer (thesis / counter_scenario
 // exits) is watching those melting-option positions instead. When that layer is DOWN (credit
@@ -730,6 +734,33 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // at removes the phantom trigger at the source. Fetch ONCE, reuse for the fill.
       // (poly off → sellVwapCents returns the quote, so the decision falls back to mid.)
       const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price, bookCache);
+      // The live match minute (provider, else the timer estimate) — a deterministic FACT,
+      // shared by the time_stop and the optionality-gate floor below.
+      const minNum = m.minute != null ? m.minute
+        : (isIsoTs(m.kickoff_at) ? Math.min(maxLiveMinutes(sport), Math.max(0, Math.floor(((Date.parse(now) || Date.now()) - Date.parse(m.kickoff_at as string)) / 60_000))) : 0);
+      // TIME_STOP (Fix 2, deterministic): the strategist's planned minute past which a MELTING
+      // option isn't sat to zero if the event hasn't happened. The minute is a FACT — code fires
+      // it, no LLM needed. Independent of the price-stop logic below (this is a PLANNED close, not
+      // a stop) and of the optionality exemption, so it fires even on an exempt market. Skips a
+      // market that already RESOLVED (mark ≥ resolved¢ → event happened → let take-profit handle it).
+      // Coexists with the time_decay_floor (≤4¢/≥80'): that's the last-ditch dust safety; this is
+      // the strategist's earlier plan, at any price. Fires at most ONCE per position.
+      const ts = plannedTimeStop(db, m.id, strat.name, b.risk_profile_id ?? "medium", b.market_label);
+      if (ts && minNum >= ts.minute && mk.price < EXIT_TIME_STOP_RESOLVED_CENTS && sell.cents < EXIT_TIME_STOP_RESOLVED_CENTS) {
+        const already = R.tradeLogForMatch(db, m.id).some((e) => e.strategy_id === b.strategy_id && e.type === "exit" && e.text.includes(`«${b.market_label}»`) && /time_stop/.test(e.text));
+        // Phantom-bid guard, as on every exit path: a planned close still must not dump into a
+        // momentarily-broken book (≤FLOOR¢ bid far under the mark) — hold to a real book/settle.
+        const phantom = sell.fromBook && sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP;
+        if (!already && !phantom) {
+          const fraction = ts.action === "close_half" ? 0.5 : 1;
+          const reason = `плановый тайм-стоп: ${minNum}' ≥ ${ts.minute}', событие не наступило (рынок ${mk.price}¢) — ${ts.action === "close_half" ? "фиксирую половину" : "закрываю"} (time_stop)`;
+          const res = closeBetPortion(db, b, fraction, sell.cents, minuteLabel(m), now);
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${res.pnl >= 0 ? "+" : ""}$${res.pnl.toFixed(2)}`, created_at: now });
+          out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason, pnl: res.pnl });
+          touched.add(b.strategy_id);
+          continue;
+        }
+      }
       // When the model prob is unknown, DON'T let it read as "edge gone" (which
       // would force-close on the first tick) — pass 1 so only take-profit / hard
       // stop can fire. (Defensive: entries always store a non-null ai_prob.)
@@ -759,8 +790,6 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // "ride the corpse to settlement". Under / No / clean-sheet / directional keep the stop
       // (each goal there is an irreversible step down — Örgryte Under 2.5 in a goal storm).
       if (d.kind === "stop" && winsOnEventOccurrence(b.market_label) && !degraded) {
-        const minNum = m.minute != null ? m.minute
-          : (isIsoTs(m.kickoff_at) ? Math.min(maxLiveMinutes(sport), Math.max(0, Math.floor(((Date.parse(now) || Date.now()) - Date.parse(m.kickoff_at as string)) / 60_000))) : 0);
         if (sell.cents <= EXIT_TIME_FLOOR_CENTS && minNum >= EXIT_TIME_FLOOR_MIN) {
           d = { exit: true, reason: `тайм-флор: ${sell.cents}¢ на ${minNum}' — опцион на событие истёк (time_decay_floor)`, pnlFrac: d.pnlFrac, kind: "stop" };
         } else {
@@ -802,6 +831,28 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+
+/** The strategist's planned time_stop for a specific (strategy·profile, market), read
+ *  from the pair's battle_sheet — the persistent home of exit plans (same source the
+ *  counter_scenario condition is read from in reassess). Deterministic: minute is a fact.
+ *  Returns null when no plan / no time_stop / malformed. */
+function plannedTimeStop(
+  db: Database, matchId: string, stratName: string, profile: string, marketLabel: string,
+): { minute: number; action: "close_full" | "close_half" } | null {
+  const sheet = R.artifactsForMatch(db, matchId).find((x) => x.kind === "battle_sheet" && x.label === `${stratName} · ${profile}`)?.content;
+  if (!sheet) return null;
+  try {
+    const bs = JSON.parse(sheet);
+    for (const p of bs?.positions ?? []) {
+      if (typeof p?.market !== "string" || norm(p.market) !== norm(marketLabel)) continue;
+      const ts = p?.exit?.time_stop;
+      if (ts && Number.isFinite(ts.minute) && Number(ts.minute) > 0) {
+        return { minute: Number(ts.minute), action: ts.action === "close_half" ? "close_half" : "close_full" };
+      }
+    }
+  } catch { /* free-text plan → no structured time_stop */ }
+  return null;
+}
 
 /** Snapshot each live match's current prices as its kickoff baseline (first
  *  write wins), so the odds column shows in-match movement, not pre-match drift. */
