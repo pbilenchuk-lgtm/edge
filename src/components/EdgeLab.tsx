@@ -7,7 +7,7 @@
 // ============================================================
 import React, { useState, useRef, useEffect } from "react";
 import type { AppData } from "@/lib/view";
-import ShadowScreen, { BudgetEffectiveness } from "./ShadowScreen";
+import ShadowScreen from "./ShadowScreen";
 
 const INK = "#12161d", PANEL = "#1a2029", PANEL2 = "#212936", LINE = "#2c3543", TEXT = "#e6e9ef", MUTE = "#8b95a5";
 const PALETTE = ["#e8a838", "#5b9bd5", "#70b56a", "#c98bdb", "#e07a5f", "#4fc3c7"];
@@ -580,20 +580,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
 
       <div style={S.treasury}>
         <div style={S.trBrand}><span style={S.mark}>&#9670;</span><span style={S.trBrandTxt}>EDGE LAB</span></div>
-        <div style={S.trCell} title={`База ${fmtMoney0(TOTAL_BALANCE)} + реализованный P&L ${totalRealized >= 0 ? "+" : ""}${fmtMoney0(totalRealized)}. Реализованный остаётся в своём турнире (реинвест); свободный остаток — от базы.`}><div style={S.trLbl}>Общий баланс</div><div style={{ ...S.trVal, color: totalRealized > 0 ? "#5fd08a" : totalRealized < 0 ? "#ff6b6b" : undefined }}>{fmtMoney0(effectiveBalance)}</div></div>
-        <div style={S.trDiv} />
-        <div style={S.trCell}><div style={S.trLbl}>Распределено</div><div style={{ ...S.trVal, color: "#e8a838" }}>{fmtMoney0(allocatedSum)}</div></div>
-        <div style={S.trDiv} />
-        <div style={S.trCell}><div style={S.trLbl}>Свободно</div><div style={{ ...S.trVal, color: freeBalance >= 0 ? "#5fd08a" : "#ff6b6b" }}>{fmtMoney0(freeBalance)}</div></div>
-        <div style={S.trDiv} />
-        <div style={S.trCell} title="Суммарный реализованный P&L по всем турнирам (расчёты и закрытия). Распределение бюджета считается от базового баланса.">
-          <div style={S.trLbl}>P&amp;L реализ.</div>
-          <div style={{ ...S.trVal, color: totalRealized >= 0 ? "#5fd08a" : "#ff6b6b" }}>{totalRealized >= 0 ? "+" : ""}{fmtMoney0(totalRealized)}</div>
-        </div>
-        <div style={S.trDiv} />
-        <div style={S.trCell}>
-          <button style={{ ...S.discoverBtn, opacity: discovering ? 0.6 : 1 }} disabled={discovering} onClick={doDiscover} title="Подтянуть матчи с Polymarket + составы ESPN + котировки (без ИИ)">{discovering ? "подтягиваю…" : "↧ Подтянуть матчи"}</button>
-        </div>
+        {/* Money-by-strategy summary moved to the Metrics tab; «Подтянуть матчи» to Настройки. */}
       </div>
 
       <div style={S.screenSwitch} className="el-screen-switch">
@@ -710,7 +697,8 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       ) : screen === "feed" ? (
         <FeedScreen feed={EVENT_FEED} />
       ) : screen === "metrics" ? (
-        <MetricsScreen catalog={catalog} quality={QUALITY} stats={strategyStats} shadow={shadow} />
+        <MetricsScreen catalog={catalog} quality={QUALITY} stats={strategyStats}
+          treasury={{ effectiveBalance, allocatedSum, freeBalance, totalRealized }} />
       ) : screen === "shadow" ? (
         <ShadowScreen data={shadow}
           onSave={async (config: any) => {
@@ -722,6 +710,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
           onReplay={async (config: any) => mutate({ type: "shadowReplay", config })} />
       ) : (
         <ModelsScreen providers={providers} setProviders={setProviders} total={TOTAL_BALANCE} allocated={allocatedSum} cron={initial.cron}
+          onDiscover={doDiscover} discovering={discovering}
           onSetTotal={async (amount: number) => {
             const r = await mutate({ type: "setTreasury", amount });
             if (r.ok) { setTotalBalance(amount); toast("ok", `Общий баланс: $${amount}`); }
@@ -1713,15 +1702,27 @@ function EquitySpark({ data }: any) {
   );
 }
 
-function MetricsScreen({ catalog, quality, stats, shadow }: any) {
+function MetricsScreen({ catalog, quality, stats, treasury }: any) {
   const S0 = { matches: 0, predictions: 0, won: 0, lost: 0, openPlus: 0, openMinus: 0, openPnl: 0, earned: 0, lostMoney: 0, inMatch: 0, inMatchPlus: 0, inMatchMinus: 0 };
+  const t = treasury ?? { effectiveBalance: 0, allocatedSum: 0, freeBalance: 0, totalRealized: 0 };
   return (
     <main style={S.main}>
       <div style={S.feedHead}>
         <div><div style={S.feedTitle}>Статистика стратегий</div><div style={S.feedSub}>Подробная статистика по каждой стратегии. Открытые позиции — по актуальной котировке. Ниже — метрики качества эджа.</div></div>
       </div>
-      {/* Effectiveness of the single-bank allocation (moved off the money-focused Budget tab) */}
-      {shadow && <BudgetEffectiveness data={shadow} />}
+      {/* Money-by-strategy summary (moved off the global header) — how the strategy sims perform in aggregate $. */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 14 }}>
+        {([
+          ["Общий баланс", fmtMoney0(t.effectiveBalance), t.totalRealized > 0 ? "#5fd08a" : t.totalRealized < 0 ? "#ff6b6b" : "#e6e9ef"],
+          ["Распределено", fmtMoney0(t.allocatedSum), "#e8a838"],
+          ["Свободно", fmtMoney0(t.freeBalance), t.freeBalance >= 0 ? "#5fd08a" : "#ff6b6b"],
+          ["P&L реализ.", `${t.totalRealized >= 0 ? "+" : ""}${fmtMoney0(t.totalRealized)}`, t.totalRealized >= 0 ? "#5fd08a" : "#ff6b6b"],
+        ] as const).map(([lbl, val, color]) => (
+          <div key={lbl} style={{ background: "#1a2029", border: "1px solid #2c3543", borderRadius: 10, padding: "10px 14px" }}>
+            <div style={S.trLbl}>{lbl}</div><div style={{ ...S.trVal, color, textAlign: "left" as const }}>{val}</div>
+          </div>
+        ))}
+      </div>
       <div style={S.metricExplain}>
         <div style={S.metricExplainItem}><b style={{ color: "#7fb4e8" }}>Brier</b> — точность вероятностей (ниже = лучше). Насколько «70%» ИИ реально значит 70%.</div>
         <div style={S.metricExplainItem}><b style={{ color: "#70b56a" }}>CLV</b> — closing line value. Двигался ли рынок в твою сторону после входа. Лучший ранний признак реального эджа.</div>
@@ -1978,13 +1979,22 @@ function PortfolioScreen({ open, closed, onGoMatches }: any) {
   );
 }
 
-function ModelsScreen({ providers, setProviders, total, allocated, cron, onSetTotal }: any) {
+function ModelsScreen({ providers, setProviders, total, allocated, cron, onSetTotal, onDiscover, discovering }: any) {
   return (
     <main style={S.main}>
       <div style={S.modelsIntro}>
         <div style={S.modelsTitle}>Настройки</div>
         <div style={S.modelsSub}>Общий баланс казны, ключи провайдеров и журнал автоматического цикла (крон).</div>
       </div>
+
+      {/* Manual data pull (moved off the global header) — Polymarket matches + ESPN lineups + quotes, no AI. */}
+      <section style={{ ...S.card, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "#e6e9ef" }}>Подтянуть матчи</div>
+          <div style={S.modelsSub}>Матчи с Polymarket + составы ESPN + котировки (без ИИ). Обычно делает авто-цикл; здесь — вручную.</div>
+        </div>
+        <button style={{ ...S.discoverBtn, opacity: discovering ? 0.6 : 1 }} disabled={discovering} onClick={onDiscover}>{discovering ? "подтягиваю…" : "↧ Подтянуть матчи"}</button>
+      </section>
 
       <BalanceCard total={total} allocated={allocated} onSetTotal={onSetTotal} />
 

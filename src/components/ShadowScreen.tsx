@@ -73,38 +73,6 @@ function Tile({ label, value, sub, color }: { label: string; value: React.ReactN
   return <div style={S.tile}><div style={S.tLbl}>{label}</div><div style={{ ...S.tVal, color: color ?? TEXT }}>{value}</div>{sub && <div style={S.tSub}>{sub}</div>}</div>;
 }
 
-/** Allocation-effectiveness of the single-bank simulation — was capital the bottleneck?
- *  This measures how well the STRATEGY ALLOCATION performs under one bank, so it lives
- *  on the Metrics tab (strategy effectiveness), NOT on the money-focused Budget tab. */
-export function BudgetEffectiveness({ data }: { data: ShadowView }) {
-  const { analytics, pool } = data;
-  const deficit = Math.round((analytics.blockedPct + analytics.trimmedPct) * 10) / 10;
-  const peakUtil = analytics.utilization.length ? Math.max(...analytics.utilization.map((p) => pctOf(p.reserved, pool.bank))) : pctOf(pool.reserved, pool.bank);
-  const status = analytics.total === 0
-    ? { color: MUTE, bg: PANEL2, word: "нет данных", line: "Событий пока нет — появятся при первых входах реальной симуляции." }
-    : deficit === 0 ? { color: GREEN, bg: "#16241c", word: "капитал свободен", line: `Ни один вход не упёрся в лимит банка. Пиковая утилизация ${peakUtil}%.` }
-    : deficit < 10 ? { color: GREEN, bg: "#16241c", word: "запас есть", line: `Капитал был узким местом лишь в ${deficit}% решений. Пик утилизации ${peakUtil}%.` }
-    : deficit < 25 ? { color: AMBER, bg: "#2a2413", word: "капитал поджимает", line: `${deficit}% входов не получили полный размер из-за лимитов. Стоит присмотреться.` }
-    : { color: RED, bg: "#2a1a1c", word: "капитал — узкое место", line: `${deficit}% решений упёрлись в лимит банка. Общий пул тесен для текущего потока входов.` };
-  return (
-    <div style={{ ...S.card, borderColor: `${status.color}44`, background: status.bg, display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flex: "1 1 320px" }}>
-        <div style={{ width: 12, height: 12, borderRadius: "50%", background: status.color, flexShrink: 0, boxShadow: `0 0 12px ${status.color}88` }} />
-        <div>
-          <div style={{ fontSize: 12, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 2 }}>эффективность единого банка (симуляция)</div>
-          <div style={{ fontSize: 17, fontWeight: 800, color: status.color, textTransform: "uppercase", letterSpacing: "0.03em" }}>{status.word}</div>
-          <div style={{ fontSize: 12.5, color: "#c4cdd9", marginTop: 3, lineHeight: 1.4, maxWidth: 460 }}>{status.line}</div>
-        </div>
-      </div>
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <Tile label="дефицит входов" value={`${deficit}%`} sub={`${analytics.blocked} блок · ${analytics.trimmed} урез`} color={status.color} />
-        <Tile label="упущенный P&L" value={<>{analytics.missedPnl >= 0 ? "+" : ""}{usd2(analytics.missedPnl)}</>} sub="из-за дефицита" color={analytics.missedPnl >= 0 ? GREEN : RED} />
-        <Tile label="пик утилизации" value={`${peakUtil}%`} sub={`конкуренций ${analytics.contentionEvents}`} />
-      </div>
-    </div>
-  );
-}
-
 function Meter({ name, used, cap }: { name: string; used: number; cap: number }) {
   const frac = cap > 0 ? Math.min(1, used / cap) : 0;
   const col = frac >= 0.9 ? RED : frac >= 0.7 ? AMBER : BLUE;
