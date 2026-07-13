@@ -14,6 +14,7 @@ import { resolveFootballMarket } from "./settlement.js";
 import { maxLiveMinutes, liveDelivering } from "./lifecycle.js";
 import { listRiskProfileViews, type RiskProfileView } from "./riskConfig.js";
 import { loadShadowConfig, shadowPoolState, shadowAnalytics, buildReplayEntries, shadowProject, type ShadowConfig, type ShadowPoolState, type ShadowAnalytics, type ProjectionSummary } from "./shadow.js";
+import { budgetPosition, type BudgetPosition } from "./budgetPosition.js";
 import type { StrategyParams, Match, Bet } from "./types.js";
 
 export interface MarketView {
@@ -144,6 +145,8 @@ export interface ShadowView {
   matchNames: Record<string, string>;
   /** closed reserves still in the settlement lag, soonest to free first */
   settlingQueue: { size: number; settleAt: string; category: string; matchLabel: string; strategyLabel: string }[];
+  /** OUR MONEY in detail — earned / lost / unresolved / in-progress / current standing + costs */
+  money: BudgetPosition;
 }
 export interface CronView {
   enabled: boolean; tickMin: number; discoverHr: number; liveSec: number; nextRunAt: string | null;
@@ -391,6 +394,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
       .filter((r) => r.state === "settling" && r.settle_at)
       .sort((a, b) => (a.settle_at! < b.settle_at! ? -1 : 1))
       .map((r) => ({ size: r.size, settleAt: r.settle_at as string, category: catNames[r.competition_id] ?? r.competition_id, matchLabel: matchLabel[r.match_id] ?? r.match_id, strategyLabel: stratNames[r.strategy_id] ?? r.strategy_id })),
+    money: budgetPosition(db),
     events: R.listShadowEvents(db, 200).map((e) => ({
       id: e.id, at: e.created_at, matchId: e.match_id, matchLabel: matchLabel[e.match_id] ?? e.match_id,
       category: catNames[e.competition_id] ?? e.competition_id, strategyId: e.strategy_id,

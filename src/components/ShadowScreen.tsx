@@ -86,7 +86,7 @@ function Meter({ name, used, cap }: { name: string; used: number; cap: number })
 }
 
 export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowView; onSave: (config: any) => Promise<any>; onReplay: (config: any) => Promise<any> }) {
-  const { pool, analytics, config, projection } = data;
+  const { pool, analytics, config, projection, money: m } = data;
   const [filter, setFilter] = useState<"all" | "blocked" | "contention">("all");
   const [cat, setCat] = useState<string>("");
   const [grouped, setGrouped] = useState(false);
@@ -172,6 +172,28 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
       <div style={S.head}>
         <div style={S.h1}>Бюджет (shadow)</div>
         <div style={S.sub}>теневая симуляция ОДНОГО общего банка {usd(config.bankTotal)} · только наблюдает, не влияет на изолированные бюджеты пар</div>
+      </div>
+
+      {/* OUR MONEY — earned / lost / unresolved / in-progress / current standing + costs */}
+      <div>
+        <div style={S.secLbl}>Наши средства</div>
+        <div style={S.card}>
+          <div style={S.tileGrid}>
+            <Tile label="заработано" value={usd2(m.earned)} sub="реализованная прибыль" color={GREEN} />
+            <Tile label="потеряно" value={usd2(m.lostMoney)} sub="реализованный убыток" color={RED} />
+            <Tile label="итог реализовано" value={<>{m.netRealized >= 0 ? "+" : "−"}{usd2(Math.abs(m.netRealized))}</>} sub={`${m.settled} расчётов · ${m.won}–${m.lost}`} color={m.netRealized >= 0 ? GREEN : RED} />
+            <Tile label="в инвестициях" value={usd2(m.invested)} sub={`${m.openCount} открытых позиций`} color={BLUE} />
+            <Tile label="ещё не понятно" value={usd2(m.openMarkValue)} sub="текущая оценка открытых (исход не определён)" color={PURPLE} />
+            <Tile label="положение открытых" value={<>{m.openPnl >= 0 ? "+" : "−"}{usd2(Math.abs(m.openPnl))}</>} sub={`${m.openPlus} в плюсе / ${m.openMinus} в минусе`} color={m.openPnl >= 0 ? GREEN : RED} />
+            <Tile label="в очереди на вход" value={usd2(m.proposedStake)} sub={`${m.proposedCount} предложено (капитал не связан)`} />
+            <Tile label="издержки" value={usd2(m.costTotal)} sub={`комиссии ${usd2(m.fees)} · слип ${usd2(m.slippage)}`} color={RED} />
+            <Tile label="казна" value={usd(m.treasuryTotal)} sub={`распределено ${usd(m.allocated)}`} />
+          </div>
+          <div style={{ ...S.hint, marginTop: 10 }}>
+            «Ещё не понятно» — деньги в открытых позициях, исход которых пока не решён (оценка по свежей котировке).
+            «Положение открытых» — нереализованный P&amp;L этих позиций прямо сейчас. Реализованное — уже закрытые сделки.
+          </div>
+        </div>
       </div>
 
       {/* VERDICT HERO — the one-glance answer */}

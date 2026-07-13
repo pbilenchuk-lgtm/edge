@@ -13,6 +13,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { loadShadowConfig, shadowAnalytics, shadowProject, buildReplayEntries, shadowPoolState, type ShadowConfig } from "./shadow.js";
 import { summarizeFillCosts, groupFillCosts } from "./fillCosts.js";
+import { budgetPosition } from "./budgetPosition.js";
 
 const REASON_RU: Record<string, string> = {
   insufficient_free: "нет свободных средств", cash_reserve: "неснижаемый остаток",
@@ -62,6 +63,16 @@ export function buildShadowLog(db: Database, opts: { now?: string; config?: Shad
   L.push(`- неснижаемый остаток: ${pct(cfg.cashReservePct)} · буфер под live: ${pct(cfg.liveBufferPct)}`);
   L.push(`- потолки: матч ${pct(cfg.capMatchPct)} · категория ${pct(cfg.capCategoryPct)} · стратегия ${pct(cfg.capStrategyPct)}`);
   L.push(`- лаг резолва: ${cfg.settlementLagMin} мин`);
+
+  const mp = budgetPosition(db);
+  L.push(`\n## Наши средства (детально)`);
+  L.push(`- Казна: $${r0(mp.treasuryTotal)} · распределено по категориям $${r0(mp.allocated)}`);
+  L.push(`- **Заработано** ${money(mp.earned)} · **потеряно** ${money(mp.lostMoney)} · итог реализовано **${signed(mp.netRealized)}** (${mp.settled} расчётов: ${mp.won} побед / ${mp.lost} поражений)`);
+  L.push(`- **В инвестициях сейчас**: $${r0(mp.invested)} в ${mp.openCount} открытых позициях (капитал в работе)`);
+  L.push(`- **Ещё не понятно** (исход не решён): текущая оценка открытых $${r0(mp.openMarkValue)} · нереализованный P&L **${signed(mp.openPnl)}**`);
+  L.push(`- **Положение открытых**: ${mp.openPlus} в плюсе (${signed(mp.openPlusPnl)}) / ${mp.openMinus} в минусе (${signed(mp.openMinusPnl)})`);
+  L.push(`- В очереди на вход: $${r0(mp.proposedStake)} в ${mp.proposedCount} предложениях (капитал ещё не связан)`);
+  L.push(`- Издержки исполнения: всего ${money(mp.costTotal)} (комиссии ${money(mp.fees)} · слиппедж ${money(mp.slippage)})`);
 
   L.push(`\n## Текущий пул`);
   L.push(`- свободно $${r0(pool.free)} · зарезервировано $${r0(pool.reserved)} · в резолве $${r0(pool.settling)}`);
