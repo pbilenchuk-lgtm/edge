@@ -375,6 +375,12 @@ export function listShadowEvents(db: Database, limit = 200): ShadowEventRow[] {
 export function allShadowEvents(db: Database): ShadowEventRow[] {
   return db.prepare(`SELECT * FROM shadow_events`).all() as ShadowEventRow[];
 }
+export function shadowEventsForMatch(db: Database, matchId: string): ShadowEventRow[] {
+  return db.prepare(`SELECT * FROM shadow_events WHERE match_id=? ORDER BY created_at ASC`).all(matchId) as ShadowEventRow[];
+}
+export function shadowReservesForMatch(db: Database, matchId: string): ShadowReserveRow[] {
+  return db.prepare(`SELECT * FROM shadow_reserves WHERE match_id=? ORDER BY created_at ASC`).all(matchId) as ShadowReserveRow[];
+}
 
 // ---------- matches ----------
 export function insertMatch(db: Database, m: Match): void {

@@ -23,6 +23,15 @@ export function findMatch(db: Database, query: string): { id: string } | null {
 }
 
 const j = (x: unknown) => "```json\n" + JSON.stringify(x, null, 2) + "\n```";
+const round0 = (n: number) => Math.round(n);
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// Shadow denial/trim reasons → readable labels (mirror of ShadowScreen's map).
+const SHADOW_REASON: Record<string, string> = {
+  insufficient_free: "нет свободных средств", cash_reserve: "неснижаемый остаток",
+  live_buffer: "буфер под live", cap_match: "потолок матча",
+  cap_category: "потолок категории", cap_strategy: "потолок стратегии",
+};
 
 /** The EXACT predicate autoEnter gates entry on (kept local to avoid a circular
  *  import). Pre-kickoff (upcoming/lineup) needs only the fixture confirmed; a LIVE
@@ -108,6 +117,46 @@ export function buildMatchLog(db: Database, matchId: string): string {
   for (const b of bets) {
     L.push(`- [${b.status}] ${b.market_label} · ${b.strategy_id}/${b.risk_profile_id ?? "?"} · предл.${b.proposed_price ?? "—"}¢ вход ${b.entry_price ?? "—"}¢ тек.${b.current_price ?? "—"}¢ · $${b.stake ?? 0} · ai_prob ${b.ai_prob != null ? (b.ai_prob * 100).toFixed(0) + "%" : "—"} · вход:${b.entered_minute ?? "—"}${b.result ? ` · ${b.result} payout $${b.payout ?? 0}` : ""}${b.settled_by ? ` (${b.settled_by})` : ""}`);
     if (b.rationale) L.push(`    ↳ ${b.rationale}`);
+  }
+
+  // ── Shadow budget (the whole-bank allocator layer: what it reserved / denied) ──
+  // The real bets above are sized off each pair's isolated budget; the shadow pool
+  // re-decides every fill against ONE shared bank (caps, cash floor, live-buffer).
+  // This is the layer that will GATE real money — so the per-match log must show its
+  // verdicts, the reason a fill was blocked/trimmed, and the P&L those denials touched.
+  h("Теневой бюджет (shadow — единый банк, каденция реальных денег)");
+  const shEvents = R.shadowEventsForMatch(db, m.id);
+  const shReserves = R.shadowReservesForMatch(db, m.id);
+  if (!shEvents.length && !shReserves.length) {
+    L.push("(нет теневых решений по этому матчу — аллокатор выключен, или входов ещё не было)");
+  } else {
+    const reqSum = round0(shEvents.reduce((s, e) => s + e.size_requested, 0));
+    const resSum = round0(shEvents.reduce((s, e) => s + e.size_reserved, 0));
+    const blocked = shEvents.filter((e) => e.verdict === "blocked");
+    const trimmed = shEvents.filter((e) => e.verdict === "trimmed");
+    // Real P&L of the fills the pool DENIED (blocked) or SHRANK (trimmed) — the money a
+    // real-bank gate would have missed/avoided. Observe-only: the real bet still happened.
+    const deniedPnl = round2([...blocked, ...trimmed].reduce((s, e) => {
+      const bet = e.bet_id ? R.getBet(db, e.bet_id) : null;
+      const settled = bet && (bet.status === "settled_won" || bet.status === "settled_lost");
+      return s + (settled && bet!.payout != null && bet!.stake != null ? bet!.payout - bet!.stake : 0);
+    }, 0));
+    const heldNow = round0(shReserves.filter((r) => r.state === "reserved").reduce((s, r) => s + r.size, 0));
+    const settlingNow = round0(shReserves.filter((r) => r.state === "settling").reduce((s, r) => s + r.size, 0));
+    L.push(`- Итог: ${shEvents.length} решений · запрошено $${reqSum} → зарезервировано $${resSum} · заблокировано ${blocked.length} · урезано ${trimmed.length}`);
+    L.push(`- Реальный P&L входов, которым пул ОТКАЗАЛ/УРЕЗАЛ: ${deniedPnl < 0 ? `-$${Math.abs(deniedPnl)}` : `+$${deniedPnl}`} (плюс = дефицит стоил денег; минус = уберёг от убытка)`);
+    L.push(`- Держится сейчас по матчу: $${heldNow} зарезервировано${settlingNow ? ` · $${settlingNow} в резолве (лаг)` : ""}`);
+    if (blocked.length || trimmed.length) {
+      const byReason: Record<string, number> = {};
+      for (const e of [...blocked, ...trimmed]) if (e.reason) byReason[e.reason] = (byReason[e.reason] ?? 0) + 1;
+      L.push(`- Причины отказа/урезания: ${Object.entries(byReason).map(([r, n]) => `${SHADOW_REASON[r] ?? r}=${n}`).join(" · ") || "—"}`);
+    }
+    L.push("\nРешения (в порядке времени):");
+    for (const e of shEvents) {
+      const v = e.verdict === "allowed" ? "принят" : e.verdict === "trimmed" ? "урезан" : "отказ";
+      const why = e.reason ? ` · ${SHADOW_REASON[e.reason] ?? e.reason}` : "";
+      L.push(`- ${e.created_at} · ${e.strategy_id}/${e.profile_id} · ${e.is_live ? "live" : "предматч"} · $${round0(e.size_requested)}→$${round0(e.size_reserved)} · **${v}**${why} · edge ${(e.edge * 100).toFixed(1)}%${e.contention ? " · ⚔ конкуренция" : ""}`);
+    }
   }
 
   // ── Reassessments (live) ──
