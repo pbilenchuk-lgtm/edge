@@ -607,6 +607,26 @@ test("settleMatch: CLV closing = kickoff for pre-match bets, entry (neutral) for
   assert.equal(R.getBet(db, inm)!.closing_price, 70, "in-match bet neutral (closing = entry 70)");
 });
 
+test("settleMatch: releases the shadow-bank reserve when a bet settles by result (no orphaned reserve)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "H", away: "A", state: "finished", lineup_out: true, kickoff_at: null, minute: 90, score_home: 2, score_away: 0, final_score: "2:0", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 60, ai_prob: 0.6, liquidity: null, external_ref: "tk", snapshot_at: "t", is_closing: false });
+  const bid = R.uid();
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Over 1.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 60, closing_price: null, ai_prob: 0.6, stake: 100, rationale: null, entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  // The shadow bank reserved capital against this bet at entry.
+  R.insertShadowReserve(db, { id: R.uid(), bet_id: bid, match_id: mid, competition_id: comp.id, strategy_id: strat.id, profile_id: "medium", size: 45, is_live: 0, edge: 0.1, state: "reserved", settle_at: null, created_at: "t" });
+  assert.equal(R.allShadowReserves(db).filter((r) => r.state === "reserved").length, 1, "reserve held while open");
+
+  settleMatch(db, R.getMatch(db, mid)!, {});
+  // The reserve is no longer 'reserved' — it moved to settling (frees after the lag),
+  // so it's not orphaned capital inflating the pool for a bet that's already settled.
+  assert.equal(R.allShadowReserves(db).filter((r) => r.state === "reserved").length, 0, "reserve released on result-settlement");
+});
+
 test("settleMatch: orphaned PROPOSED bets are closed out as not_filled (never stuck «предлагается»)", () => {
   const db = openDb(":memory:");
   seedDatabase(db);

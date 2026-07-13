@@ -91,9 +91,15 @@ export function budgetPosition(db: Database, nowIso?: string): BudgetPosition {
   const fc = summarizeFillCosts(scaledCosts as R.FillCostRow[]);
 
   const netRealized = earned - lostMoney;
+  // Free = the bank's current worth (bank + realised P&L) minus what's tied up in open
+  // positions and still-settling capital. Money-consistent: with nothing invested, free
+  // equals the balance — realised winnings ARE available (unlike pool.free, which is off
+  // the fixed bank base and used only for the allocator's caps/live-buffer mechanics).
+  const balance = bank + netRealized;
+  const free = Math.max(0, balance - invested - pool.settling);
   return {
-    bank: r2(bank), balance: r2(bank + netRealized), equity: r2(bank + netRealized + openPnl),
-    free: r2(pool.free), invested: r2(invested), settling: r2(pool.settling),
+    bank: r2(bank), balance: r2(balance), equity: r2(balance + openPnl),
+    free: r2(free), invested: r2(invested), settling: r2(pool.settling),
     earned: r2(earned), lostMoney: r2(lostMoney), netRealized: r2(netRealized),
     settled, won, lost,
     openCount, openMarkValue: r2(openMarkValue), openPnl: r2(openPnl),

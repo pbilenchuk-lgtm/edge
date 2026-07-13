@@ -20,6 +20,7 @@ import { settleBet, resolveFootballMarket } from "./settlement.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig } from "./polymarket.js";
 import { liquidationCents } from "./execution.js";
+import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { isIso, finishStamp } from "./time.js";
 import type { SportsProvider } from "./sports.js";
 
@@ -234,6 +235,12 @@ export function settleMatch(
 
   let settled = 0, skipped = 0;
   const affected = new Set<string>();
+  const shadowCfg = loadShadowConfig(db, deps.env);
+  // A bet resolving on the match result must ALSO free its shadow-bank reserve —
+  // otherwise the $5000 pool keeps counting settled positions as "reserved" forever
+  // (orphaned capital: free understated, caps falsely tightened). Mirrors the
+  // early-close path, which already calls shadowOnExit. Observe-only; never throws.
+  const releaseShadow = (betId: string) => { try { shadowOnExit(db, betId, 1, shadowCfg, now); } catch { /* observe-only */ } };
   for (const b of R.betsForMatch(db, match.id)) {
     if (b.status !== "open") continue;
     const won = resolveOutcome(b, match, overrides);
@@ -253,6 +260,7 @@ export function settleMatch(
         status: "settled_lost", result: null, payout: b.stake ?? 0, settled_at: now,
         closing_price: b.current_price ?? b.entry_price ?? null, settled_by: "void",
       });
+      releaseShadow(b.id);
       R.insertTradeLog(db, {
         id: R.uid(), match_id: match.id, strategy_id: b.strategy_id, minute: "финал",
         type: "settle", text: `${b.market_label}: рынок не рассчитывается автоматически — возврат ставки ${fmt(b.stake ?? 0)} (P&L $0)`,
@@ -271,6 +279,7 @@ export function settleMatch(
     const closing = preMatch ? (kickoff[b.market_label] ?? b.entry_price ?? null) : (b.entry_price ?? null);
     const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, closing);
     R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price, settled_at: now });
+    releaseShadow(b.id);
     R.insertTradeLog(db, {
       id: R.uid(), match_id: match.id, strategy_id: b.strategy_id, minute: "финал",
       type: "settle", text: `${b.market_label}: ${won ? "выигрыш" : "проигрыш"} → ${fmt(patch.payout)} (P&L ${fmt(patch.pnl)})`,

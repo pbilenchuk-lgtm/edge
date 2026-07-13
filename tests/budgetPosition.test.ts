@@ -48,6 +48,7 @@ test("budgetPosition: bank P&L is scaled to the BANK's committed size, not the s
   assert.equal(p.openPnl, 15);
   assert.equal(p.openPlus, 1);
   assert.equal(p.equity, p.bank + 5 + 15, "equity = balance + unrealised");
+  assert.equal(p.free, p.balance - p.invested, "free = balance − invested (realised profit is available)");
 });
 
 test("budgetPosition: no shadow activity → bank intact, all P&L zero", () => {
@@ -56,6 +57,7 @@ test("budgetPosition: no shadow activity → bank intact, all P&L zero", () => {
   assert.ok(p.bank > 0, "bank is the configured betting bank");
   assert.equal(p.balance, p.bank, "no realised P&L → balance = bank");
   assert.equal(p.invested, 0);
+  assert.equal(p.free, p.bank, "nothing invested → free equals the whole bank");
   assert.equal(p.openPnl, 0);
   assert.equal(p.earned, 0);
 });
