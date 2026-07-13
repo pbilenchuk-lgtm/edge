@@ -17,6 +17,7 @@ import {
 } from "../src/lib/llm.js";
 import { extractThresholds } from "../src/lib/thresholds.js";
 import { analyzeMatch } from "../src/lib/analysis.js";
+import { loadAnalysisDuel, analysisModelTag } from "../src/lib/analysisDuel.js";
 import { parseStatpalTennis, parseStatpalEsports, parseStatpalCricket, parseStatpalSoccer, StatpalSportsProvider, CompositeSportsProvider, loadSportsConfig as loadSportsCfg, EspnSportsProvider } from "../src/lib/sports.js";
 
 // Mock an Anthropic response carrying a JSON assessment for assessMatchLLM.
@@ -101,6 +102,29 @@ test("analyzeMatch tags proposed bets with the pair's risk profile", async () =>
   const bets = R.betsForMatch(db, "m-lineup", "edge");
   assert.ok(bets.length > 0, "edge proposed at least one bet");
   assert.ok(bets.every((b) => b.risk_profile_id === "aggressive"), "every bet carries the pair's profile");
+});
+
+test("analysis duel (ANALYSIS_DUEL=on): a match is analysed by one arm and its bets carry that arm's code_version tag", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  // Clean slate: the seed pre-populates m-lineup with pre+post assessments at a FIXED
+  // timestamp; leaving them makes "latest ok" tie once the duel writes a new one. In
+  // production the fresh post-lineup analysis always has a newer stamp (no tie).
+  db.exec("DELETE FROM assessments WHERE match_id='m-lineup'");
+  R.clearShares(db, "wc2026");
+  R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", risk_profile_id: "medium", pct: 40 });
+  const labels = R.latestMarkets(db, "m-lineup").map((m) => m.label);
+  const analysis = { match_type: "group", match_type_reason: "t", core: { xg_home: 2.3, xg_away: 1.4, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 }, overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.7, scenario_confidence: 0.6, sample_size: 12, notes: "" }, unknowns: [], picks: labels.map((l) => ({ label: l, conviction: "высокая", reason: "t" })), exits: [] };
+  const env = { ANTHROPIC_API_KEY: "k", ANALYSIS_DUEL: "on" };
+  await analyzeMatch(db, "m-lineup", { fetchImpl: mockLLM(analysis), env });
+  const asmt = R.assessmentsForMatch(db, "m-lineup").find((a) => a.status === "ok")!;
+  const duel = loadAnalysisDuel(env);
+  assert.ok(duel.models.includes(asmt.model!), `analysed by a duel arm (got ${asmt.model})`);
+  const bets = R.betsForMatch(db, "m-lineup", "edge").filter((b) => b.status === "proposed");
+  assert.ok(bets.length > 0, "at least one bet proposed");
+  const tag = analysisModelTag(asmt.model!);
+  assert.ok(bets.every((b) => (b.code_version ?? "").endsWith(`·${tag}`)), `every bet tagged with the arm (${tag}) — got ${bets[0].code_version}`);
+  assert.match(bets[0].code_version ?? "", /^e5·m1·(opus48|fable5)$/, "epoch × model-arm label");
 });
 
 test("module 3: the assigned risk profile gates entries + saves a battle_sheet (calibration differs)", async () => {

@@ -24,9 +24,12 @@ export function modelEpoch(db: Database): number {
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
 }
 
-/** The label stamped on every new bet: code epoch × model epoch, e.g. "e5·m2". */
-export function effectiveCodeVersion(db: Database): string {
-  return `${CODE_VERSION}·m${modelEpoch(db)}`;
+/** The label stamped on every new bet: code epoch × model epoch, e.g. "e5·m2". An
+ *  optional model tag (from an active analysis duel) is appended so the two duel arms
+ *  segment as distinct code_versions, e.g. "e5·m2·opus48" vs "e5·m2·fable5". */
+export function effectiveCodeVersion(db: Database, modelTag?: string | null): string {
+  const base = `${CODE_VERSION}·m${modelEpoch(db)}`;
+  return modelTag ? `${base}·${modelTag}` : base;
 }
 
 /** Advance the model epoch (call once per model-assignment change). Returns the new

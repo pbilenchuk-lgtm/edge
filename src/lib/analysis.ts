@@ -21,6 +21,7 @@ import { stratBudget } from "./money.js";
 import { winsOnEventOccurrence } from "./thresholds.js";
 import { serializeEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
+import { loadAnalysisDuel, pickAnalysisModel, analysisModelTag } from "./analysisDuel.js";
 
 export interface AnalyzeDeps {
   fetchImpl?: typeof fetch;
@@ -96,12 +97,17 @@ export async function analyzeMatch(
   // instead of dead-ending.
   const DEFAULT_MODEL = deps.defaultModel ?? "Claude Opus 4.8";
   const safeModel = (m: string | null | undefined) => (m && resolveModel(m) ? m : DEFAULT_MODEL);
-  const model = safeModel(prompt.model);
   const stage: "pre_lineup" | "post_lineup" = match.lineup_out ? "post_lineup" : "pre_lineup";
 
   // Key resolution: explicit deps.env wins (tests/callers); otherwise env vars
   // OR a key entered via the UI (Models screen), resolved from the DB.
   const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
+  // Two-model analysis duel: half the matches (stable hash of the id) are analysed by
+  // model B instead of the configured one, so the two can be compared head-to-head. Both
+  // analysis layers (base + ЧМ modifier) use the SAME chosen model, so a match is fully
+  // attributable to one model. Off → the single configured analytics model, as before.
+  const duel = loadAnalysisDuel(env);
+  const model = duel.enabled ? safeModel(pickAnalysisModel(matchId, duel)) : safeModel(prompt.model);
   const ctx = matchContext(db, matchId); // real lineups + events, if enriched from ESPN
   // Football → two-layer analysis: Layer 1 (base) estimates CORE from the SPORT
   // prompt; if the competition carries a MODIFIER prompt (e.g. World Cup), Layer 2
@@ -121,7 +127,7 @@ export async function analyzeMatch(
     } else {
       const modifier = R.analyticsPromptRow(db, "competition", match.competition_id);
       let category: CategoryDelta | null = null;
-      if (modifier?.body) category = await assessCategoryModifier(modifier.body, base, match.home, match.away, safeModel(modifier.model), { fetchImpl: deps.fetchImpl, env });
+      if (modifier?.body) category = await assessCategoryModifier(modifier.body, base, match.home, match.away, model, { fetchImpl: deps.fetchImpl, env });
       const assembled = assembleFootball(base, category?.ok ? category : null);
       calibrationNum = assembled.calibration.xg_confidence;
       a = footballToAssessment(assembled, match.home, match.away, markets.map((m) => m.label));
@@ -220,6 +226,10 @@ export async function runStrategists(
   const safeModel = (m: string | null | undefined) => (m && resolveModel(m) ? m : DEFAULT_MODEL);
   const model = safeModel(prompt.model);
   const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
+  // Duel tag for this match's bets = the model that actually produced its analysis
+  // (recorded on the assessment). Null when the duel is off → plain epoch label.
+  const duel = loadAnalysisDuel(env);
+  const analysisTag = duel.enabled && assessment.model ? analysisModelTag(assessment.model) : null;
 
   const freshMarkets = R.latestMarkets(db, matchId);
   // Only replace existing proposals if we actually have usable probabilities — a
@@ -345,7 +355,7 @@ export async function runStrategists(
         status: "proposed", proposed_price: m.price, entry_price: null, current_price: null,
         closing_price: null, ai_prob: ourProb, stake: r.stake,
         rationale: `«${m.label}»: edge ${(r.edge * 100).toFixed(1)}% (наша ${(ourProb * 100).toFixed(0)}% vs рынок ${(implied * 100).toFixed(0)}%). ${pick?.reason || r.reason}.${pickTreeNote(pick)}`,
-        entered_minute: null, result: null, payout: null, entry_meta: serializeEntryMeta(entryMeta), code_version: effectiveCodeVersion(db), created_at: now(),
+        entered_minute: null, result: null, payout: null, entry_meta: serializeEntryMeta(entryMeta), code_version: effectiveCodeVersion(db, analysisTag), created_at: now(),
       });
     }
     // A pick the strategist named that resolves to NO real market (a mislabel, or a

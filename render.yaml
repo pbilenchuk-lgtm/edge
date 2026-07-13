@@ -58,6 +58,14 @@ services:
         value: "5"       # match-stats snapshot cadence (data layer — kept dense)
       - key: PARTIAL_TP_THROTTLE_MIN
         value: "8"       # min minutes between partial TAKE-PROFIT fixations on one position (0 disables)
+      # ANALYSIS DUEL (A/B): analyse each match with ONE of two models (≈50/50 by a
+      # stable hash of the match id), so their logs + outcomes compare head-to-head.
+      # "on" = default pair Opus 4.8 vs Fable 5; "Model A | Model B" to repoint; "off"
+      # to stop. Bets are tagged by arm (code_version "…·opus48" / "…·fable5") so the
+      # «Профили» tab segments them. NOTE: the ANTHROPIC_API_KEY must have access to
+      # BOTH models, or analysis fails on that arm's half of the slate.
+      - key: ANALYSIS_DUEL
+        value: "on"
       # Live Claude analysis needs a key. sync:false means Render PROMPTS you for
       # the value in the dashboard on first deploy and KEEPS it across redeploys.
       # Recommended over entering the key in the UI: the env var is read before

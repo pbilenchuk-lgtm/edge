@@ -10,6 +10,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { summarizeFillCosts } from "./fillCosts.js";
 import { loadShadowConfig } from "./shadow.js";
+import { loadAnalysisDuel } from "./analysisDuel.js";
 
 /** Resolve a match by exact id, else a case-insensitive team-name substring.
  *  Prefers the most recent match when several fixtures match the same query. */
@@ -93,6 +94,14 @@ export function buildMatchLog(db: Database, matchId: string): string {
   const arts = R.artifactsForMatch(db, m.id);
   const byKind = (k: string) => arts.filter((a) => a.kind === k);
   h("Анализ (Слой 1 base / Слой 2 category / assembled distribution)");
+  // A/B duel: state up front which model analysed this match, so head-to-head accuracy
+  // is readable from the log without digging into each artifact's JSON.
+  {
+    const okA = R.assessmentsForMatch(db, m.id).filter((a) => a.status === "ok").sort((a, b) => (a.created_at >= b.created_at ? -1 : 1))[0];
+    const dm = loadAnalysisDuel().models;
+    if (loadAnalysisDuel().enabled) L.push(`- Дуэль анализа: **${okA?.model ?? "?"}** (арм этого матча; сравнение ${dm[0]} ↔ ${dm[1]})`);
+    else if (okA?.model) L.push(`- Модель анализа: **${okA.model}**`);
+  }
   for (const kind of ["base", "category", "distribution"]) {
     for (const a of byKind(kind)) { L.push(`\n### ${kind}${a.label ? ` · ${a.label}` : ""} (${a.stage}, ${a.model ?? "?"}, ${a.created_at})`); L.push(safeJson(a.content)); }
   }

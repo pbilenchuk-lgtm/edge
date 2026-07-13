@@ -35,6 +35,7 @@ import { hoursUntil, finishStamp } from "./time.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit, type ShadowEntryRequest } from "./shadow.js";
 import { collectSnapshots } from "./snapshots.js";
 import { overreactionShouldCall } from "./reassessGate.js";
+import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
 
 // Timing gates (hours before kickoff). Pre-match assessment opens ~12h out;
@@ -968,6 +969,7 @@ export async function strategistReassess(
   const triggeredOnly = opts.triggeredOnly ?? false;
   const now = nowFn(deps)();
   const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
+  const analysisDuel = loadAnalysisDuel(env); // tag live bets with the match's analysis model
   const poly = deps.polymarket ?? loadPolymarketConfig(env);
   const comps = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
   const out: ReassessResult = { exits: [], entries: [], llmCalls: 0, llmFail: 0 };
@@ -1012,6 +1014,9 @@ export async function strategistReassess(
       ? Math.min(maxLiveMinutes(sport), Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at as string)) / 60000)))
       : null;
     const assess = R.assessmentsForMatch(db, m.id).filter((a) => a.status === "ok").sort((a, b) => (a.created_at >= b.created_at ? -1 : 1))[0];
+    // A/B duel tag: attribute this match's live bets to the model that analysed it, so a
+    // match's whole bet set (prematch + live) segments under one arm. Null → plain epoch.
+    const analysisTag = analysisDuel.enabled && assess?.model ? analysisModelTag(assess.model) : null;
     // Match facts + the outcome tree / match_shape / scenarios the strategist
     // reasons over (single-sourced; the pair's battle sheet is appended below).
     const ctx = strategistContext(db, m.id);
@@ -1300,15 +1305,16 @@ export async function strategistReassess(
               branchWeightSum: pick.branchWeightSum != null ? round2(pick.branchWeightSum) : null,
               phantomCheck: pick.phantomCheck ?? null, marketThinnessUsd: liqNum(mk.liquidity),
               winsOnEvent: winsOnEventOccurrence(mk.label), exitPlan: pick.exitPlan ?? null,
-              // Live entries run the live-reassess tier (model_live), falling back to model → Opus.
-              models: { analysis: null, strategist: strat.model_live ?? strat.model ?? "Claude Opus 4.8" },
+              // Live entries run the live-reassess tier (model_live→model→Opus); analysis = the
+              // model that analysed the match (duel arm), so the bet is fully attributable.
+              models: { analysis: assess?.model ?? null, strategist: strat.model_live ?? strat.model ?? "Claude Opus 4.8" },
             };
             R.insertBet(db, {
               id: R.uid(), match_id: m.id, strategy_id: sid, risk_profile_id: profile, market_label: mk.label,
               status: "proposed", proposed_price: mk.price, entry_price: null, current_price: null,
               closing_price: null, ai_prob: ourProb, stake: r.stake,
               rationale: `переоценка (лайв): «${mk.label}» edge ${(r.edge * 100).toFixed(1)}%. ${pick.reason || r.reason}.`,
-              entered_minute: null, result: null, payout: null, entry_meta: serializeEntryMeta(liveEntryMeta), code_version: effectiveCodeVersion(db), created_at: now,
+              entered_minute: null, result: null, payout: null, entry_meta: serializeEntryMeta(liveEntryMeta), code_version: effectiveCodeVersion(db, analysisTag), created_at: now,
             });
             out.entries.push({ matchId: m.id, strategyId: sid, market: mk.label, stake: r.stake });
             enteredMarkets.push(mk.label);
