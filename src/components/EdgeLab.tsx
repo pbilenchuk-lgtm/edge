@@ -8,6 +8,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import type { AppData } from "@/lib/view";
 import ShadowScreen from "./ShadowScreen";
+import ProfilesScreen from "./ProfilesScreen";
 
 const INK = "#12161d", PANEL = "#1a2029", PANEL2 = "#212936", LINE = "#2c3543", TEXT = "#e6e9ef", MUTE = "#8b95a5";
 const PALETTE = ["#e8a838", "#5b9bd5", "#70b56a", "#c98bdb", "#e07a5f", "#4fc3c7"];
@@ -600,7 +601,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       </div>
 
       <div style={S.screenSwitch} className="el-screen-switch">
-        {[["matches", "Матчи"], ["feed", "Лента"], ["portfolio", "Портфель"], ["metrics", "Метрики"], ["shadow", "Бюджет (shadow)"], ["strategies", "Стратегии"], ["models", "Настройки"]].map(([k, lbl]) => {
+        {[["matches", "Матчи"], ["feed", "Лента"], ["portfolio", "Портфель"], ["metrics", "Метрики"], ["profiles", "Профили"], ["shadow", "Бюджет (shadow)"], ["strategies", "Стратегии"], ["models", "Настройки"]].map(([k, lbl]) => {
           const alert = k === "shadow" && screen !== "shadow" && ((shadow?.analytics?.blocked ?? 0) + (shadow?.analytics?.trimmed ?? 0) > 0 || (shadow?.projection?.blocked ?? 0) > 0);
           return <button key={k} onClick={() => setScreen(k)} style={{ ...S.screenBtn, ...(screen === k ? S.screenOn : {}) }} title={alert ? "капитал упирался в лимит — загляни" : undefined}>{lbl}{alert && <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#ff6b6b", marginLeft: 6, verticalAlign: "middle" }} />}</button>;
         })}
@@ -715,6 +716,8 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       ) : screen === "metrics" ? (
         <MetricsScreen catalog={catalog} quality={QUALITY} stats={strategyStats}
           treasury={{ effectiveBalance, allocatedSum, freeBalance, totalRealized }} />
+      ) : screen === "profiles" ? (
+        <ProfilesScreen />
       ) : screen === "shadow" ? (
         <ShadowScreen data={shadow}
           onSave={async (config: any) => {
