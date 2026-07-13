@@ -61,8 +61,8 @@ const S: Record<string, React.CSSProperties> = {
 };
 
 function exportCsv(events: ShadowView["events"]) {
-  const cols = ["time", "match", "category", "strategy", "profile", "source", "edge", "requested", "reserved", "verdict", "reason", "contention", "free", "proj_size", "proj_verdict"];
-  const rows = events.map((e) => [e.at, e.matchLabel, e.category, e.strategyLabel, e.profileId, e.isLive ? "live" : "prematch", e.edge, e.sizeRequested, e.sizeReserved, e.verdict, e.reason ?? "", e.contention ? "1" : "0", e.freeAt ?? "", e.projSize ?? "", e.projVerdict ?? ""]);
+  const cols = ["time", "match", "category", "strategy", "profile", "source", "edge", "requested", "reserved", "now_pnl", "pos_status", "verdict", "reason", "contention", "free", "proj_size", "proj_verdict"];
+  const rows = events.map((e) => [e.at, e.matchLabel, e.category, e.strategyLabel, e.profileId, e.isLive ? "live" : "prematch", e.edge, e.sizeRequested, e.sizeReserved, e.nowPnl ?? "", e.posStatus, e.verdict, e.reason ?? "", e.contention ? "1" : "0", e.freeAt ?? "", e.projSize ?? "", e.projVerdict ?? ""]);
   const csv = [cols, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
   const url = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
   const a = document.createElement("a"); a.href = url; a.download = `shadow-events-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
@@ -113,8 +113,8 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
   const segs = [
     { v: pool.reserved, c: BLUE, l: "резерв" },
     { v: pool.settling, c: PURPLE, l: "settling" },
-    { v: pool.liveBufferFree, c: HELD, l: "буфер live" },
-    { v: spendable, c: GREEN, l: "свободно" },
+    { v: pool.liveBufferFree, c: HELD, l: "буфер live (придержан)" },
+    { v: spendable, c: GREEN, l: "доступно аллокатору" },
   ];
 
   // Settings form: percentages shown as WHOLE numbers (40, not 0.4). Convert on save.
@@ -183,10 +183,11 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
         </div>
       </div>
 
-      {/* CAPITAL — where the money sits */}
+      {/* CAPITAL — allocator mechanics (distinct from the money panel above) */}
       <div>
-        <div style={S.secLbl}>Капитал пула</div>
+        <div style={S.secLbl}>Капитал пула · механика аллокатора</div>
         <div style={S.card}>
+          <div style={{ ...S.hint, marginBottom: 10 }}>Как единый банк ${usd(pool.bank).replace("$", "")} распределяется под потолки и live-буфер. Считается от фиксированного банка (не от баланса) — это мера загрузки, а не «сколько наших денег свободно» (та цифра — вверху, «СВОБОДНО»).</div>
           <div style={{ display: "flex", height: 16, borderRadius: 6, overflow: "hidden", background: "#0e1219" }} title="разбивка банка">
             {segs.map((s, i) => s.v > 0 && <div key={i} style={{ width: `${(s.v / pool.bank) * 100}%`, background: s.c }} title={`${s.l}: ${usd(s.v)}`} />)}
           </div>
@@ -198,12 +199,12 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
             <Tile label="банк" value={usd(pool.bank)} />
             <Tile label="резерв" value={usd(pool.reserved)} sub={`${pctOf(pool.reserved, pool.bank)}% банка`} color={BLUE} />
             <Tile label="settling" value={usd(pool.settling)} sub={`резолв ${config.settlementLagMin} мин`} color={PURPLE} />
-            <Tile label="свободно" value={usd(spendable)} sub="доступно предматчу" color={GREEN} />
-            <Tile label="live-буфер" value={usd(pool.liveBufferUsed)} sub={`из ${usd(pool.liveBufferTotal)} · только live`} />
+            <Tile label="доступно аллокатору" value={usd(spendable)} sub="под предматч-входы" color={GREEN} />
+            <Tile label="буфер live · занято" value={usd(pool.liveBufferUsed)} sub={`из ${usd(pool.liveBufferTotal)} · только live`} />
           </div>
           {data.settlingQueue.length > 0 && (
             <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${LINE}` }}>
-              <div style={{ ...S.hint, marginBottom: 6 }}>очередь settling — {usd(pool.settling)} вернётся во «свободно» после лага</div>
+              <div style={{ ...S.hint, marginBottom: 6 }}>очередь settling — {usd(pool.settling)} вернётся в «доступно» после лага</div>
               {data.settlingQueue.slice(0, 8).map((s, i) => {
                 const mins = Math.max(0, Math.round((Date.parse(s.settleAt) - Date.now()) / 60000));
                 return (
@@ -335,9 +336,9 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
             </table>
           ) : (
           <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 720 }}>
-            <thead><tr>{["время", "матч", "категория", "стратегия", "запрос → резерв", "проекция", "вердикт", "причина", "free"].map((h) => <th key={h} style={S.th} title={h === "проекция" ? "размер при сайзинге от единого банка (worst case)" : undefined}>{h}</th>)}</tr></thead>
+            <thead><tr>{["время", "матч", "категория", "стратегия", "запрос → резерв", "сейчас", "проекция", "вердикт", "причина", "free"].map((h) => <th key={h} style={S.th} title={h === "проекция" ? "размер при сайзинге от единого банка (worst case)" : h === "сейчас" ? "текущий P&L позиции (на резерв банка): mark-to-market для открытых, реализованный для закрытых" : undefined}>{h}</th>)}</tr></thead>
             <tbody>
-              {events.length === 0 && <tr><td colSpan={9} style={S.empty}>{data.events.length ? "Под фильтр ничего не попало." : "Событий пока нет.\nОни появляются при каждом входе реальной симуляции — allowed / blocked / trimmed."}</td></tr>}
+              {events.length === 0 && <tr><td colSpan={10} style={S.empty}>{data.events.length ? "Под фильтр ничего не попало." : "Событий пока нет.\nОни появляются при каждом входе реальной симуляции — allowed / blocked / trimmed."}</td></tr>}
               {events.slice(0, 150).map((e) => {
                 const v = VERDICT[e.verdict as keyof typeof VERDICT] ?? VERDICT.allowed;
                 return (
@@ -347,6 +348,7 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
                     <td style={{ ...S.td, color: "#c4cdd9" }}>{e.category}</td>
                     <td style={S.td}>{e.strategyLabel} <span style={{ color: MUTE }}>/{e.profileId}</span></td>
                     <td style={{ ...S.td, fontFamily: MONO }}>{usd(e.sizeRequested)} <span style={{ color: MUTE }}>→</span> {usd(e.sizeReserved)}</td>
+                    <td style={{ ...S.td, fontFamily: MONO, color: e.nowPnl == null ? MUTE : e.nowPnl >= 0 ? GREEN : RED }} title={e.posStatus === "open" ? "открыта — оценка по свежей котировке" : e.posStatus === "settled" ? "закрыта — реализованный результат" : "нет открытой позиции банка"}>{e.nowPnl == null ? "—" : `${e.nowPnl >= 0 ? "+" : "−"}${usd2(Math.abs(e.nowPnl))}`}{e.posStatus === "open" && <span style={{ color: MUTE, fontSize: 9, marginLeft: 4 }}>live</span>}</td>
                     <td style={{ ...S.td, fontFamily: MONO, color: e.projVerdict === "blocked" ? RED : e.projVerdict === "nodata" ? MUTE : "#c4cdd9" }} title={e.projVerdict === "nodata" ? "нет захваченной intensity — вне проекции" : "сайзинг от банка (worst case)"}>{e.projVerdict === "blocked" ? "нет места" : e.projVerdict === "nodata" ? "н/д" : e.projSize != null ? usd(e.projSize) : "—"}</td>
                     <td style={S.td}><span style={{ ...S.pill, background: v.bg, color: v.color }}>{v.ru}</span></td>
                     <td style={{ ...S.td, color: e.reason ? "#c4cdd9" : MUTE }}>{e.reason ? (REASON_RU[e.reason] ?? e.reason) : "—"}</td>

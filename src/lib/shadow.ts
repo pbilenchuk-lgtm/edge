@@ -79,6 +79,7 @@ export function sweepSettled(db: Database, nowIso: string): number {
 /** Current pool state, derived from the live reserve rows (after sweeping settled). */
 export function shadowPoolState(db: Database, cfg: ShadowConfig, nowIso: string): ShadowPoolState {
   sweepSettled(db, nowIso);
+  R.releaseOrphanReserves(db); // self-heal reserves left behind by already-settled bets
   const rows = R.allShadowReserves(db);
   const bank = cfg.bankTotal;
   let reserved = 0, settling = 0, liveUsed = 0;

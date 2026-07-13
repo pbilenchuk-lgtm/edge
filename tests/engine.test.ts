@@ -627,6 +627,28 @@ test("settleMatch: releases the shadow-bank reserve when a bet settles by result
   assert.equal(R.allShadowReserves(db).filter((r) => r.state === "reserved").length, 0, "reserve released on result-settlement");
 });
 
+test("releaseOrphanReserves: drops a reserve whose bet already settled, keeps open & bet-less ones", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "H", away: "A", state: "finished", lineup_out: true, kickoff_at: null, minute: 90, score_home: 1, score_away: 0, final_score: "1:0", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  const settledBet = R.uid(), openBet = R.uid();
+  R.insertBet(db, { id: settledBet, match_id: mid, strategy_id: strat.id, market_label: "M1", status: "settled_won", proposed_price: 50, entry_price: 50, current_price: 100, closing_price: 100, ai_prob: 0.6, stake: 100, rationale: null, entered_minute: "10'", result: "won", payout: 200, created_at: "t" });
+  R.insertBet(db, { id: openBet, match_id: mid, strategy_id: strat.id, market_label: "M2", status: "open", proposed_price: 50, entry_price: 50, current_price: 55, closing_price: null, ai_prob: 0.5, stake: 100, rationale: null, entered_minute: "10'", result: null, payout: null, created_at: "t" });
+  const rsv = (betId: string, size: number) => R.insertShadowReserve(db, { id: R.uid(), bet_id: betId, match_id: mid, competition_id: comp.id, strategy_id: strat.id, profile_id: "medium", size, is_live: 0, edge: 0.1, state: "reserved", settle_at: null, created_at: "t" });
+  rsv(settledBet, 45); // orphan — bet already settled
+  rsv(openBet, 30);    // legit — bet still open
+  rsv(R.uid(), 10);    // bet-less (isolated) — must be left untouched
+
+  const released = R.releaseOrphanReserves(db);
+  assert.equal(released, 1, "only the settled bet's reserve is dropped");
+  const remaining = R.allShadowReserves(db).filter((r) => r.state === "reserved");
+  assert.equal(remaining.length, 2, "open + bet-less reserves remain");
+  assert.ok(!remaining.some((r) => r.bet_id === settledBet), "the orphaned reserve is gone");
+});
+
 test("settleMatch: orphaned PROPOSED bets are closed out as not_filled (never stuck «предлагается»)", () => {
   const db = openDb(":memory:");
   seedDatabase(db);

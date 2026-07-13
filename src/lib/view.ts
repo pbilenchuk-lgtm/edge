@@ -131,6 +131,10 @@ export interface ShadowEventView {
   isLive: boolean; edge: number; contention: boolean; freeAt: number | null;
   /** projection: size the entry would get from a bank-derived base + its verdict */
   projSize: number | null; projVerdict: string | null;
+  /** CURRENT standing of the position this decision funded, scaled to the reserved
+   *  amount: realised for a closed bet, mark-to-market for an open one. null = not funded. */
+  nowPnl: number | null;
+  posStatus: "open" | "settled" | "none";
 }
 export interface ShadowView {
   enabled: boolean;
@@ -377,6 +381,26 @@ export function buildAppData(db: Database, env = process.env): AppData {
   const catNames: Record<string, string> = {}; for (const c of competitions) catNames[c.id] = c.name;
   const stratNames: Record<string, string> = {}; for (const s of strategies) stratNames[s.id] = s.name;
   const matchLabel: Record<string, string> = {}; for (const m of allMatches) matchLabel[m.id] = `${m.home} — ${m.away}`;
+  // CURRENT standing of each decision: the P&L of the position it funded, scaled to the
+  // reserved amount — realised for a closed bet, mark-to-market (freshest quote) for an
+  // open one. Lets the decision feed show where each bet stands right now.
+  const betById = new Map<string, Bet>();
+  for (const arr of betsByMatch.values()) for (const b of arr) betById.set(b.id, b);
+  const eventNow = (betId: string | null, reserved: number): { nowPnl: number | null; posStatus: "open" | "settled" | "none" } => {
+    const b = betId ? betById.get(betId) : undefined;
+    if (!b || reserved <= 0) return { nowPnl: null, posStatus: "none" };
+    const entry = b.entry_price ?? 0, stake = b.stake ?? 0;
+    if (b.status === "settled_won" || b.status === "settled_lost") {
+      const ratio = stake > 0 && b.payout != null ? b.payout / stake : 1;
+      return { nowPnl: Math.round(reserved * (ratio - 1) * 100) / 100, posStatus: "settled" };
+    }
+    if (b.status === "open") {
+      const cur = (pricesByMatch.get(b.match_id) ?? {})[b.market_label] ?? b.current_price ?? entry;
+      const ratio = entry > 0 ? cur / entry : 1;
+      return { nowPnl: Math.round(reserved * (ratio - 1) * 100) / 100, posStatus: "open" };
+    }
+    return { nowPnl: null, posStatus: "none" };
+  };
   // Worst-case projection: re-size every recorded entry from a bank-derived base and
   // simulate the pool timeline. `results` align to R.allShadowEvents order.
   const allShadowEv = R.allShadowEvents(db);
@@ -402,6 +426,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
       sizeRequested: e.size_requested, sizeReserved: e.size_reserved, verdict: e.verdict, reason: e.reason,
       isLive: !!e.is_live, edge: e.edge, contention: !!e.contention, freeAt: e.free_at,
       projSize: projById.get(e.id)?.size ?? null, projVerdict: projById.get(e.id)?.verdict ?? null,
+      ...eventNow(e.bet_id, e.size_reserved),
     })),
   };
 

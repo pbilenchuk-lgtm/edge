@@ -365,6 +365,16 @@ export function releaseSettledShadow(db: Database, nowIso: string): number {
   const info = db.prepare(`DELETE FROM shadow_reserves WHERE state='settling' AND settle_at IS NOT NULL AND settle_at <= ?`).run(nowIso);
   return Number(info.changes ?? 0);
 }
+/** Drop 'reserved' rows whose bet is no longer OPEN (settled / not_filled / gone). Such a
+ *  reserve is orphaned capital — it would keep the pool counting a closed position as
+ *  invested, understating free and falsely tightening caps. Returns released count. */
+export function releaseOrphanReserves(db: Database): number {
+  // Only drop a reserve whose bet EXISTS and is in a terminal (non-open) state — a bet
+  // that settled without its reserve being released. A reserve whose bet row is absent
+  // (isolated shadow simulation, no real bet) is left untouched.
+  const info = db.prepare(`DELETE FROM shadow_reserves WHERE state='reserved' AND bet_id IN (SELECT id FROM bets WHERE status <> 'open')`).run();
+  return Number(info.changes ?? 0);
+}
 export function insertShadowEvent(db: Database, e: ShadowEventRow): void {
   db.prepare(`INSERT INTO shadow_events(id,bet_id,match_id,competition_id,strategy_id,profile_id,size_requested,size_reserved,verdict,reason,is_live,edge,contention,free_at,pool_snapshot,config_snapshot,intensity,created_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(e.id, e.bet_id, e.match_id, e.competition_id, e.strategy_id, e.profile_id, e.size_requested, e.size_reserved, e.verdict, e.reason, e.is_live, e.edge, e.contention, e.free_at, e.pool_snapshot, e.config_snapshot ?? null, e.intensity ?? null, e.created_at);
