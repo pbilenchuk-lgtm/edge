@@ -407,6 +407,31 @@ test("evaluateExits fires a planned time_stop when the minute passes and the eve
   assert.equal(R.getBet(c.db, c.bid)!.status, "open", "position still open before the planned minute");
 });
 
+test("evaluateExits time_stop fires for EACH profile of a strategy on the same market (audit [2])", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const bookFetch = (book: any) => (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Argentina", away: "Switzerland", state: "live", lineup_out: true, kickoff_at: null, minute: 82, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Switzerland Over 0.5", price: 25, ai_prob: 0.4, liquidity: "2000", external_ref: "TOKS", snapshot_at: "t", is_closing: false });
+  // TWO profiles of the SAME strategy, each holding the same melting market, each with its
+  // own battle sheet + planned time_stop at 80'. Before the fix, the first profile's fire
+  // suppressed the second's forever (throttle keyed by strategy+market only).
+  const bidM = R.uid(), bidA = R.uid();
+  for (const [prof, bid] of [["medium", bidM], ["aggressive", bidA]] as const) {
+    R.saveArtifact(db, { match_id: mid, kind: "battle_sheet", label: `${strat.name} · ${prof}`, stage: "prematch", content: JSON.stringify({ positions: [{ market: "Switzerland Over 0.5", exit: { time_stop: { minute: 80, action: "close_full" } } }] }), model: "m", created_at: "t" });
+    R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, risk_profile_id: prof, market_label: "Switzerland Over 0.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 25, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  }
+  await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.27", size: "500" }], bids: [{ price: "0.24", size: "5000" }] }) });
+  assert.ok(R.getBet(db, bidM)!.status.startsWith("settled"), "medium profile time-stopped");
+  assert.ok(R.getBet(db, bidA)!.status.startsWith("settled"), "aggressive profile ALSO time-stopped (not suppressed by medium's fire)");
+});
+
 test("evaluateExits HOLDS a stop when the full stake would SLIP far below the best bid (exit_slippage_block), executes it on a deep book", async () => {
   const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
   const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });

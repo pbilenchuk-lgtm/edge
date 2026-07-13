@@ -200,6 +200,12 @@ export function deleteStrategy(db: Database, id: string): void {
     `DELETE FROM trade_log WHERE strategy_id=?`,
     `DELETE FROM reassessments WHERE strategy_id=?`,
     `DELETE FROM bets WHERE strategy_id=?`,
+    // Shadow reserves/ledger are keyed by strategy_id too — drop them or their capital
+    // stays "reserved" against a bet row that no longer exists (leaked capital that
+    // releaseOrphanReserves can't reclaim, since it keys off the now-absent bet).
+    `DELETE FROM shadow_reserves WHERE strategy_id=?`,
+    `DELETE FROM shadow_events WHERE strategy_id=?`,
+    `DELETE FROM fill_costs WHERE strategy_id=?`,
     `DELETE FROM strategy_shares WHERE strategy_id=?`,
     `DELETE FROM strategy_versions WHERE strategy_id=?`,
     `DELETE FROM quality_metrics WHERE strategy_id=?`,
@@ -583,7 +589,7 @@ export function pruneMarketSnapshots(db: Database, keepPerLabel = 8): number {
 // match. provider_snapshots is NOT here on purpose: it's long-retention research
 // data, and the prune queries below EXCLUDE any match that has snapshots, so a
 // snapshotted match is never deleted (protects the data AND avoids the FK error).
-const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "markets", "bets", "reassessments", "trade_log", "analysis_jobs", "match_live", "match_events", "market_open", "provider_match_map", "provider_snapshots"];
+const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "markets", "bets", "reassessments", "trade_log", "analysis_jobs", "match_live", "match_events", "market_open", "provider_match_map", "provider_snapshots", "shadow_reserves", "shadow_events", "fill_costs"];
 
 /**
  * Prune bloat matches to keep the DB (and every `buildAppData` scan) bounded.

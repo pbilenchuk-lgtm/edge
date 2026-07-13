@@ -25,6 +25,7 @@ export interface LiveProbConfig {
   lateFromMin: number;    // minute at which late-game goal clustering starts ramping
   lateBoost: number;      // max additional multiplier by regulation end
   regulationEnd: number;  // 90 for football
+  stoppageMin: number;    // expected added time — goals still cluster in 90'+; keep λ alive there
 }
 
 export function loadLiveProbConfig(env: Record<string, string | undefined> = process.env): LiveProbConfig {
@@ -35,19 +36,24 @@ export function loadLiveProbConfig(env: Record<string, string | undefined> = pro
     lateFromMin: num(env.LIVEPROB_LATE_FROM_MIN, 45),
     lateBoost: num(env.LIVEPROB_LATE_BOOST, 0.35),
     regulationEnd: num(env.LIVEPROB_REG_END, 90),
+    stoppageMin: num(env.LIVEPROB_STOPPAGE_MIN, 5),
   };
 }
 
 /** Fraction of a team's FULL-MATCH xG still to come at `minute`, using the 1st-half
  *  share (goals are back-loaded: share1h < 0.5 ⇒ the 2nd half carries more). A team's
- *  remaining expected goals = full xG × this. Deterministic in the match minute. */
-export function remainingXgFraction(minute: number, share1h: number, regEnd = 90): number {
+ *  remaining expected goals = full xG × this. Deterministic in the match minute. The
+ *  match effectively ends at regEnd + `stoppage`, NOT at regEnd — otherwise a still-live
+ *  option in the 90'+ window reads P=0, killing exactly the late/stoppage goals the layer
+ *  exists to price. At half-time the whole 2nd half remains; it decays to ~0 by regEnd+stoppage. */
+export function remainingXgFraction(minute: number, share1h: number, regEnd = 90, stoppage = 5): number {
   const s = clamp(share1h, 0.1, 0.9);
   const half = regEnd / 2;
+  const effEnd = regEnd + Math.max(0, stoppage);
   if (minute <= 0) return 1;
-  if (minute >= regEnd) return 0;
+  if (minute >= effEnd) return 0;
   if (minute < half) return s * (half - minute) / half + (1 - s); // rest of 1H (pro-rata) + all 2H
-  return (1 - s) * (regEnd - minute) / half;                        // rest of the 2H (pro-rata)
+  return (1 - s) * (effEnd - minute) / (effEnd - half);            // rest of the 2H + stoppage (pro-rata)
 }
 
 /** Game-state multiplier on a team's remaining λ from its score differential (its
@@ -71,7 +77,7 @@ export function liveScoreProb(
   input: { teamXgFull: number; teamShare1h: number; minute: number; scoreDiff: number },
   cfg: LiveProbConfig,
 ): { lambdaRemaining: number; prob: number; gs: number; late: number } {
-  const baseRem = Math.max(0, input.teamXgFull) * remainingXgFraction(input.minute, input.teamShare1h, cfg.regulationEnd);
+  const baseRem = Math.max(0, input.teamXgFull) * remainingXgFraction(input.minute, input.teamShare1h, cfg.regulationEnd, cfg.stoppageMin);
   const gs = gameStateMultiplier(input.scoreDiff, cfg);
   const late = lateGameProfile(input.minute, cfg);
   const lambda = baseRem * gs * late;

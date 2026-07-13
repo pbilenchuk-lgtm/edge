@@ -792,15 +792,21 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // the strategist's earlier plan, at any price. Fires at most ONCE per position.
       const ts = plannedTimeStop(db, m.id, strat.name, b.risk_profile_id ?? "medium", b.market_label);
       if (ts && minNum >= ts.minute && mk.price < EXIT_TIME_STOP_RESOLVED_CENTS && sell.cents < EXIT_TIME_STOP_RESOLVED_CENTS) {
-        const already = R.tradeLogForMatch(db, m.id).some((e) => e.strategy_id === b.strategy_id && e.type === "exit" && e.text.includes(`«${b.market_label}»`) && /time_stop/.test(e.text));
+        // Fire at most once PER POSITION (strategy·profile·market). The throttle must
+        // include the risk profile — two profiles of one strategy hold their own bets on
+        // the same market, so a market-only key would let the first profile's fire suppress
+        // every other profile's planned time_stop forever. The marker embeds the profile.
+        const prof = b.risk_profile_id ?? "medium";
+        const tsMarker = `(time_stop·${prof})`;
+        const already = R.tradeLogForMatch(db, m.id).some((e) => e.strategy_id === b.strategy_id && e.type === "exit" && e.text.includes(`«${b.market_label}»`) && e.text.includes(tsMarker));
         // Phantom-bid guard, as on every exit path: a planned close still must not dump into a
         // momentarily-broken book (≤FLOOR¢ bid far under the mark) — hold to a real book/settle.
         const phantom = sell.fromBook && sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP;
         if (!already && !phantom) {
           const fraction = ts.action === "close_half" ? 0.5 : 1;
-          const reason = `плановый тайм-стоп: ${minNum}' ≥ ${ts.minute}', событие не наступило (рынок ${mk.price}¢) — ${ts.action === "close_half" ? "фиксирую половину" : "закрываю"} (time_stop)`;
+          const reason = `плановый тайм-стоп: ${minNum}' ≥ ${ts.minute}', событие не наступило (рынок ${mk.price}¢) — ${ts.action === "close_half" ? "фиксирую половину" : "закрываю"} ${tsMarker}`;
           const res = closeBetPortion(db, b, fraction, sell.cents, minuteLabel(m), now);
-          if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, scaleCost(sell.cost, fraction), now);
+          if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: prof }, scaleCost(sell.cost, fraction), now);
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${res.pnl >= 0 ? "+" : ""}$${res.pnl.toFixed(2)}`, created_at: now });
           out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason, pnl: res.pnl });
           touched.add(b.strategy_id);

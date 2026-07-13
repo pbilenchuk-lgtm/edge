@@ -56,13 +56,17 @@ test("lateGameProfile: flat until lateFromMin, ramps to 1+lateBoost by regEnd", 
 });
 
 // ── UNIT: remainingXgFraction decays 1→0 across the match ────────────────────
-test("remainingXgFraction: 1 at kick-off, 0 at regEnd, back-loaded when share1h<0.5", () => {
+test("remainingXgFraction: 1 at kick-off, small-positive in stoppage, 0 past reg+stoppage, back-loaded when share1h<0.5", () => {
   assert.equal(remainingXgFraction(0, 0.45), 1);
-  assert.equal(remainingXgFraction(90, 0.45), 0);
+  // A still-live option in the 90'+ window keeps a SMALL positive fraction (not 0) —
+  // late/stoppage goals still cluster; it decays to 0 only past regEnd + stoppage.
+  assert.ok(remainingXgFraction(90, 0.45) > 0 && remainingXgFraction(90, 0.45) < 0.1, "90' → small positive (stoppage still to play)");
+  assert.equal(remainingXgFraction(95, 0.45), 0, "past reg+stoppage → 0");
+  assert.equal(remainingXgFraction(90, 0.45, 90, 0), 0, "with stoppage=0 → 0 at regEnd (back-compat)");
   assert.ok(remainingXgFraction(45, 0.45) > 0.5, "at half-time most xG (2nd half) still to come when share1h<0.5");
-  // Monotonic non-increasing.
+  // Monotonic non-increasing across the whole window incl. stoppage.
   let prev = 1;
-  for (let mn = 0; mn <= 90; mn += 5) { const f = remainingXgFraction(mn, 0.45); assert.ok(f <= prev + 1e-9, `non-increasing at ${mn}'`); prev = f; }
+  for (let mn = 0; mn <= 95; mn += 5) { const f = remainingXgFraction(mn, 0.45); assert.ok(f <= prev + 1e-9, `non-increasing at ${mn}'`); prev = f; }
 });
 
 // ── UNIT: poissonAtLeast for Over 1.5 (≥2 goals) ─────────────────────────────

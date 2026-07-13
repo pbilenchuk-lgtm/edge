@@ -381,23 +381,35 @@ export function buildAppData(db: Database, env = process.env): AppData {
   const catNames: Record<string, string> = {}; for (const c of competitions) catNames[c.id] = c.name;
   const stratNames: Record<string, string> = {}; for (const s of strategies) stratNames[s.id] = s.name;
   const matchLabel: Record<string, string> = {}; for (const m of allMatches) matchLabel[m.id] = `${m.home} — ${m.away}`;
-  // CURRENT standing of each decision: the P&L of the position it funded, scaled to the
-  // reserved amount — realised for a closed bet, mark-to-market (freshest quote) for an
-  // open one. Lets the decision feed show where each bet stands right now.
+  // CURRENT standing of each decision: the P&L of the position it funded — realised for a
+  // closed bet, mark-to-market for an open one. Must match the money panel (budgetPosition):
+  // an OPEN position marks the CURRENT live reserve (which shrinks on a partial close), NOT
+  // the frozen entry reserve; a SETTLED position sums its slices (remainder + 'partial'
+  // children) scaled by commitment/ORIGINAL-stake. `reserved` = the entry event's size_reserved.
   const betById = new Map<string, Bet>();
   for (const arr of betsByMatch.values()) for (const b of arr) betById.set(b.id, b);
+  const liveReservedByBet = new Map<string, number>(); // current 'reserved' capital per bet
+  for (const r of R.allShadowReserves(db)) if (r.state === "reserved" && r.bet_id) liveReservedByBet.set(r.bet_id, (liveReservedByBet.get(r.bet_id) ?? 0) + r.size);
+  const nrm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  const pKey = (b: Bet) => `${b.match_id}::${b.strategy_id}::${b.risk_profile_id ?? "medium"}::${nrm(b.market_label)}`;
+  const r2v = (n: number) => Math.round(n * 100) / 100;
   const eventNow = (betId: string | null, reserved: number): { nowPnl: number | null; posStatus: "open" | "settled" | "none" } => {
     const b = betId ? betById.get(betId) : undefined;
     if (!b || reserved <= 0) return { nowPnl: null, posStatus: "none" };
-    const entry = b.entry_price ?? 0, stake = b.stake ?? 0;
-    if (b.status === "settled_won" || b.status === "settled_lost") {
-      const ratio = stake > 0 && b.payout != null ? b.payout / stake : 1;
-      return { nowPnl: Math.round(reserved * (ratio - 1) * 100) / 100, posStatus: "settled" };
-    }
+    const entry = b.entry_price ?? 0;
     if (b.status === "open") {
+      const live = liveReservedByBet.get(b.id) ?? reserved; // shrinks after a partial fix
       const cur = (pricesByMatch.get(b.match_id) ?? {})[b.market_label] ?? b.current_price ?? entry;
       const ratio = entry > 0 ? cur / entry : 1;
-      return { nowPnl: Math.round(reserved * (ratio - 1) * 100) / 100, posStatus: "open" };
+      return { nowPnl: r2v(live * (ratio - 1)), posStatus: "open" };
+    }
+    if (b.status === "settled_won" || b.status === "settled_lost") {
+      const key = pKey(b);
+      const children = (betsByMatch.get(b.match_id) ?? []).filter((c) => c.settled_by === "partial" && c.id !== b.id && pKey(c) === key);
+      const s0 = (b.stake ?? 0) + children.reduce((s, c) => s + (c.stake ?? 0), 0);
+      const r = s0 > 0 ? reserved / s0 : 0;
+      const pnl = [...children, b].reduce((s, x) => s + r * ((x.payout ?? 0) - (x.stake ?? 0)), 0);
+      return { nowPnl: r2v(pnl), posStatus: "settled" };
     }
     return { nowPnl: null, posStatus: "none" };
   };

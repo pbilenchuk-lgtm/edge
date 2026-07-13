@@ -42,6 +42,22 @@ test("buildMatchLog: includes the shadow-budget section with verdicts, reasons, 
   assert.match(log2, /Слиппедж: \*\*\$0\.3\*\*/, "slippage totalled");
 });
 
+test("buildMatchLog: a TRIMMED decision counts only the un-funded fraction of its P&L (audit [9])", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "2026-07-13T13:00:00Z", minute: 90, score_home: 1, score_away: 0, final_score: "1:0", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  // Requested $100, pool TRIMMED to $60 (unfunded 40%); the sim bet won +$50.
+  const tb = R.uid();
+  R.insertBet(db, { id: tb, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Over 1.5", status: "settled_won", proposed_price: 50, entry_price: 50, current_price: 100, closing_price: 100, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "10'", result: "won", payout: 150, created_at: "t", settled_by: null, settled_at: "t" });
+  R.insertShadowEvent(db, { id: R.uid(), bet_id: tb, match_id: mid, competition_id: comp.id, strategy_id: strat.id, profile_id: "medium", size_requested: 100, size_reserved: 60, verdict: "trimmed", reason: "cap_match", is_live: 0, edge: 0.05, contention: 0, free_at: null, pool_snapshot: null, config_snapshot: null, intensity: 0.02, created_at: "t" });
+  const log = buildMatchLog(db, mid);
+  // Un-funded fraction 0.4 × (+$50) = +$20, NOT the full +$50.
+  assert.match(log, /ОТКАЗАЛ\/УРЕЗАЛ: \+\$20\b/, "trimmed denied-P&L weighted by the un-funded fraction");
+});
+
 test("buildMatchLog: says so when there are no shadow decisions for the match", () => {
   const db = openDb(":memory:");
   seedDatabase(db);

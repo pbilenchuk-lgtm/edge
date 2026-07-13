@@ -627,6 +627,22 @@ test("settleMatch: releases the shadow-bank reserve when a bet settles by result
   assert.equal(R.allShadowReserves(db).filter((r) => r.state === "reserved").length, 0, "reserve released on result-settlement");
 });
 
+test("deleteStrategy: removes its shadow reserves/events/fill_costs (no leaked capital) (audit [6])", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid(), betId = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "H", away: "A", state: "live", lineup_out: true, kickoff_at: null, minute: 50, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertBet(db, { id: betId, match_id: mid, strategy_id: strat.id, market_label: "Over 1.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 55, closing_price: null, ai_prob: 0.5, stake: 100, rationale: null, entered_minute: "10'", result: null, payout: null, created_at: "t" });
+  R.insertShadowReserve(db, { id: R.uid(), bet_id: betId, match_id: mid, competition_id: comp.id, strategy_id: strat.id, profile_id: "medium", size: 50, is_live: 0, edge: 0.1, state: "reserved", settle_at: null, created_at: "t" });
+  R.insertShadowEvent(db, { id: R.uid(), bet_id: betId, match_id: mid, competition_id: comp.id, strategy_id: strat.id, profile_id: "medium", size_requested: 50, size_reserved: 50, verdict: "allowed", reason: null, is_live: 0, edge: 0.1, contention: 0, free_at: null, pool_snapshot: null, config_snapshot: null, intensity: 0.02, created_at: "t" });
+
+  R.deleteStrategy(db, strat.id);
+  assert.equal(R.allShadowReserves(db).filter((r) => r.strategy_id === strat.id).length, 0, "reserves removed with the strategy");
+  assert.equal(R.allShadowEvents(db).filter((e) => e.strategy_id === strat.id).length, 0, "events removed with the strategy");
+});
+
 test("releaseOrphanReserves: drops a reserve whose bet already settled, keeps open & bet-less ones", () => {
   const db = openDb(":memory:");
   seedDatabase(db);

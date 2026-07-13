@@ -136,11 +136,15 @@ export function buildMatchLog(db: Database, matchId: string): string {
     const blocked = shEvents.filter((e) => e.verdict === "blocked");
     const trimmed = shEvents.filter((e) => e.verdict === "trimmed");
     // Real P&L of the fills the pool DENIED (blocked) or SHRANK (trimmed) — the money a
-    // real-bank gate would have missed/avoided. Observe-only: the real bet still happened.
+    // real-bank gate would have missed/avoided. Weight by the UN-funded fraction (blocked =
+    // 100%, trimmed = the part the pool didn't fund) so this reconciles with the global log
+    // and shadowAnalytics.missedPnl, which use the same weighting. Observe-only.
     const deniedPnl = round2([...blocked, ...trimmed].reduce((s, e) => {
       const bet = e.bet_id ? R.getBet(db, e.bet_id) : null;
       const settled = bet && (bet.status === "settled_won" || bet.status === "settled_lost");
-      return s + (settled && bet!.payout != null && bet!.stake != null ? bet!.payout - bet!.stake : 0);
+      if (!settled || bet!.payout == null || bet!.stake == null) return s;
+      const unfunded = e.size_requested > 0 ? (e.size_requested - e.size_reserved) / e.size_requested : 0;
+      return s + (bet!.payout - bet!.stake) * unfunded;
     }, 0));
     const heldNow = round0(shReserves.filter((r) => r.state === "reserved").reduce((s, r) => s + r.size, 0));
     const settlingNow = round0(shReserves.filter((r) => r.state === "settling").reduce((s, r) => s + r.size, 0));

@@ -21,7 +21,7 @@ import { winsOnEventOccurrence } from "./thresholds.js";
 // YES — the event effectively happened. Env-tunable.
 const OCCURRED_CENTS = (() => { const n = Number(process.env.MELT_REPORT_OCCURRED_CENTS); return Number.isFinite(n) && n > 0 ? n : 85; })();
 
-export type CutBucket = "<60" | "60-75" | "75+";
+export type CutBucket = "<60" | "60-75" | "75+" | "unknown";
 export type CutReason = "time_stop" | "counter_scenario" | "thesis_stop" | "take_price" | "stop" | "other";
 
 export interface MeltCut {
@@ -76,7 +76,8 @@ export function classifyCutReason(text: string): CutReason {
 }
 
 function bucketOf(minute: number | null): CutBucket {
-  if (minute == null || minute < 60) return "<60";
+  if (minute == null) return "unknown"; // don't lump unparseable-minute cuts into the earliest bucket
+  if (minute < 60) return "<60";
   if (minute <= 75) return "60-75";
   return "75+";
 }
@@ -103,9 +104,11 @@ export function meltingOptionCutReport(db: Database): MeltReport {
     for (const mk of R.latestMarkets(db, matchId)) if (mk.price != null) finalByLabel.set(norm(mk.label), mk.price);
     const exits = R.tradeLogForMatch(db, matchId).filter((e) => e.type === "exit");
     for (const b of bets) {
-      // Match the exit log entry for this position: same market label (guillemets), and
-      // the closest close price to the recorded closing_price — gives minute + reason.
-      const candidates = exits.filter((e) => e.text.includes(`«${b.market_label}»`));
+      // Match the exit log entry for this position: same STRATEGY + market label (guillemets),
+      // and the closest close price to the recorded closing_price — gives minute + reason.
+      // The strategy_id constraint stops two strategies holding the same market in one match
+      // from being tagged each other's cut minute/reason.
+      const candidates = exits.filter((e) => e.strategy_id === b.strategy_id && e.text.includes(`«${b.market_label}»`));
       const cut = b.closing_price;
       const pick = candidates.length
         ? candidates.reduce((best, e) => {
@@ -138,7 +141,7 @@ export function meltingOptionCutReport(db: Database): MeltReport {
   const occurredCuts = withFinalCuts.filter((c) => c.eventOccurred);
   const mean = (xs: number[]) => (xs.length ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 10) / 10 : null);
   const missedWhenOccurred = occurredCuts.map((c) => c.missedDeltaCents).filter((x): x is number => x != null);
-  const buckets: CutBucket[] = ["<60", "60-75", "75+"];
+  const buckets: CutBucket[] = ["<60", "60-75", "75+", "unknown"];
   const byBucket: MeltBucketAgg[] = buckets.map((bk) => {
     const inB = withFinalCuts.filter((c) => c.bucket === bk);
     const occ = inB.filter((c) => c.eventOccurred);
