@@ -24,10 +24,10 @@ test("buildShadowLog: rolls up all decisions across matches with breakdowns + fu
 
   const log = buildShadowLog(db, { now: "2026-07-13T16:00:00Z" });
   assert.match(log, /Глобальный лог теневого бюджета/);
-  assert.match(log, /Наши средства \(детально\)/, "money section present");
-  assert.match(log, /Заработано.*потеряно.*итог реализовано/, "earned/lost/net line present");
-  assert.match(log, /В инвестициях сейчас/, "in-progress capital line present");
-  assert.match(log, /Ещё не понятно/, "unresolved line present");
+  assert.match(log, /Наш бюджет для ставок \(реальный банк/, "real-bank money section present");
+  assert.match(log, /Баланс/, "balance line present");
+  assert.match(log, /Заработано.*потеряно.*итог/, "earned/lost/net line present");
+  assert.match(log, /открытые, mark-to-market/, "in-progress line present");
   assert.match(log, /Решений в реестре: \*\*3\*\*/, "counts all decisions across both matches");
   assert.match(log, /всего 3 · принято 1 · заблокировано 1.*урезано 1/, "roll-up counts");
   // Denied/trimmed P&L: blocked bet lost 80 (unfunded 100%) → −80; trimmed row has no settled bet → 0.

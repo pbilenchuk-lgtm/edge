@@ -7,7 +7,7 @@
 // ============================================================
 import React, { useState, useRef, useEffect } from "react";
 import type { AppData } from "@/lib/view";
-import ShadowScreen from "./ShadowScreen";
+import ShadowScreen, { BudgetEffectiveness } from "./ShadowScreen";
 
 const INK = "#12161d", PANEL = "#1a2029", PANEL2 = "#212936", LINE = "#2c3543", TEXT = "#e6e9ef", MUTE = "#8b95a5";
 const PALETTE = ["#e8a838", "#5b9bd5", "#70b56a", "#c98bdb", "#e07a5f", "#4fc3c7"];
@@ -497,7 +497,8 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
         if (screen === "matches") {
           await Promise.all(liveMatchIds.slice(0, 12).map((id) => refreshOddsCore(id, true).catch(() => {})));
         }
-        const reloadEvery = screen === "matches" ? 5 : 2; // 15s on Matches (odds already live), 6s elsewhere
+        // 15s on Matches (odds already live); 3s on Budget (live money view the user asked for); 6s elsewhere.
+        const reloadEvery = screen === "matches" ? 5 : screen === "shadow" ? 1 : 2;
         if (!stop && n % reloadEvery === 0) await reloadApp().catch(() => {});
       } finally {
         if (!stop) timer = setTimeout(tick, 3000);
@@ -709,7 +710,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       ) : screen === "feed" ? (
         <FeedScreen feed={EVENT_FEED} />
       ) : screen === "metrics" ? (
-        <MetricsScreen catalog={catalog} quality={QUALITY} stats={strategyStats} />
+        <MetricsScreen catalog={catalog} quality={QUALITY} stats={strategyStats} shadow={shadow} />
       ) : screen === "shadow" ? (
         <ShadowScreen data={shadow}
           onSave={async (config: any) => {
@@ -1712,13 +1713,15 @@ function EquitySpark({ data }: any) {
   );
 }
 
-function MetricsScreen({ catalog, quality, stats }: any) {
+function MetricsScreen({ catalog, quality, stats, shadow }: any) {
   const S0 = { matches: 0, predictions: 0, won: 0, lost: 0, openPlus: 0, openMinus: 0, openPnl: 0, earned: 0, lostMoney: 0, inMatch: 0, inMatchPlus: 0, inMatchMinus: 0 };
   return (
     <main style={S.main}>
       <div style={S.feedHead}>
         <div><div style={S.feedTitle}>Статистика стратегий</div><div style={S.feedSub}>Подробная статистика по каждой стратегии. Открытые позиции — по актуальной котировке. Ниже — метрики качества эджа.</div></div>
       </div>
+      {/* Effectiveness of the single-bank allocation (moved off the money-focused Budget tab) */}
+      {shadow && <BudgetEffectiveness data={shadow} />}
       <div style={S.metricExplain}>
         <div style={S.metricExplainItem}><b style={{ color: "#7fb4e8" }}>Brier</b> — точность вероятностей (ниже = лучше). Насколько «70%» ИИ реально значит 70%.</div>
         <div style={S.metricExplainItem}><b style={{ color: "#70b56a" }}>CLV</b> — closing line value. Двигался ли рынок в твою сторону после входа. Лучший ранний признак реального эджа.</div>

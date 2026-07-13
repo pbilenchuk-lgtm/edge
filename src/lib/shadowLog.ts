@@ -64,15 +64,14 @@ export function buildShadowLog(db: Database, opts: { now?: string; config?: Shad
   L.push(`- потолки: матч ${pct(cfg.capMatchPct)} · категория ${pct(cfg.capCategoryPct)} · стратегия ${pct(cfg.capStrategyPct)}`);
   L.push(`- лаг резолва: ${cfg.settlementLagMin} мин`);
 
-  const mp = budgetPosition(db);
-  L.push(`\n## Наши средства (детально)`);
-  L.push(`- Казна: $${r0(mp.treasuryTotal)} · распределено по категориям $${r0(mp.allocated)}`);
-  L.push(`- **Заработано** ${money(mp.earned)} · **потеряно** ${money(mp.lostMoney)} · итог реализовано **${signed(mp.netRealized)}** (${mp.settled} расчётов: ${mp.won} побед / ${mp.lost} поражений)`);
-  L.push(`- **В инвестициях сейчас**: $${r0(mp.invested)} в ${mp.openCount} открытых позициях (капитал в работе)`);
-  L.push(`- **Ещё не понятно** (исход не решён): текущая оценка открытых $${r0(mp.openMarkValue)} · нереализованный P&L **${signed(mp.openPnl)}**`);
-  L.push(`- **Положение открытых**: ${mp.openPlus} в плюсе (${signed(mp.openPlusPnl)}) / ${mp.openMinus} в минусе (${signed(mp.openMinusPnl)})`);
-  L.push(`- В очереди на вход: $${r0(mp.proposedStake)} в ${mp.proposedCount} предложениях (капитал ещё не связан)`);
-  L.push(`- Издержки исполнения: всего ${money(mp.costTotal)} (комиссии ${money(mp.fees)} · слиппедж ${money(mp.slippage)})`);
+  const mp = budgetPosition(db, nowIso);
+  L.push(`\n## Наш бюджет для ставок (реальный банк $${r0(mp.bank)})`);
+  L.push(`- **Баланс** $${r0(mp.balance)} (банк $${r0(mp.bank)} ${mp.netRealized >= 0 ? "+" : "−"} реализованное ${money(Math.abs(mp.netRealized))}) · капитал сейчас (с нереализованным) $${r0(mp.equity)}`);
+  L.push(`- **Свободно** $${r0(mp.free)} · **заинвестировано** $${r0(mp.invested)} в ${mp.openCount} открытых${mp.settling > 0 ? ` · $${r0(mp.settling)} в резолве` : ""}`);
+  L.push(`- **Заработано** ${money(mp.earned)} · **потеряно** ${money(mp.lostMoney)} · итог **${signed(mp.netRealized)}** (${mp.settled} расчётов: ${mp.won} побед / ${mp.lost} поражений)`);
+  L.push(`- **В процессе** (открытые, mark-to-market): нереализованный P&L **${signed(mp.openPnl)}** · ${mp.openPlus} в плюсе (${signed(mp.openPlusPnl)}) / ${mp.openMinus} в минусе (${signed(mp.openMinusPnl)})`);
+  L.push(`- Издержки на банк (масштаб. к вкладу): всего ${money(mp.costTotal)} (комиссии ${money(mp.fees)} · слиппедж ${money(mp.slippage)})`);
+  L.push(`  _(суммы — доля реального банка $${r0(mp.bank)} в каждой позиции, не изолированные бюджеты симуляций стратегий)_`);
 
   L.push(`\n## Текущий пул`);
   L.push(`- свободно $${r0(pool.free)} · зарезервировано $${r0(pool.reserved)} · в резолве $${r0(pool.settling)}`);

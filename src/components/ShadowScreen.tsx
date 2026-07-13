@@ -73,6 +73,38 @@ function Tile({ label, value, sub, color }: { label: string; value: React.ReactN
   return <div style={S.tile}><div style={S.tLbl}>{label}</div><div style={{ ...S.tVal, color: color ?? TEXT }}>{value}</div>{sub && <div style={S.tSub}>{sub}</div>}</div>;
 }
 
+/** Allocation-effectiveness of the single-bank simulation — was capital the bottleneck?
+ *  This measures how well the STRATEGY ALLOCATION performs under one bank, so it lives
+ *  on the Metrics tab (strategy effectiveness), NOT on the money-focused Budget tab. */
+export function BudgetEffectiveness({ data }: { data: ShadowView }) {
+  const { analytics, pool } = data;
+  const deficit = Math.round((analytics.blockedPct + analytics.trimmedPct) * 10) / 10;
+  const peakUtil = analytics.utilization.length ? Math.max(...analytics.utilization.map((p) => pctOf(p.reserved, pool.bank))) : pctOf(pool.reserved, pool.bank);
+  const status = analytics.total === 0
+    ? { color: MUTE, bg: PANEL2, word: "нет данных", line: "Событий пока нет — появятся при первых входах реальной симуляции." }
+    : deficit === 0 ? { color: GREEN, bg: "#16241c", word: "капитал свободен", line: `Ни один вход не упёрся в лимит банка. Пиковая утилизация ${peakUtil}%.` }
+    : deficit < 10 ? { color: GREEN, bg: "#16241c", word: "запас есть", line: `Капитал был узким местом лишь в ${deficit}% решений. Пик утилизации ${peakUtil}%.` }
+    : deficit < 25 ? { color: AMBER, bg: "#2a2413", word: "капитал поджимает", line: `${deficit}% входов не получили полный размер из-за лимитов. Стоит присмотреться.` }
+    : { color: RED, bg: "#2a1a1c", word: "капитал — узкое место", line: `${deficit}% решений упёрлись в лимит банка. Общий пул тесен для текущего потока входов.` };
+  return (
+    <div style={{ ...S.card, borderColor: `${status.color}44`, background: status.bg, display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flex: "1 1 320px" }}>
+        <div style={{ width: 12, height: 12, borderRadius: "50%", background: status.color, flexShrink: 0, boxShadow: `0 0 12px ${status.color}88` }} />
+        <div>
+          <div style={{ fontSize: 12, color: MUTE, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 2 }}>эффективность единого банка (симуляция)</div>
+          <div style={{ fontSize: 17, fontWeight: 800, color: status.color, textTransform: "uppercase", letterSpacing: "0.03em" }}>{status.word}</div>
+          <div style={{ fontSize: 12.5, color: "#c4cdd9", marginTop: 3, lineHeight: 1.4, maxWidth: 460 }}>{status.line}</div>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <Tile label="дефицит входов" value={`${deficit}%`} sub={`${analytics.blocked} блок · ${analytics.trimmed} урез`} color={status.color} />
+        <Tile label="упущенный P&L" value={<>{analytics.missedPnl >= 0 ? "+" : ""}{usd2(analytics.missedPnl)}</>} sub="из-за дефицита" color={analytics.missedPnl >= 0 ? GREEN : RED} />
+        <Tile label="пик утилизации" value={`${peakUtil}%`} sub={`конкуренций ${analytics.contentionEvents}`} />
+      </div>
+    </div>
+  );
+}
+
 function Meter({ name, used, cap }: { name: string; used: number; cap: number }) {
   const frac = cap > 0 ? Math.min(1, used / cap) : 0;
   const col = frac >= 0.9 ? RED : frac >= 0.7 ? AMBER : BLUE;
@@ -107,19 +139,6 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
     }
     return [...m.values()].sort((a, b) => b.count - a.count);
   }, [events]);
-
-  // Verdict: is capital the bottleneck? deficit rate = share of decisions not fully funded.
-  const deficit = Math.round((analytics.blockedPct + analytics.trimmedPct) * 10) / 10;
-  const peakUtil = analytics.utilization.length ? Math.max(...analytics.utilization.map((p) => pctOf(p.reserved, pool.bank))) : pctOf(pool.reserved, pool.bank);
-  const status = analytics.total === 0
-    ? { color: MUTE, bg: PANEL2, word: "нет данных", line: "Событий пока нет — появятся при первых входах реальной симуляции." }
-    : deficit === 0
-      ? { color: GREEN, bg: "#16241c", word: "капитал свободен", line: `Ни один вход не упёрся в лимит банка. Пиковая утилизация ${peakUtil}%.` }
-      : deficit < 10
-        ? { color: GREEN, bg: "#16241c", word: "запас есть", line: `Капитал был узким местом лишь в ${deficit}% решений. Пик утилизации ${peakUtil}%.` }
-        : deficit < 25
-          ? { color: AMBER, bg: "#2a2413", word: "капитал поджимает", line: `${deficit}% входов не получили полный размер из-за лимитов. Стоит присмотреться.` }
-          : { color: RED, bg: "#2a1a1c", word: "капитал — узкое место", line: `${deficit}% решений упёрлись в лимит банка. Общий пул тесен для текущего потока входов.` };
 
   // Capital bar segments (sum = bank): reserved | settling | live-buffer held | spendable free.
   const spendable = Math.max(0, pool.free - pool.liveBufferFree);
@@ -174,41 +193,25 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
         <div style={S.sub}>теневая симуляция ОДНОГО общего банка {usd(config.bankTotal)} · только наблюдает, не влияет на изолированные бюджеты пар</div>
       </div>
 
-      {/* OUR MONEY — earned / lost / unresolved / in-progress / current standing + costs */}
+      {/* OUR REAL BETTING BANK — the $5000 and what happens to it (refreshes every 3s) */}
       <div>
-        <div style={S.secLbl}>Наши средства</div>
+        <div style={S.secLbl}>Наш бюджет для ставок · обновление каждые 3 сек</div>
         <div style={S.card}>
           <div style={S.tileGrid}>
+            <Tile label="баланс" value={usd2(m.balance)} sub={`из банка ${usd(m.bank)} · итог ${m.netRealized >= 0 ? "+" : "−"}${usd2(Math.abs(m.netRealized))}`} color={m.balance >= m.bank ? GREEN : RED} />
+            <Tile label="свободно" value={usd2(m.free)} sub="доступно для входов" color={GREEN} />
+            <Tile label="заинвестировано" value={usd2(m.invested)} sub={`${m.openCount} открытых позиций${m.settling > 0 ? ` · +${usd2(m.settling)} в резолве` : ""}`} color={BLUE} />
             <Tile label="заработано" value={usd2(m.earned)} sub="реализованная прибыль" color={GREEN} />
-            <Tile label="потеряно" value={usd2(m.lostMoney)} sub="реализованный убыток" color={RED} />
-            <Tile label="итог реализовано" value={<>{m.netRealized >= 0 ? "+" : "−"}{usd2(Math.abs(m.netRealized))}</>} sub={`${m.settled} расчётов · ${m.won}–${m.lost}`} color={m.netRealized >= 0 ? GREEN : RED} />
-            <Tile label="в инвестициях" value={usd2(m.invested)} sub={`${m.openCount} открытых позиций`} color={BLUE} />
-            <Tile label="ещё не понятно" value={usd2(m.openMarkValue)} sub="текущая оценка открытых (исход не определён)" color={PURPLE} />
-            <Tile label="положение открытых" value={<>{m.openPnl >= 0 ? "+" : "−"}{usd2(Math.abs(m.openPnl))}</>} sub={`${m.openPlus} в плюсе / ${m.openMinus} в минусе`} color={m.openPnl >= 0 ? GREEN : RED} />
-            <Tile label="в очереди на вход" value={usd2(m.proposedStake)} sub={`${m.proposedCount} предложено (капитал не связан)`} />
+            <Tile label="потеряно" value={usd2(m.lostMoney)} sub={`реализованный убыток · ${m.settled} расчётов ${m.won}–${m.lost}`} color={RED} />
+            <Tile label="в процессе" value={<>{m.openPnl >= 0 ? "+" : "−"}{usd2(Math.abs(m.openPnl))}</>} sub={`оценка ${usd2(m.openMarkValue)} · ${m.openPlus} в плюсе / ${m.openMinus} в минусе`} color={m.openPnl >= 0 ? GREEN : RED} />
+            <Tile label="капитал сейчас" value={usd2(m.equity)} sub="баланс + нереализованное (mark-to-market)" color={PURPLE} />
             <Tile label="издержки" value={usd2(m.costTotal)} sub={`комиссии ${usd2(m.fees)} · слип ${usd2(m.slippage)}`} color={RED} />
-            <Tile label="казна" value={usd(m.treasuryTotal)} sub={`распределено ${usd(m.allocated)}`} />
           </div>
           <div style={{ ...S.hint, marginTop: 10 }}>
-            «Ещё не понятно» — деньги в открытых позициях, исход которых пока не решён (оценка по свежей котировке).
-            «Положение открытых» — нереализованный P&amp;L этих позиций прямо сейчас. Реализованное — уже закрытые сделки.
+            Это наш РЕАЛЬНЫЙ банк ${usd(m.bank)} и что с ним происходит: сколько свободно, вложено в открытые позиции,
+            заработано/потеряно на закрытых, и «в процессе» — нереализованный P&amp;L открытых по свежей котировке.
+            Симуляции стратегий (изолированные бюджеты) — это отдельно, на вкладке «Метрики».
           </div>
-        </div>
-      </div>
-
-      {/* VERDICT HERO — the one-glance answer */}
-      <div style={{ ...S.card, borderColor: `${status.color}44`, background: status.bg, display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, flex: "1 1 320px" }}>
-          <div style={{ width: 12, height: 12, borderRadius: "50%", background: status.color, flexShrink: 0, boxShadow: `0 0 12px ${status.color}88` }} />
-          <div>
-            <div style={{ fontSize: 17, fontWeight: 800, color: status.color, textTransform: "uppercase", letterSpacing: "0.03em" }}>{status.word}</div>
-            <div style={{ fontSize: 12.5, color: "#c4cdd9", marginTop: 3, lineHeight: 1.4, maxWidth: 460 }}>{status.line}</div>
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <Tile label="дефицит входов" value={`${deficit}%`} sub={`${analytics.blocked} блок · ${analytics.trimmed} урез`} color={status.color} />
-          <Tile label="упущенный P&L" value={<>{analytics.missedPnl >= 0 ? "+" : ""}{usd2(analytics.missedPnl)}</>} sub="из-за дефицита" color={analytics.missedPnl >= 0 ? GREEN : RED} />
-          <Tile label="пик утилизации" value={`${peakUtil}%`} sub={`конкуренций ${analytics.contentionEvents}`} />
         </div>
       </div>
 
