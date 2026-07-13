@@ -256,14 +256,22 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
           <div style={{ ...S.hint, marginBottom: 12 }}>
             факт выше считает дефицит на размерах от изолированных бюджетов пар (~$1000) — в реале сайзинг пойдёт от общего банка ({usd(config.bankTotal)}), и размеры будут крупнее. Здесь каждый вход пересчитан как <b>Kelly×edge × доступная база</b> (free − остаток, урезано потолками), пул сам себя тормозит по мере заполнения. <b style={{ color: AMBER }}>Верхняя граница (worst case)</b>: считается для ВСЕХ текущих пар — боевых в реале будет меньше.
           </div>
+          {projection.covered === 0 ? (
+            <div style={{ ...S.hint, padding: "14px 12px", background: "#1a1f27", borderRadius: 8, color: MUTE }}>
+              Проекция пока <b style={{ color: TEXT }}>без данных</b>: ни один из {projection.total} входов в журнале не несёт захваченной <b>intensity</b> (Kelly×edge). Такие входы записаны до включения захвата — они исключены из проекции (это «нет данных», а не «нет места»). Как только накопятся новые входы с intensity, здесь появятся реальные worst-case размеры.
+            </div>
+          ) : (<>
           <div style={S.tileGrid}>
             <Tile label="пик утилизации" value={`${projection.peakUtilPct}%`} sub={`факт ${Math.round(pctOf(pool.reserved, pool.bank))}%`} color={projection.peakUtilPct >= 90 ? RED : projection.peakUtilPct >= 70 ? AMBER : GREEN} />
             <Tile label="средняя утилизация" value={`${projection.avgUtilPct}%`} />
-            <Tile label="не влезло" value={`${projection.blockedPct}%`} sub={`${projection.blocked} из ${projection.total}`} color={projection.blocked > 0 ? RED : GREEN} />
+            <Tile label="не влезло" value={`${projection.blockedPct}%`} sub={`${projection.blocked} из ${projection.covered}`} color={projection.blocked > 0 ? RED : GREEN} />
             <Tile label="спроецировано" value={usd(projection.totalProjected)} sub="суммарный размер" color={BLUE} />
             <Tile label="упущенный P&L" value={<>{projection.missedPnl >= 0 ? "+" : ""}{usd2(projection.missedPnl)}</>} sub="входы без места" color={projection.missedPnl >= 0 ? GREEN : RED} />
           </div>
-          <div style={{ ...S.hint, marginTop: 10 }}>если пик утилизации приближается к 90–100% или «не влезло» &gt; 0 — банка {usd(config.bankTotal)} при реальных размерах не хватит. Подбери потолки/банк в «Калибровке» ниже.</div>
+          <div style={{ ...S.hint, marginTop: 10 }}>
+            проекция по <b>{projection.covered}</b> из {projection.total} входов{projection.noData > 0 ? ` · ${projection.noData} без intensity исключены` : ""}. если пик утилизации приближается к 90–100% или «не влезло» &gt; 0 — банка {usd(config.bankTotal)} при реальных размерах не хватит. Подбери потолки/банк в «Калибровке» ниже.
+          </div>
+          </>)}
         </div>
       </div>
 
@@ -345,7 +353,7 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
                     <td style={{ ...S.td, color: "#c4cdd9" }}>{e.category}</td>
                     <td style={S.td}>{e.strategyLabel} <span style={{ color: MUTE }}>/{e.profileId}</span></td>
                     <td style={{ ...S.td, fontFamily: MONO }}>{usd(e.sizeRequested)} <span style={{ color: MUTE }}>→</span> {usd(e.sizeReserved)}</td>
-                    <td style={{ ...S.td, fontFamily: MONO, color: e.projVerdict === "blocked" ? RED : "#c4cdd9" }} title="сайзинг от банка (worst case)">{e.projVerdict === "blocked" ? "нет места" : e.projSize != null ? usd(e.projSize) : "—"}</td>
+                    <td style={{ ...S.td, fontFamily: MONO, color: e.projVerdict === "blocked" ? RED : e.projVerdict === "nodata" ? MUTE : "#c4cdd9" }} title={e.projVerdict === "nodata" ? "нет захваченной intensity — вне проекции" : "сайзинг от банка (worst case)"}>{e.projVerdict === "blocked" ? "нет места" : e.projVerdict === "nodata" ? "н/д" : e.projSize != null ? usd(e.projSize) : "—"}</td>
                     <td style={S.td}><span style={{ ...S.pill, background: v.bg, color: v.color }}>{v.ru}</span></td>
                     <td style={{ ...S.td, color: e.reason ? "#c4cdd9" : MUTE }}>{e.reason ? (REASON_RU[e.reason] ?? e.reason) : "—"}</td>
                     <td style={{ ...S.td, color: MUTE, fontFamily: MONO }}>{e.freeAt != null ? usd(e.freeAt) : "—"}</td>

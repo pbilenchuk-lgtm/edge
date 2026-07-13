@@ -222,6 +222,27 @@ test("shadow projection: a size squeezed below the minimum counts as blocked (de
   assert.equal(summary.missedPnl, 40, "the blocked entry's real P&L is the deficit's cost");
 });
 
+test("shadow projection: entries with NO captured intensity are EXCLUDED (nodata), not counted as blocked", () => {
+  const c = cfg({ bankTotal: 1000, cashReservePct: 0, liveBufferPct: 0, capMatchPct: 1, capCategoryPct: 1, capStrategyPct: 1 });
+  const base = { at: "2026-07-11T20:00:00Z", size: 50, edge: 0.1, isLive: false, competitionId: "c", strategyId: "s", exitAt: null, realPnl: 8 };
+  // pre-capture / no-edge entries carry intensity 0 (or undefined) — the old code sized
+  // them to $0 and booked them as «нет места», reading as 100% deficit on a ledger the
+  // real pool accepted in full. They must now be nodata, not blocked.
+  const zero: ReplayEntry = { ...base, matchId: "m1", intensity: 0 };
+  const missing = { ...base, matchId: "m2" } as ReplayEntry; // intensity undefined
+  const real: ReplayEntry = { ...base, matchId: "m3", intensity: 0.1 }; // one genuine entry
+  const { summary, results } = shadowProject([zero, missing, real], c);
+  assert.equal(summary.noData, 2, "the two intensity-less entries are excluded as no-data");
+  assert.equal(summary.covered, 1, "only the one entry with intensity is projected");
+  assert.equal(summary.blocked, 0, "no-data is NOT a capital block");
+  assert.equal(summary.blockedPct, 0, "blockedPct is over covered (1), not total (3)");
+  assert.equal(summary.missedPnl, 0, "excluded entries never book missed P&L");
+  assert.equal(results[0].verdict, "nodata");
+  assert.equal(results[1].verdict, "nodata");
+  assert.equal(results[2].verdict, "allowed");
+  assert.equal(summary.funded, 1);
+});
+
 test("shadow: config precedence — defaults < env < saved app_meta (user settings win)", () => {
   const db = openDb(":memory:");
   assert.equal(loadShadowConfig(db, {}).bankTotal, 5000, "default bank");

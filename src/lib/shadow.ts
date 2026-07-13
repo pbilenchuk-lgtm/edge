@@ -338,7 +338,12 @@ function reserveInto(t: PoolTotals, req: EntryReq, amt: number): void {
 }
 
 export interface ProjectionSummary {
-  total: number; funded: number; blocked: number; blockedPct: number;
+  total: number;
+  /** entries with a usable captured intensity — the ONLY ones the projection can size.
+   *  Entries recorded before intensity capture (or with no positive edge) have none and
+   *  are EXCLUDED, not counted as blocked. blockedPct is over `covered`, not `total`. */
+  covered: number; noData: number;
+  funded: number; blocked: number; blockedPct: number;
   missedPnl: number; peakUtilPct: number; avgUtilPct: number; totalProjected: number;
 }
 
@@ -349,14 +354,14 @@ export interface ProjectionSummary {
  *  isolated-budget sizes hide. Deterministic edge-order within a tick; a reserve frees after
  *  the lag. WORST CASE / upper bound: it sizes for ALL current pairs; live will have fewer.
  *  Returns a summary + per-entry result aligned to the input order (for the ledger column). */
-export function shadowProject(entries: ReplayEntry[], cfg: ShadowConfig): { summary: ProjectionSummary; results: { size: number; verdict: "allowed" | "blocked" }[] } {
+export function shadowProject(entries: ReplayEntry[], cfg: ShadowConfig): { summary: ProjectionSummary; results: { size: number; verdict: "allowed" | "blocked" | "nodata" }[] } {
   const lagMs = cfg.settlementLagMin * 60_000;
   const t = emptyTotals();
   const reservedOf = new Map<ReplayEntry, number>();
   const freeEvents: { ms: number; e: ReplayEntry }[] = [];
-  const results: { size: number; verdict: "allowed" | "blocked" }[] = new Array(entries.length);
+  const results: { size: number; verdict: "allowed" | "blocked" | "nodata" }[] = new Array(entries.length);
   const idxOf = new Map<ReplayEntry, number>(); entries.forEach((e, i) => idxOf.set(e, i));
-  let funded = 0, blocked = 0, missedPnl = 0, peak = 0, utilSum = 0, utilN = 0, totalProjected = 0;
+  let funded = 0, blocked = 0, noData = 0, missedPnl = 0, peak = 0, utilSum = 0, utilN = 0, totalProjected = 0;
   const byTime = new Map<number, ReplayEntry[]>();
   for (const e of entries) { const ms = Date.parse(e.at) || 0; const a = byTime.get(ms) ?? []; a.push(e); byTime.set(ms, a); }
   const sweep = (upto: number) => {
@@ -369,9 +374,17 @@ export function shadowProject(entries: ReplayEntry[], cfg: ShadowConfig): { summ
   for (const ms of [...byTime.keys()].sort((a, b) => a - b)) {
     sweep(ms);
     for (const e of byTime.get(ms)!.slice().sort((a, b) => (b.edge - a.edge) || (a.at < b.at ? -1 : 1))) {
-      const base = availableBase(t, e, cfg);
-      const size = round2((e.intensity ?? 0) * base);
       const idx = idxOf.get(e)!;
+      const intensity = e.intensity ?? 0;
+      // NO DATA vs BLOCKED are different things. An entry with no captured intensity
+      // (recorded before intensity capture existed, or opened at a non-positive Kelly
+      // edge) can't be Kelly-sized against a bank base — it is EXCLUDED from the
+      // projection, not counted as "capital ran out". Counting it as blocked was the bug
+      // that made a ledger of pre-capture entries read as «не влезло 100%» / $0 while the
+      // real reserve layer accepted every one.
+      if (intensity <= 0) { results[idx] = { size: 0, verdict: "nodata" }; noData++; continue; }
+      const base = availableBase(t, e, cfg);
+      const size = round2(intensity * base);
       if (size < SHADOW_PROJ_MIN) {
         results[idx] = { size: 0, verdict: "blocked" };
         blocked++;
@@ -387,9 +400,11 @@ export function shadowProject(entries: ReplayEntry[], cfg: ShadowConfig): { summ
     }
   }
   const total = entries.length;
+  const covered = funded + blocked; // entries the projection could actually size
   return {
     summary: {
-      total, funded, blocked, blockedPct: total ? round2((blocked / total) * 100) : 0,
+      total, covered, noData, funded, blocked,
+      blockedPct: covered ? round2((blocked / covered) * 100) : 0, // over COVERED, not total
       missedPnl: round2(missedPnl), peakUtilPct: round2(peak), avgUtilPct: utilN ? round2(utilSum / utilN) : 0,
       totalProjected: round2(totalProjected),
     },
