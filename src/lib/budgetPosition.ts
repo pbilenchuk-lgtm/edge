@@ -45,17 +45,48 @@ export function budgetPosition(db: Database, nowIso?: string): BudgetPosition {
     if (e.bet_id && e.size_reserved > 0) committedByBet.set(e.bet_id, (committedByBet.get(e.bet_id) ?? 0) + e.size_reserved);
   }
 
-  // Realised P&L of the bank: each funded, settled position returns its bank
-  // commitment × (bet return ratio − 1). Won/lost counted on real-outcome settles.
+  // A position may be partially fixed: closeBetPortion books each closed slice as a NEW
+  // child bet (settled_by='partial', fresh id — NO shadow_event) and shrinks the parent's
+  // stake in place. So the bank's realised P&L must (a) scale by the ORIGINAL stake
+  // (remainder + all closed slices), not the shrunken remainder, and (b) include the child
+  // slices' P&L. We attribute each slice its share of the bank commitment: for a position
+  // with original stake S0 and commitment C, a slice of stake s and payout p returns
+  // (C/S0)·(p − s). Group children to their parent by (match·strategy·profile·market);
+  // if that key has >1 funded parent (a re-entry), don't attach children — fall back to
+  // parent-only (bounded, rare) rather than double-count across parents.
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  const posKey = (b: { match_id: string; strategy_id: string; risk_profile_id?: string | null; market_label: string }) =>
+    `${b.match_id}::${b.strategy_id}::${b.risk_profile_id ?? "medium"}::${norm(b.market_label)}`;
+  const betsCache = new Map<string, ReturnType<typeof R.betsForMatch>>();
+  const matchBets = (matchId: string) => { let a = betsCache.get(matchId); if (!a) { a = R.betsForMatch(db, matchId); betsCache.set(matchId, a); } return a; };
+  const parentBet = new Map<string, ReturnType<typeof R.getBet>>();
+  const parentsByKey = new Map<string, number>();
+  for (const betId of committedByBet.keys()) {
+    const b = R.getBet(db, betId); if (!b) continue;
+    parentBet.set(betId, b); parentsByKey.set(posKey(b), (parentsByKey.get(posKey(b)) ?? 0) + 1);
+  }
+
+  // Realised P&L of the bank, per funded position, summed across its settled slices.
   let earned = 0, lostMoney = 0, settled = 0, won = 0, lost = 0;
+  const ratioByBet = new Map<string, number>(); // committed / original stake — reused for cost scaling
   for (const [betId, committed] of committedByBet) {
-    const b = R.getBet(db, betId);
-    if (!b || (b.status !== "settled_won" && b.status !== "settled_lost")) continue;
-    const stake = b.stake ?? 0;
-    const ratio = stake > 0 && b.payout != null ? b.payout / stake : 1; // return multiple on the sim stake
-    const pnl = committed * (ratio - 1);                                 // applied to the bank's commitment
-    if (pnl >= 0) earned += pnl; else lostMoney += -pnl;
-    if (b.settled_by == null) { settled++; if (b.result === "won") won++; else lost++; }
+    const b = parentBet.get(betId);
+    if (!b) continue;
+    const key = posKey(b);
+    const children = parentsByKey.get(key) === 1
+      ? matchBets(b.match_id).filter((c) => c.settled_by === "partial" && c.id !== b.id && posKey(c) === key)
+      : [];
+    const childStake = children.reduce((s, c) => s + (c.stake ?? 0), 0);
+    const s0 = (b.stake ?? 0) + childStake;                 // original stake = open/settled remainder + closed slices
+    const r = s0 > 0 ? committed / s0 : 0;                  // bank commitment per $ of original stake
+    ratioByBet.set(betId, r);
+    const parentSettled = b.status === "settled_won" || b.status === "settled_lost";
+    const slices = parentSettled ? [...children, b] : children; // an OPEN remainder is unrealised (counted via reserves)
+    for (const s of slices) {
+      const pnl = r * ((s.payout ?? 0) - (s.stake ?? 0));
+      if (pnl >= 0) earned += pnl; else lostMoney += -pnl;
+    }
+    if (parentSettled && b.settled_by == null) { settled++; if (b.result === "won") won++; else lost++; }
   }
 
   // In-progress: the bank's OPEN reserves, marked to the freshest quote per market.
@@ -79,13 +110,12 @@ export function budgetPosition(db: Database, nowIso?: string): BudgetPosition {
     if (pnl >= 0) { openPlus++; openPlusPnl += pnl; } else { openMinus++; openMinusPnl += pnl; }
   }
 
-  // Execution costs scaled to the bank's commitment (the fill ledger is at sim-stake
-  // notional; scale each fill by committed/stake so the drag is on the real $5000).
+  // Execution costs scaled to the bank's commitment. The fill ledger is at sim-stake
+  // notional; the bank's share is committed/ORIGINAL-stake (ratioByBet), constant per
+  // position — NOT committed/current-stake, which inflates after a partial fixation
+  // shrinks the parent's stake while the fills stay booked under it.
   const scaledCosts = R.allFillCosts(db).map((f) => {
-    const committed = f.bet_id ? committedByBet.get(f.bet_id) ?? 0 : 0;
-    const b = f.bet_id ? R.getBet(db, f.bet_id) : null;
-    const stake = b?.stake ?? f.notional_usd;
-    const scale = stake > 0 ? Math.min(4, committed / stake) : 0; // guard against a degenerate ratio
+    const scale = f.bet_id ? Math.min(4, ratioByBet.get(f.bet_id) ?? 0) : 0;
     return { ...f, fee_usd: f.fee_usd * scale, slip_usd: f.slip_usd * scale, notional_usd: f.notional_usd * scale };
   });
   const fc = summarizeFillCosts(scaledCosts as R.FillCostRow[]);

@@ -51,6 +51,33 @@ test("budgetPosition: bank P&L is scaled to the BANK's committed size, not the s
   assert.equal(p.free, p.balance - p.invested, "free = balance − invested (realised profit is available)");
 });
 
+test("budgetPosition: partial fixation — realised P&L sums the closed slice + remainder, cost not inflated (audit)", () => {
+  const { db, comp, strat, mid } = setup();
+  // One position, original sim stake 100, bank committed 100 (ratio 1). 50% fixed early at
+  // return 1.5 (child slice), remainder settles at return 2.0. Bank realised must be
+  // 50·(1.5−1) + 50·(2.0−1) = +75 — NOT the buggy 100·(2.0−1)=+100 (which dropped the child
+  // slice and rode the full commitment on the shrunken remainder).
+  const parent = R.uid(), child = R.uid();
+  // remainder (settles by real result), stake shrunk to 50, return 2.0 → payout 100
+  R.insertBet(db, bet({ id: parent, match_id: mid, strategy_id: strat.id, market_label: "Over 0.5", status: "settled_won", entry_price: 50, stake: 50, result: "won", payout: 100, settled_by: null, settled_at: "t" }));
+  // closed slice: partial child, stake 50, return 1.5 → payout 75
+  R.insertBet(db, bet({ id: child, match_id: mid, strategy_id: strat.id, market_label: "Over 0.5", status: "settled_won", entry_price: 50, stake: 50, result: "won", payout: 75, settled_by: "partial", settled_at: "t" }));
+  // The bank commitment (event only on the parent) = 100 → original stake = 50 remainder + 50 child = 100 → ratio 1.
+  R.insertShadowEvent(db, { id: R.uid(), bet_id: parent, match_id: mid, competition_id: comp.id, strategy_id: strat.id, profile_id: "medium", size_requested: 100, size_reserved: 100, verdict: "allowed", reason: null, is_live: 0, edge: 0.05, contention: 0, free_at: null, pool_snapshot: null, config_snapshot: null, intensity: 0.02, created_at: "t" });
+  // Fills booked under the parent: entry buy + the partial-exit sell — fee $2, slip $1 total.
+  R.insertFillCost(db, { id: R.uid(), bet_id: parent, match_id: mid, competition_id: comp.id, strategy_id: strat.id, profile_id: "medium", side: "buy", shares: 100, notional_usd: 100, quote_cents: 50, vwap_cents: 50, fee_cents: 2, fee_usd: 2, slip_cents: 1, slip_usd: 1, from_book: 1, created_at: "t" });
+
+  const p = budgetPosition(db, "2026-07-13T16:00:00Z");
+  assert.equal(p.earned, 75, "realised = closed slice (+25) + remainder (+50), not +100");
+  assert.equal(p.lostMoney, 0);
+  assert.equal(p.netRealized, 75);
+  assert.equal(p.settled, 1, "one prediction (the real-outcome parent), not two");
+  assert.equal(p.won, 1);
+  // Cost scaled by committed/ORIGINAL-stake (100/100=1), not committed/shrunken-stake (100/50=2).
+  assert.equal(p.fees, 2, "fees not doubled by the shrunken remainder stake");
+  assert.equal(p.slippage, 1);
+});
+
 test("budgetPosition: no shadow activity → bank intact, all P&L zero", () => {
   const { db } = setup();
   const p = budgetPosition(db, "2026-07-13T16:00:00Z");
