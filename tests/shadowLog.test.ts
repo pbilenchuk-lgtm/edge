@@ -36,6 +36,15 @@ test("buildShadowLog: rolls up all decisions across matches with breakdowns + fu
   assert.match(log, /Rosenborg — Kristiansund/);
   assert.match(log, /потолок категории/, "reason labelled in the ledger");
   assert.match(log, /Полный реестр решений \(3/, "full ledger, not the UI cap");
+
+  // Execution costs roll up globally with per-category / per-strategy breakdowns.
+  R.insertFillCost(db, { id: R.uid(), bet_id: R.uid(), match_id: m1, competition_id: comp.id, strategy_id: strat.id, profile_id: "medium", side: "buy", shares: 100, notional_usd: 100, quote_cents: 47, vwap_cents: 47.3, fee_cents: 0.75, fee_usd: 1, slip_cents: 0.3, slip_usd: 0.5, from_book: 1, created_at: "2026-07-13T13:34:00Z" });
+  R.insertFillCost(db, { id: R.uid(), bet_id: R.uid(), match_id: m2, competition_id: comp.id, strategy_id: strat.id, profile_id: "medium", side: "sell", shares: 50, notional_usd: 50, quote_cents: 30, vwap_cents: 29, fee_cents: 0.5, fee_usd: 0.4, slip_cents: 1, slip_usd: 0.5, from_book: 0, created_at: "2026-07-13T15:12:00Z" });
+  const log2 = buildShadowLog(db, { now: "2026-07-13T16:00:00Z" });
+  assert.match(log2, /Издержки исполнения/, "global execution-cost section present");
+  assert.match(log2, /комиссии \*\*\$1\.4\*\*/, "fees rolled up globally");
+  assert.match(log2, /слиппедж \*\*\$1\*\*/, "slippage rolled up globally");
+  assert.match(log2, /ВСЕГО издержек \*\*\$2\.4\*\*/, "total execution cost");
 });
 
 test("buildShadowLog: empty DB says the ledger is empty, doesn't throw", () => {

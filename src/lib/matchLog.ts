@@ -8,6 +8,7 @@
 
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
+import { summarizeFillCosts } from "./fillCosts.js";
 
 /** Resolve a match by exact id, else a case-insensitive team-name substring.
  *  Prefers the most recent match when several fixtures match the same query. */
@@ -156,6 +157,23 @@ export function buildMatchLog(db: Database, matchId: string): string {
       const v = e.verdict === "allowed" ? "принят" : e.verdict === "trimmed" ? "урезан" : "отказ";
       const why = e.reason ? ` · ${SHADOW_REASON[e.reason] ?? e.reason}` : "";
       L.push(`- ${e.created_at} · ${e.strategy_id}/${e.profile_id} · ${e.is_live ? "live" : "предматч"} · $${round0(e.size_requested)}→$${round0(e.size_reserved)} · **${v}**${why} · edge ${(e.edge * 100).toFixed(1)}%${e.contention ? " · ⚔ конкуренция" : ""}`);
+    }
+  }
+
+  // ── Execution costs (fees + slippage — the real-money leak, folded into P&L) ──
+  h("Издержки исполнения (комиссии + слиппедж — на реальных деньгах это прямой минус)");
+  const fills = R.fillCostsForMatch(db, m.id);
+  if (!fills.length) {
+    L.push("(нет исполнений с книгой — котировочный фолбэк или входов ещё не было)");
+  } else {
+    const fc = summarizeFillCosts(fills);
+    L.push(`- Итог: ${fc.fills} исполнений (${fc.buys} вход / ${fc.sells} выход) на оборот $${round0(fc.notionalUsd)}`);
+    L.push(`- Комиссии: **$${fc.feeUsd}** (вход $${fc.feeBuyUsd} · выход $${fc.feeSellUsd})`);
+    L.push(`- Слиппедж: **$${fc.slipUsd}** (вход $${fc.slipBuyUsd} · выход $${fc.slipSellUsd}) · средний ${fc.avgSlipCents}¢/шт`);
+    L.push(`- Всего издержек: **$${fc.totalUsd}** = ${fc.costPctOfNotional}% от оборота${fc.modelledFills ? ` · ${fc.modelledFills} исп. по модели (без реальной книги)` : ""}`);
+    L.push("\nПо исполнениям:");
+    for (const f of fills) {
+      L.push(`- ${f.created_at} · ${f.strategy_id}/${f.profile_id} · ${f.side === "buy" ? "вход" : "выход"} $${round0(f.notional_usd)} · котир. ${f.quote_cents ?? "—"}¢ → VWAP ${f.vwap_cents ?? "—"}¢ · комиссия $${round2(f.fee_usd)} (${f.fee_cents}¢/шт) · слип $${round2(f.slip_usd)} (${f.slip_cents}¢/шт)${f.from_book ? "" : " · модель"}`);
     }
   }
 

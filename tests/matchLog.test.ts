@@ -33,6 +33,13 @@ test("buildMatchLog: includes the shadow-budget section with verdicts, reasons, 
   assert.match(log, /потолок категории=1/, "denial reason labelled");
   assert.match(log, /\*\*принят\*\*/, "per-decision verdict rendered");
   assert.match(log, /\*\*отказ\*\* · потолок категории/, "blocked decision shows its reason inline");
+
+  // Execution-cost section: fees + slippage from the fill ledger.
+  R.insertFillCost(db, { id: R.uid(), bet_id: R.uid(), match_id: mid, competition_id: comp.id, strategy_id: strat.id, profile_id: "medium", side: "buy", shares: 100, notional_usd: 50, quote_cents: 47, vwap_cents: 47.3, fee_cents: 0.75, fee_usd: 0.75, slip_cents: 0.3, slip_usd: 0.3, from_book: 1, created_at: "2026-07-13T13:34:00Z" });
+  const log2 = buildMatchLog(db, mid);
+  assert.match(log2, /Издержки исполнения/, "execution-cost section present");
+  assert.match(log2, /Комиссии: \*\*\$0\.75\*\*/, "fees totalled");
+  assert.match(log2, /Слиппедж: \*\*\$0\.3\*\*/, "slippage totalled");
 });
 
 test("buildMatchLog: says so when there are no shadow decisions for the match", () => {

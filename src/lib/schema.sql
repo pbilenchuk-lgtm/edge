@@ -418,3 +418,30 @@ CREATE TABLE IF NOT EXISTS shadow_events (
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_ev_time ON shadow_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_shadow_ev_verdict ON shadow_events(verdict);
+
+-- fill_costs — the structured EXECUTION-COST ledger: one row per real fill (entry buy
+-- or exit sell) with the fee and slippage that fill actually paid, in ¢/share AND $.
+-- The effective price already folds these into P&L, but folded they're invisible — on
+-- real money fees + slippage are a first-order leak, so they must be separately
+-- aggregatable (per match / strategy / category / globally). Append-only, observe-only.
+CREATE TABLE IF NOT EXISTS fill_costs (
+  id             TEXT PRIMARY KEY,
+  bet_id         TEXT,
+  match_id       TEXT NOT NULL,
+  competition_id TEXT NOT NULL,
+  strategy_id    TEXT NOT NULL,
+  profile_id     TEXT NOT NULL,
+  side           TEXT NOT NULL,            -- 'buy' (entry) | 'sell' (exit)
+  shares         REAL NOT NULL DEFAULT 0,
+  notional_usd   REAL NOT NULL DEFAULT 0,  -- $ transacted in this fill
+  quote_cents    REAL,                     -- top-of-book quote (best ask on buy, best bid on sell)
+  vwap_cents     REAL,                     -- realized volume-weighted fill price
+  fee_cents      REAL NOT NULL DEFAULT 0,  -- taker fee per share (¢)
+  fee_usd        REAL NOT NULL DEFAULT 0,  -- shares × fee_cents/100
+  slip_cents     REAL NOT NULL DEFAULT 0,  -- adverse slippage vs quote per share (¢, ≥0)
+  slip_usd       REAL NOT NULL DEFAULT 0,  -- shares × slip_cents/100
+  from_book      INTEGER NOT NULL DEFAULT 1, -- 1 = real CLOB book, 0 = parametric model
+  created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fill_costs_match ON fill_costs(match_id);
+CREATE INDEX IF NOT EXISTS idx_fill_costs_time ON fill_costs(created_at);

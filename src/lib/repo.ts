@@ -378,6 +378,23 @@ export function allShadowEvents(db: Database): ShadowEventRow[] {
 export function shadowEventsForMatch(db: Database, matchId: string): ShadowEventRow[] {
   return db.prepare(`SELECT * FROM shadow_events WHERE match_id=? ORDER BY created_at ASC`).all(matchId) as ShadowEventRow[];
 }
+export interface FillCostRow {
+  id: string; bet_id: string | null; match_id: string; competition_id: string;
+  strategy_id: string; profile_id: string; side: "buy" | "sell";
+  shares: number; notional_usd: number; quote_cents: number | null; vwap_cents: number | null;
+  fee_cents: number; fee_usd: number; slip_cents: number; slip_usd: number;
+  from_book: number; created_at: string;
+}
+export function insertFillCost(db: Database, f: FillCostRow): void {
+  db.prepare(`INSERT INTO fill_costs(id,bet_id,match_id,competition_id,strategy_id,profile_id,side,shares,notional_usd,quote_cents,vwap_cents,fee_cents,fee_usd,slip_cents,slip_usd,from_book,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(f.id, f.bet_id, f.match_id, f.competition_id, f.strategy_id, f.profile_id, f.side, f.shares, f.notional_usd, f.quote_cents, f.vwap_cents, f.fee_cents, f.fee_usd, f.slip_cents, f.slip_usd, f.from_book, f.created_at);
+}
+export function allFillCosts(db: Database): FillCostRow[] {
+  return db.prepare(`SELECT * FROM fill_costs`).all() as FillCostRow[];
+}
+export function fillCostsForMatch(db: Database, matchId: string): FillCostRow[] {
+  return db.prepare(`SELECT * FROM fill_costs WHERE match_id=? ORDER BY created_at ASC`).all(matchId) as FillCostRow[];
+}
 export function shadowReservesForMatch(db: Database, matchId: string): ShadowReserveRow[] {
   return db.prepare(`SELECT * FROM shadow_reserves WHERE match_id=? ORDER BY created_at ASC`).all(matchId) as ShadowReserveRow[];
 }

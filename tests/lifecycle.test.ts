@@ -125,6 +125,15 @@ test("autoEnter executes against the order book — VWAP fill + depth cap on a t
   assert.ok(b.entry_price != null && b.entry_price > 47.5 && b.entry_price < 49, `filled at VWAP+fee above best ask, got ${b.entry_price}`);
   assert.ok(res.some((r) => r.market === "Over 1.5"), "reported as entered");
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "enter" && /VWAP.*комиссия/.test(l.text)), "execution + fee logged");
+  // The fill's fee + slippage are recorded structurally (not only in the log text).
+  const fills = R.fillCostsForMatch(db, mid);
+  assert.equal(fills.length, 1, "one buy fill cost recorded");
+  const f = fills[0];
+  assert.equal(f.side, "buy");
+  assert.ok(f.fee_usd > 0, "a taker fee was booked in $");
+  assert.ok(f.shares > 0 && f.notional_usd > 100, "shares + notional captured");
+  assert.ok(f.slip_cents >= 0, "slippage vs best ask captured (≥0)");
+  assert.equal(f.from_book, 1, "priced off a real book");
 });
 
 test("autoEnter: two profiles of the SAME strategy both fill the SAME market independently", async () => {

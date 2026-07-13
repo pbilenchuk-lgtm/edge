@@ -461,7 +461,34 @@ async function classifyOrderBook(
   return r;
 }
 
-interface EntryExec { skip: boolean; priceCents: number; stake: number; note?: string; retry?: boolean }
+/** Structured execution-cost of one fill — the fee + slippage that were folded into
+ *  the effective price, kept separable so they can be aggregated (real-money leak). */
+interface FillCost {
+  side: "buy" | "sell"; shares: number; notionalUsd: number;
+  quoteCents: number; vwapCents: number;
+  feeCents: number; feeUsd: number; slipCents: number; slipUsd: number; fromBook: boolean;
+}
+interface EntryExec { skip: boolean; priceCents: number; stake: number; note?: string; retry?: boolean; cost?: FillCost }
+
+/** Scale a fill cost to a closed FRACTION (per-share cents/prices stay; totals scale). */
+function scaleCost(cost: FillCost, frac: number): FillCost {
+  const f = Math.max(0, Math.min(1, frac));
+  return { ...cost, shares: cost.shares * f, notionalUsd: cost.notionalUsd * f, feeUsd: cost.feeUsd * f, slipUsd: cost.slipUsd * f };
+}
+/** Persist a fill's cost breakdown to the ledger. Observe-only; never throws into a fill. */
+function recordFill(db: Database, ids: { betId: string | null; matchId: string; competitionId: string; strategyId: string; profileId: string }, cost: FillCost, now: string): void {
+  try {
+    R.insertFillCost(db, {
+      id: R.uid(), bet_id: ids.betId, match_id: ids.matchId, competition_id: ids.competitionId,
+      strategy_id: ids.strategyId, profile_id: ids.profileId, side: cost.side,
+      shares: round2(cost.shares), notional_usd: round2(cost.notionalUsd),
+      quote_cents: cost.quoteCents, vwap_cents: cost.vwapCents,
+      fee_cents: cost.feeCents, fee_usd: round2(cost.feeUsd),
+      slip_cents: cost.slipCents, slip_usd: round2(cost.slipUsd),
+      from_book: cost.fromBook ? 1 : 0, created_at: now,
+    });
+  } catch { /* cost ledger is observe-only, never break a real fill */ }
+}
 
 /** Model an entry fill against the real order book: VWAP price (slippage), size
  *  capped to what the book absorbs while keeping edge and bounding price impact.
@@ -497,7 +524,14 @@ async function executeEntry(
     if (ph) return { skip: true, priceCents: eff, stake: 0, note: ph };
     const capped = stake < proposedUsd - 0.5;
     const note = `VWAP ${fill.avgPriceCents}¢ (котир. ${bestAsk}¢${slip > 0 ? `, слип +${slip}¢` : ""}) + комиссия ${fee}¢ · сдвиг→${fill.newTopCents}¢${capped ? ` · урезан по глубине $${Math.round(proposedUsd)}→$${Math.round(stake)}` : ""}`;
-    return { skip: false, priceCents: eff, stake: Math.round(stake), note };
+    const slipAdverse = Math.max(0, slip);
+    const cost: FillCost = {
+      side: "buy", shares: fill.shares, notionalUsd: fill.filledUsd || stake,
+      quoteCents: bestAsk, vwapCents: fill.avgPriceCents,
+      feeCents: fee, feeUsd: (fill.shares * fee) / 100,
+      slipCents: slipAdverse, slipUsd: (fill.shares * slipAdverse) / 100, fromBook: true,
+    };
+    return { skip: false, priceCents: eff, stake: Math.round(stake), note, cost };
   }
   // Untradeable-market gate (option 1, symmetric to the exit-side phantom guard): with
   // no real, tradeable ask book we do NOT enter on the parametric model — we never open
@@ -526,7 +560,7 @@ async function sellVwapCents(
   mk: Market | undefined, entryCents: number, basisUsd: number,
   poly: PolymarketConfig, deps: EngineDeps, quoteCents: number,
   bookCache?: Map<string, OrderBookFetch>,
-): Promise<{ cents: number; note?: string; fromBook: boolean; bestBidCents?: number }> {
+): Promise<{ cents: number; note?: string; fromBook: boolean; bestBidCents?: number; cost?: FillCost }> {
   if (!poly.enabled) return { cents: quoteCents, fromBook: false };
   const token = mk?.external_ref ?? null;
   const shares = entryCents > 0 ? basisUsd / (entryCents / 100) : 0;
@@ -543,7 +577,12 @@ async function sellVwapCents(
     const fee = takerFeeCents(f.avgPriceCents, poly.exec.takerFeeRate); // taker fee on exit
     const eff = Math.round((f.avgPriceCents - fee) * 10) / 10;           // proceeds/share after fee
     const slip = Math.round((bestBid - f.avgPriceCents) * 10) / 10;
-    return { cents: eff, fromBook: true, bestBidCents: bestBid, note: `выход VWAP ${f.avgPriceCents}¢ (бид ${bestBid}¢${slip > 0 ? `, слип −${slip}¢` : ""}) − комиссия ${fee}¢` };
+    const slipAdverse = Math.max(0, slip);
+    const cost: FillCost = {
+      side: "sell", shares, notionalUsd: basisUsd, quoteCents: bestBid, vwapCents: f.avgPriceCents,
+      feeCents: fee, feeUsd: (shares * fee) / 100, slipCents: slipAdverse, slipUsd: (shares * slipAdverse) / 100, fromBook: true,
+    };
+    return { cents: eff, fromBook: true, bestBidCents: bestBid, cost, note: `выход VWAP ${f.avgPriceCents}¢ (бид ${bestBid}¢${slip > 0 ? `, слип −${slip}¢` : ""}) − комиссия ${fee}¢` };
   }
   const liq = Number(mk?.liquidity ?? 0) || 0;
   const avg = parametricSellAvgCents(quoteCents, basisUsd, liq, poly.exec.fallbackK);
@@ -551,7 +590,12 @@ async function sellVwapCents(
   const eff = Math.round((avg - fee) * 10) / 10;
   // fromBook=false: this is a MODELLED price (no real book), so the phantom-bid guard
   // must NOT treat a large-stake illiquidity haircut here as a phantom to hold on.
-  return { cents: eff, fromBook: false, note: `≈выход ${avg}¢ − комиссия ${fee}¢ (модель по ликвидности)` };
+  const slipModel = Math.max(0, Math.round((quoteCents - avg) * 10) / 10);
+  const cost: FillCost = {
+    side: "sell", shares, notionalUsd: basisUsd, quoteCents, vwapCents: avg,
+    feeCents: fee, feeUsd: (shares * fee) / 100, slipCents: slipModel, slipUsd: (shares * slipModel) / 100, fromBook: false,
+  };
+  return { cents: eff, fromBook: false, cost, note: `≈выход ${avg}¢ − комиссия ${fee}¢ (модель по ликвидности)` };
 }
 
 export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<AutoEnterItem[]> {
@@ -615,6 +659,7 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
 
       R.updateBet(db, b.id, { status: "open", entry_price: ex.priceCents, current_price: ex.priceCents, stake: ex.stake, entered_minute: minuteLabel(m) });
       openKey.add(key);
+      if (ex.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, ex.cost, now);
       R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "enter", text: `вход «${b.market_label}» @ ${ex.priceCents}¢ · $${ex.stake}${ex.note ? ` · ${ex.note}` : ""}`, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, price: ex.priceCents, stake: ex.stake });
       // Mirror this fill into the shadow batch. edge = our prob − executed price; a fill
@@ -755,6 +800,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           const fraction = ts.action === "close_half" ? 0.5 : 1;
           const reason = `плановый тайм-стоп: ${minNum}' ≥ ${ts.minute}', событие не наступило (рынок ${mk.price}¢) — ${ts.action === "close_half" ? "фиксирую половину" : "закрываю"} (time_stop)`;
           const res = closeBetPortion(db, b, fraction, sell.cents, minuteLabel(m), now);
+          if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, scaleCost(sell.cost, fraction), now);
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${res.pnl >= 0 ? "+" : ""}$${res.pnl.toFixed(2)}`, created_at: now });
           out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason, pnl: res.pnl });
           touched.add(b.strategy_id);
@@ -821,6 +867,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
         continue;
       }
       const pnl = closeBetEarly(db, b, sell.cents, d.reason, minuteLabel(m), now);
+      if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, sell.cost, now);
       R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${d.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason: d.reason, pnl });
       touched.add(b.strategy_id);
@@ -1136,6 +1183,7 @@ export async function strategistReassess(
             continue;
           }
           const { pnl, partial } = closeBetPortion(db, b, ex.fraction, sell.cents, minuteLabel(m), now);
+          if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: sid, profileId: profile }, sell.cost, now);
           const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
           // Trigger honesty: verify a counter_scenario tag against its pre-registered score/minute
           // condition (structured, from the plan) — objectively-unmet or unbacked defensive tags

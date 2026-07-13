@@ -12,6 +12,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { loadShadowConfig, shadowAnalytics, shadowProject, buildReplayEntries, shadowPoolState, type ShadowConfig } from "./shadow.js";
+import { summarizeFillCosts, groupFillCosts } from "./fillCosts.js";
 
 const REASON_RU: Record<string, string> = {
   insufficient_free: "нет свободных средств", cash_reserve: "неснижаемый остаток",
@@ -106,6 +107,28 @@ export function buildShadowLog(db: Database, opts: { now?: string; config?: Shad
   dumpAgg("По категориям", byCat, (k) => catName[k] ?? k);
   dumpAgg("По стратегиям", byStrat, (k) => stratName[k] ?? k);
   dumpAgg("По фазе входа", byPhase, (k) => k);
+
+  // ── Execution costs (fees + slippage) — the real-money leak, aggregated globally ──
+  const fills = R.allFillCosts(db);
+  L.push(`\n## Издержки исполнения (комиссии + слиппедж)`);
+  if (!fills.length) {
+    L.push("(нет исполнений с книгой — пока нечего агрегировать)");
+  } else {
+    const fc = summarizeFillCosts(fills);
+    L.push(`- ${fc.fills} исполнений (${fc.buys} вход / ${fc.sells} выход) · оборот $${r0(fc.notionalUsd)}`);
+    L.push(`- комиссии **${money(fc.feeUsd)}** (вход ${money(fc.feeBuyUsd)} · выход ${money(fc.feeSellUsd)})`);
+    L.push(`- слиппедж **${money(fc.slipUsd)}** (вход ${money(fc.slipBuyUsd)} · выход ${money(fc.slipSellUsd)}) · средний ${fc.avgSlipCents}¢/шт`);
+    L.push(`- ВСЕГО издержек **${money(fc.totalUsd)}** = ${fc.costPctOfNotional}% оборота${fc.modelledFills ? ` · ${fc.modelledFills} по модели` : ""}`);
+    const dumpCost = (title: string, map: Map<string, ReturnType<typeof summarizeFillCosts>>, name: (k: string) => string) => {
+      if (!map.size) return;
+      L.push(`\n### ${title}`);
+      for (const [k, s] of [...map.entries()].sort((x, y) => y[1].totalUsd - x[1].totalUsd)) {
+        L.push(`- **${name(k)}**: издержки ${money(s.totalUsd)} (комиссии ${money(s.feeUsd)} · слип ${money(s.slipUsd)}) на обороте $${r0(s.notionalUsd)} = ${s.costPctOfNotional}%`);
+      }
+    };
+    dumpCost("По категориям", groupFillCosts(fills, (f) => f.competition_id), (k) => catName[k] ?? k);
+    dumpCost("По стратегиям", groupFillCosts(fills, (f) => f.strategy_id), (k) => stratName[k] ?? k);
+  }
 
   L.push(`\n## Полный реестр решений (${events.length}, по времени)`);
   L.push(`_время · матч · категория · стратегия/профиль · фаза · запрос→резерв · вердикт · причина · edge · конкуренция · проекция_`);
