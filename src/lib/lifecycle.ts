@@ -105,19 +105,48 @@ export function strategistDegraded(db: Database, nowMs: number): boolean {
 // data next cycle. Normal drift is 0–5¢; only an event moves it this far. Env-tunable.
 export const EXIT_STALE_GAP = (() => { const n = Number(process.env.EXIT_STALE_GAP); return Number.isFinite(n) && n > 0 ? n : 20; })();
 
+/** Parse the OBJECTIVE part (score + minute) of a counter_scenario condition string like
+ *  "0:0 к 60' и Аргентина полностью контролирует" → {home:0, away:0, minute:60}. The
+ *  qualitative tail ("полностью контролирует") isn't code-checkable and is ignored — but if
+ *  the objective part isn't met, the scenario definitionally didn't fire regardless. Returns
+ *  null when a clean score+minute can't be extracted (→ caller falls back to the echo check). */
+export function parseScoreMinuteCondition(text: string): { home: number; away: number; minute: number } | null {
+  const s = text.match(/\b(\d)\s*[:\-]\s*(\d)\b/);
+  const mm = text.match(/(\d{1,3})\s*['′]/) ?? text.match(/(?:к|by|до|to|after|через|мин|минут[аеы]?)\s*(\d{1,3})/i);
+  if (!s || !mm) return null;
+  const home = Number(s[1]), away = Number(s[2]), minute = Number(mm[1]);
+  if (![home, away, minute].every(Number.isFinite) || minute < 1 || minute > 130) return null;
+  return { home, away, minute };
+}
+
 /** A DEFENSIVE trigger tag (counter_scenario / thesis_stop) claims a pre-registered adverse
  *  condition materialised. Audit (Argentina–Switzerland): the strategist tagged exits
- *  `counter_scenario` whose condition ("0:0 к 60'") had NOT occurred (score 1:0, 45'), with a
- *  reason that merely echoed the trigger word — polluting trigger stats (a real firing becomes
- *  indistinguishable from "exited by feel, called it that"). Deterministic honesty check: a
- *  defensive tag whose reason carries NO substantive justification beyond the trigger word is
- *  UNVERIFIED → recorded as `discretionary`, flagged. Substantive-reason defensive exits are
- *  kept as-is. (Full score/minute verification against a STRUCTURED exit plan is a follow-up —
- *  the plan is currently free text.) */
-export function verifyExitTrigger(trigger: string | undefined | null, reason: string): { trigger: string | undefined; flagged: boolean } {
+ *  `counter_scenario` whose condition ("0:0 к 60'") had NOT occurred (score 1:0, 45'). Two
+ *  deterministic checks, strongest first:
+ *   (A) STRUCTURED: if the exit plan's counter_scenario_stop yields a parseable score+minute,
+ *       verify it against the live facts. Objective part not met → the scenario didn't fire →
+ *       demote to `discretionary`, flagged with the concrete mismatch.
+ *   (B) ECHO fallback: no parseable condition — a defensive tag whose reason carries no
+ *       substance beyond the trigger word is unverified → demote, flagged.
+ *  Substantive-reason / objectively-verified defensive exits are kept. Keeps trigger stats
+ *  honest (a real firing stays distinguishable from "exited by feel, called it that"). */
+export function verifyExitTrigger(
+  trigger: string | undefined | null,
+  reason: string,
+  facts?: { scoreHome?: number | null; scoreAway?: number | null; minute?: number | null; conditionText?: string | null },
+): { trigger: string | undefined; flagged: boolean; note?: string } {
   const t = trigger ?? undefined;
   if (!t || !/counter_scenario|thesis_stop/i.test(t)) return { trigger: t, flagged: false };
-  // Strip the trigger token(s) from the reason; if nothing substantive remains, it's an echo.
+  // (A) Structured score/minute verification for counter_scenario against the plan's condition.
+  if (/counter_scenario/i.test(t) && facts?.conditionText && facts.scoreHome != null && facts.scoreAway != null && facts.minute != null) {
+    const cond = parseScoreMinuteCondition(facts.conditionText);
+    if (cond) {
+      const met = facts.scoreHome === cond.home && facts.scoreAway === cond.away && facts.minute >= cond.minute;
+      if (!met) return { trigger: "discretionary", flagged: true, note: `условие «${facts.conditionText.trim()}» не выполнено (счёт ${facts.scoreHome}:${facts.scoreAway}, ${facts.minute}')` };
+      return { trigger: t, flagged: false }; // objectively verified
+    }
+  }
+  // (B) Echo fallback: strip the trigger token(s); nothing substantive left → unverified.
   const residue = (reason ?? "").toLowerCase().replace(/counter[_\s]?scenario|thesis[_\s]?stop/gi, "").replace(/[^a-zа-яё0-9]+/gi, " ").trim();
   return residue.length === 0 ? { trigger: "discretionary", flagged: true } : { trigger: t, flagged: false };
 }
@@ -919,6 +948,10 @@ export async function strategistReassess(
       // а не про размер, и почти одинаков по профилям одной стратегии; берём первый
       // доступный как представителя (LIVE-окно исполняет его, не переизобретает).
       const battleSheet = profiles.map((p) => R.artifactsForMatch(db, m.id).find((x) => x.kind === "battle_sheet" && x.label === `${strat.name} · ${p.profile}`)?.content).find(Boolean);
+      // Pre-registered counter_scenario conditions per market (structured field in the plan) —
+      // used to verify a counter_scenario exit tag against the live score/minute (trigger honesty).
+      const csCondByMarket = new Map<string, string>();
+      if (battleSheet) { try { const bs = JSON.parse(battleSheet); for (const p of bs?.positions ?? []) { const c = p?.exit?.counter_scenario_stop; if (typeof p?.market === "string" && typeof c === "string") csCondByMarket.set(norm(p.market), c); } } catch { /* free-text plan → fall back to the echo check */ } }
       const dec = await strategistDecide({
         strategyName: strat.name, strategyPrompt: strat.prompt_live ?? strat.prompt,
         match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, minuteApprox },
@@ -1031,11 +1064,13 @@ export async function strategistReassess(
           }
           const { pnl, partial } = closeBetPortion(db, b, ex.fraction, sell.cents, minuteLabel(m), now);
           const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
-          // Trigger honesty: a defensive tag with no substantive reason is unverified — record the
-          // honest trigger so stats aren't polluted with unbacked counter_scenario/thesis firings.
-          const ver = verifyExitTrigger(ex.trigger, ex.reason ?? "");
+          // Trigger honesty: verify a counter_scenario tag against its pre-registered score/minute
+          // condition (structured, from the plan) — objectively-unmet or unbacked defensive tags
+          // are recorded as discretionary so stats aren't polluted with phantom firings.
+          const curMin = m.minute != null ? m.minute : minuteApprox;
+          const ver = verifyExitTrigger(ex.trigger, ex.reason ?? "", { scoreHome: m.score_home, scoreAway: m.score_away, minute: curMin, conditionText: csCondByMarket.get(norm(b.market_label)) ?? csCondByMarket.get(norm(ex.market)) });
           const trg = ver.trigger ? ` (${ver.trigger})` : ""; // which live trigger fired (verified)
-          const flagNote = ver.flagged ? ` · тег «${ex.trigger}» без обоснования → discretionary (trigger_unverified)` : "";
+          const flagNote = ver.flagged ? ` · тег «${ex.trigger}» → discretionary (trigger_unverified${ver.note ? `: ${ver.note}` : " — без обоснования"})` : "";
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag})${trg} @ ${sell.cents}¢ · стратег: ${ex.reason}${flagNote}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
           out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}${flagNote}`, pnl });
           exitedMarkets.push(`${b.market_label} (${tag})`);

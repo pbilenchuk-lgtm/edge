@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision, winsOnEventOccurrence } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition } from "../src/lib/lifecycle.js";
 import { analyzeMatch, runStrategists } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
@@ -688,6 +688,28 @@ test("verifyExitTrigger: a defensive tag with only an echoed reason → discreti
   // non-defensive triggers are never scrutinised
   assert.deepEqual(verifyExitTrigger("take_price", ""), { trigger: "take_price", flagged: false });
   assert.deepEqual(verifyExitTrigger(undefined, "x"), { trigger: undefined, flagged: false });
+});
+
+test("verifyExitTrigger: STRUCTURED — verifies a counter_scenario tag against the plan's score/minute condition", () => {
+  const cond = "0:0 к 60' и Аргентина полностью контролирует без шансов гостей";
+  // exact Argentina–Switzerland case: condition 0:0-by-60', actual 1:0 at 45' → NOT met → demoted
+  const bad = verifyExitTrigger("counter_scenario", "режу ногу", { scoreHome: 1, scoreAway: 0, minute: 45, conditionText: cond });
+  assert.equal(bad.trigger, "discretionary");
+  assert.equal(bad.flagged, true);
+  assert.match(bad.note ?? "", /не выполнено.*счёт 1:0, 45'/);
+  // condition objectively MET (0:0 at 62') → kept even with a thin reason (facts corroborate)
+  assert.deepEqual(verifyExitTrigger("counter_scenario", "x", { scoreHome: 0, scoreAway: 0, minute: 62, conditionText: cond }), { trigger: "counter_scenario", flagged: false });
+  // right score, too early (58' < 60') → not yet met → demoted
+  assert.equal(verifyExitTrigger("counter_scenario", "x", { scoreHome: 0, scoreAway: 0, minute: 58, conditionText: cond }).flagged, true);
+  // a non-score/minute condition can't be parsed → falls back to the echo check (substantive → kept)
+  assert.deepEqual(verifyExitTrigger("counter_scenario", "гости перехватили инициативу", { scoreHome: 1, scoreAway: 0, minute: 70, conditionText: "гости перехватывают инициативу и создают" }), { trigger: "counter_scenario", flagged: false });
+});
+
+test("parseScoreMinuteCondition: extracts score + minute, or null when not both present", () => {
+  assert.deepEqual(parseScoreMinuteCondition("0:0 к 60' и полный контроль"), { home: 0, away: 0, minute: 60 });
+  assert.deepEqual(parseScoreMinuteCondition("1-0 by 75 min with no threat"), { home: 1, away: 0, minute: 75 });
+  assert.equal(parseScoreMinuteCondition("Аргентина полностью контролирует"), null); // no numbers
+  assert.equal(parseScoreMinuteCondition("0:0 без минуты"), null);                   // score but no minute
 });
 
 test("strategistReassess STALENESS guard: an event repriced the market between decision and fill → exit deferred, reassess", async () => {
