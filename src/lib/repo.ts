@@ -330,6 +330,12 @@ export function metaSet(db: Database, key: string, value: string, now: string): 
      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
   ).run(key, value, now);
 }
+/** All KV rows whose key starts with `prefix` (newest first). Used by diagnostics that
+ *  aggregate per-item markers (e.g. the tennis funnel's per-break action markers). */
+export function metaByPrefix(db: Database, prefix: string): { key: string; value: string; updated_at: string }[] {
+  return db.prepare(`SELECT key,value,updated_at FROM app_meta WHERE key LIKE ? ESCAPE '\\' ORDER BY updated_at DESC`)
+    .all(prefix.replace(/[%_\\]/g, (c) => "\\" + c) + "%") as { key: string; value: string; updated_at: string }[];
+}
 
 // ---------- shadow allocator (observe-only capital pool) ----------
 export interface ShadowReserveRow {

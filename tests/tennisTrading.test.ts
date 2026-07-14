@@ -7,6 +7,7 @@ import { serializeEntryMeta } from "../src/lib/betMeta.js";
 import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick, tennisTradingTick } from "../src/lib/tennisTrading.js";
 import { migrateTennisStrategy } from "../src/lib/seed.js";
 import { buildTennisCalibrationReport } from "../src/lib/tennisScout.js";
+import { buildTennisFunnel } from "../src/lib/tennisTrading.js";
 
 test("resolveTennisWinner: advances→YES, loser→NO, canceled→void, retirement→advancing wins", () => {
   // Vukic advances (won or Broady retired)
@@ -232,6 +233,35 @@ test("Part B buildTennisCalibrationReport: splits marks into recovery vs no-reco
   assert.equal(rep.ready, false, "3 < 100 → interim, not ready");
   assert.ok((rep.noRecovery.slideCents.p90 ?? 0) >= 30, "no-recovery slide tail informs the floor");
   assert.ok(rep.byContext.some((c) => /ATP/.test(c.context)), "context split present");
+});
+
+test("buildTennisFunnel: reconstructs the funnel + names each live match's drop-out stage", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20 });
+  // A favourite (first) broken in set 1 with the price in the buyback zone → passes the gate.
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 50, setNum: 1 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
+  const f = buildTennisFunnel(db);
+  assert.equal(f.live, 1);
+  assert.equal(f.withFavourite, 1);
+  assert.equal(f.tradeable, 1, "book $5000 both sides ≥ $2000");
+  assert.equal(f.withBreak, 1);
+  assert.equal(f.favBreak, 1, "the favourite's serve was broken");
+  assert.equal(f.gatePass, 1);
+  assert.equal(f.perMatch[0].stage, "armed→LLM", "gate passed, no position yet → armed for the LLM");
+  assert.equal(f.entriesAllTime, 0);
+});
+
+test("buildTennisFunnel: an underdog break is named a non-setup, not a silent skip", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20 });
+  // The UNDERDOG (second) is broken → not our setup.
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "second", p1c: 82, setNum: 1 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 4, g2: 3, server: "first", p1c: 82, setNum: 1 });
+  const f = buildTennisFunnel(db);
+  assert.equal(f.favBreak, 0);
+  assert.equal(f.gatePass, 0);
+  assert.equal(f.perMatch[0].stage, "underdog_broken");
 });
 
 test("tennisExitTick: a position with neither trigger stays OPEN (rides on)", () => {

@@ -18,6 +18,13 @@ export async function GET(req: Request) {
       if (format === "csv") return new NextResponse(scout.tennisBreakMarksCsv(getDb()), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="tennis-break-marks.csv"` } });
       return NextResponse.json(scout.buildTennisBreakReport(getDb()));
     }
+    // ?report=funnel → the live entry funnel (why the loop is holding fire, per match).
+    if (url.searchParams.get("report") === "funnel") {
+      const trading = await import("@/lib/tennisTrading");
+      const f = trading.buildTennisFunnel(getDb());
+      if (format === "json") return NextResponse.json(f);
+      return new NextResponse(trading.tennisFunnelMarkdown(f), { status: 200, headers: { "Content-Type": "text/markdown; charset=utf-8" } });
+    }
     // ?report=calibration → Part B recovery-vs-no-recovery split (calibrates K / floor / take buffer).
     if (url.searchParams.get("report") === "calibration") {
       if (format === "csv") return new NextResponse(scout.tennisCalibrationCsv(getDb()), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="tennis-calibration.csv"` } });

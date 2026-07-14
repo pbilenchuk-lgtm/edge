@@ -188,6 +188,88 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
   return closed;
 }
 
+// ── Observability: the entry funnel (read-only; reconstructs the tick's own gates) ──
+// The tick's skips are mostly SILENT (no_favourite / thin_book / no_break / underdog_broken /
+// out_of_window / price_far go to app_meta, not the trade log), so from the UI a running-but-
+// selective loop looks identical to a dead one. This recomputes each live tennis match's funnel
+// stage from current state so you can SEE it's alive and WHY it's holding fire. Pure read.
+export interface TennisFunnelRow { match: string; comp: string; stage: string; note: string }
+export interface TennisFunnel {
+  live: number; withFavourite: number; tradeable: number; withBreak: number; favBreak: number; gatePass: number;
+  openPositions: number; entriesAllTime: number;
+  actionMarkers: Record<string, number>;
+  perMatch: TennisFunnelRow[];
+  recentLog: { at: string; type: string; text: string }[];
+  note: string;
+}
+export function buildTennisFunnel(db: Database): TennisFunnel {
+  const f: TennisFunnel = { live: 0, withFavourite: 0, tradeable: 0, withBreak: 0, favBreak: 0, gatePass: 0, openPositions: 0, entriesAllTime: 0, actionMarkers: {}, perMatch: [], recentLog: [], note: "" };
+  const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, m })));
+  for (const { comp, m } of tennisMatches) {
+    for (const b of R.betsForMatch(db, m.id, TENNIS_STRATEGY)) { f.entriesAllTime++; if (b.status === "open") f.openPositions++; }
+    if (m.state !== "live") continue;
+    const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(m.id) as R.TennisSnapshotRow[];
+    if (snaps.length < 2) continue; // not enough scout data to charge/detect yet
+    f.live++;
+    const label = `${m.home} — ${m.away}`;
+    const row = (stage: string, note = ""): void => { f.perMatch.push({ match: label, comp, stage, note }); };
+    const last = snaps[snaps.length - 1];
+    const charge = chargeTennisMatch(db, m.id, { p1: last.p1 ?? "", p2: last.p2 ?? "" });
+    if (!charge.favSide) { row("no_favourite", "обе стороны > порога андердога"); continue; }
+    f.withFavourite++;
+    if (!charge.tradeable) { row("thin_book", charge.bookNote); continue; }
+    f.tradeable++;
+    const br = detectBreaks(snaps).slice(-1)[0];
+    if (!br) { row("no_break_yet", `фаворит ${charge.favSide} @ ${charge.favPriceCents}¢`); continue; }
+    f.withBreak++;
+    if (br.server !== charge.favSide) { row("underdog_broken", `сломан андердог в сете ${br.setNum} — не наш сетап`); continue; }
+    f.favBreak++;
+    const brSnap = snaps.find((s) => s.batch_at === br.batchAt) ?? last;
+    const favSetsLost = (charge.favSide === "first" ? brSnap.sets_p2 : brSnap.sets_p1) ?? 0;
+    const favPrice = favPriceFromScout(db, m.id, charge.favSide);
+    if (!tennisReassessShouldCall(charge, { brokenSide: br.server, setNum: br.setNum, favSetsLost, favPriceCents: favPrice })) {
+      const earlyWindow = br.setNum <= 1 || (br.setNum === 2 && favSetsLost === 0);
+      row(!earlyWindow && favSetsLost < 1 ? "out_of_window" : "price_far", `фаворит @ ${favPrice}¢, сет ${br.setNum}, проиграно сетов ${favSetsLost}`);
+      continue;
+    }
+    f.gatePass++;
+    const acted = R.metaGet(db, ACTED + m.id + ":" + br.batchAt);
+    const hasOpen = R.betsForMatch(db, m.id, TENNIS_STRATEGY).some((b) => b.status === "open");
+    row(hasOpen ? "has_open_position" : acted ? `acted:${acted}` : "armed→LLM", `фаворит @ ${favPrice}¢, сет ${br.setNum}`);
+  }
+  // Cumulative per-break action markers (decided / gate_skip / no_market / blocked_second_buyback).
+  for (const r of R.metaByPrefix(db, ACTED)) f.actionMarkers[r.value] = (f.actionMarkers[r.value] ?? 0) + 1;
+  f.recentLog = R.recentTradeLog(db, 300).filter((l) => l.strategy_id === TENNIS_STRATEGY).slice(0, 15).map((l) => ({ at: l.created_at, type: l.type, text: l.text }));
+  f.note = f.entriesAllTime > 0
+    ? `${f.entriesAllTime} входов всего (${f.openPositions} открыто); из ${f.live} live-матчей ${f.gatePass} на взводе сейчас`
+    : f.gatePass > 0
+      ? `${f.gatePass}/${f.live} live-матчей на взводе — вход на следующем тике (или уже acted)`
+      : `${f.live} live-матчей, 0 на взводе прямо сейчас — воронка жива, сетап ещё не совпал (см. perMatch)`;
+  return f;
+}
+
+export function tennisFunnelMarkdown(f: TennisFunnel): string {
+  const L: string[] = [];
+  L.push(`# Теннис — воронка входа (live)`);
+  L.push(f.note);
+  L.push(`\n## Ступени сейчас`);
+  L.push(`live ${f.live} → с фаворитом ${f.withFavourite} → торгуемых ${f.tradeable} → с брейком ${f.withBreak} → брейк фаворита ${f.favBreak} → прошло гейт ${f.gatePass}`);
+  L.push(`открытых позиций ${f.openPositions} · входов всего ${f.entriesAllTime}`);
+  const am = Object.entries(f.actionMarkers);
+  if (am.length) L.push(`\n## Маркеры решений (накоплено): ${am.map(([k, v]) => `${k}=${v}`).join(" · ")}`);
+  if (f.perMatch.length) {
+    L.push(`\n## По матчам (где отваливается)`);
+    L.push(`| матч | ступень | детали |`);
+    L.push(`|---|---|---|`);
+    for (const r of f.perMatch) L.push(`| ${r.match} | ${r.stage} | ${r.note} |`);
+  }
+  if (f.recentLog.length) {
+    L.push(`\n## Последние действия`);
+    for (const l of f.recentLog) L.push(`- ${l.at.slice(11, 19)} · ${l.type} · ${l.text}`);
+  }
+  return L.join("\n");
+}
+
 export function finishTennisMatches(db: Database, deps: EngineDeps = {}): number {
   const now = nowFn(deps)();
   let n = 0;
