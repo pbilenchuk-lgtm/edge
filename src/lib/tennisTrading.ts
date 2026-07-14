@@ -18,7 +18,7 @@ import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { chargeTennisTriggers, tennisReassessShouldCall, type TennisCharge } from "./tennisOverreaction.js";
 import { detectBreaks } from "./tennisScout.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
-import { serializeEntryMeta, type BetEntryMeta } from "./betMeta.js";
+import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
 import { sizePrematch, impliedProbs } from "./strategist.js";
 import { getProfileConfig } from "./riskConfig.js";
@@ -87,6 +87,67 @@ export function settleTennisBets(db: Database, deps: EngineDeps = {}): number {
  * them — they'd pile up in `live` forever (starving the full cycle's prune) without this.
  * Returns matches finished. Observe-only guarded.
  */
+/** Which side of the linked match this bet's winner-market label belongs to (by surname). */
+function favSideForLabel(snap: R.TennisSnapshotRow, label: string): "first" | "second" | null {
+  const toks = surnames(label);
+  if (toks.some((t) => norm(snap.p1 ?? "").includes(t))) return "first";
+  if (toks.some((t) => norm(snap.p2 ?? "").includes(t))) return "second";
+  return null;
+}
+
+/** Cash out an open tennis paper bet at the current price (mirrors football's closeBetEarly:
+ *  payout = stake·current/entry, booked settled_by="early" so it's excluded from Brier/CLV —
+ *  a trading realize, not a prediction outcome). §9.6: pure arithmetic, no LLM. */
+function closeTennisBetEarly(db: Database, betId: string, currentCents: number, trigger: string, reason: string, deps: EngineDeps, now: string): number | null {
+  const fresh = R.getBet(db, betId);
+  if (!fresh || fresh.status !== "open") return null; // already closed/settled → no double-close
+  const stake = fresh.stake ?? 0, entry = fresh.entry_price ?? 0;
+  const payout = entry > 0 ? Math.round(stake * (currentCents / entry) * 100) / 100 : 0;
+  const pnl = Math.round((payout - stake) * 100) / 100;
+  R.updateBet(db, betId, { status: pnl >= 0 ? "settled_won" : "settled_lost", result: pnl >= 0 ? "won" : "lost", payout, closing_price: currentCents, settled_by: "early", settled_at: now });
+  try { shadowOnExit(db, betId, 1, loadShadowConfig(db, deps.env), now); } catch { /* observe-only */ }
+  R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: TENNIS_STRATEGY, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} (${trigger})`, created_at: now });
+  return pnl;
+}
+
+/**
+ * §6 EXIT: deterministic close of open tennis buyback positions from the PRE-WRITTEN plan.
+ * Runs every live tick. §9.6 — both the arithmetic AND the trigger detection are CODE, never
+ * the LLM. Two mid-match triggers (retirement / match-finish are settleTennisBets' job):
+ *   • take_price  — the favourite recovered to ≥ (pre-break − buffer): the buyback worked → realize.
+ *   • thesis_stop — a SECOND break of the favourite AFTER entry: the recovery thesis broke → cut.
+ * Isolated + guarded; never throws into the tick. Returns positions closed.
+ */
+export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
+  const now = nowFn(deps)();
+  let closed = 0;
+  const tennisMatchIds = new Set(R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => m.id)));
+  for (const b of R.openBets(db)) {
+    if (b.strategy_id !== TENNIS_STRATEGY || !tennisMatchIds.has(b.match_id)) continue;
+    const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(b.match_id) as R.TennisSnapshotRow[];
+    if (!snaps.length) continue;
+    const favSide = favSideForLabel(snaps[snaps.length - 1], b.market_label);
+    if (!favSide) continue;
+    // Current favourite price: freshest scout mid (same source as entry), else the market row.
+    const cur = favPriceFromScout(db, b.match_id, favSide) ?? winnerMarketFor(db, b.match_id, b.market_label)?.price ?? null;
+    if (cur == null) continue;
+    // 1) TAKE — recovered to the pre-written take level (pre-break − buffer).
+    const plan = parseEntryMeta(b.entry_meta)?.exitPlan as any;
+    const takeAt = Number.isFinite(plan?.take_price?.at_cents) ? Number(plan.take_price.at_cents) : null;
+    if (takeAt != null && cur >= takeAt) {
+      if (closeTennisBetEarly(db, b.id, cur, "take_price", `тейк выкупа: фаворит вернулся к ${cur}¢ (цель ≥${takeAt}¢)`, deps, now) != null) closed++;
+      continue;
+    }
+    // 2) THESIS STOP — a NEW break of the favourite after we entered (entry break excluded by time).
+    const entryMs = Date.parse(b.created_at) || 0;
+    const secondBreak = detectBreaks(snaps).some((br) => br.server === favSide && (Date.parse(br.batchAt) || 0) > entryMs);
+    if (secondBreak) {
+      if (closeTennisBetEarly(db, b.id, cur, "thesis_stop", `стоп тезиса: второй брейк фаворита — выход @ ${cur}¢`, deps, now) != null) closed++;
+    }
+  }
+  return closed;
+}
+
 export function finishTennisMatches(db: Database, deps: EngineDeps = {}): number {
   const now = nowFn(deps)();
   let n = 0;
@@ -148,6 +209,11 @@ export function tennisEntryMeta(o: { favPrice: number; prePrice: number; edge: n
 const TENNIS_PAPER_BUDGET = (() => { const n = Number(process.env.TENNIS_PAPER_BUDGET_USD); return Number.isFinite(n) && n > 0 ? n : 300; })();
 
 const ACTED = "tennis_acted:"; // per (match, break) idempotency marker
+
+// Recovery-take buffer (¢): the take fires when the favourite climbs back to within this many
+// cents of its pre-break price — the buyback has paid off, realize it. STRUCTURAL/interim; the
+// only numbers that swap in from the §4 distribution are the ENTRY armed prices, not this. Env-tunable.
+const TENNIS_TAKE_BUFFER = (() => { const n = Number(process.env.TENNIS_TAKE_BUFFER_CENTS); return Number.isFinite(n) && n >= 0 ? n : 3; })();
 
 /** The favourite's winner price just BEFORE a break (the recovery target reference). */
 function prePriceBefore(db: Database, matchId: string, favSide: "first" | "second", breakBatch: string): number | null {

@@ -4,7 +4,7 @@ import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 import { resolveTennisWinner } from "../src/lib/settlement.js";
 import { serializeEntryMeta } from "../src/lib/betMeta.js";
-import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches } from "../src/lib/tennisTrading.js";
+import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick } from "../src/lib/tennisTrading.js";
 import { migrateTennisStrategy } from "../src/lib/seed.js";
 
 test("resolveTennisWinner: advances→YES, loser→NO, canceled→void, retirement→advancing wins", () => {
@@ -79,6 +79,49 @@ test("finishTennisMatches: a live app match with a Finished scout snapshot trans
   assert.equal(R.getMatch(db, mid)!.state, "finished");
   // idempotent — already finished, no re-count
   assert.equal(finishTennisMatches(db, { now: () => "2026-07-14T13:05:00Z" }), 0);
+});
+
+test("tennisExitTick: take_price realizes the buyback when the favourite recovers to the pre-break level", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  // Entered the buyback at the panicked 44¢; the pre-written plan takes profit at 59¢ (pre-break 62 − 3 buffer).
+  R.insertBet(db, { id: "tex1", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 1", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: { take_price: { at_cents: 59, note: "возврат минус запас" } } }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+  // Scout: the favourite recovered to 60¢ (≥ the 59¢ take level).
+  R.insertTennisSnapshot(db, { event_key: "E9", provider: "apitennis", batch_at: "2026-07-14T10:10:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "Set 3", sets_p1: 1, sets_p2: 1, set_num: 3, games_p1: 2, games_p2: 1, game_points: null, server: "first", pm_match_id: mid, pm_mid_cents: 60, pm_p1_cents: 60, pm_p2_cents: 40, raw: "{}" });
+  const n = tennisExitTick(db, { now: () => "2026-07-14T10:10:05Z" });
+  assert.equal(n, 1, "the recovery-take fired");
+  const b = R.getBet(db, "tex1")!;
+  assert.equal(b.status, "settled_won");
+  assert.equal(b.settled_by, "early", "booked as a trading realize, not a prediction outcome");
+  assert.equal(b.closing_price, 60);
+  assert.equal(b.payout, Math.round(100 * (60 / 44) * 100) / 100, "payout = stake·current/entry");
+});
+
+test("tennisExitTick: thesis_stop cuts the position on a SECOND break of the favourite (price still low)", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  R.insertBet(db, { id: "tex2", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: { take_price: { at_cents: 59 } } }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+  // Favourite (first) serving at 3-3, gets broken → 3-4, and it persists. Price stays at 40¢ (< 59 take), so the take never fires.
+  const base = { provider: "apitennis", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1 as const, status: "Set 2", sets_p1: 1, sets_p2: 1, set_num: 2, game_points: null, pm_match_id: mid, pm_mid_cents: 40, pm_p2_cents: 60, raw: "{}" };
+  R.insertTennisSnapshot(db, { ...base, event_key: "E10", batch_at: "2026-07-14T10:05:00Z", games_p1: 3, games_p2: 3, server: "first", pm_p1_cents: 40 });
+  R.insertTennisSnapshot(db, { ...base, event_key: "E10", batch_at: "2026-07-14T10:06:00Z", games_p1: 3, games_p2: 4, server: "second", pm_p1_cents: 40 });
+  R.insertTennisSnapshot(db, { ...base, event_key: "E10", batch_at: "2026-07-14T10:07:00Z", games_p1: 3, games_p2: 4, server: "second", pm_p1_cents: 40 });
+  const n = tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" });
+  assert.equal(n, 1, "thesis_stop fired on the second favourite break");
+  const b = R.getBet(db, "tex2")!;
+  assert.equal(b.status, "settled_lost", "40¢ < 44¢ entry → the cut books a loss");
+  assert.equal(b.settled_by, "early");
+  assert.equal(b.closing_price, 40);
+});
+
+test("tennisExitTick: a position with neither trigger stays OPEN (rides on)", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  R.insertBet(db, { id: "tex3", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: { take_price: { at_cents: 59 } } }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+  // Price at 50¢ — above entry but below the 59 take; no new break. Hold.
+  R.insertTennisSnapshot(db, { event_key: "E11", provider: "apitennis", batch_at: "2026-07-14T10:08:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "Set 2", sets_p1: 1, sets_p2: 0, set_num: 2, games_p1: 4, games_p2: 3, game_points: null, server: "first", pm_match_id: mid, pm_mid_cents: 50, pm_p1_cents: 50, pm_p2_cents: 50, raw: "{}" });
+  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:08:05Z" }), 0);
+  assert.equal(R.getBet(db, "tex3")!.status, "open", "held — buyback not yet recovered, thesis intact");
 });
 
 test("settleTennisBets: a retirement resolves to the advancing (non-retiring) player", () => {

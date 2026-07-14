@@ -35,7 +35,7 @@ import { hoursUntil, finishStamp } from "./time.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit, type ShadowEntryRequest } from "./shadow.js";
 import { collectSnapshots } from "./snapshots.js";
 import { collectTennisSnapshots, recordTennisBreakMarks } from "./tennisScout.js";
-import { tennisTradingTick, settleTennisBets, finishTennisMatches } from "./tennisTrading.js";
+import { tennisTradingTick, tennisExitTick, settleTennisBets, finishTennisMatches } from "./tennisTrading.js";
 import { overreactionShouldCall } from "./reassessGate.js";
 import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
@@ -1426,6 +1426,7 @@ export async function runAutoCycle(
   // Never touches football/money-path; isolated so a provider blip can't abort the tick.
   await step("tennisScout", () => collectTennisSnapshots(db, deps), 0);
   stepSync("tennisBreakMarks", () => recordTennisBreakMarks(db, deps), 0); // mark completed break windows (≥6min old)
+  stepSync("tennisExit", () => tennisExitTick(db, deps), 0);               // §6 paper: deterministic take_price / thesis_stop close (no LLM, §9.6)
   stepSync("tennisFinish", () => finishTennisMatches(db, deps), 0);        // drive tennis matches to finished from the scout (else they pile up in live)
   stepSync("tennisSettle", () => settleTennisBets(db, deps), 0);           // safety-net settle for finished tennis matches
   const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [], llmCalls: 0, llmFail: 0 } as ReassessResult);
@@ -1633,6 +1634,7 @@ export async function runLiveCycle(
   await stepLive("tennisScout", () => collectTennisSnapshots(db, deps), 0); // tennis scouting on the fast (~20s) cadence — dense break-lag data
   stepSyncLive("tennisBreakMarks", () => recordTennisBreakMarks(db, deps), 0); // passive break marker (§4)
   await stepLive("tennisTrade", () => tennisTradingTick(db, deps), 0); // §6 paper: break-triggered Overreaction entry (isolated, budget-0 comps)
+  stepSyncLive("tennisExit", () => tennisExitTick(db, deps), 0);       // §6 paper: deterministic take_price / thesis_stop close (no LLM, §9.6)
   stepSyncLive("tennisFinish", () => finishTennisMatches(db, deps), 0); // drive tennis matches to finished from the scout (else they pile up in live)
   stepSyncLive("tennisSettle", () => settleTennisBets(db, deps), 0);   // settle tennis bets from the scout's final result
   // Reassessment fires on TWO conditions, unioned: (1) a high-impact on-pitch
