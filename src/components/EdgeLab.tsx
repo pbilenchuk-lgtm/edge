@@ -785,10 +785,15 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
     ? { label: "ЖДЁМ ДАННЫЕ", color: "#e8a838", bg: "#2e2a1a" }
     : STATE_META[match.state] ?? { label: String(match.state ?? "—").toUpperCase(), color: "#8b95a5", bg: "#232a35" };
   const hasLineups = LINEUP_SPORTS.has(comp.sport); // does this sport have team sheets?
+  const cardIsTennis = comp.sport === "tennis";
   const compStrats = catalog.filter((s: any) => s.sport === comp.sport && (shares[comp.id]?.[s.id] || 0) > 0 && compBudget[comp.id] > 0);
-  // The (strategy, profile) PAIRS funded here — the real trading unit, so a
-  // strategy funded under two profiles renders two blocks in the strat tab.
-  const compPairs = compPairsOf(shareRows, catalog, riskProfiles, comp.id, compBudget);
+  // The (strategy, profile) PAIRS surfaced here — the real trading unit. Tennis runs
+  // engine-managed pairs ($1k/profile), NOT the tournament money flow, so it uses
+  // tennisPairsOf; football uses the funded shares. A strategy funded under two
+  // profiles renders two blocks in the strat tab.
+  const compPairs = cardIsTennis
+    ? tennisPairsOf(catalog.filter((s: any) => s.sport === "tennis"), riskProfiles)
+    : compPairsOf(shareRows, catalog, riskProfiles, comp.id, compBudget);
   // Strategies to surface in the per-strategy bars (log / reassess / settle): the
   // funded ones PLUS any that actually have data on THIS match. A strategy can
   // place a bet and then have its share zeroed (or the client's share map lag
@@ -1038,7 +1043,10 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
               <div style={S.stratListGrid} className="el-strat-grid">
                 {analyzing && <div style={S.runningRow}><span style={S.spinner} /> ИИ прогоняет стратегии…</div>}
                 {analyzeErr && <div style={S.analysisPending}>{analyzeErr}</div>}
-                {compPairs.length === 0 && <div style={S.noStrat}>Стратегия не активирована на «{comp.name}». Задай бюджет турниру (кнопка <b>$</b> на плашке) и распредели долю стратегии («⚙ Распределить доли %» над матчами) — тогда она начнёт играть и появится здесь.</div>}
+                {compPairs.length === 0 && (cardIsTennis
+                  ? <div style={S.noStrat}>Теннисная стратегия ещё не активирована в этой категории.</div>
+                  : <div style={S.noStrat}>Стратегия не активирована на «{comp.name}». Задай бюджет турниру (кнопка <b>$</b> на плашке) и распредели долю стратегии («⚙ Распределить доли %» над матчами) — тогда она начнёт играть и появится здесь.</div>)}
+                {cardIsTennis && compPairs.length > 0 && !(match.bets && Object.values(match.bets).some((v: any) => v?.items?.length)) && <div style={S.noStrat}>Движок ведёт этот матч ($1k/профиль). Ставка откроется на перелом фаворита (брейк-паника) — иначе честно ждём сигнал.</div>}
                 {compPairs.map((p: any) => {
                   const budget = p.budget;
                   const items = (match.bets?.[p.strategyId]?.items || []).filter((b: any) => (b.profileId || "medium") === p.profileId);
@@ -1047,7 +1055,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                       <div style={S.stratBlockHead}>
                         <span style={{ ...S.dot, background: p.color }} /><span style={S.stratName}>{p.name}</span>
                         <ProfileBadge id={p.profileId} name={p.profileName} />
-                        <span style={S.stratBudgetChip}>{fmtPct(p.pct)}% · {fmtMoney0(budget)}</span>
+                        <span style={S.stratBudgetChip}>{cardIsTennis ? fmtMoney0(budget) : `${fmtPct(p.pct)}% · ${fmtMoney0(budget)}`}</span>
                         {/* Always-on run icon. Live → full reassessment (revisit
                             positions of ALL the strategy's pairs); pre-match/lineup →
                             analyze the match. Hidden once the match is finished. */}
