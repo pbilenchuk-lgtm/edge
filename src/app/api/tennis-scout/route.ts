@@ -18,6 +18,13 @@ export async function GET(req: Request) {
       if (format === "csv") return new NextResponse(scout.tennisBreakMarksCsv(getDb()), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="tennis-break-marks.csv"` } });
       return NextResponse.json(scout.buildTennisBreakReport(getDb()));
     }
+    // ?report=calibration → Part B recovery-vs-no-recovery split (calibrates K / floor / take buffer).
+    if (url.searchParams.get("report") === "calibration") {
+      if (format === "csv") return new NextResponse(scout.tennisCalibrationCsv(getDb()), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="tennis-calibration.csv"` } });
+      const rep = scout.buildTennisCalibrationReport(getDb());
+      if (format === "json") return NextResponse.json(rep);
+      return new NextResponse(scout.tennisCalibrationMarkdown(rep), { status: 200, headers: { "Content-Type": "text/markdown; charset=utf-8" } });
+    }
     const rep = scout.buildTennisScoutReport(getDb());
     if (format === "json") return NextResponse.json(rep);
     if (format === "csv") return new NextResponse(scout.tennisScoutCsv(rep), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="tennis-scout-${new Date().toISOString().slice(0, 10)}.csv"` } });

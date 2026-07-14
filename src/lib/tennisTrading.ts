@@ -16,7 +16,7 @@ import type { EngineDeps } from "./engine.js";
 import { settleBet, resolveTennisWinner } from "./settlement.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { chargeTennisTriggers, tennisReassessShouldCall, type TennisCharge } from "./tennisOverreaction.js";
-import { detectBreaks } from "./tennisScout.js";
+import { detectBreaks, detectTennisEvents } from "./tennisScout.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -101,8 +101,10 @@ function favSideForLabel(snap: R.TennisSnapshotRow, label: string): "first" | "s
 
 /** Cash out an open tennis paper bet at the current price (mirrors football's closeBetEarly:
  *  payout = stake·current/entry, booked settled_by="early" so it's excluded from Brier/CLV —
- *  a trading realize, not a prediction outcome). §9.6: pure arithmetic, no LLM. */
-function closeTennisBetEarly(db: Database, betId: string, currentCents: number, trigger: string, reason: string, deps: EngineDeps, now: string): number | null {
+ *  a trading realize, not a prediction outcome). §9.6: pure arithmetic, no LLM. A5: the log
+ *  carries trigger, game score, receiving games played, decision-vs-execution slippage (0 on
+ *  paper — decision price IS the fill), and the armed-threshold epoch. */
+function closeTennisBetEarly(db: Database, betId: string, currentCents: number, trigger: string, reason: string, deps: EngineDeps, now: string, extra: { gameScore?: string; recvGames?: number } = {}): number | null {
   const fresh = R.getBet(db, betId);
   if (!fresh || fresh.status !== "open") return null; // already closed/settled → no double-close
   const stake = fresh.stake ?? 0, entry = fresh.entry_price ?? 0;
@@ -110,16 +112,21 @@ function closeTennisBetEarly(db: Database, betId: string, currentCents: number, 
   const pnl = Math.round((payout - stake) * 100) / 100;
   R.updateBet(db, betId, { status: pnl >= 0 ? "settled_won" : "settled_lost", result: pnl >= 0 ? "won" : "lost", payout, closing_price: currentCents, settled_by: "early", settled_at: now });
   try { shadowOnExit(db, betId, 1, loadShadowConfig(db, deps.env), now); } catch { /* observe-only */ }
-  R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: TENNIS_STRATEGY, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} (${trigger})`, created_at: now });
+  const tail = `геймы ${extra.gameScore ?? "?"}, приёмных ${extra.recvGames ?? 0} · слиппедж 0¢ (paper) · пороги:${TENNIS_ARMED_EPOCH}`;
+  R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: TENNIS_STRATEGY, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} · ${tail} (${trigger})`, created_at: now });
   return pnl;
 }
 
 /**
  * §6 EXIT: deterministic close of open tennis buyback positions from the PRE-WRITTEN plan.
  * Runs every live tick. §9.6 — both the arithmetic AND the trigger detection are CODE, never
- * the LLM. Two mid-match triggers (retirement / match-finish are settleTennisBets' job):
- *   • take_price  — the favourite recovered to ≥ (pre-break − buffer): the buyback worked → realize.
- *   • thesis_stop — a SECOND break of the favourite AFTER entry: the recovery thesis broke → cut.
+ * the LLM. Fixed priority (A4): a broken thesis / a collapse outranks profit-taking, so on a
+ * simultaneous hit the DEFENSIVE exit wins:
+ *   #1 retirement / match-finish → deferred to settleTennisBets (advancer/void, not a price exit).
+ *   #2 thesis_stop        — a SECOND break of the favourite after entry: the recovery thesis broke.
+ *   #3 catastrophic_floor — real (debounced) price ≤ entry−floor: a collapse, wide backstop.
+ *   #4 game_count_stop    — ≥K receiving games since entry with NO break-back: edge lifetime spent.
+ *   #5 take_price         — recovered to ≥ (pre-break − buffer): the buyback worked → realize.
  * Isolated + guarded; never throws into the tick. Returns positions closed.
  */
 export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
@@ -128,25 +135,54 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
   const tennisMatchIds = new Set(R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => m.id)));
   for (const b of R.openBets(db)) {
     if (b.strategy_id !== TENNIS_STRATEGY || !tennisMatchIds.has(b.match_id)) continue;
+    // A4 #1: a finished/retired match is settleTennisBets' job (advancer wins / void) — never a price exit.
+    if (tennisFinalResult(db, b.match_id)?.finished) continue;
     const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(b.match_id) as R.TennisSnapshotRow[];
     if (!snaps.length) continue;
     const favSide = favSideForLabel(snaps[snaps.length - 1], b.market_label);
     if (!favSide) continue;
-    // Current favourite price: freshest scout mid (same source as entry), else the market row.
-    const cur = favPriceFromScout(db, b.match_id, favSide) ?? winnerMarketFor(db, b.match_id, b.market_label)?.price ?? null;
-    if (cur == null) continue;
-    // 1) TAKE — recovered to the pre-written take level (pre-break − buffer).
+    const oppSide = favSide === "first" ? "second" : "first";
     const plan = parseEntryMeta(b.entry_meta)?.exitPlan as any;
-    const takeAt = Number.isFinite(plan?.take_price?.at_cents) ? Number(plan.take_price.at_cents) : null;
-    if (takeAt != null && cur >= takeAt) {
-      if (closeTennisBetEarly(db, b.id, cur, "take_price", `тейк выкупа: фаворит вернулся к ${cur}¢ (цель ≥${takeAt}¢)`, deps, now) != null) closed++;
+    const entryMs = Date.parse(b.created_at) || 0;
+    // Freshest AND previous favourite price (previous drives the floor debounce / phantom guard).
+    const priceOn = (r: R.TennisSnapshotRow) => (favSide === "first" ? r.pm_p1_cents : r.pm_p2_cents);
+    const priced = snaps.filter((s) => priceOn(s) != null);
+    const curRow = priced[priced.length - 1] ?? null;
+    const cur = (curRow ? priceOn(curRow) : null) ?? winnerMarketFor(db, b.match_id, b.market_label)?.price ?? null;
+    if (cur == null) continue;
+    const prev = priced.length >= 2 ? priceOn(priced[priced.length - 2]) : null;
+    // Post-entry events: receiving-game count (server = opponent) + break-back + a new favourite break.
+    const evs = detectTennisEvents(snaps).filter((e) => (Date.parse(e.batchAt) || 0) > entryMs);
+    const recvGames = evs.filter((e) => (e.type === "hold" || e.type === "break") && e.server === oppSide).length;
+    const counterBreak = evs.some((e) => e.type === "break" && e.server === oppSide); // favourite broke opponent back
+    const gs = curRow ? `${curRow.games_p1}-${curRow.games_p2}` : "?";
+    const ext = { gameScore: gs, recvGames };
+
+    // #2 thesis_stop — a NEW break of the FAVOURITE's serve after entry.
+    if (evs.some((e) => e.type === "break" && e.server === favSide)) {
+      if (closeTennisBetEarly(db, b.id, cur, "thesis_stop", `стоп тезиса: второй брейк фаворита — выход`, deps, now, ext) != null) closed++;
       continue;
     }
-    // 2) THESIS STOP — a NEW break of the favourite after we entered (entry break excluded by time).
-    const entryMs = Date.parse(b.created_at) || 0;
-    const secondBreak = detectBreaks(snaps).some((br) => br.server === favSide && (Date.parse(br.batchAt) || 0) > entryMs);
-    if (secondBreak) {
-      if (closeTennisBetEarly(db, b.id, cur, "thesis_stop", `стоп тезиса: второй брейк фаворита — выход @ ${cur}¢`, deps, now) != null) closed++;
+    // #3 catastrophic_floor — a real collapse to ≤ floor, phantom-guarded by PERSISTENCE: cur AND the
+    // prior priced snapshot both ≤ floor, so a single artifact print can't dump the position (tennis
+    // has a midpoint, not a raw bid — Örgryte lesson via debounce). Deliberately wide: game jitter
+    // (±5-8¢) never reaches entry−15¢, only an injury/cascade does.
+    const floorAt = Number.isFinite(plan?.catastrophic_floor?.at_cents) ? Number(plan.catastrophic_floor.at_cents) : null;
+    if (floorAt != null && cur <= floorAt && prev != null && prev <= floorAt) {
+      if (closeTennisBetEarly(db, b.id, cur, "catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${floorAt}¢, подтверждён)`, deps, now, ext) != null) closed++;
+      continue;
+    }
+    // #4 game_count_stop — the favourite has played ≥K receiving games since entry with NO break-back.
+    const K = Number.isFinite(plan?.game_count_stop?.receiver_games) ? Number(plan.game_count_stop.receiver_games) : TENNIS_GAME_COUNT_STOP;
+    if (recvGames >= K && !counterBreak) {
+      if (closeTennisBetEarly(db, b.id, cur, "game_count_stop", `стоп по геймам: ${recvGames} приёмных без брейка назад`, deps, now, ext) != null) closed++;
+      continue;
+    }
+    // #5 take_price — recovered to the pre-written take level (pre-break − buffer).
+    const takeAt = Number.isFinite(plan?.take_price?.at_cents) ? Number(plan.take_price.at_cents) : null;
+    if (takeAt != null && cur >= takeAt) {
+      if (closeTennisBetEarly(db, b.id, cur, "take_price", `тейк выкупа: фаворит вернулся к ${cur}¢ (цель ≥${takeAt}¢)`, deps, now, ext) != null) closed++;
+      continue;
     }
   }
   return closed;
@@ -203,7 +239,13 @@ export function tennisEntryMeta(o: { favPrice: number; prePrice: number; edge: n
     marketPrice: o.favPrice, impliedProb: Math.round((o.favPrice / 100) * 1000) / 1000, liveProbAdjusted: null,
     kellyFraction: Math.round(o.kelly * 1000) / 1000, sizeRequested: Math.round(o.stake * 100) / 100, sizeFilled: null, entrySlipCents: null,
     calibration: null, branchWeightSum: null, phantomCheck: null, marketThinnessUsd: o.thinnessUsd,
-    winsOnEvent: false, exitPlan: { take_price: { at_cents: o.prePrice - 3, note: "возврат к предбрейковой минус запас" }, thesis_stop: "второй брейк подряд / признаки ретайра" },
+    winsOnEvent: false, exitPlan: {
+      take_price: { at_cents: o.prePrice - TENNIS_TAKE_BUFFER, note: "возврат к предбрейковой минус запас" },
+      thesis_stop: "второй брейк подряд / признаки ретайра",
+      game_count_stop: { receiver_games: TENNIS_GAME_COUNT_STOP }, // A1: main stop — K receiving games, no break-back
+      catastrophic_floor: { at_cents: o.favPrice - TENNIS_CATASTROPHIC_FLOOR }, // A2: wide backstop for a collapse
+      armed_epoch: TENNIS_ARMED_EPOCH,
+    },
     models: { analysis: null, strategist: null },
   };
 }
@@ -218,6 +260,18 @@ const ACTED = "tennis_acted:"; // per (match, break) idempotency marker
 // cents of its pre-break price — the buyback has paid off, realize it. STRUCTURAL/interim; the
 // only numbers that swap in from the §4 distribution are the ENTRY armed prices, not this. Env-tunable.
 const TENNIS_TAKE_BUFFER = (() => { const n = Number(process.env.TENNIS_TAKE_BUFFER_CENTS); return Number.isFinite(n) && n >= 0 ? n : 3; })();
+// A1 game-count stop (the strategy's MAIN stop): exit after the favourite has played this many
+// RECEIVING games since entry without a break-back. §4: overreaction lives ~7.6min and recovery
+// shows in a 3-5min window ≈ a few receiving games — beyond that we'd be holding a directional bet,
+// not trading the overreaction. INTERIM; calibrated from the §4/B recovery split. Env-tunable.
+const TENNIS_GAME_COUNT_STOP = (() => { const n = Number(process.env.TENNIS_GAME_COUNT_STOP); return Number.isFinite(n) && n > 0 ? Math.round(n) : 3; })();
+// A2 catastrophic floor (¢ below entry): a BACKSTOP, not a working stop. Deliberately WIDE so it
+// never catches game jitter (±5-8¢ on a deuce), only a collapse (injury/cascade) before the second
+// break. INTERIM; calibrated from the §4/B no-recovery trajectory. Env-tunable.
+const TENNIS_CATASTROPHIC_FLOOR = (() => { const n = Number(process.env.TENNIS_CATASTROPHIC_FLOOR_CENTS); return Number.isFinite(n) && n > 0 ? n : 15; })();
+// Armed-threshold epoch: "interim" until the §4/B calibration swaps the numbers; bump to
+// "calibrated" alongside the real values so exits are segmentable by which era's thresholds fired.
+const TENNIS_ARMED_EPOCH = process.env.TENNIS_ARMED_EPOCH || "interim";
 
 /** The favourite's winner price just BEFORE a break (the recovery target reference). */
 function prePriceBefore(db: Database, matchId: string, favSide: "first" | "second", breakBatch: string): number | null {
@@ -265,6 +319,16 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     if (!favMk || favMk.price == null) { R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "no_market", now); continue; }
     const prePrice = prePriceBefore(db, m.id, charge.favSide, br.batchAt) ?? favMk.price;
 
+    // A3: ONE buyback position per match — never stack a second (any profile of this strategy).
+    // Structurally resolves the trigger #1/#2 conflict: the early-break position exits by A1 (no
+    // recovery) BEFORE the lost-set trigger would arm, and if #1 is still alive when #2's conditions
+    // hit, #2 simply doesn't open — no "докупка в падающую". Blocks BEFORE the LLM call (saves it).
+    if (R.betsForMatch(db, m.id, TENNIS_STRATEGY).some((b) => b.status === "open")) {
+      R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "blocked_second_buyback", now);
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `второй выкуп заблокирован — по матчу уже открыта выкупная позиция (blocked_second_buyback)`, created_at: now });
+      continue;
+    }
+
     // LLM judges ONLY real_shift (overreaction vs genuine collapse). Code did side/window/price.
     const dec = await strategistDecide({
       strategyName: strat.name, strategyPrompt: strat.prompt_live ?? strat.prompt,
@@ -299,7 +363,7 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       entry_meta: serializeEntryMeta(meta), code_version: codeVer, created_at: now,
     });
     try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: r.stake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
-    R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `ВЫКУП фаворита «${favMk.label}» @ ${favMk.price}¢ · $${Math.round(r.stake)} (edge ${(r.edge * 100).toFixed(1)}%, тейк ~${prePrice - 3}¢)`, created_at: now });
+    R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `ВЫКУП фаворита «${favMk.label}» @ ${favMk.price}¢ · $${Math.round(r.stake)} (edge ${(r.edge * 100).toFixed(1)}%, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${favMk.price - TENNIS_CATASTROPHIC_FLOOR}¢, пороги:${TENNIS_ARMED_EPOCH})`, created_at: now });
     opened++;
   }
   return opened;

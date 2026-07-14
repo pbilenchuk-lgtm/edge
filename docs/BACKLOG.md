@@ -26,6 +26,28 @@ FLAGS+BLOCKS on a ≥8¢ divergence and never merges. It holds the money.
 3. Same class covers "broken labels" (`Team — Yes` = 100¢): a token with an unclear
    resolution condition, resolved by the same provenance pass.
 
+## Tennis buyback exits — structure built on INTERIM numbers; calibrate ONLY from §4/B (DONE)
+
+tennisExitTick executes a fixed-priority exit ladder (§9.6 — all triggers CODE, no LLM):
+retirement/final (settle) → thesis_stop (2nd fav break) → catastrophic_floor → game_count_stop
+→ take_price. Defensive exits outrank profit-taking on a simultaneous hit.
+
+The interim thresholds — **K=3** receiving games, **floor = entry−15¢**, **take buffer 3¢** — are
+env-tunable and tagged `armed_epoch:"interim"` on every bet's exitPlan. **Do NOT hand-tune them from
+the first paper bets** — that overfits noise. The ONLY source for the calibrated values is the
+Part B recovery-split report (`/api/tennis-scout?report=calibration`): floor ← no-recovery p90 slide,
+K ← recovery-time p75 (~2min/receiving game), take buffer ← recovered floor-gap; armed entry prices
+← §4 panic distribution. When it swaps in, bump `TENNIS_ARMED_EPOCH` to `calibrated` so exits stay
+segmentable by which era's numbers fired. Structure is complete NOW; the numbers land last.
+
+**catastrophic_floor phantom guard:** tennis has a midpoint, not a raw executable bid, so the
+Örgryte "don't stop on a phantom print" lesson is enforced by PERSISTENCE — the collapse must show
+on TWO consecutive priced snapshots (cur AND prev ≤ floor). A single artifact print never dumps.
+
+**One buyback per match (A3):** never stack a second buyback on a match with an open one (any
+profile). Structurally kills the "докупка в падающую" between trigger #1 (early break) and #2 (lost
+set) — #1 exits by the game-count stop before #2 arms, and if #1 is still alive, #2 doesn't open.
+
 ## Tennis retirement provenance — VERIFIED from Polymarket, mandatory pre-first-bet (DONE)
 
 Read the actual Polymarket H2H resolution text (gamma-api, tag 864). The clause is

@@ -4,8 +4,9 @@ import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 import { resolveTennisWinner } from "../src/lib/settlement.js";
 import { serializeEntryMeta } from "../src/lib/betMeta.js";
-import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick } from "../src/lib/tennisTrading.js";
+import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick, tennisTradingTick } from "../src/lib/tennisTrading.js";
 import { migrateTennisStrategy } from "../src/lib/seed.js";
+import { buildTennisCalibrationReport } from "../src/lib/tennisScout.js";
 
 test("resolveTennisWinner: advances→YES, loser→NO, canceled→void, retirement→advancing wins", () => {
   // Vukic advances (won or Broady retired)
@@ -112,6 +113,125 @@ test("tennisExitTick: thesis_stop cuts the position on a SECOND break of the fav
   assert.equal(b.status, "settled_lost", "40¢ < 44¢ entry → the cut books a loss");
   assert.equal(b.settled_by, "early");
   assert.equal(b.closing_price, 40);
+});
+
+// Compact snapshot helper for the exit-order tests (one event, ATP singles, live).
+function snap(db: ReturnType<typeof openDb>, mid: string, o: { at: string; g1: number; g2: number; server: "first" | "second" | null; p1c: number | null; setNum?: number }) {
+  R.insertTennisSnapshot(db, { event_key: "EX", provider: "apitennis", batch_at: o.at, p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "live", sets_p1: 1, sets_p2: 0, set_num: o.setNum ?? 2, games_p1: o.g1, games_p2: o.g2, game_points: null, server: o.server, pm_match_id: mid, pm_mid_cents: o.p1c, pm_p1_cents: o.p1c, pm_p2_cents: o.p1c == null ? null : 100 - o.p1c, raw: "{}" });
+}
+function buybackBet(db: ReturnType<typeof openDb>, mid: string, id: string, plan: any) {
+  R.insertBet(db, { id, match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: plan }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+}
+
+test("tennisExitTick A1: game_count_stop fires after K receiving games with NO break-back", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  buybackBet(db, mid, "a1", { take_price: { at_cents: 59 }, catastrophic_floor: { at_cents: 29 }, game_count_stop: { receiver_games: 2 } });
+  // Favourite (first) is the receiver whenever server="second". Two opponent holds → 2 receiving games, no break-back. Price flat at 45 (no take, no floor).
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "second", p1c: 45 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "first", p1c: 45 });  // opp held → recv #1
+  snap(db, mid, { at: "2026-07-14T10:03:00Z", g1: 4, g2: 4, server: "second", p1c: 45 }); // fav held
+  snap(db, mid, { at: "2026-07-14T10:04:00Z", g1: 4, g2: 5, server: "first", p1c: 45 });  // opp held → recv #2
+  snap(db, mid, { at: "2026-07-14T10:05:00Z", g1: 4, g2: 5, server: "first", p1c: 45 });  // debounce confirm
+  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:05:05Z" }), 1);
+  const b = R.getBet(db, "a1")!;
+  assert.equal(b.status, "settled_won", "closed at 45¢ > 44¢ entry → small win");
+  assert.equal(b.closing_price, 45);
+});
+
+test("tennisExitTick A1: a BREAK-BACK (counter-break) suppresses game_count_stop — position holds", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  buybackBet(db, mid, "a1b", { take_price: { at_cents: 59 }, catastrophic_floor: { at_cents: 29 }, game_count_stop: { receiver_games: 2 } });
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "second", p1c: 45 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 4, g2: 3, server: "first", p1c: 45 });  // fav BROKE opp serve → counter-break (recv #1)
+  snap(db, mid, { at: "2026-07-14T10:03:00Z", g1: 5, g2: 3, server: "second", p1c: 45 }); // fav held
+  snap(db, mid, { at: "2026-07-14T10:04:00Z", g1: 5, g2: 4, server: "first", p1c: 45 });  // opp held → recv #2
+  snap(db, mid, { at: "2026-07-14T10:05:00Z", g1: 5, g2: 4, server: "first", p1c: 45 });  // debounce
+  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:05:05Z" }), 0, "recovery underway (break-back) → don't stop");
+  assert.equal(R.getBet(db, "a1b")!.status, "open");
+});
+
+test("tennisExitTick A2: catastrophic_floor fires only on a PERSISTENT collapse (phantom-guarded)", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  // floor at 29¢ (entry 44 − 15). Two consecutive snapshots ≤ 29 → confirmed collapse.
+  buybackBet(db, mid, "a2", { take_price: { at_cents: 59 }, catastrophic_floor: { at_cents: 29 } });
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "second", p1c: 27 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 3, server: "second", p1c: 26 });
+  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:02:05Z" }), 1);
+  const b = R.getBet(db, "a2")!;
+  assert.equal(b.status, "settled_lost");
+  assert.equal(b.closing_price, 26);
+});
+
+test("tennisExitTick A2: a SINGLE spike below floor (then recovers) does NOT trigger — phantom guard", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  buybackBet(db, mid, "a2b", { take_price: { at_cents: 59 }, catastrophic_floor: { at_cents: 29 } });
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "second", p1c: 45 }); // prev above floor
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 3, server: "second", p1c: 24 }); // one print below — a phantom
+  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:02:05Z" }), 0, "single print ≤ floor is not confirmed → hold");
+  assert.equal(R.getBet(db, "a2b")!.status, "open");
+});
+
+test("tennisExitTick A2: game jitter ABOVE the floor never triggers the backstop", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  buybackBet(db, mid, "a2c", { take_price: { at_cents: 59 }, catastrophic_floor: { at_cents: 29 } });
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "second", p1c: 36 }); // −8¢ deuce jitter
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 3, server: "second", p1c: 36 });
+  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:02:05Z" }), 0, "±8¢ never reaches entry−15 → hold");
+  assert.equal(R.getBet(db, "a2c")!.status, "open");
+});
+
+test("tennisExitTick A4: on simultaneous thesis_stop + catastrophic_floor, the THESIS (defensive, higher) wins", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  buybackBet(db, mid, "a4", { take_price: { at_cents: 59 }, catastrophic_floor: { at_cents: 29 } });
+  // A second break of the favourite (server first loses) AND price collapsed ≤ floor at the same time.
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 26 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 24 }); // fav's serve broken
+  snap(db, mid, { at: "2026-07-14T10:03:00Z", g1: 3, g2: 4, server: "second", p1c: 24 }); // debounce
+  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:03:05Z" }), 1);
+  const logs = R.tradeLogForMatch(db, mid).filter((l) => l.type === "exit");
+  assert.ok(logs.some((l) => /thesis_stop/.test(l.text)), "thesis_stop fired");
+  assert.ok(!logs.some((l) => /catastrophic_floor/.test(l.text)), "floor did NOT also fire (single close, defensive priority)");
+});
+
+test("tennisTradingTick A3: a second buyback on a match with an OPEN position is blocked (no LLM call)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20 });
+  // Already holding a buyback on this match.
+  buybackBet(db, mid, "held", { take_price: { at_cents: 59 } });
+  // A fresh favourite break that would otherwise pass the gate (fav=first broken in set 1, price 50¢ ≤ cap+buffer).
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 50, setNum: 1 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
+  // No fetchImpl: if the block fails and the LLM is reached, the call throws → test surfaces it.
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: {} });
+  assert.equal(opened, 0, "second buyback blocked");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => /blocked_second_buyback/.test(l.text)), "block is logged");
+});
+
+test("Part B buildTennisCalibrationReport: splits marks into recovery vs no-recovery", () => {
+  const db = openDb(":memory:");
+  const mk = (id: string, pre: number, floor: number, rec5: number, early: number) => R.insertTennisBreakMark(db, {
+    event_key: id, match_id: null, players: "A vs B", tournament: "ATP Granby", event_type: "Atp Singles", set_num: 1,
+    broken_side: "first", broke_early: early, t_event: "2026-07-14T10:00:00Z", pre_cents: pre, floor_cents: floor, t_floor_sec: 60,
+    panic_cents: pre - floor, recovery_1: 0, recovery_2: Math.round(rec5 / 2), recovery_3: rec5, recovery_5: rec5, window_quotes: 10, confidence_flags: null, code_version: "e5", created_at: id,
+  });
+  // Recovered: pre 62, floor 40 (panic 22); recovery_5 = 20 ≥ panic−buffer(22−3=19) → recovered.
+  mk("r1", 62, 40, 20, 1);
+  // No-recovery: pre 60, floor 30 (panic 30); best recovery 8 < 27 → never came back.
+  mk("n1", 60, 30, 8, 1);
+  mk("n2", 70, 25, 5, 0); // deep slide 45, no recovery
+  const rep = buildTennisCalibrationReport(db);
+  assert.equal(rep.measured, 3);
+  assert.equal(rep.recovery.n, 1, "one mark recovered to within the take buffer");
+  assert.equal(rep.noRecovery.n, 2);
+  assert.equal(rep.ready, false, "3 < 100 → interim, not ready");
+  assert.ok((rep.noRecovery.slideCents.p90 ?? 0) >= 30, "no-recovery slide tail informs the floor");
+  assert.ok(rep.byContext.some((c) => /ATP/.test(c.context)), "context split present");
 });
 
 test("tennisExitTick: a position with neither trigger stays OPEN (rides on)", () => {

@@ -366,6 +366,105 @@ export function buildTennisBreakReport(db: Database): TennisBreakReport {
   };
 }
 
+// ── Part B: recovery-vs-no-recovery calibration report (build now, READ after ~100 marks) ──
+// A mark "recovered" when the price climbed back to within the take buffer of the pre-break level
+// (recovery_N ≥ panic − buffer for some window N) — the same definition the live take_price uses.
+// From the recovered set we read HOW FAST the buyback pays (→ calibrates K and confirms the take
+// buffer); from the no-recovery set we read HOW FAR it slid (→ calibrates the catastrophic floor).
+const TAKE_BUFFER_FOR_CALIB = (() => { const n = Number(process.env.TENNIS_TAKE_BUFFER_CENTS); return Number.isFinite(n) && n >= 0 ? n : 3; })();
+const RECOVERY_MINUTES: [keyof R.TennisBreakMarkRow, number][] = [["recovery_1", 1], ["recovery_2", 2], ["recovery_3", 3], ["recovery_5", 5]];
+
+export interface TennisCalibrationReport {
+  measured: number; target: number; ready: boolean;
+  recovery: { n: number; share: number; withinMin: { p25: number | null; p50: number | null; p75: number | null }; note: string };
+  noRecovery: { n: number; slideCents: { p25: number | null; p50: number | null; p75: number | null; p90: number | null }; note: string };
+  byContext: { context: string; n: number; recoveryShare: number; medianEntry: number | null }[];
+  suggests: { takeBufferCents: number | null; catastrophicFloorCents: number | null; gameCountK: number | null };
+  note: string;
+}
+
+/** The earliest window-minute at which a mark recovered to (pre − buffer); null = never recovered. */
+function recoveredWithinMin(m: R.TennisBreakMarkRow, buffer: number): number | null {
+  if (m.panic_cents == null) return null;
+  const need = m.panic_cents - buffer; // cents of recovery required to reach (pre − buffer)
+  for (const [k, min] of RECOVERY_MINUTES) { const v = m[k] as number | null; if (v != null && v >= need) return min; }
+  return null;
+}
+const pctl = (xs: number[], p: number): number | null => { if (!xs.length) return null; const v = [...xs].sort((a, b) => a - b); const i = Math.min(v.length - 1, Math.max(0, Math.round((p / 100) * (v.length - 1)))); return Math.round(v[i] * 10) / 10; };
+
+export function buildTennisCalibrationReport(db: Database): TennisCalibrationReport {
+  const marks = R.listTennisBreakMarks(db).filter((m) => m.panic_cents != null); // measurable only
+  const levelOf = (t: string | null) => /challenger/i.test(t ?? "") ? "Challenger" : /wta/i.test(t ?? "") ? "WTA" : /atp|men/i.test(t ?? "") ? "ATP" : (t ?? "?");
+  const recovered: R.TennisBreakMarkRow[] = [], noRec: R.TennisBreakMarkRow[] = [];
+  const recMin: number[] = [];
+  for (const m of marks) { const w = recoveredWithinMin(m, TAKE_BUFFER_FOR_CALIB); if (w != null) { recovered.push(m); recMin.push(w); } else noRec.push(m); }
+  const slides = noRec.map((m) => m.panic_cents as number); // pre − floor: how far it slid with no comeback
+  // Context split: recovery share by (level · early/late).
+  const groups = new Map<string, R.TennisBreakMarkRow[]>();
+  for (const m of marks) { const ctx = `${levelOf(m.event_type)} · ${m.broke_early ? "early" : "late"}`; (groups.get(ctx) ?? groups.set(ctx, []).get(ctx)!).push(m); }
+  const med = (xs: (number | null)[]) => pctl(xs.filter((x): x is number => x != null), 50);
+  const ready = marks.length >= CALIB_TARGET;
+  // Suggestions are RENDERED but only trustworthy at the target — the report says so.
+  const floorP90 = pctl(slides, 90);
+  return {
+    measured: marks.length, target: CALIB_TARGET, ready,
+    recovery: {
+      n: recovered.length, share: marks.length ? Math.round(recovered.length / marks.length * 100) / 100 : 0,
+      withinMin: { p25: pctl(recMin, 25), p50: pctl(recMin, 50), p75: pctl(recMin, 75) },
+      note: "минуты окна, за которые цена вернулась к (предбрейк − буфер) — верхняя граница жизни edge → калибрует K и буфер тейка",
+    },
+    noRecovery: {
+      n: noRec.length, slideCents: { p25: pctl(slides, 25), p50: pctl(slides, 50), p75: pctl(slides, 75), p90: floorP90 },
+      note: "насколько цена сползла без возврата (pre − floor) — хвост калибрует катастрофический floor",
+    },
+    byContext: [...groups.entries()].map(([context, ms]) => {
+      const rec = ms.filter((m) => recoveredWithinMin(m, TAKE_BUFFER_FOR_CALIB) != null).length;
+      return { context, n: ms.length, recoveryShare: ms.length ? Math.round(rec / ms.length * 100) / 100 : 0, medianEntry: med(ms.map((m) => m.floor_cents)) };
+    }).sort((a, b) => b.n - a.n),
+    // Interim suggestions from the current sample (floor ≈ the no-recovery p90 slide; K from the median recovery minute ≈ ~2min/receiving game).
+    suggests: {
+      takeBufferCents: TAKE_BUFFER_FOR_CALIB,
+      catastrophicFloorCents: floorP90,
+      gameCountK: recMin.length ? Math.max(2, Math.ceil((pctl(recMin, 75) ?? 6) / 2)) : null,
+    },
+    note: ready
+      ? "≥100 марок — калибровка готова: подставить floor из no-recovery p90, K из recovery p75, сверить армед-цены по recoveryShare контекстов (эпоха → calibrated)"
+      : `марок ${marks.length} из ${CALIB_TARGET} — структура готова, читаем после набора (числа interim)`,
+  };
+}
+
+export function tennisCalibrationMarkdown(rep: TennisCalibrationReport): string {
+  const pc = (x: number | null) => x == null ? "—" : `${x}`;
+  const L: string[] = [];
+  L.push(`# Теннис — калибровка выкупа (recovery vs no-recovery)`);
+  L.push(`Измеримых марок: **${rep.measured} / ${rep.target}** — ${rep.ready ? "**готово к калибровке**" : "копим (числа interim)"}`);
+  L.push(`\n## Recovery (выкуп сыграл)`);
+  L.push(`n=${rep.recovery.n}, доля ${(rep.recovery.share * 100).toFixed(0)}%. Возврат за минуты окна: p25 ${pc(rep.recovery.withinMin.p25)} · p50 ${pc(rep.recovery.withinMin.p50)} · p75 ${pc(rep.recovery.withinMin.p75)}.`);
+  L.push(`_${rep.recovery.note}_`);
+  L.push(`\n## No-recovery (возврата не было)`);
+  L.push(`n=${rep.noRecovery.n}. Сполз (¢): p25 ${pc(rep.noRecovery.slideCents.p25)} · p50 ${pc(rep.noRecovery.slideCents.p50)} · p75 ${pc(rep.noRecovery.slideCents.p75)} · p90 ${pc(rep.noRecovery.slideCents.p90)}.`);
+  L.push(`_${rep.noRecovery.note}_`);
+  L.push(`\n## По контексту (доля recovery)`);
+  L.push(`| контекст | n | recovery | медиана floor¢ |`);
+  L.push(`|---|---|---|---|`);
+  for (const c of rep.byContext) L.push(`| ${c.context} | ${c.n} | ${(c.recoveryShare * 100).toFixed(0)}% | ${pc(c.medianEntry)} |`);
+  L.push(`\n## Предложения (interim до набора)`);
+  L.push(`- буфер тейка: ${pc(rep.suggests.takeBufferCents)}¢ · катастрофический floor ≈ ${pc(rep.suggests.catastrophicFloorCents)}¢ (no-recovery p90) · K ≈ ${pc(rep.suggests.gameCountK)} приёмных гейма`);
+  L.push(`\n${rep.note}`);
+  return L.join("\n");
+}
+
+/** Per-mark CSV with the recovery classification for the calibration split. */
+export function tennisCalibrationCsv(db: Database): string {
+  const esc = (v: unknown) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const head = ["t_event", "players", "event_type", "broke_early", "pre_cents", "floor_cents", "panic_cents", "recovery_1", "recovery_2", "recovery_3", "recovery_5", "recovered", "recovered_within_min"];
+  const rows = R.listTennisBreakMarks(db).filter((m) => m.panic_cents != null).map((m) => {
+    const w = recoveredWithinMin(m, TAKE_BUFFER_FOR_CALIB);
+    return [m.t_event, m.players, m.event_type, m.broke_early, m.pre_cents, m.floor_cents, m.panic_cents, m.recovery_1, m.recovery_2, m.recovery_3, m.recovery_5, w != null ? 1 : 0, w ?? ""].map(esc).join(",");
+  });
+  return [head.join(","), ...rows].join("\n");
+}
+
 /** Per-break-mark CSV — inspect the actual pre/floor/panic per break (is the panic real?). */
 export function tennisBreakMarksCsv(db: Database): string {
   const esc = (v: unknown) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
