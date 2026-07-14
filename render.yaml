@@ -91,3 +91,7 @@ services:
       # Render dashboard; the key activates both the composite provider and its snapshot.
       - key: STATPAL_KEY
         sync: false
+      # API-Tennis live-score key (Stage-0 tennis scouting). sync:false → set in the Render
+      # dashboard, kept across redeploys, never committed. Unset → tennis scouting is inert.
+      - key: API_TENNIS_KEY
+        sync: false

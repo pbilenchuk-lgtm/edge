@@ -1049,6 +1049,36 @@ export function comebackLatencyCountForMatch(db: Database, matchId: string): num
   return (db.prepare(`SELECT COUNT(*) n FROM comeback_latency_metrics WHERE match_id=?`).get(matchId) as { n: number }).n;
 }
 
+// ── tennis_snapshots — Stage-0 tennis provider scouting (parallel stream) ──
+export interface TennisSnapshotRow {
+  id: string; event_key: string; provider: string; batch_at: string;
+  p1: string | null; p2: string | null; tournament: string | null; event_type: string | null;
+  live: number | null; status: string | null;
+  sets_p1: number | null; sets_p2: number | null; set_num: number | null;
+  games_p1: number | null; games_p2: number | null; game_points: string | null; server: string | null;
+  pm_match_id: string | null; pm_mid_cents: number | null; raw: string | null; created_at: string;
+}
+export function insertTennisSnapshot(db: Database, r: Omit<TennisSnapshotRow, "id" | "created_at"> & { id?: string; created_at?: string }): void {
+  db.prepare(
+    `INSERT INTO tennis_snapshots(id,event_key,provider,batch_at,p1,p2,tournament,event_type,live,status,
+       sets_p1,sets_p2,set_num,games_p1,games_p2,game_points,server,pm_match_id,pm_mid_cents,raw,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?, ?)`,
+  ).run(r.id ?? uid(), r.event_key, r.provider, r.batch_at, r.p1, r.p2, r.tournament, r.event_type, r.live, r.status,
+    r.sets_p1, r.sets_p2, r.set_num, r.games_p1, r.games_p2, r.game_points, r.server, r.pm_match_id, r.pm_mid_cents, r.raw, r.created_at ?? nowIso());
+}
+export function tennisSnapshotsForEvent(db: Database, eventKey: string): TennisSnapshotRow[] {
+  return db.prepare(`SELECT * FROM tennis_snapshots WHERE event_key=? ORDER BY batch_at`).all(eventKey) as TennisSnapshotRow[];
+}
+export function tennisSnapshotEventKeys(db: Database): string[] {
+  return (db.prepare(`SELECT DISTINCT event_key FROM tennis_snapshots`).all() as { event_key: string }[]).map((r) => r.event_key);
+}
+export function tennisSnapshotCount(db: Database): number {
+  return (db.prepare(`SELECT COUNT(*) n FROM tennis_snapshots`).get() as { n: number }).n;
+}
+export function pruneTennisSnapshots(db: Database, olderThanIso: string): number {
+  return db.prepare(`DELETE FROM tennis_snapshots WHERE batch_at < ?`).run(olderThanIso).changes ?? 0;
+}
+
 export function getProviderRef(db: Database, matchId: string, provider: string): { provider_ref: string | null; resolved_at: string } | null {
   const r = db.prepare(`SELECT provider_ref,resolved_at FROM provider_match_map WHERE match_id=? AND provider=?`).get(matchId, provider);
   return r ?? null;

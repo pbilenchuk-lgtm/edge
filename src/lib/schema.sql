@@ -505,3 +505,33 @@ CREATE TABLE IF NOT EXISTS comeback_latency_metrics (
 );
 CREATE INDEX IF NOT EXISTS idx_clm_match ON comeback_latency_metrics(match_id);
 CREATE INDEX IF NOT EXISTS idx_clm_case ON comeback_latency_metrics(case_type);
+
+-- tennis_snapshots — Stage-0 tennis provider scouting (PARALLEL stream, does NOT touch
+-- football or money-path). One row per poll of a live tennis match from a score provider
+-- (currently API-Tennis). Keyed by the provider's own event_key (NOT matches(id) — these
+-- are scouting observations, not tradeable app matches), plus an optional link to a
+-- discovered Polymarket match + its mid, so break-detection lag vs the market can be
+-- measured offline. server = who serves the current game ('first'|'second') — the field
+-- ESPN lacked; a break = the server loses their service game.
+CREATE TABLE IF NOT EXISTS tennis_snapshots (
+  id            TEXT PRIMARY KEY,
+  event_key     TEXT NOT NULL,   -- provider's stable match id
+  provider      TEXT NOT NULL,   -- 'apitennis'
+  batch_at      TEXT NOT NULL,   -- ISO poll timestamp
+  p1            TEXT,            -- first player
+  p2            TEXT,            -- second player
+  tournament    TEXT,
+  event_type    TEXT,            -- e.g. "ATP Singles" / "Challenger Men Singles"
+  live          INTEGER,         -- 1 = in play
+  status        TEXT,            -- "Set 2" / "Finished" / …
+  sets_p1       INTEGER, sets_p2 INTEGER,     -- match set score
+  set_num       INTEGER,                       -- current set number
+  games_p1      INTEGER, games_p2 INTEGER,     -- games in the current set
+  game_points   TEXT,                          -- "40 - 40"
+  server        TEXT,                          -- 'first' | 'second' | null
+  pm_match_id   TEXT,                          -- linked Polymarket match (nullable)
+  pm_mid_cents  REAL,                          -- linked market mid at batch (for lag vs market)
+  raw           TEXT,                          -- full provider row (JSON)
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tennis_snap_event ON tennis_snapshots(event_key, batch_at);
