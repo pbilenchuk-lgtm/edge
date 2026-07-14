@@ -1,0 +1,136 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { openDb } from "../src/lib/db.js";
+import * as R from "../src/lib/repo.js";
+import { parseProp, theoForProp, resolveTennisProp, scanMatchProps, finalSetsFromRaw, type FinalSets } from "../src/lib/tennisPmv.js";
+import { tennisTheo, BASE_HOLD } from "../src/lib/tennisMarkov.js";
+import { migrateTennisPmvStrategy } from "../src/lib/seed.js";
+
+const Q = "Iasi Open: Kawa vs Waltert ";
+
+test("parseProp: classifies each prop family + line/side/set", () => {
+  assert.deepEqual(parseProp(Q + "Match Over 23.5"), { family: "total_games", scope: "match", setNum: null, line: 23.5, side: "over", handicapOnFirst: false });
+  assert.deepEqual(parseProp(Q + "Set 1 Under 8.5"), { family: "total_games", scope: "set", setNum: 1, line: 8.5, side: "under", handicapOnFirst: false });
+  assert.equal(parseProp(Q + "Total Sets: Under 2.5")!.family, "total_sets");
+  assert.equal(parseProp("Set 1 Winner: Kawa vs Waltert")!.family, "set_winner");
+  const h = parseProp("Set Handicap: Kawa (-1.5) vs Waltert (+1.5)")!;
+  assert.equal(h.family, "set_handicap"); assert.equal(h.handicapOnFirst, true);
+  assert.equal(parseProp("Iasi Open: Kawa vs Waltert"), null, "moneyline → null");
+});
+
+// ── Consistency scan: gates (deviation ≥7 enter, ≥18 anti-Draw, price band, book gate) ──
+function seedScan(db: ReturnType<typeof openDb>, mlCents: number, props: { label: string; mid: number; liq: number }[]) {
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "pm-wta", sport_id: "tennis", name: "WTA", budget: 0, external_league: null, created_at: "t" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-wta", home: "Kawa", away: "Waltert", state: "upcoming", lineup_out: false, kickoff_at: "2026-07-14T20:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "WTA: Kawa vs Waltert", price: mlCents, ai_prob: null, liquidity: "50000", external_ref: "ml", snapshot_at: "t", is_closing: false });
+  for (const p of props) R.insertMarket(db, { id: R.uid(), match_id: mid, label: p.label, price: p.mid, ai_prob: null, liquidity: String(p.liq), external_ref: R.uid(), snapshot_at: "t", is_closing: false });
+  return mid;
+}
+
+test("scan: deviation ≥7¢ → enter; ≥18¢ → provenance_review (anti-Draw); thin/out-of-band → skip", () => {
+  const db = openDb(":memory:");
+  const theo = tennisTheo(0.65, BASE_HOLD.wta); // must match the scan's anchor (WTA, hard)
+  const setGamesLabel = Q + "Set 1 Over 8.5";
+  const t = Math.round(theoForProp(parseProp(setGamesLabel)!, theo)! * 100); // theoCents for this prop
+  const mid = seedScan(db, 65, [
+    { label: setGamesLabel, mid: t - 10, liq: 3000 },                 // dev +10 → ENTER
+    { label: Q + "Set 2 Over 8.5", mid: t - 25, liq: 3000 },          // dev +25 → PROVENANCE (anti-Draw)
+    { label: Q + "Set 3 Over 8.5", mid: t - 10, liq: 120 },           // same edge but thin book → SKIP
+    { label: Q + "Match Over 5.5", mid: 4, liq: 3000 },               // mid 4¢ < band 8¢ → SKIP
+  ]);
+  const scan = scanMatchProps(db, mid, { p1: "Kawa", p2: "Waltert" }, "wta", "WTA");
+  const by = (frag: string) => scan.candidates.find((c) => c.label.includes(frag))!;
+  assert.equal(by("Set 1 Over").action, "enter");
+  assert.equal(by("Set 2 Over").action, "provenance_review");
+  assert.equal(by("Set 3 Over").action, "skip");
+  assert.ok(/книга/.test(by("Set 3 Over").reason));
+  assert.equal(by("Match Over 5.5").action, "skip");
+  // invariants
+  for (const c of scan.candidates) {
+    if (c.action === "enter") { assert.ok(c.deviation >= 7 && Math.abs(c.deviation) < 18 && c.bookUsd >= 500 && c.midCents >= 8 && c.midCents <= 92); }
+    if (c.action === "provenance_review") assert.ok(Math.abs(c.deviation) >= 18);
+  }
+});
+
+test("scan tick + correlation: ≤2 props/match of DIFFERENT families", async () => {
+  const db = openDb(":memory:");
+  migrateTennisPmvStrategy(db);
+  const theo = tennisTheo(0.65, BASE_HOLD.wta);
+  const cents = (label: string) => Math.round(theoForProp(parseProp(label)!, theo)! * 100);
+  const l1 = Q + "Set 1 Over 8.5", l2 = Q + "Set 2 Over 8.5", l3 = Q + "Total Sets: Over 2.5", l4 = Q + "Match Over 20.5";
+  const mid = seedScan(db, 65, [
+    { label: l1, mid: cents(l1) - 12, liq: 4000 },  // total_games (set)
+    { label: l2, mid: cents(l2) - 12, liq: 4000 },  // total_games (set) — SAME family as l1
+    { label: l3, mid: cents(l3) - 12, liq: 4000 },  // total_sets — different family
+    { label: l4, mid: cents(l4) - 12, liq: 4000 },  // total_games (match) — same family again
+  ]);
+  const opened = await tennisPmvTickImport(db);
+  const fams = new Set(R.betsForMatch(db, mid, "tennis_pmv").filter((b) => b.status === "open").map((b) => parseProp(b.market_label)!.family));
+  assert.ok(fams.size <= 2, "at most 2 distinct families");
+  assert.ok(opened > 0, "at least one prop entered");
+  // never two of the same family
+  const perFamPerProfile = R.betsForMatch(db, mid, "tennis_pmv").filter((b) => b.status === "open");
+  const key = (b: any) => `${b.risk_profile_id}:${parseProp(b.market_label)!.family}`;
+  assert.equal(new Set(perFamPerProfile.map(key)).size, perFamPerProfile.length, "no duplicate family per profile");
+});
+async function tennisPmvTickImport(db: any) { const { tennisPmvTick } = await import("../src/lib/tennisPmv.js"); return tennisPmvTick(db, { now: () => "2026-07-14T19:00:00Z" }); }
+
+// ── Prop settle by family (Gate 0.2 clauses) ──
+const fsFull: FinalSets = { sets: [{ p1: 6, p2: 4 }, { p1: 6, p2: 3 }], setsWonP1: 2, setsWonP2: 0, matchGames: 19 }; // Kawa 2-0
+const fsRetiredS1only: FinalSets = { sets: [{ p1: 6, p2: 4 }, { p1: 3, p2: 2 }], setsWonP1: 1, setsWonP2: 0, matchGames: 15 }; // retired mid set 2
+const opt = { retired: false, canceled: false, firstIsP1: true };
+
+test("prop settle: a completed match resolves every family", () => {
+  assert.equal(resolveTennisProp(Q + "Total Sets: Under 2.5", fsFull, opt), true, "2 sets < 3 → under wins");
+  assert.equal(resolveTennisProp("Set Handicap: Kawa (-1.5) vs Waltert (+1.5)", fsFull, opt), true, "Kawa won by 2 sets");
+  assert.equal(resolveTennisProp(Q + "Match Under 23.5", fsFull, opt), true, "19 games < 24 → under");
+  assert.equal(resolveTennisProp("Set 1 Winner: Kawa vs Waltert", fsFull, opt), true, "Kawa took set 1");
+  assert.equal(resolveTennisProp(Q + "Set 1 Over 8.5", fsFull, opt), true, "set 1 had 10 games");
+});
+
+test("prop settle: RETIREMENT voids match-scope props but resolves a COMPLETED set (Gate 0.2)", () => {
+  const ret = { retired: true, canceled: false, firstIsP1: true };
+  assert.equal(resolveTennisProp(Q + "Total Sets: Under 2.5", fsRetiredS1only, ret), null, "Total Sets → VOID on retire");
+  assert.equal(resolveTennisProp("Set Handicap: Kawa (-1.5) vs Waltert (+1.5)", fsRetiredS1only, ret), null, "Set Handicap → VOID");
+  assert.equal(resolveTennisProp(Q + "Match Over 23.5", fsRetiredS1only, ret), null, "match total games → VOID");
+  assert.equal(resolveTennisProp("Set 1 Winner: Kawa vs Waltert", fsRetiredS1only, ret), true, "completed set 1 resolves even post-retire");
+  assert.equal(resolveTennisProp(Q + "Set 1 Over 8.5", fsRetiredS1only, ret), true, "completed set 1 games resolve");
+  assert.equal(resolveTennisProp(Q + "Set 2 Over 8.5", fsRetiredS1only, ret), null, "incomplete set 2 → VOID");
+});
+
+test("prop settle: a walkover/cancel voids everything", () => {
+  const cx = { retired: false, canceled: true, firstIsP1: true };
+  assert.equal(resolveTennisProp("Set 1 Winner: Kawa vs Waltert", fsFull, cx), null);
+  assert.equal(resolveTennisProp(Q + "Match Under 23.5", fsFull, cx), null);
+});
+
+test("core Brier criterion: markov ≤ implied → core_beats_market; <40 settles → accumulating", async () => {
+  const { buildPmvBrierReport } = await import("../src/lib/tennisPmv.js");
+  const db = openDb(":memory:");
+  migrateTennisPmvStrategy(db);
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "pm-wta", sport_id: "tennis", name: "WTA", budget: 0, external_league: null, created_at: "t" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-wta", home: "Kawa", away: "Waltert", state: "finished", lineup_out: true, kickoff_at: "t", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid } as any);
+  // 2 settled props: markov prob closer to the outcome than the implied mid → markov Brier lower.
+  const mk = (i: number, aiProb: number, entry: number, result: "won" | "lost") => R.insertBet(db, { id: `b${i}`, match_id: mid, strategy_id: "tennis_pmv", risk_profile_id: "medium", market_label: "Iasi: Kawa vs Waltert Match Over 20.5", status: result === "won" ? "settled_won" : "settled_lost", proposed_price: entry, entry_price: entry, current_price: 100, closing_price: 100, ai_prob: aiProb, stake: 50, rationale: "pmv", entered_minute: "предматч", result, payout: result === "won" ? 90 : 0, settled_by: null, settled_at: "t", entry_meta: null, code_version: "e·interim", created_at: "t" } as any);
+  mk(1, 0.75, 0.60, "won");  // markov said 0.75 (right), market 0.60
+  mk(2, 0.20, 0.40, "lost"); // markov said 0.20 (right), market 0.40
+  const acc = buildPmvBrierReport(db);
+  assert.equal(acc.settled, 2);
+  assert.equal(acc.verdict, "accumulating", "2 < 40 → not judged yet");
+  const ready = buildPmvBrierReport(db, 2); // lower the gate to judge
+  assert.equal(ready.ready, true);
+  assert.ok(ready.brierMarkov < ready.brierImplied, "markov beats implied on these");
+  assert.equal(ready.verdict, "core_beats_market");
+});
+
+test("finalSetsFromRaw: parses API-Tennis scores into per-set games", () => {
+  const raw = JSON.stringify({ scores: [{ score_set: 2, score_first: 6, score_second: 3 }, { score_set: 1, score_first: 4, score_second: 6 }] });
+  const fs = finalSetsFromRaw(raw)!;
+  assert.deepEqual(fs.sets, [{ p1: 4, p2: 6 }, { p1: 6, p2: 3 }], "sorted by set number");
+  assert.equal(fs.matchGames, 19);
+  assert.equal(fs.setsWonP1, 1); assert.equal(fs.setsWonP2, 1);
+});

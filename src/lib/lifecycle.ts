@@ -36,6 +36,7 @@ import { loadShadowConfig, shadowOnEntries, shadowOnExit, type ShadowEntryReques
 import { collectSnapshots } from "./snapshots.js";
 import { collectTennisSnapshots, recordTennisBreakMarks } from "./tennisScout.js";
 import { tennisTradingTick, tennisSetValueTick, tennisExitTick, settleTennisBets, finishTennisMatches, tennisScoutInPlay, tennisFinalResult } from "./tennisTrading.js";
+import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
 import { overreactionShouldCall } from "./reassessGate.js";
 import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
@@ -1458,6 +1459,7 @@ export async function runAutoCycle(
   stepSync("tennisExit", () => tennisExitTick(db, deps), 0);               // §6 paper: deterministic take_price / thesis_stop close (no LLM, §9.6)
   stepSync("tennisFinish", () => finishTennisMatches(db, deps), 0);        // drive tennis matches to finished from the scout (else they pile up in live)
   stepSync("tennisSettle", () => settleTennisBets(db, deps), 0);           // safety-net settle for finished tennis matches
+  stepSync("tennisPmvSettle", () => settleTennisPmvBets(db, deps), 0);     // safety-net settle for PMV props (Gate-0.2 void clauses)
   const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [], llmCalls: 0, llmFail: 0 } as ReassessResult);
   const exited = [...await step("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
   const entered = await step("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
@@ -1664,6 +1666,8 @@ export async function runLiveCycle(
   stepSyncLive("tennisBreakMarks", () => recordTennisBreakMarks(db, deps), 0); // passive break marker (§4)
   await stepLive("tennisTrade", () => tennisTradingTick(db, deps), 0); // §6 paper: break-triggered Overreaction entry (isolated, budget-0 comps)
   await stepLive("tennisSetValue", () => tennisSetValueTick(db, deps), 0); // §6 paper: lost-set-1 Set-Value entry (cross-strategy one-position rule)
+  await stepLive("tennisPmv", () => tennisPmvTick(db, deps), 0);       // PMV: deterministic pre-match prop-consistency entry (no LLM v1)
+  stepSyncLive("tennisPmvSettle", () => settleTennisPmvBets(db, deps), 0); // settle PMV props from the scout final (Gate-0.2 void clauses)
   stepSyncLive("tennisExit", () => tennisExitTick(db, deps), 0);       // §6 paper: deterministic exits for BOTH tennis strategies (no LLM, §9.6)
   stepSyncLive("tennisFinish", () => finishTennisMatches(db, deps), 0); // drive tennis matches to finished from the scout (else they pile up in live)
   stepSyncLive("tennisSettle", () => settleTennisBets(db, deps), 0);   // settle tennis bets from the scout's final result

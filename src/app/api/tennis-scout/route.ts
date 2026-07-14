@@ -31,6 +31,11 @@ export async function GET(req: Request) {
       if (format === "json") return NextResponse.json(rep);
       return new NextResponse(scout.tennisPropLiquidityMarkdown(rep), { status: 200, headers: { "Content-Type": "text/markdown; charset=utf-8" } });
     }
+    // ?report=pmv_brier → PMV core success criterion: Brier of the Markov prob vs the implied mid.
+    if (url.searchParams.get("report") === "pmv_brier") {
+      const pmv = await import("@/lib/tennisPmv");
+      return NextResponse.json(pmv.buildPmvBrierReport(getDb()));
+    }
     // ?report=calibration → Part B recovery-vs-no-recovery split (calibrates K / floor / take buffer).
     if (url.searchParams.get("report") === "calibration") {
       if (format === "csv") return new NextResponse(scout.tennisCalibrationCsv(getDb()), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="tennis-calibration.csv"` } });

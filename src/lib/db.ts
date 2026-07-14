@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy, migrateTennisSetValueStrategy, migrateResetTennisMarks } from "./seed.js";
+import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy, migrateTennisSetValueStrategy, migrateTennisPmvStrategy, migrateResetTennisMarks } from "./seed.js";
 import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
 
@@ -96,6 +96,10 @@ export function getDb(path = dbPath()): Database {
   // Seed the SECOND tennis strategy, Set-Value (buy the favourite after a competitive lost set 1,
   // hold to resolution). Idempotent; same tennis paper loop, comps stay budget-0.
   try { migrateTennisSetValueStrategy(db); }
+  catch { /* non-fatal */ }
+  // Seed the THIRD tennis strategy, PMV (prop consistency vs the moneyline anchor; deterministic,
+  // no LLM v1). Idempotent; same tennis paper loop, comps stay budget-0.
+  try { migrateTennisPmvStrategy(db); }
   catch { /* non-fatal */ }
   // One-time: move every (category × strategy) allocation onto the AGGRESSIVE
   // profile (and retag live bets). Marker-guarded, so it runs once and respects

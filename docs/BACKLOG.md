@@ -107,6 +107,38 @@ appear at kickoff/HT). A **timeout** is a transient network failure and is NOT
 cached (distinct from `not_resolved`). Confirmed-coverage leagues never hard-disable
 on transient errors.
 
+## Tennis PMV — the THIRD tennis strategy: prop consistency vs the moneyline anchor (DONE, v1 no-LLM)
+
+The epistemic inversion of the football PMV (which bled −$1022 on "I know better than the market"):
+Tennis PMV does NOT estimate player strength. It takes the LIQUID MONEYLINE as the anchor, solves the
+single class differential δ that reproduces it under a hold-based Markov chain (tennisMarkov.ts), prices
+every prop theoretically, and trades only the INTERNAL inconsistency of a thin inattentive prop vs the
+moneyline. Our own estimate is nowhere in the loop → the France-Morocco phantom-value class is excluded
+by construction. Deterministic end-to-end: NO LLM in v1 (the deliberate end point of the football
+lesson — market+code were the better pre-match judges). An LLM filter is added ONLY if paper shows a
+systematic class of false entries explained by info outside prices — data-gated, never pre-emptive.
+
+**Stage-0 gates (both cleared):** 0.1 prop liquidity — production says 89.4% of ATP/WTA matches carry a
+prop with book ≥$500 (bar 15%) → BUILD (`?report=prop_liquidity`; caveat: gamma POOL proxy, a live CLOB
+probe precedes real sizing). 0.2 retire provenance — documented above; the void-on-incompletion semantics
+are wired into settle AND folded into the theo (Total Sets / Set Handicap / match-total-games get a
+completion-rate haircut so we don't read a phantom deviation against a mid that already prices the void).
+
+**Anti-Draw rule (the two-Draw lesson, the main safety):** deviation ≥18¢ is NOT a bet but a
+`provenance_review` FLAG — a giant gap almost always means we misread the CONTRACT (retire resolution,
+line semantics), not free money. Blocked + logged until the clause is hand-checked. Entry band: deviation
+≥7¢ (props are noisier than football), price 8-92¢, book ≥$500. Correlation: ≤2 props/match of DIFFERENT
+families (all match props correlate through the result); thin-book stake cap = 25% of the prop's book.
+Held to settle (a thin-book early exit is eaten by spread); no price stops — size + entry bar are the guard.
+
+**Success criterion (Brier, primary; written before data):** over ~40-60 settles the Markov probabilities
+must beat the implied mid — `Brier_markov ≤ Brier_implied` (`?report=pmv_brier`) → the core prices props
+more accurately than the inattentive market, strategy lives. Worse → park and review (base_hold /
+tiebreak approximation). PnL/CLV on this sample are noisy and secondary. base_hold is INTERIM by
+tour×surface (ATP hard ~0.80 / clay ~0.77 / WTA ~0.65), calibrated later from our own hold-frequency
+snapshots as its own epoch. bo3 only (bo5 = different chain + retire dynamics, later). v1 does NOT build:
+point-by-point game expansion, fatigue/between-set dynamics, or a live-PMV re-price (pre-match only).
+
 ## Tennis PMV Gate 0.2 — prop RETIREMENT provenance, VERIFIED from gamma-api (DONE); families void differently
 
 The PMV core anchors every prop's theoretical price on the moneyline via a Markov chain. But a prop's
