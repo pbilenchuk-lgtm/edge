@@ -1061,7 +1061,10 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                   // Closed positions for this pair on THIS match — a fast tennis round-trip
                   // (buyback→take in minutes) is already settled by the time you look, so an
                   // open-only block wrongly reads "нет входов". Surface the closes + realized P&L.
-                  const closed = (match.settledBets?.[p.strategyId] || []).filter((b: any) => (b.profileId || "medium") === p.profileId);
+                  // Voided bets (settledBy "void") are cancellations/refunds, not trades — hide them
+                  // from the card (e.g. the PMV positions zeroed by the flag-only reset). They stay in
+                  // the export/portfolio history; they just don't clutter the match card as "closed".
+                  const closed = (match.settledBets?.[p.strategyId] || []).filter((b: any) => (b.profileId || "medium") === p.profileId && b.settledBy !== "void");
                   const closedPnl = closed.reduce((a: number, b: any) => a + ((b.payout ?? 0) - (b.stake ?? 0)), 0);
                   return (
                     <div key={p.key} style={S.stratBlock}>
