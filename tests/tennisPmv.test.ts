@@ -62,8 +62,22 @@ test("scan: deviation ≥7¢ → enter; ≥18¢ → provenance_review (anti-Draw
   }
 });
 
+test("flag-only mode (default): the scan logs would-be entries but places NO bets", async () => {
+  const db = openDb(":memory:");
+  migrateTennisPmvStrategy(db);
+  const theo = tennisTheo(0.65, BASE_HOLD.wta);
+  const l = Q + "Set 1 Over 8.5";
+  const mid = seedScan(db, 65, [{ label: l, mid: Math.round(theoForProp(parseProp(l)!, theo)! * 100) - 12, liq: 4000 }]);
+  delete process.env.TENNIS_PMV_FLAG_ONLY; // default → flag-only ON
+  const opened = await tennisPmvTickImport(db);
+  assert.equal(opened, 0, "no bets placed in flag-only mode");
+  assert.equal(R.betsForMatch(db, mid, "tennis_pmv").length, 0);
+  assert.ok(R.tradeLogForMatch(db, mid).some((x) => /flag_only/.test(x.text)), "the would-be entry is logged");
+});
+
 test("scan tick + correlation: ≤2 props/match of DIFFERENT families", async () => {
   const db = openDb(":memory:");
+  process.env.TENNIS_PMV_FLAG_ONLY = "false"; // exercise the real betting path
   migrateTennisPmvStrategy(db);
   const theo = tennisTheo(0.65, BASE_HOLD.wta);
   const cents = (label: string) => Math.round(theoForProp(parseProp(label)!, theo)! * 100);

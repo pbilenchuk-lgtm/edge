@@ -57,6 +57,11 @@ const PMV_MAX_PROPS = Math.max(1, Math.round(num(process.env.TENNIS_PMV_MAX_PROP
 // on their completed unit → no haircut.
 const PMV_COMPLETE_PROB = Math.min(1, Math.max(0.5, num(process.env.TENNIS_PMV_COMPLETE_PROB, 0.93)));
 const PMV_BUDGET = (() => { const n = Number(process.env.TENNIS_PAPER_BUDGET_USD); return Number.isFinite(n) && n > 0 ? n : 1000; })();
+// FLAG-ONLY until the core is re-calibrated (momentum + base_hold from our own frequencies). The
+// scanner still logs every would-be entry so data accumulates, but places NO bets — the first-day
+// systematic one-sided edge was phantom value from the model's own math. Set env "false" to re-enable.
+// Evaluated at call time so it can be flipped without a restart (and set per-test).
+export const pmvFlagOnly = (): boolean => process.env.TENNIS_PMV_FLAG_ONLY !== "false";
 const VOID_FAMILIES = new Set<PropFamily>(["total_sets", "set_handicap"]);
 const PMV_ACTED = "tennis_pmv_acted:"; // per-match idempotency (pre-match scan runs once)
 
@@ -350,6 +355,16 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `provenance_review «${cand.label}»: ${cand.reason}`, created_at: now });
       const enters = scan.candidates.filter((x) => x.action === "enter");
       if (!enters.length) { R.metaSet(db, PMV_ACTED + m.id, "no_edge", now); continue; }
+      // FLAG-ONLY (default until the core is re-calibrated): the scan produced a systematic one-sided
+      // fat edge on its FIRST day — phantom value from its own math, the same signature we caught the
+      // LLM making. So PMV places NO bets: it only LOGS the deviations it WOULD have taken (data keeps
+      // accumulating, contamination stopped). Open positions ride to settle as the diagnostic sample.
+      if (pmvFlagOnly()) {
+        for (const cand of enters)
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `flag_only «${cand.label}»: theo ${cand.theoCents}¢ vs mid ${cand.midCents}¢ (dev +${cand.deviation}¢, δ=${scan.delta}, книга $${cand.bookUsd}) — ставка НЕ размещена (калибровка ядра)`, created_at: now });
+        R.metaSet(db, PMV_ACTED + m.id, `flag_only:${enters.length}`, now);
+        continue;
+      }
       // Correlation cap: ≤ MAX_PROPS of DIFFERENT families (all match props correlate through the result).
       const chosen: PmvCandidate[] = []; const fams = new Set<PropFamily>();
       for (const cand of enters) { if (chosen.length >= PMV_MAX_PROPS) break; if (fams.has(cand.family)) continue; fams.add(cand.family); chosen.push(cand); }
