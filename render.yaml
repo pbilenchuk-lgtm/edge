@@ -71,6 +71,11 @@ services:
       # atp/wta (singles) vs atp-doubles/wta-doubles/itf. Unset = show every liquid series.
       - key: TENNIS_SERIES
         value: "atp,wta"
+      # Snapshot retention (days). The 1 GB persistent disk cannot hold years of raw provider
+      # payloads (the old 3-year default filled it → "database or disk is full"). Keep modest;
+      # raise only together with a larger Render disk.
+      - key: SNAPSHOT_RETENTION_DAYS
+        value: "5"
       # Live Claude analysis needs a key. sync:false means Render PROMPTS you for
       # the value in the dashboard on first deploy and KEEPS it across redeploys.
       # Recommended over entering the key in the UI: the env var is read before

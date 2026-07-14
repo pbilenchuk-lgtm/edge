@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { openDb } from "../src/lib/db.js";
+import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 import {
   serverSide, parsePair, currentSet, normalizeLive, detectBreaks, detectTennisEvents,
@@ -18,6 +18,17 @@ const apiRow = (over: any = {}) => ({
   event_status: "Set 2", event_live: "1", tournament_name: "Granby", event_type_type: "ATP Singles",
   scores: [{ score_first: "6", score_second: "2", score_set: "1" }, { score_first: "2", score_second: "1", score_set: "2" }],
   ...over,
+});
+
+test("boot-time emergency prune deletes OLD snapshots (disk recovery), keeps recent", () => {
+  const db = openDb(":memory:");
+  const old = new Date(Date.now() - 40 * 86_400_000).toISOString(); // 40 days ago (> 5-day retention)
+  const fresh = new Date().toISOString();
+  R.insertTennisSnapshot(db, { event_key: "OLD", provider: "apitennis", batch_at: old, p1: "A", p2: "B", tournament: null, event_type: null, live: 0, status: null, sets_p1: null, sets_p2: null, set_num: null, games_p1: null, games_p2: null, game_points: null, server: null, pm_match_id: null, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: null });
+  R.insertTennisSnapshot(db, { event_key: "NEW", provider: "apitennis", batch_at: fresh, p1: "A", p2: "B", tournament: null, event_type: null, live: 1, status: null, sets_p1: null, sets_p2: null, set_num: null, games_p1: null, games_p2: null, game_points: null, server: null, pm_match_id: null, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: null });
+  initSchema(db); // re-run boot: the emergency prune runs before DDL
+  assert.equal(R.tennisSnapshotsForEvent(db, "OLD").length, 0, "old snapshot reclaimed");
+  assert.equal(R.tennisSnapshotsForEvent(db, "NEW").length, 1, "recent (live) snapshot kept");
 });
 
 test("field parsers: server side, pair, current set", () => {

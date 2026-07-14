@@ -85,6 +85,14 @@ export async function fetchTennisLivescores(cfg: TennisConfig, deps: EngineDeps 
   finally { clearTimeout(timer); }
 }
 
+/** Strip the heavy arrays (pointbypoint / statistics) from a stored raw row — not needed for
+ *  Stage-1 break detection, and they blow up the persistent disk at 20s cadence. */
+function trimRaw(raw: any): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  const { pointbypoint, statistics, ...rest } = raw;
+  try { return JSON.stringify(rest); } catch { return null; }
+}
+
 /** A market label's price is for player X's "to win" if the label contains X's surname. */
 function priceForPlayer(markets: { label: string; external_ref: string | null }[], player: string): string | null {
   const toks = normName(player).replace(/\./g, " ").split(/\s+/).filter((t) => t.length > 1);
@@ -128,7 +136,7 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
       tournament: m.tournament, event_type: m.eventType, live: m.live, status: m.status,
       sets_p1: m.setsP1, sets_p2: m.setsP2, set_num: m.setNum, games_p1: m.gamesP1, games_p2: m.gamesP2,
       game_points: m.gamePoints, server: m.server, pm_match_id: pmMatchId, pm_mid_cents: pmMid, pm_p1_cents: p1c, pm_p2_cents: p2c,
-      raw: JSON.stringify(m.raw),
+      raw: trimRaw(m.raw),
     });
     written++;
   }

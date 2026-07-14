@@ -120,8 +120,22 @@ export function openDb(path: string): Database {
   return db;
 }
 
+// Snapshot retention (days). 1 GB persistent disk can't hold years of raw payloads, so keep
+// this modest; bump only alongside a bigger Render disk. Env-overridable.
+const SNAPSHOT_RETENTION_DAYS = Math.max(1, Number(process.env.SNAPSHOT_RETENTION_DAYS ?? 5));
+
 export function initSchema(db: Database): void {
   const here = dirname(fileURLToPath(import.meta.url));
+  // EMERGENCY DISK RECOVERY (runs BEFORE any DDL): reclaim pages from over-retained snapshots
+  // so a FULL persistent disk can't block schema init or subsequent writes. DELETE succeeds
+  // even when the disk is full (it frees pages for reuse within the file); it's time-based, so
+  // live-match snapshots (recent) are never touched. Guarded — tables may not exist on a fresh DB.
+  try {
+    const cutoff = new Date(Date.now() - SNAPSHOT_RETENTION_DAYS * 86_400_000).toISOString();
+    for (const t of ["provider_snapshots", "tennis_snapshots"]) {
+      try { db.exec(`DELETE FROM ${t} WHERE batch_at < '${cutoff}'`); } catch { /* table absent on a fresh DB */ }
+    }
+  } catch { /* best-effort recovery */ }
   const sql = readFileSync(join(here, "schema.sql"), "utf8");
   db.exec(sql);
   // Additive migrations for pre-existing databases (CREATE TABLE IF NOT EXISTS
