@@ -174,8 +174,15 @@ export function recordTennisBreakMarks(db: Database, deps: EngineDeps = {}): num
       if (nowMs - at < MARK_DELAY_MS) continue;    // window not complete yet
       const first = rows[0];
       const pmMatchId = rows.find((r) => r.pm_match_id)?.pm_match_id ?? null;
-      // The broken side's winner price column.
-      const priceOf = (r: R.TennisSnapshotRow) => (br.server === "first" ? r.pm_p1_cents : r.pm_p2_cents);
+      // The broken side's winner price. Winner markets are complementary, so if only the OTHER
+      // side's market was matched, derive the broken side's price as 100 − other (robustness:
+      // a break marks whichever side we can price).
+      const priceOf = (r: R.TennisSnapshotRow) => {
+        const own = br.server === "first" ? r.pm_p1_cents : r.pm_p2_cents;
+        if (own != null) return own;
+        const other = br.server === "first" ? r.pm_p2_cents : r.pm_p1_cents;
+        return other != null ? Math.round((100 - other) * 10) / 10 : null;
+      };
       const series = rows.filter((r) => priceOf(r) != null).map((r) => ({ provider: "polymarket", batch_at: r.batch_at, extracted: JSON.stringify({ markets: [{ label: "win", bidCents: priceOf(r), midCents: priceOf(r) }] }) }));
       const wm = computeWindowMetrics(polymarketSeries(series, "win"), at, undefined, codeVer);
       const setNum = br.setNum;
@@ -328,13 +335,17 @@ export function buildTennisScoutReport(db: Database): TennisScoutReport {
 // ── §4 break-marker report: panic calibration by context ──
 export interface TennisBreakReport {
   totalMarks: number; targetForCalibration: number; ready: boolean;
+  rawMarks: number; unmeasured: number; mapping: { auto: number; review: number; skip: number };
   byContext: { context: string; n: number; medianPanic: number | null; medianFloor: number | null; medianTFloorSec: number | null }[];
   overall: { medianPanic: number | null; medianFloor: number | null; medianRecovery2: number | null };
   note: string;
 }
 const CALIB_TARGET = 100;
 export function buildTennisBreakReport(db: Database): TennisBreakReport {
-  const marks = R.listTennisBreakMarks(db).filter((m) => m.panic_cents != null); // measurable only
+  const allMarks = R.listTennisBreakMarks(db);
+  const marks = allMarks.filter((m) => m.panic_cents != null); // measurable only (has a price window)
+  const mapLog = R.tennisMapLog(db, 5000);
+  const mapping = { auto: mapLog.filter((m) => m.verdict === "auto").length, review: mapLog.filter((m) => m.verdict === "review").length, skip: mapLog.filter((m) => m.verdict === "skip").length };
   const groups = new Map<string, R.TennisBreakMarkRow[]>();
   const levelOf = (t: string | null) => /challenger/i.test(t ?? "") ? "Challenger" : /wta/i.test(t ?? "") ? "WTA" : /atp|men/i.test(t ?? "") ? "ATP" : (t ?? "?");
   for (const m of marks) {
@@ -344,6 +355,7 @@ export function buildTennisBreakReport(db: Database): TennisBreakReport {
   const med = (xs: (number | null)[]) => { const v = xs.filter((x): x is number => x != null).sort((a, b) => a - b); return v.length ? (v.length % 2 ? v[(v.length - 1) / 2] : Math.round((v[v.length / 2 - 1] + v[v.length / 2]) / 2 * 10) / 10) : null; };
   return {
     totalMarks: marks.length, targetForCalibration: CALIB_TARGET, ready: marks.length >= CALIB_TARGET,
+    rawMarks: allMarks.length, unmeasured: allMarks.length - marks.length, mapping,
     byContext: [...groups.entries()].map(([context, ms]) => ({
       context, n: ms.length, medianPanic: med(ms.map((m) => m.panic_cents)), medianFloor: med(ms.map((m) => m.floor_cents)), medianTFloorSec: med(ms.map((m) => m.t_floor_sec)),
     })).sort((a, b) => b.n - a.n),
