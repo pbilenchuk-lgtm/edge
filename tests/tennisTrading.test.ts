@@ -54,6 +54,15 @@ test("chargeTennisMatch: identifies the favourite + gates tradeability on winner
   assert.equal(chargeTennisMatch(db, mid2, { p1: "X Player", p2: "Y Player" }).tradeable, false);
 });
 
+test("chargeTennisMatch: favourite is identified from the PRE-BREAK price even when the current price panicked", () => {
+  const db = openDb(":memory:");
+  // MARKET row now shows a coin-flip (the favourite's price crashed on the break) → no favourite by current price.
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 50, p2price: 50, p1liq: 5000, p2liq: 5000 });
+  assert.equal(chargeTennisMatch(db, mid, { p1: "A. Vukic", p2: "L. Broady" }).favSide, null, "current 50/50 → favourite erased by the panic");
+  // Pre-break price (80/20) recovers the favourite — this is what the tick now passes in.
+  assert.equal(chargeTennisMatch(db, mid, { p1: "A. Vukic", p2: "L. Broady" }, { p1: 80, p2: 20 }).favSide, "first", "pre-break 80/20 → favourite = first");
+});
+
 test("tennisFinalResult + settleTennisBets: settle a paper bet from the scout's final result", () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 60 });

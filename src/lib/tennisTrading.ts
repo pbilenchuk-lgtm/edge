@@ -229,12 +229,14 @@ export function buildTennisFunnel(db: Database): TennisFunnel {
     f.linked++;
     const row = (stage: string, note = ""): void => { f.perMatch.push({ match: label, comp, stage, note }); };
     const last = snaps[snaps.length - 1];
-    const charge = chargeTennisMatch(db, m.id, { p1: last.p1 ?? "", p2: last.p2 ?? "" });
+    const brF = detectBreaks(snaps).slice(-1)[0];
+    // Same as the tick: identify the favourite off the PRE-BREAK price, so a panic doesn't read as no_favourite.
+    const charge = chargeTennisMatch(db, m.id, { p1: last.p1 ?? "", p2: last.p2 ?? "" }, brF ? prePricesBefore(db, m.id, brF.batchAt) : undefined);
     if (!charge.favSide) { row("no_favourite", "обе стороны > порога андердога"); continue; }
     f.withFavourite++;
     if (!charge.tradeable) { row("thin_book", charge.bookNote); continue; }
     f.tradeable++;
-    const br = detectBreaks(snaps).slice(-1)[0];
+    const br = brF;
     if (!br) { row("no_break_yet", `фаворит ${charge.favSide} @ ${charge.favPriceCents}¢`); continue; }
     f.withBreak++;
     if (br.server !== charge.favSide) { row("underdog_broken", `сломан андердог в сете ${br.setNum} — не наш сетап`); continue; }
@@ -323,12 +325,23 @@ export interface TennisChargeInfo extends TennisCharge { matchId: string; tradea
  * prices, arm the interim triggers, and gate tradeability on winner-book depth ≥ threshold
  * on BOTH sides. Pure enough to unit-test with an injected market list.
  */
-export function chargeTennisMatch(db: Database, matchId: string, players: { p1: string; p2: string }): TennisChargeInfo {
+export function chargeTennisMatch(db: Database, matchId: string, players: { p1: string; p2: string }, idPrices?: { p1: number | null; p2: number | null }): TennisChargeInfo {
   const m1 = winnerMarketFor(db, matchId, players.p1), m2 = winnerMarketFor(db, matchId, players.p2);
-  const charge = chargeTennisTriggers({ p1Cents: m1?.price ?? null, p2Cents: m2?.price ?? null });
+  // Favourite ID prefers the PRE-BREAK price: a live break panics the favourite's price toward the
+  // underdog threshold (the market row AND the scout both follow it down), which would erase the
+  // favourite exactly when the buyback should fire. Fall back to the current market row when the
+  // pre-break signal is missing or ambiguous (e.g. tests / a match the scout joined mid-panic).
+  let charge = chargeTennisTriggers({ p1Cents: idPrices?.p1 ?? null, p2Cents: idPrices?.p2 ?? null });
+  if (!charge.favSide) charge = chargeTennisTriggers({ p1Cents: m1?.price ?? null, p2Cents: m2?.price ?? null });
   const liq1 = Number(m1?.liquidity ?? 0) || 0, liq2 = Number(m2?.liquidity ?? 0) || 0;
   const tradeable = liq1 >= TENNIS_MIN_BOOK_USD && liq2 >= TENNIS_MIN_BOOK_USD;
   return { ...charge, matchId, tradeable, bookNote: `книга: ${players.p1} $${Math.round(liq1)} / ${players.p2} $${Math.round(liq2)} (порог $${TENNIS_MIN_BOOK_USD})` };
+}
+
+/** Both sides' winner price just BEFORE a break (the pre-panic favourite reference for charge). */
+function prePricesBefore(db: Database, matchId: string, breakBatch: string): { p1: number | null; p2: number | null } {
+  const r = db.prepare(`SELECT pm_p1_cents,pm_p2_cents FROM tennis_snapshots WHERE pm_match_id=? AND batch_at < ? AND pm_p1_cents IS NOT NULL ORDER BY batch_at DESC LIMIT 1`).get(matchId, breakBatch) as { pm_p1_cents?: number; pm_p2_cents?: number } | undefined;
+  return { p1: r?.pm_p1_cents ?? null, p2: r?.pm_p2_cents ?? null };
 }
 
 /** Build the decision-time entry_meta for a tennis paper bet. */
@@ -410,12 +423,13 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(m.id) as R.TennisSnapshotRow[];
     if (snaps.length < 2) continue;
     const players = { p1: snaps[snaps.length - 1].p1 ?? "", p2: snaps[snaps.length - 1].p2 ?? "" };
-    const charge = chargeTennisMatch(db, m.id, players);
-    if (!charge.favSide || !charge.tradeable) continue; // no favourite / thin book → skip
     const breaks = detectBreaks(snaps);
     const br = breaks[breaks.length - 1]; // most recent confirmed break
     if (!br) continue;
     if (R.metaGet(db, ACTED + m.id + ":" + br.batchAt)) continue; // already acted on this break
+    // Charge with the PRE-BREAK price for favourite ID (the panic must not erase the favourite).
+    const charge = chargeTennisMatch(db, m.id, players, prePricesBefore(db, m.id, br.batchAt));
+    if (!charge.favSide || !charge.tradeable) continue; // no favourite / thin book → skip
     const brSnap = snaps.find((s) => s.batch_at === br.batchAt) ?? snaps[snaps.length - 1];
     const favSetsLost = charge.favSide === "first" ? (brSnap.sets_p2 ?? 0) : (brSnap.sets_p1 ?? 0);
     const favPrice = favPriceFromScout(db, m.id, charge.favSide);
