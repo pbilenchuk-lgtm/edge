@@ -121,8 +121,8 @@ test("tennisExitTick: thesis_stop cuts the position on a SECOND break of the fav
 function snap(db: ReturnType<typeof openDb>, mid: string, o: { at: string; g1: number; g2: number; server: "first" | "second" | null; p1c: number | null; setNum?: number }) {
   R.insertTennisSnapshot(db, { event_key: "EX", provider: "apitennis", batch_at: o.at, p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "live", sets_p1: 1, sets_p2: 0, set_num: o.setNum ?? 2, games_p1: o.g1, games_p2: o.g2, game_points: null, server: o.server, pm_match_id: mid, pm_mid_cents: o.p1c, pm_p1_cents: o.p1c, pm_p2_cents: o.p1c == null ? null : 100 - o.p1c, raw: "{}" });
 }
-function buybackBet(db: ReturnType<typeof openDb>, mid: string, id: string, plan: any) {
-  R.insertBet(db, { id, match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: plan }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+function buybackBet(db: ReturnType<typeof openDb>, mid: string, id: string, plan: any, profile = "medium") {
+  R.insertBet(db, { id, match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: profile, market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: plan }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
 }
 
 test("tennis calibration: the entry plan carries the CALIBRATED defaults (K=2, epoch=calibrated)", () => {
@@ -211,18 +211,35 @@ test("tennisExitTick A4: on simultaneous thesis_stop + catastrophic_floor, the T
   assert.ok(!logs.some((l) => /catastrophic_floor/.test(l.text)), "floor did NOT also fire (single close, defensive priority)");
 });
 
-test("tennisTradingTick A3: a second buyback on a match with an OPEN position is blocked (no LLM call)", async () => {
+test("tennisTradingTick A3: when EVERY profile already holds a buyback on the match, the break is blocked (no LLM call)", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20 });
-  // Already holding a buyback on this match.
-  buybackBet(db, mid, "held", { take_price: { at_cents: 59 } });
-  // A fresh favourite break that would otherwise pass the gate (fav=first broken in set 1, price 50¢ ≤ cap+buffer).
+  // Hold an open buyback for EACH default profile → no free profile left → block before the LLM.
+  for (const p of ["aggressive", "medium", "conservative"]) buybackBet(db, mid, "held-" + p, { take_price: { at_cents: 59 } }, p);
   snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 50, setNum: 1 });
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
   // No fetchImpl: if the block fails and the LLM is reached, the call throws → test surfaces it.
   const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: {} });
-  assert.equal(opened, 0, "second buyback blocked");
+  assert.equal(opened, 0, "all profiles held → no new buyback");
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /blocked_second_buyback/.test(l.text)), "block is logged");
+});
+
+test("tennisTradingTick: one overreaction opens a bet per FREE risk profile, each on its own budget (side-by-side)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20, p1liq: 8000, p2liq: 8000 });
+  // Favourite (first) broken in set 1, price 50¢ → passes the gate.
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 50, setNum: 1 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
+  // Mock the strategist to confirm the overreaction (buy the favourite) — ONE call, shared.
+  const body = { content: [{ text: JSON.stringify({ picks: [{ label: "Aleksandar Vukic", prob: 0.7, reason: "выкуп переоценки" }] }) }] };
+  let llmCalls = 0;
+  const fetchImpl = (async () => { llmCalls++; return { ok: true, status: 200, json: async () => body }; }) as unknown as typeof fetch;
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl });
+  assert.equal(llmCalls, 1, "the real_shift question is asked ONCE, not per profile (Model-A dedup)");
+  assert.equal(opened, 3, "one bet per default profile (aggressive/medium/conservative)");
+  const bets = R.betsForMatch(db, mid, "tennis_overreaction").filter((b) => b.status === "open");
+  assert.deepEqual([...new Set(bets.map((b) => b.risk_profile_id))].sort(), ["aggressive", "conservative", "medium"], "distinct profiles, side-by-side");
+  assert.ok(bets.every((b) => (b.stake ?? 0) > 0 && b.code_version?.includes("calibrated")), "each sized > 0 and carries the calibrated epoch");
 });
 
 test("Part B buildTennisCalibrationReport: splits marks into recovery vs no-recovery", () => {

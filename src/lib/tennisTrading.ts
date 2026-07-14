@@ -21,7 +21,7 @@ import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
 import { sizePrematch, impliedProbs } from "./strategist.js";
-import { getProfileConfig } from "./riskConfig.js";
+import { getProfileConfig, RISK_PROFILE_DEFS } from "./riskConfig.js";
 import { shadowOnEntries, type ShadowEntryRequest } from "./shadow.js";
 import { getStrategy } from "./repo.js";
 
@@ -350,9 +350,10 @@ export function tennisEntryMeta(o: { favPrice: number; prePrice: number; edge: n
   };
 }
 
-// Per-match paper budget for a tennis Overreaction position (comps stay budget-0 so the
-// football engine never touches tennis; this loop owns tennis sizing). Env-tunable.
-const TENNIS_PAPER_BUDGET = (() => { const n = Number(process.env.TENNIS_PAPER_BUDGET_USD); return Number.isFinite(n) && n > 0 ? n : 300; })();
+// PER-PROFILE paper budget for a tennis Overreaction position: each risk profile trades the
+// same setup side-by-side against its OWN budget (comps stay budget-0 so the football engine
+// never touches tennis; this loop owns tennis sizing). $1k each. Env-tunable.
+const TENNIS_PAPER_BUDGET = (() => { const n = Number(process.env.TENNIS_PAPER_BUDGET_USD); return Number.isFinite(n) && n > 0 ? n : 1000; })();
 
 const ACTED = "tennis_acted:"; // per (match, break) idempotency marker
 
@@ -426,17 +427,21 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     if (!favMk || favMk.price == null) { R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "no_market", now); continue; }
     const prePrice = prePriceBefore(db, m.id, charge.favSide, br.batchAt) ?? favMk.price;
 
-    // A3: ONE buyback position per match — never stack a second (any profile of this strategy).
-    // Structurally resolves the trigger #1/#2 conflict: the early-break position exits by A1 (no
-    // recovery) BEFORE the lost-set trigger would arm, and if #1 is still alive when #2's conditions
-    // hit, #2 simply doesn't open — no "докупка в падающую". Blocks BEFORE the LLM call (saves it).
-    if (R.betsForMatch(db, m.id, TENNIS_STRATEGY).some((b) => b.status === "open")) {
+    // A3 (per profile): each risk profile holds at most ONE buyback per match — no "докупка в
+    // падающую" WITHIN a profile — but the profiles run SIDE-BY-SIDE, each on its OWN $1k budget,
+    // so they're compared like the football grid. Pre-LLM: only skip the whole break if EVERY
+    // profile already holds a buyback here (saves the call); otherwise ask ONCE, size per profile.
+    const profiles = (() => { const ps = R.listRiskProfiles(db).map((p) => p.id); return ps.length ? ps : RISK_PROFILE_DEFS.map((d) => d.id); })();
+    const heldProfiles = new Set(R.betsForMatch(db, m.id, TENNIS_STRATEGY).filter((b) => b.status === "open").map((b) => b.risk_profile_id));
+    const freeProfiles = profiles.filter((p) => !heldProfiles.has(p));
+    if (!freeProfiles.length) {
       R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "blocked_second_buyback", now);
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `второй выкуп заблокирован — по матчу уже открыта выкупная позиция (blocked_second_buyback)`, created_at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `второй выкуп заблокирован — все профили уже держат позицию по матчу (blocked_second_buyback)`, created_at: now });
       continue;
     }
 
-    // LLM judges ONLY real_shift (overreaction vs genuine collapse). Code did side/window/price.
+    // LLM judges ONLY real_shift (overreaction vs collapse) — ONCE, shared across profiles (Model-A
+    // dedup: the real_shift question is risk-appetite-independent; only the SIZE differs per profile).
     const dec = await strategistDecide({
       strategyName: strat.name, strategyPrompt: strat.prompt_live ?? strat.prompt,
       match: { home: players.p1, away: players.p2, sport: "tennis", state: "live", minute: null, scoreHome: null, scoreAway: null },
@@ -451,27 +456,32 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     if (!dec.ok) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `стратег недоступен (${dec.error || "нет ответа"}) — входа нет`, created_at: now }); continue; }
     if (!pick) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `real_shift: стратег воздержался (не overreaction) — ${dec.note?.slice(0, 120) ?? ""}`, created_at: now }); continue; }
 
-    // CODE sizing: fair = pre-break price, buy at the panicked price. Edge = fair − implied(now).
+    // Entry prices off the LIVE scout price (the panicked favourite), NOT the market ROW — that row
+    // can lag the import (~pre-break level), which is right for IDENTIFYING the favourite but wrong
+    // for sizing: sizing the buyback against a stale high price zeroes the edge and every entry is
+    // rejected. The gate already uses the scout price; the entry must match it. Fall back to the row.
+    const entryCents = favPrice ?? favMk.price;
+    // CODE sizes PER free profile within its OWN $1k budget (§9.6). One LLM call → up to N side-by-side bets.
     const ourProb = (pick.prob != null ? pick.prob * 100 : prePrice) / 100;
-    const implied = impliedProbs([{ label: favMk.label, priceCents: favMk.price, liquidity: Number(favMk.liquidity ?? 0) || 0 }]).get(favMk.label)?.implied ?? favMk.price / 100;
-    const profile = "medium";
-    const cfg = getProfileConfig(db, profile);
-    const held = R.betsForMatch(db, m.id, TENNIS_STRATEGY).filter((b) => b.status === "open").reduce((s, b) => s + (b.stake ?? 0), 0);
-    const r = sizePrematch({ ourProb, priceCents: favMk.price, implied, calibration: 0.6, liquidity: Number(favMk.liquidity ?? 0) || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: true });
-    if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `overreaction подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
-
-    const meta = tennisEntryMeta({ favPrice: favMk.price, prePrice, edge: r.edge, kelly: r.kellyFraction, stake: r.stake, thinnessUsd: Number(favMk.liquidity ?? 0) || null, setNum: br.setNum });
-    const betId = R.uid();
-    R.insertBet(db, {
-      id: betId, match_id: m.id, strategy_id: TENNIS_STRATEGY, risk_profile_id: profile, market_label: favMk.label,
-      status: "open", proposed_price: favMk.price, entry_price: favMk.price, current_price: favMk.price, closing_price: null,
-      ai_prob: ourProb, stake: r.stake, rationale: `выкуп переоценки (теннис): фаворит сломан в сете ${br.setNum}, цена ${favMk.price}¢ vs предбрейк ${prePrice}¢. ${pick.reason || dec.note || ""}`,
-      entered_minute: `сет ${br.setNum}`, result: null, payout: null, settled_by: null, settled_at: null,
-      entry_meta: serializeEntryMeta(meta), code_version: codeVer, created_at: now,
-    });
-    try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: r.stake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
-    R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `ВЫКУП фаворита «${favMk.label}» @ ${favMk.price}¢ · $${Math.round(r.stake)} (edge ${(r.edge * 100).toFixed(1)}%, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${favMk.price - TENNIS_CATASTROPHIC_FLOOR}¢, пороги:${TENNIS_ARMED_EPOCH})`, created_at: now });
-    opened++;
+    const implied = impliedProbs([{ label: favMk.label, priceCents: entryCents, liquidity: Number(favMk.liquidity ?? 0) || 0 }]).get(favMk.label)?.implied ?? entryCents / 100;
+    for (const profile of freeProfiles) {
+      const cfg = getProfileConfig(db, profile);
+      const held = R.betsForMatch(db, m.id, TENNIS_STRATEGY).filter((b) => b.status === "open" && b.risk_profile_id === profile).reduce((s, b) => s + (b.stake ?? 0), 0);
+      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: Number(favMk.liquidity ?? 0) || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: true });
+      if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `[${profile}] overreaction подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
+      const meta = tennisEntryMeta({ favPrice: entryCents, prePrice, edge: r.edge, kelly: r.kellyFraction, stake: r.stake, thinnessUsd: Number(favMk.liquidity ?? 0) || null, setNum: br.setNum });
+      const betId = R.uid();
+      R.insertBet(db, {
+        id: betId, match_id: m.id, strategy_id: TENNIS_STRATEGY, risk_profile_id: profile, market_label: favMk.label,
+        status: "open", proposed_price: entryCents, entry_price: entryCents, current_price: entryCents, closing_price: null,
+        ai_prob: ourProb, stake: r.stake, rationale: `выкуп переоценки (теннис): фаворит сломан в сете ${br.setNum}, цена ${entryCents}¢ vs предбрейк ${prePrice}¢. ${pick.reason || dec.note || ""}`,
+        entered_minute: `сет ${br.setNum}`, result: null, payout: null, settled_by: null, settled_at: null,
+        entry_meta: serializeEntryMeta(meta), code_version: codeVer, created_at: now,
+      });
+      try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: r.stake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП фаворита «${favMk.label}» @ ${favMk.price}¢ · $${Math.round(r.stake)} (edge ${(r.edge * 100).toFixed(1)}%, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${favMk.price - TENNIS_CATASTROPHIC_FLOOR}¢, пороги:${TENNIS_ARMED_EPOCH})`, created_at: now });
+      opened++;
+    }
   }
   return opened;
 }
