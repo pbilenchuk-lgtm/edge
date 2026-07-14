@@ -702,8 +702,10 @@ export async function importPolymarketMatches(
     // матча» then falls back to market-price snapshots); a thin one isn't, ESPN
     // feed or not. 0 disables the floor.
     if (poly.minLiquidity > 0 && d.liquidity < poly.minLiquidity) continue;
-    // Per-sport series allow-list: tennis keeps only ATP (WTA/doubles/juniors
-    // have no liquidity — user). Other sports: no restriction.
+    // Tennis: DOUBLES are out of scope entirely (spec: «Пары — не подключать вообще»),
+    // env-independent — never import them regardless of TENNIS_SERIES.
+    if (sport === "tennis" && /doubles/i.test(`${d.series ?? ""} ${d.seriesSlug ?? ""}`)) continue;
+    // Per-sport series allow-list (tennis: TENNIS_SERIES; null = unrestricted).
     if (allow && !allow.has(seriesSlugOf(d.series, d.seriesSlug))) continue;
     // Skip matches with NO tournament series — on Polymarket these are novelty /
     // prop "X vs Y" markets (player H2H, "to play?"), not real fixtures. They

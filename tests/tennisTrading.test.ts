@@ -4,7 +4,7 @@ import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 import { resolveTennisWinner } from "../src/lib/settlement.js";
 import { serializeEntryMeta } from "../src/lib/betMeta.js";
-import { tennisFinalResult, settleTennisBets, chargeTennisMatch } from "../src/lib/tennisTrading.js";
+import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches } from "../src/lib/tennisTrading.js";
 import { migrateTennisStrategy } from "../src/lib/seed.js";
 
 test("resolveTennisWinner: advances→YES, loser→NO, canceled→void, retirement→advancing wins", () => {
@@ -65,6 +65,20 @@ test("tennisFinalResult + settleTennisBets: settle a paper bet from the scout's 
   const b = R.getBet(db, "tb1")!;
   assert.equal(b.status, "settled_won");
   assert.equal(b.payout, Math.round(100 / 0.6 * 100) / 100, "payout = stake / (60/100)");
+});
+
+test("finishTennisMatches: a live app match with a Finished scout snapshot transitions to finished", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  // no scout yet → stays live
+  assert.equal(finishTennisMatches(db, { now: () => "2026-07-14T13:00:00Z" }), 0);
+  assert.equal(R.getMatch(db, mid)!.state, "live");
+  // scout says finished → the match is driven to finished (else it piles up in live forever)
+  R.insertTennisSnapshot(db, { event_key: "E3", provider: "apitennis", batch_at: "2026-07-14T11:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Finished", sets_p1: 2, sets_p2: 0, set_num: 2, games_p1: 6, games_p2: 3, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "First Player" }) });
+  assert.equal(finishTennisMatches(db, { now: () => "2026-07-14T13:00:00Z" }), 1);
+  assert.equal(R.getMatch(db, mid)!.state, "finished");
+  // idempotent — already finished, no re-count
+  assert.equal(finishTennisMatches(db, { now: () => "2026-07-14T13:05:00Z" }), 0);
 });
 
 test("settleTennisBets: a retirement resolves to the advancing (non-retiring) player", () => {

@@ -81,6 +81,26 @@ export function settleTennisBets(db: Database, deps: EngineDeps = {}): number {
   return settled;
 }
 
+/**
+ * Drive tennis app matches to `finished` once the scout reports the match over. Tennis app
+ * matches have no provider score, so the clock drives them to `live` but nothing finishes
+ * them — they'd pile up in `live` forever (starving the full cycle's prune) without this.
+ * Returns matches finished. Observe-only guarded.
+ */
+export function finishTennisMatches(db: Database, deps: EngineDeps = {}): number {
+  const now = nowFn(deps)();
+  let n = 0;
+  for (const c of R.listCompetitions(db)) {
+    if (c.sport_id !== "tennis") continue;
+    for (const m of R.listMatches(db, c.id)) {
+      if (m.state === "finished") continue;
+      const fin = tennisFinalResult(db, m.id);
+      if (fin?.finished) { try { R.updateMatch(db, m.id, { state: "finished", end_time: now }); n++; } catch { /* best-effort */ } }
+    }
+  }
+  return n;
+}
+
 /** Winner-market tokens for the favourite/underdog sides of a linked match, by surname. */
 function winnerMarketFor(db: Database, matchId: string, playerName: string): { label: string; price: number; liquidity: string | null } | null {
   const toks = surnames(playerName);

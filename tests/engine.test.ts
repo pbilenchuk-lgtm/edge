@@ -740,6 +740,23 @@ test("pruneRemovedCategories: UNRESTRICTED tennis (null allow) keeps every liqui
     assert.ok(R.listCompetitions(db).some((c) => c.id === id), `${id} kept`);
 });
 
+test("pruneRemovedCategories: DOUBLES is always pruned, even when tennis is otherwise unrestricted", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertSport(db, "tennis", "Теннис");
+  const mk = (id: string) => {
+    R.upsertCompetition(db, { id, sport_id: "tennis", name: id, budget: 0, external_league: null, created_at: "t" });
+    return id;
+  };
+  mk("pm-atp-singles"); mk("pm-wta-doubles"); mk("pm-atp-mixed-doubles");
+  // unrestricted (null) — singles kept, but doubles are never tradeable → always gone.
+  const removed = R.pruneRemovedCategories(db, { keepSports: new Set(["football", "tennis"]), tennisSeriesAllow: null });
+  assert.equal(removed, 2, "both doubles comps pruned");
+  assert.ok(R.listCompetitions(db).some((c) => c.id === "pm-atp-singles"), "singles kept");
+  assert.ok(!R.listCompetitions(db).some((c) => c.id === "pm-wta-doubles"), "wta-doubles gone");
+  assert.ok(!R.listCompetitions(db).some((c) => c.id === "pm-atp-mixed-doubles"), "mixed-doubles gone");
+});
+
 test("pruneRemovedCategories retires a dropped sport ENTIRELY — funded comp + strategy + shares + bets", () => {
   const db = openDb(":memory:");
   seedDatabase(db);

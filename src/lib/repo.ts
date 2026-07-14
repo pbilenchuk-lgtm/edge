@@ -765,10 +765,12 @@ export function pruneRemovedCategories(db: Database, opts: { keepSports: Set<str
     if (c.id === `pm-${c.sport_id}`) doomed = true;                      // seriesless «… · прочее» catch-all
     else if (c.sport_id === "tennis") {
       const slug = c.id.slice(3);                                        // pm-<slug>
-      // Series filter applies ONLY when a whitelist is set. null = unrestricted (keep
-      // every liquid tennis series) — else an empty/absent allow-list would wrongly
-      // doom EVERY tennis category and the display-only tennis would vanish next cycle.
-      if (opts.tennisSeriesAllow && !opts.tennisSeriesAllow.has(slug)) doomed = true;
+      // Doubles are out of scope entirely (env-independent) — always prune.
+      if (/doubles/.test(slug)) doomed = true;
+      // Else the series filter applies ONLY when a whitelist is set. null = unrestricted
+      // (keep every liquid tennis series) — an empty/absent allow-list must NOT doom
+      // every tennis category (that's how display-only tennis would vanish next cycle).
+      else if (opts.tennisSeriesAllow && !opts.tennisSeriesAllow.has(slug)) doomed = true;
     }
     else if (c.sport_id === "football" && c.external_league == null) doomed = true; // no ESPN live coverage → not tradeable
     if (!doomed || c.budget > 0) continue;                               // funded → keep
