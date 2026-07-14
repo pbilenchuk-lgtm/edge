@@ -198,7 +198,7 @@ function stratOverall(competitions: any[], matchDb: any, stratId: string, sportI
   const avgRoi = roiList.length ? roiList.reduce((a, b) => a + b, 0) / roiList.length : 0;
   return { avgRoi, pnl: sumPnl, budget: sumBudget, active: roiList.length };
 }
-function collectPortfolio(competitions: any[], matchDb: any, catalog: any[], compBudget: any, shares: any) {
+function collectPortfolio(competitions: any[], matchDb: any, catalog: any[]) {
   const positions: any[] = [];
   for (const comp of competitions) {
     for (const mid of comp.matches) {
@@ -212,7 +212,11 @@ function collectPortfolio(competitions: any[], matchDb: any, catalog: any[], com
       const when = m.state === "live" ? (m.minute != null ? `${m.minute}'` : "LIVE") : "предматч";
       for (const st of catalog) {
         if (st.sport !== comp.sport) continue;
-        if ((shares[comp.id]?.[st.id] || 0) <= 0 || (compBudget[comp.id] || 0) <= 0) continue;
+        // NO budget/share gate here: an OPEN position is real committed capital — it is exactly
+        // what the top bar counts as «Заинвестировано» — so it MUST show even when the comp is
+        // structurally budget-0 (tennis is funded by the tennis loop, not the comp budget) or the
+        // strategy was later de-funded (share→0). Hiding live exposure was the bug: invested $55 up
+        // top, «0 открытых позиций» here. (collectPortfolio only ever pushes open bets, below.)
         for (const b of betItems(m.bets?.[st.id])) {
           if (b.status !== "open") continue;
           const stake = b.stake ?? 0;
@@ -738,7 +742,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
           riskProfiles={riskProfiles} setRiskProfiles={setRiskProfiles}
           analysis={analysis} setAnalysis={setAnalysis} onGoModels={() => setScreen("models")} />
       ) : screen === "portfolio" ? (
-        <PortfolioScreen open={collectPortfolio(COMPETITIONS, matchDb, catalog, compBudget, shares)} closed={collectClosed(COMPETITIONS, matchDb, catalog)} onGoMatches={() => setScreen("matches")} />
+        <PortfolioScreen open={collectPortfolio(COMPETITIONS, matchDb, catalog)} closed={collectClosed(COMPETITIONS, matchDb, catalog)} onGoMatches={() => setScreen("matches")} />
       ) : screen === "feed" ? (
         <FeedScreen feed={EVENT_FEED} />
       ) : screen === "metrics" ? (
