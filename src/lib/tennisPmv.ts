@@ -21,7 +21,7 @@ import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { sizePrematch } from "./strategist.js";
 import { getProfileConfig, RISK_PROFILE_DEFS } from "./riskConfig.js";
-import { tennisMoneyline, propFamily, detectTennisEvents, type PropFamily } from "./tennisScout.js";
+import { tennisMoneyline, propFamily, detectTennisEvents, tennisTourOf, type PropFamily } from "./tennisScout.js";
 import { tennisTheo, baseHoldFor, matchDistribution, BASE_HOLD, type TennisTheo } from "./tennisMarkov.js";
 
 export const STRAT_PMV_DESC = `# ТЕННИС — PMV (консистентность пропов, v1, БЕЗ LLM)
@@ -144,13 +144,9 @@ export interface PmvMatchScan { matchId: string; players: { p1: string; p2: stri
 // PMV scope: ATP/WTA SINGLES only (the Gate-0.1 build verdict was measured on pm-atp+pm-wta; base_hold
 // constants exist only for ATP/WTA; ITF/Challenger have different hold rates + thinner books). Returns
 // the tour for an in-scope comp, or null to skip. Doubles are excluded (a different chain entirely).
-export function pmvTour(c: { id: string; name: string; external_league?: string | null }): "atp" | "wta" | null {
-  const hay = `${c.id} ${c.name} ${c.external_league ?? ""}`.toLowerCase();
-  if (/doubles|itf|challenger/.test(hay)) return null;
-  if (/\bwta\b/.test(hay)) return "wta";
-  if (/\batp\b/.test(hay)) return "atp";
-  return null;
-}
+// Single source of truth is tennisScout.tennisTourOf (shared with Overreaction + Set-Value); kept
+// as pmvTour here so PMV's callers/tests read unchanged.
+export const pmvTour = tennisTourOf;
 
 const surfaceOf = (tournament: string | null): "hard" | "clay" | "grass" | null => {
   const t = (tournament ?? "").toLowerCase();

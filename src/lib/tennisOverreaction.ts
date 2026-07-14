@@ -113,7 +113,7 @@ export const STRAT_TENNIS_OVR_LIVE = `# [ОКНО: LIVE] ТЕННИС — OVERRE
 
 ## ЖЕЛЕЗНАЯ ГРАНИЦА ВХОДА (нарушать нельзя)
 Вход разрешён ТОЛЬКО как исполнение заряженного триггера, у которого ОДНОВРЕМЕННО:
-(1) сломали ФАВОРИТА (не андердога), (2) в окне триггера (ранний брейк / после проигранного сета 1),
+(1) сломали ФАВОРИТА (не андердога), (2) в окне триггера (РАННИЙ брейк: сет 1 / начало сета 2 без проигранного сета — «проигранный сет 1» это Set-Value, не сюда),
 (3) цена winner фаворита дошла до buyback_target. Нет — входов НЕТ. open_new вне триггера запрещён.
 
 ## ФИЛЬТР real_shift (главное суждение — тут ты и нужен)
@@ -134,6 +134,6 @@ thesis_stop: второй брейк подряд (фаворит реально
   "break_context": { "broken": "first|second", "set": , "fav_sets_lost": , "fav_price_cents": },
   "real_shift_check": { "verdict": "overreaction|real_shift", "reason": "чем набран брейк" },
   "actions": [ { "market": , "action": "open_new|add|reduce|close|hold", "side": , "price": , "size_pct": ,
-                 "reason": , "armed_trigger": "early_break|lost_first_set — чем выполнены side/window/price" } ],
+                 "reason": , "armed_trigger": "early_break — чем выполнены side/window/price" } ],
   "notes": "" }
 \`\`\``;

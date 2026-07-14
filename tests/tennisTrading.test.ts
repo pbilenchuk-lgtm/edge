@@ -5,8 +5,8 @@ import * as R from "../src/lib/repo.js";
 import { resolveTennisWinner } from "../src/lib/settlement.js";
 import { serializeEntryMeta } from "../src/lib/betMeta.js";
 import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick, tennisTradingTick, tennisEntryMeta } from "../src/lib/tennisTrading.js";
-import { migrateTennisStrategy } from "../src/lib/seed.js";
-import { buildTennisCalibrationReport } from "../src/lib/tennisScout.js";
+import { migrateTennisStrategy, migrateTennisSetValueStrategy } from "../src/lib/seed.js";
+import { buildTennisCalibrationReport, tennisTourOf } from "../src/lib/tennisScout.js";
 import { buildTennisFunnel } from "../src/lib/tennisTrading.js";
 import { advanceClocks } from "../src/lib/lifecycle.js";
 
@@ -31,16 +31,19 @@ test("migrateTennisStrategy: the tennis_overreaction strategy is seeded on boot 
   assert.ok((s!.prompt_live ?? "").length > 0, "has a live prompt");
 });
 
-function seedTennisMatch(db: ReturnType<typeof openDb>, opts: { p1: string; p2: string; p1liq?: number; p2liq?: number; p1price?: number; p2price?: number }) {
+function seedTennisMatch(db: ReturnType<typeof openDb>, opts: { p1: string; p2: string; p1liq?: number; p2liq?: number; p1price?: number; p2price?: number; compId?: string; compName?: string }) {
   migrateTennisStrategy(db); // FK target for tennis bets
+  migrateTennisSetValueStrategy(db); // FK target for cross-strategy tests
   R.upsertSport(db, "tennis", "Теннис");
-  R.upsertCompetition(db, { id: "pm-atp", sport_id: "tennis", name: "ATP", budget: 0, external_league: null, created_at: "t" });
+  const compId = opts.compId ?? "pm-atp";
+  const compName = opts.compName ?? "ATP";
+  R.upsertCompetition(db, { id: compId, sport_id: "tennis", name: compName, budget: 0, external_league: null, created_at: "t" });
   const mid = R.uid();
-  R.insertMatch(db, { id: mid, competition_id: "pm-atp", home: opts.p1, away: opts.p2, state: "live", lineup_out: true, kickoff_at: "2026-07-14T09:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMatch(db, { id: mid, competition_id: compId, home: opts.p1, away: opts.p2, state: "live", lineup_out: true, kickoff_at: "2026-07-14T09:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   // ONE moneyline market ("Tournament: A vs B", stored price = P(first-named player)); resolved
   // by structure (never a prop). The book is a single gate — thin either side thins the moneyline.
   const book = Math.min(opts.p1liq ?? 5000, opts.p2liq ?? 5000);
-  R.insertMarket(db, { id: R.uid(), match_id: mid, label: `ATP: ${opts.p1} vs ${opts.p2}`, price: opts.p1price ?? 80, ai_prob: null, liquidity: String(book), external_ref: "t1", snapshot_at: "t", is_closing: false });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: `${compName}: ${opts.p1} vs ${opts.p2}`, price: opts.p1price ?? 80, ai_prob: null, liquidity: String(book), external_ref: "t1", snapshot_at: "t", is_closing: false });
   return mid;
 }
 
@@ -386,6 +389,61 @@ test("tennisFinalResult: a WALKOVER (pre-start withdrawal) is VOID, not an advan
   assert.equal(fin.finished, true);
   assert.equal(fin.canceled, true, "walkover → void (50-50), even though a winner is named");
   assert.equal(fin.advancing, null);
+});
+
+test("tennisTourOf: ATP/WTA singles in scope; ITF / Challenger / doubles out (shared by every tennis strategy)", () => {
+  assert.equal(tennisTourOf({ id: "pm-atp", name: "ATP" }), "atp");
+  assert.equal(tennisTourOf({ id: "pm-wta", name: "WTA" }), "wta");
+  assert.equal(tennisTourOf({ id: "pm-itf", name: "ITF Sao Paulo" }), null, "ITF out of scope");
+  assert.equal(tennisTourOf({ id: "x", name: "ATP Challenger Lima" }), null, "Challenger out of scope");
+  assert.equal(tennisTourOf({ id: "pm-atp", name: "ATP Doubles" }), null, "doubles out of scope");
+  assert.equal(tennisTourOf({ id: "x", name: "Some Exhibition" }), null, "unknown tour → skip");
+});
+
+test("tennisTradingTick: an ITF match is NOT traded (tour scope — favourite-reversion thesis invalid there)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "I. Barrera", p2: "M. Reasco", p1price: 80, p2price: 20, compId: "pm-itf", compName: "ITF Sao Paulo" });
+  // A textbook favourite-broken-in-set-1 setup — the ONLY reason it doesn't trade is the ITF scope gate.
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 50, setNum: 1 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
+  const fetchImpl = (async () => { throw new Error("LLM must not be reached for an out-of-scope ITF match"); }) as unknown as typeof fetch;
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl });
+  assert.equal(opened, 0, "ITF is out of scope → no entry");
+  assert.equal(R.betsForMatch(db, mid, "tennis_overreaction").length, 0, "no bet created for the ITF match");
+});
+
+test("tennisTradingTick BUG-1 flip: after the pre-match favourite loses set 1, the opponent's set-2 break is an UNDERDOG break (no favourite flip)", () => {
+  const db = openDb(":memory:");
+  // Pre-match favourite = FIRST (67¢). First then LOSES set 1; the market flips SECOND to 69¢.
+  const mid = seedTennisMatch(db, { p1: "I. Barrera", p2: "M. Reasco", p1price: 67, p2price: 33 });
+  const base = { provider: "apitennis", p1: "I. Barrera", p2: "M. Reasco", tournament: "ATP Granby", event_type: "ATP Singles", live: 1 as const, game_points: null, pm_match_id: mid, pm_mid_cents: null, raw: "{}" };
+  // START snapshot (set 1): pm_p1=67 → startPrices anchors the favourite to FIRST (the pre-match favourite).
+  R.insertTennisSnapshot(db, { ...base, event_key: "F", batch_at: "2026-07-14T10:00:00Z", status: "Set 1", sets_p1: 0, sets_p2: 0, set_num: 1, games_p1: 2, games_p2: 1, server: "first", pm_p1_cents: 67, pm_p2_cents: 33 });
+  // Set 2: FIRST lost set 1 (sets 0-1); SECOND is now the market-favourite (69¢), serving at 3-3…
+  R.insertTennisSnapshot(db, { ...base, event_key: "F", batch_at: "2026-07-14T10:30:00Z", status: "Set 2", sets_p1: 0, sets_p2: 1, set_num: 2, games_p1: 3, games_p2: 3, server: "second", pm_p1_cents: 31, pm_p2_cents: 69 });
+  // …and SECOND's serve is broken (game to first → 4-3, server flips to first). br.server = second.
+  R.insertTennisSnapshot(db, { ...base, event_key: "F", batch_at: "2026-07-14T10:31:00Z", status: "Set 2", sets_p1: 0, sets_p2: 1, set_num: 2, games_p1: 4, games_p2: 3, server: "first", pm_p1_cents: 38, pm_p2_cents: 62 });
+  const f = buildTennisFunnel(db);
+  assert.equal(f.withFavourite, 1, "favourite still identified (first, from the START price — not the flipped current price)");
+  assert.equal(f.favBreak, 0, "the broken side (second, the set-1 WINNER) is the underdog — NOT a favourite buyback");
+  assert.equal(f.gatePass, 0, "no phantom buyback armed on the flip");
+  assert.equal(f.perMatch[0].stage, "underdog_broken");
+});
+
+test("tennisTradingTick BUG-3: cross-strategy block is symmetric — Overreaction does NOT stack on an open Set-Value position", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20 });
+  // Set-Value already holds an open position on EACH profile (favourite bought back after losing set 1).
+  for (const p of ["aggressive", "medium", "conservative"]) {
+    R.insertBet(db, { id: "sv-" + p, match_id: mid, strategy_id: "tennis_set_value", risk_profile_id: p, market_label: "Aleksandar Vukic", status: "open", proposed_price: 39, entry_price: 39, current_price: 39, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "set-value", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: null, code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+  }
+  // A fresh favourite break that WOULD arm Overreaction if the cross-strategy block were absent.
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 50, setNum: 1 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
+  const fetchImpl = (async () => { throw new Error("LLM must not be reached — a Set-Value hold should block Overreaction"); }) as unknown as typeof fetch;
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl });
+  assert.equal(opened, 0, "every profile holds a Set-Value position → Overreaction is blocked (no opposite-side double exposure)");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => /blocked_second_buyback/.test(l.text)), "the cross-strategy block is logged");
 });
 
 test("settleTennisBets: a retirement resolves to the advancing (non-retiring) player", () => {

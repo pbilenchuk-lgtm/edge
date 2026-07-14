@@ -17,7 +17,7 @@ import { settleBet, resolveTennisWinner } from "./settlement.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { chargeTennisTriggers, tennisReassessShouldCall, type TennisCharge } from "./tennisOverreaction.js";
 import { SET_VALUE_STRATEGY, SET_VALUE_ARMED, SET_VALUE_EPOCH, setValueGate } from "./tennisSetValue.js";
-import { detectBreaks, detectTennisEvents, tennisMoneyline } from "./tennisScout.js";
+import { detectBreaks, detectTennisEvents, tennisMoneyline, tennisTourOf } from "./tennisScout.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -301,8 +301,9 @@ export function buildTennisFunnel(db: Database): TennisFunnel {
     const row = (stage: string, note = ""): void => { f.perMatch.push({ match: label, comp, stage, note }); };
     const last = snaps[snaps.length - 1];
     const brF = detectBreaks(snaps).slice(-1)[0];
-    // Same as the tick: identify the favourite off the PRE-BREAK price, so a panic doesn't read as no_favourite.
-    const charge = chargeTennisMatch(db, m.id, { p1: last.p1 ?? "", p2: last.p2 ?? "" }, brF ? prePricesBefore(db, m.id, brF.batchAt) : undefined);
+    // Same as the tick: identify the favourite off the MATCH-START (pre-match) price, so neither a
+    // live panic nor a completed set flips who reads as favourite.
+    const charge = chargeTennisMatch(db, m.id, { p1: last.p1 ?? "", p2: last.p2 ?? "" }, startPrices(db, m.id));
     if (!charge.favSide) { row("no_favourite", "обе стороны > порога андердога"); continue; }
     f.withFavourite++;
     if (!charge.tradeable) { row("thin_book", charge.bookNote); continue; }
@@ -402,12 +403,6 @@ export function chargeTennisMatch(db: Database, matchId: string, players: { p1: 
   return { ...charge, matchId, tradeable, bookNote: `манилайн ${ml ? `«${ml.label}»` : "НЕ НАЙДЕН"} · книга $${Math.round(liq)} (порог $${TENNIS_MIN_BOOK_USD})` };
 }
 
-/** Both sides' winner price just BEFORE a break (the pre-panic favourite reference for charge). */
-function prePricesBefore(db: Database, matchId: string, breakBatch: string): { p1: number | null; p2: number | null } {
-  const r = db.prepare(`SELECT pm_p1_cents,pm_p2_cents FROM tennis_snapshots WHERE pm_match_id=? AND batch_at < ? AND pm_p1_cents IS NOT NULL ORDER BY batch_at DESC LIMIT 1`).get(matchId, breakBatch) as { pm_p1_cents?: number; pm_p2_cents?: number } | undefined;
-  return { p1: r?.pm_p1_cents ?? null, p2: r?.pm_p2_cents ?? null };
-}
-
 /** Build the decision-time entry_meta for a tennis paper bet. */
 export function tennisEntryMeta(o: { favPrice: number; prePrice: number; edge: number; kelly: number; stake: number; thinnessUsd: number | null; setNum: number }): BetEntryMeta {
   return {
@@ -482,9 +477,10 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
   const shadowCfg = loadShadowConfig(db, deps.env);
   let opened = 0;
 
-  const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, m })));
-  for (const { comp, m } of tennisMatches) {
+  const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, cObj: c, m })));
+  for (const { comp, cObj, m } of tennisMatches) {
     if (m.state === "finished") continue;
+    if (!tennisTourOf(cObj)) continue; // ATP/WTA singles only — ITF/Challenger/doubles out of scope (favourite-reversion thesis invalid there)
     // Latest scout snapshots for this mapped match.
     const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(m.id) as R.TennisSnapshotRow[];
     if (snaps.length < 2) continue;
@@ -493,8 +489,13 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     const br = breaks[breaks.length - 1]; // most recent confirmed break
     if (!br) continue;
     if (R.metaGet(db, ACTED + m.id + ":" + br.batchAt)) continue; // already acted on this break
-    // Charge with the PRE-BREAK price for favourite ID (the panic must not erase the favourite).
-    const charge = chargeTennisMatch(db, m.id, players, prePricesBefore(db, m.id, br.batchAt));
+    // Favourite ID off the MATCH-START (pre-match) price — NOT a per-break price. A per-break
+    // reference re-identifies the favourite every break, so after the PRE-MATCH favourite loses a
+    // set the current set-leader (the pre-match underdog) gets mislabelled "the favourite" and
+    // bought back against its inflated set-lead price — a phantom edge (the −$93 Barrera flip).
+    // startPrices is the clean pre-panic anchor Set-Value already uses; the recovery target below
+    // still reads the true pre-break price via prePriceBefore.
+    const charge = chargeTennisMatch(db, m.id, players, startPrices(db, m.id));
     if (!charge.favSide || !charge.tradeable) continue; // no favourite / thin book → skip
     const brSnap = snaps.find((s) => s.batch_at === br.batchAt) ?? snaps[snaps.length - 1];
     const favSetsLost = charge.favSide === "first" ? (brSnap.sets_p2 ?? 0) : (brSnap.sets_p1 ?? 0);
@@ -515,11 +516,15 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     // so they're compared like the football grid. Pre-LLM: only skip the whole break if EVERY
     // profile already holds a buyback here (saves the call); otherwise ask ONCE, size per profile.
     const profiles = (() => { const ps = R.listRiskProfiles(db).map((p) => p.id); return ps.length ? ps : RISK_PROFILE_DEFS.map((d) => d.id); })();
-    const heldProfiles = new Set(R.betsForMatch(db, m.id, TENNIS_STRATEGY).filter((b) => b.status === "open").map((b) => b.risk_profile_id));
+    // Cross-strategy one-position rule (symmetric with Set-Value): a profile holding ANY open tennis
+    // buyback on this match — Overreaction OR Set-Value — is not free. (Was TENNIS_STRATEGY-only, so
+    // Overreaction ignored a Set-Value hold and could take the OPPOSITE side of the same 2-outcome
+    // market = long both players, guaranteed vig bleed.)
+    const heldProfiles = new Set(R.betsForMatch(db, m.id).filter((b) => TENNIS_STRATEGIES.has(b.strategy_id) && b.status === "open").map((b) => b.risk_profile_id));
     const freeProfiles = profiles.filter((p) => !heldProfiles.has(p));
     if (!freeProfiles.length) {
       R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "blocked_second_buyback", now);
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `второй выкуп заблокирован — все профили уже держат позицию по матчу (blocked_second_buyback)`, created_at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `второй выкуп заблокирован — все профили уже держат теннисную позицию по матчу (blocked_second_buyback)`, created_at: now });
       continue;
     }
 
@@ -531,7 +536,7 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       assessment: { confidence: "средняя", short: "", verdict: "" },
       markets: [{ label: favName, priceCents: favMlPrice, aiProb: prePrice / 100, liquidity: ml.liquidity || null }],
       openPositions: [],
-      context: `БРЕЙК: сломали ${br.server === charge.favSide ? "ФАВОРИТА" : "андердога"} в сете ${br.setNum}, фаворит проиграл сетов: ${favSetsLost}. Цена фаворита ${favPrice}¢ (до брейка ~${prePrice}¢). Заряжен триггер ${favSetsLost >= 1 ? "lost_first_set" : "early_break"}. Реши: overreaction (выкупаем) или real_shift (воздерживаемся).`,
+      context: `БРЕЙК: сломали ${br.server === charge.favSide ? "ФАВОРИТА" : "андердога"} в сете ${br.setNum}, фаворит проиграл сетов: ${favSetsLost}. Цена фаворита ${favPrice}¢ (до брейка ~${prePrice}¢). Заряжен триггер early_break (ранний брейк, снапбек за минуты — «проигранный сет 1» это уже Set-Value, не сюда). Реши: overreaction (выкупаем) или real_shift (воздерживаемся).`,
     }, strat.model_live ?? strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
     R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "decided", now); // one shot per break
 
@@ -550,7 +555,10 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     for (const profile of freeProfiles) {
       const cfg = getProfileConfig(db, profile);
       const held = R.betsForMatch(db, m.id, TENNIS_STRATEGY).filter((b) => b.status === "open" && b.risk_profile_id === profile).reduce((s, b) => s + (b.stake ?? 0), 0);
-      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: true });
+      // allowLargeEdge OFF: unlike a football near-resolved market (where a huge edge is genuine), a
+      // huge tennis moneyline edge is the phantom signature — the absurd_edge_block (>25%) is a real
+      // backstop here (defense-in-depth behind the pre-match favourite anchor). Legit snapbacks are 5-12%.
+      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg });
       if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `[${profile}] overreaction подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
       const meta = tennisEntryMeta({ favPrice: entryCents, prePrice, edge: r.edge, kelly: r.kellyFraction, stake: r.stake, thinnessUsd: ml.liquidity || null, setNum: br.setNum });
       const betId = R.uid();
@@ -615,9 +623,10 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
   const shadowCfg = loadShadowConfig(db, deps.env);
   let opened = 0;
 
-  const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, m })));
-  for (const { comp, m } of tennisMatches) {
+  const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, cObj: c, m })));
+  for (const { comp, cObj, m } of tennisMatches) {
     if (m.state === "finished") continue;
+    if (!tennisTourOf(cObj)) continue; // ATP/WTA singles only — ITF/Challenger/doubles out of scope (competitive-comeback thesis invalid there)
     if (R.metaGet(db, SV_ACTED + m.id)) continue; // one Set-Value decision per match
     const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(m.id) as R.TennisSnapshotRow[];
     if (snaps.length < 2) continue;
@@ -668,7 +677,10 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
     for (const profile of freeProfiles) {
       const cfg = getProfileConfig(db, profile);
       const held = R.betsForMatch(db, m.id, SET_VALUE_STRATEGY).filter((b) => b.status === "open" && b.risk_profile_id === profile).reduce((s, b) => s + (b.stake ?? 0), 0);
-      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: true });
+      // allowLargeEdge OFF (same phantom-guard reasoning as Overreaction): a Set-Value edge is
+      // comebackProb(0.5) − price, ≤20% inside the 30-45¢ band, so the 25% absurd_edge_block never
+      // catches a legitimate entry — it only backstops a bad-quote / mislabelled-favourite artifact.
+      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg });
       if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `[${profile}] конкурентный сет подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
       const meta = tennisSetValueEntryMeta({ favPrice: entryCents, edge: r.edge, kelly: r.kellyFraction, stake: r.stake, thinnessUsd: ml.liquidity || null, setNum: last.set_num ?? 2 });
       const betId = R.uid();

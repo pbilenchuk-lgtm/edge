@@ -45,7 +45,23 @@ function liveDataStatus(db: Database, matchId: string): { ok: boolean; via: stri
   const m = R.getMatch(db, matchId);
   const live = R.getMatchLive(db, matchId);
   const realEvents = R.eventsForMatch(db, matchId).filter((e) => e.type !== "stats" && e.type !== "other");
-  const football = R.listCompetitions(db).some((c) => c.id === m?.competition_id && c.sport_id === "football");
+  const sportId = R.listCompetitions(db).find((c) => c.id === m?.competition_id)?.sport_id;
+  const football = sportId === "football";
+  // TENNIS: there is NO ESPN/StatPal match_live row and no events table row — liveness lives
+  // ENTIRELY in the scout (tennis_snapshots). Reading the football provider path here would
+  // falsely report "нет live-данных" for a tennis match the scout is actively feeding (and did
+  // feed the trades). Consult the scout directly (local, to avoid a circular import).
+  if (sportId === "tennis") {
+    const snap = db.prepare(`SELECT live, batch_at, set_num, games_p1, games_p2 FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(matchId) as { live?: number; batch_at?: string; set_num?: number; games_p1?: number; games_p2?: number } | undefined;
+    const total = (db.prepare(`SELECT COUNT(*) n FROM tennis_snapshots WHERE pm_match_id=?`).get(matchId) as { n?: number } | undefined)?.n ?? 0;
+    if (!snap) return { ok: false, via: "теннис: скаут не привязал матч (0 снапшотов tennis_snapshots) — маппинг имён не сошёлся или скаут не видит матч live" };
+    const ageMin = Math.round((Date.now() - (Date.parse(snap.batch_at ?? "") || 0)) / 60000);
+    const fresh = ageMin <= 15; // mirrors TENNIS_SCOUT_STALE_MIN
+    const score = `сет ${snap.set_num ?? "?"}, геймы ${snap.games_p1 ?? "?"}-${snap.games_p2 ?? "?"}`;
+    if (snap.live === 1 && fresh) return { ok: true, via: `теннис-скаут live (${total} снапшотов, свежий ${ageMin}м назад · ${score})` };
+    if (snap.live === 1) return { ok: false, via: `теннис-скаут: последний снапшот live, но устарел (${ageMin}м > 15м) — скаут молчит (крон/скаут простаивал)` };
+    return { ok: false, via: `теннис-скаут: последний снапшот не live (${total} снапшотов, ${ageMin}м назад · ${score})` };
+  }
   if (m?.state === "live") {
     // Live: require real delivery — an event, or a real ADVANCING minute. NOT
     // match_live.stats (ESPN returns a zeros stats object even for a "pre" fixture).
@@ -78,8 +94,9 @@ export function buildMatchLog(db: Database, matchId: string): string {
   h("Провайдер и live-данные (диагноз входа)");
   const lds = liveDataStatus(db, m.id);
   L.push(`- **hasLiveData: ${lds.ok ? "ДА" : "НЕТ"}** — ${lds.via}`);
+  const isTennis = comp?.sport_id === "tennis";
   const live = R.getMatchLive(db, m.id);
-  L.push(`- match_live: ${live ? `есть (espn_event_id=\`${live.espn_event_id ?? "null"}\`, league=\`${live.league ?? "null"}\`, обновлён ${live.updated_at})` : "**НЕТ** — ни ESPN, ни StatPal не привязали эту фикстуру (проверь совпадение имён команд и покрытие StatPal)"}`);
+  L.push(`- match_live: ${live ? `есть (espn_event_id=\`${live.espn_event_id ?? "null"}\`, league=\`${live.league ?? "null"}\`, обновлён ${live.updated_at})` : isTennis ? "**н/д для тенниса** — теннис не использует match_live (ESPN/StatPal); live идёт из скаута (tennis_snapshots), см. hasLiveData выше" : "**НЕТ** — ни ESPN, ни StatPal не привязали эту фикстуру (проверь совпадение имён команд и покрытие StatPal)"}`);
   const xg = R.latestLiveXg(db, m.id);
   L.push(`- live xG: ${xg ? `дом ${xg.home} – ${xg.away} гости (${xg.provider}${xg.minute != null ? `, ${xg.minute}'` : ""})` : "нет"}`);
   L.push(`- provider-refs: ${["sportmonks", "thestatsapi", "statpal"].map((p) => { const r = R.getProviderRef(db, m.id, p); return `${p}=${r?.provider_ref ?? "—"}`; }).join(" · ")}`);
@@ -215,15 +232,25 @@ export function buildMatchLog(db: Database, matchId: string): string {
   for (const e of ev) L.push(`- ${e.minute ?? "?"}' ${e.type}${e.team ? " " + e.team : ""}${e.text ? ` — ${e.text}` : ""}`);
 
   // ── Provider snapshots (raw-capture layer: was StatPal/Sportmonks queried?) ──
-  h(`Снимки провайдеров (${R.snapshotCount(db, m.id)} шт — сырьё StatPal/Sportmonks/TheStatsAPI/Polymarket)`);
-  const snaps = R.snapshotMetaForMatch(db, m.id, 60);
-  const byProv: Record<string, number> = {};
-  for (const s of snaps) byProv[s.provider] = (byProv[s.provider] ?? 0) + 1;
-  L.push(`- по провайдерам: ${Object.entries(byProv).map(([p, n]) => `${p}=${n}`).join(" · ") || "нет"}`);
-  for (const s of snaps.slice(0, 24)) {
-    let extract = "";
-    try { extract = s.extracted ? ` · extracted: ${JSON.stringify(JSON.parse(s.extracted)).slice(0, 300)}` : ""; } catch { /* ignore */ }
-    L.push(`- ${s.batch_at} · ${s.provider} · ${s.phase} · ok=${s.ok} http=${s.http_status ?? "—"} lat=${s.latency_ms ?? "—"}ms${s.minute != null ? ` ${s.minute}'` : ""}${extract}`);
+  // Tennis app matches capture into tennis_snapshots (the scout), NOT provider_snapshots — show
+  // the scout's raw so a tennis match doesn't read "0 снапшотов" while the scout drove the trades.
+  if (isTennis) {
+    const tCount = (db.prepare(`SELECT COUNT(*) n FROM tennis_snapshots WHERE pm_match_id=?`).get(m.id) as { n?: number } | undefined)?.n ?? 0;
+    h(`Снимки скаута тенниса (${tCount} шт — tennis_snapshots · api-tennis + Polymarket)`);
+    const tSnaps = db.prepare(`SELECT batch_at, live, status, set_num, games_p1, games_p2, sets_p1, sets_p2, pm_p1_cents, pm_p2_cents FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 24`).all(m.id) as Array<{ batch_at: string; live?: number; status?: string; set_num?: number; games_p1?: number; games_p2?: number; sets_p1?: number; sets_p2?: number; pm_p1_cents?: number; pm_p2_cents?: number }>;
+    if (!tSnaps.length) L.push("- нет снапшотов скаута (матч не привязан / скаут не видит live)");
+    for (const s of tSnaps) L.push(`- ${s.batch_at} · live=${s.live ?? "?"}${s.status ? ` ${s.status}` : ""} · сеты ${s.sets_p1 ?? "?"}-${s.sets_p2 ?? "?"} · сет ${s.set_num ?? "?"} геймы ${s.games_p1 ?? "?"}-${s.games_p2 ?? "?"} · PM ${s.pm_p1_cents ?? "—"}¢/${s.pm_p2_cents ?? "—"}¢`);
+  } else {
+    h(`Снимки провайдеров (${R.snapshotCount(db, m.id)} шт — сырьё StatPal/Sportmonks/TheStatsAPI/Polymarket)`);
+    const snaps = R.snapshotMetaForMatch(db, m.id, 60);
+    const byProv: Record<string, number> = {};
+    for (const s of snaps) byProv[s.provider] = (byProv[s.provider] ?? 0) + 1;
+    L.push(`- по провайдерам: ${Object.entries(byProv).map(([p, n]) => `${p}=${n}`).join(" · ") || "нет"}`);
+    for (const s of snaps.slice(0, 24)) {
+      let extract = "";
+      try { extract = s.extracted ? ` · extracted: ${JSON.stringify(JSON.parse(s.extracted)).slice(0, 300)}` : ""; } catch { /* ignore */ }
+      L.push(`- ${s.batch_at} · ${s.provider} · ${s.phase} · ok=${s.ok} http=${s.http_status ?? "—"} lat=${s.latency_ms ?? "—"}ms${s.minute != null ? ` ${s.minute}'` : ""}${extract}`);
+    }
   }
 
   // ── Recent cron log (ИИ-сбои count) ──

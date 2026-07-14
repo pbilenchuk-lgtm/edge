@@ -21,6 +21,20 @@ import { effectiveCodeVersion } from "./codeEpoch.js";
 
 const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 
+// TOUR SCOPE (single source of truth, shared by every tennis strategy): ATP/WTA SINGLES only.
+// ITF / Challenger have different hold rates + thinner, jumpier books, and doubles is a different
+// chain entirely — the favourite-mean-reversion and competitive-set theses (Overreaction, Set-Value)
+// and the base_hold constants (PMV) are all measured/valid ONLY on ATP/WTA singles. A comp outside
+// scope returns null → the strategy skips it. Kept in the scout (leaf) so trading + PMV share it
+// without an import cycle.
+export function tennisTourOf(c: { id: string; name: string; external_league?: string | null }): "atp" | "wta" | null {
+  const hay = `${c.id} ${c.name} ${c.external_league ?? ""}`.toLowerCase();
+  if (/doubles|itf|challenger/.test(hay)) return null;
+  if (/\bwta\b/.test(hay)) return "wta";
+  if (/\batp\b/.test(hay)) return "atp";
+  return null;
+}
+
 export interface TennisConfig { enabled: boolean; key: string; base: string; timeoutMs: number }
 export function loadTennisConfig(env: Record<string, string | undefined> = process.env): TennisConfig {
   const key = (env.API_TENNIS_KEY ?? env.APITENNIS_KEY ?? "").trim();
