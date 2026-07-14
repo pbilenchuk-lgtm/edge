@@ -366,6 +366,14 @@ export function buildTennisBreakReport(db: Database): TennisBreakReport {
   };
 }
 
+/** Per-break-mark CSV — inspect the actual pre/floor/panic per break (is the panic real?). */
+export function tennisBreakMarksCsv(db: Database): string {
+  const esc = (v: unknown) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const head = ["t_event", "players", "tournament", "event_type", "set_num", "broken_side", "broke_early", "match_id", "pre_cents", "floor_cents", "panic_cents", "t_floor_sec", "recovery_1", "recovery_2", "recovery_5", "window_quotes", "flags"];
+  const rows = R.listTennisBreakMarks(db).map((m) => [m.t_event, m.players, m.tournament, m.event_type, m.set_num, m.broken_side, m.broke_early, m.match_id, m.pre_cents, m.floor_cents, m.panic_cents, m.t_floor_sec, m.recovery_1, m.recovery_2, m.recovery_5, m.window_quotes, m.confidence_flags].map(esc).join(","));
+  return [head.join(","), ...rows].join("\n");
+}
+
 export function tennisScoutCsv(rep: TennisScoutReport): string {
   const esc = (v: unknown) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const head = ["event_key", "players", "tournament", "type", "snapshots", "median_cadence_sec", "breaks", "linked_polymarket", "gaps"];

@@ -13,8 +13,11 @@ export async function GET(req: Request) {
     const scout = await import("@/lib/tennisScout");
     const url = new URL(req.url);
     const format = url.searchParams.get("format") ?? "md";
-    // ?report=breaks → the §4 panic-calibration report (JSON); default = the provider scouting report.
-    if (url.searchParams.get("report") === "breaks") return NextResponse.json(scout.buildTennisBreakReport(getDb()));
+    // ?report=breaks → the §4 panic-calibration report; &format=csv → per-break-mark rows.
+    if (url.searchParams.get("report") === "breaks") {
+      if (format === "csv") return new NextResponse(scout.tennisBreakMarksCsv(getDb()), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="tennis-break-marks.csv"` } });
+      return NextResponse.json(scout.buildTennisBreakReport(getDb()));
+    }
     const rep = scout.buildTennisScoutReport(getDb());
     if (format === "json") return NextResponse.json(rep);
     if (format === "csv") return new NextResponse(scout.tennisScoutCsv(rep), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="tennis-scout-${new Date().toISOString().slice(0, 10)}.csv"` } });
