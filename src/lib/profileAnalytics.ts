@@ -81,7 +81,7 @@ export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
     const em: BetEntryMeta | null = parseEntryMeta(b.entry_meta);
     const phase: "prematch" | "live" = em?.phase ?? (b.entered_minute && /\d/.test(b.entered_minute) ? "live" : "prematch");
     if (filter.phase && phase !== filter.phase) continue;
-    const settled = b.status === "settled_won" || b.status === "settled_lost";
+    const settled = R.isSettled(b.status);
     const outcome: BetRec["outcome"] = !settled ? "open" : b.settled_by === "void" ? "void" : b.result === "won" ? "won" : "lost";
     const stake = b.stake ?? 0;
     const pnl = settled && b.payout != null ? Math.round((b.payout - stake) * 100) / 100 : null;

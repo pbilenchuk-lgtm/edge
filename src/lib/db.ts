@@ -222,6 +222,27 @@ export function initSchema(db: Database): void {
       db.exec("COMMIT");
     }
   } catch { try { db.exec("ROLLBACK"); } catch { /* ignore */ } }
+  // Same: add 'settled_void' to the bets.status CHECK (a VOID is settled-but-not-a-loss — single-source
+  // truth in the field, so no consumer miscounts a refund as a loss). Rebuilt from the table's ACTUAL
+  // DDL so every ALTER-added column is preserved; guarded to run only on the pre-void CHECK.
+  try {
+    const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='bets'").get() as { sql?: string } | undefined;
+    if (row?.sql && /CHECK/i.test(row.sql) && !/settled_void/i.test(row.sql)) {
+      const cols = (db.prepare("PRAGMA table_info(bets)").all() as { name: string }[]).map((c) => c.name).join(",");
+      const newDdl = row.sql
+        .replace(/CREATE TABLE (IF NOT EXISTS )?["'`]?bets["'`]?/i, "CREATE TABLE bets_new")
+        .replace("'settled_won','settled_lost'", "'settled_won','settled_lost','settled_void'");
+      db.exec("PRAGMA foreign_keys=OFF");
+      db.exec("BEGIN");
+      db.exec(newDdl);
+      db.exec(`INSERT INTO bets_new(${cols}) SELECT ${cols} FROM bets`);
+      db.exec("DROP TABLE bets");
+      db.exec("ALTER TABLE bets_new RENAME TO bets");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_bets_match_strat ON bets(match_id, strategy_id)");
+      db.exec("COMMIT");
+      db.exec("PRAGMA foreign_keys=ON");
+    }
+  } catch { try { db.exec("ROLLBACK"); db.exec("PRAGMA foreign_keys=ON"); } catch { /* ignore */ } }
   // Same: relax reassessments.trigger CHECK to admit the 'penalty' trigger (a
   // saved/missed penalty now fires a reassessment). Guarded: runs only on the old
   // penalty-less CHECK; preserves all rows.

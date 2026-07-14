@@ -726,7 +726,7 @@ export function competitionLiveObserved(db: Database, compId: string): boolean {
 export function competitionHasRealBets(db: Database, compId: string): boolean {
   return !!db.prepare(
     `SELECT 1 FROM bets b JOIN matches m ON b.match_id=m.id
-      WHERE m.competition_id=? AND b.status IN ('open','settled_won','settled_lost') LIMIT 1`,
+      WHERE m.competition_id=? AND b.status IN ('open','settled_won','settled_lost','settled_void') LIMIT 1`,
   ).get(compId);
 }
 /** Does this competition have any live (pct>0) strategy shares? A category the
@@ -878,8 +878,14 @@ export function clearProposedBets(db: Database, matchId: string): void {
 }
 export function settledBetsForStrategy(db: Database, strategyId: string): Bet[] {
   return db.prepare(
-    `SELECT * FROM bets WHERE strategy_id=? AND status IN ('settled_won','settled_lost')`,
+    `SELECT * FROM bets WHERE strategy_id=? AND status IN ('settled_won','settled_lost','settled_void')`,
   ).all(strategyId) as Bet[];
+}
+// Canonical "this bet reached a terminal state" test — the single source so no caller re-derives it
+// (and can't forget that a VOID is settled-but-not-a-loss). A loss-specific check must use
+// `status === "settled_lost"` directly; a stats/outcome check must exclude settled_void.
+export function isSettled(status: string): boolean {
+  return status === "settled_won" || status === "settled_lost" || status === "settled_void";
 }
 
 // ---------- reassessments / trade log ----------

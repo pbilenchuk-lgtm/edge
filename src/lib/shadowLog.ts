@@ -33,7 +33,7 @@ function deniedPnlOf(db: Database, e: R.ShadowEventRow): number {
   if (e.verdict === "allowed" || !e.bet_id) return 0;
   const bet = R.getBet(db, e.bet_id);
   if (!bet || bet.payout == null || bet.stake == null) return 0;
-  if (bet.status !== "settled_won" && bet.status !== "settled_lost") return 0;
+  if (!R.isSettled(bet.status)) return 0;
   const unfunded = e.size_requested > 0 ? (e.size_requested - e.size_reserved) / e.size_requested : 0;
   return (bet.payout - bet.stake) * unfunded;
 }

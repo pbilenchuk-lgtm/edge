@@ -156,7 +156,7 @@ export function buildMatchLog(db: Database, matchId: string): string {
     // and shadowAnalytics.missedPnl, which use the same weighting. Observe-only.
     const deniedPnl = round2([...blocked, ...trimmed].reduce((s, e) => {
       const bet = e.bet_id ? R.getBet(db, e.bet_id) : null;
-      const settled = bet && (bet.status === "settled_won" || bet.status === "settled_lost");
+      const settled = bet && R.isSettled(bet.status);
       if (!settled || bet!.payout == null || bet!.stake == null) return s;
       const unfunded = e.size_requested > 0 ? (e.size_requested - e.size_reserved) / e.size_requested : 0;
       return s + (bet!.payout - bet!.stake) * unfunded;

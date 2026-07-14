@@ -77,7 +77,7 @@ export function settleTennisBets(db: Database, deps: EngineDeps = {}): number {
     const won = resolveTennisWinner(b.market_label, fin.p1, fin.p2, fin.advancing, fin.canceled);
     if (won == null) {
       // Void: canceled/ambiguous → refund the stake, zero P&L (excluded from accuracy).
-      R.updateBet(db, b.id, { status: "settled_lost", result: null, payout: b.stake ?? 0, closing_price: b.current_price ?? b.entry_price ?? null, settled_at: now, settled_by: "void" });
+      R.updateBet(db, b.id, { status: "settled_void", result: null, payout: b.stake ?? 0, closing_price: b.current_price ?? b.entry_price ?? null, settled_at: now, settled_by: "void" });
     } else {
       const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, b.entry_price ?? null);
       R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price, settled_at: now });

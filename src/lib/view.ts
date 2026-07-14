@@ -255,14 +255,14 @@ export function buildAppData(db: Database, env = process.env): AppData {
       const settledTmp: Record<string, { view: MatchView["settledBets"][string][number]; at: string }[]> = {};
       const result: Record<string, number> = {};
       for (const b of allBets) {
-        if (b.status === "settled_won" || b.status === "settled_lost") {
+        if (R.isSettled(b.status)) {
           // How much of the position this close represents: a partial fixation
           // stamps «частичная фиксация NN%» into the rationale; a full early
           // close / resolution is 100%.
           const pctM = b.settled_by === "partial" ? /(\d+)\s*%/.exec(b.rationale ?? "") : null;
           const closedPct = pctM ? Number(pctM[1]) : 100;
           (settledTmp[b.strategy_id] ||= []).push({
-            view: { market: b.market_label, stake: b.stake ?? 0, result: b.result ?? "lost", payout: b.payout ?? 0, settledBy: b.settled_by ?? null, closedPct, at: warsawClock(b.settled_at), profileId: b.risk_profile_id ?? "medium" },
+            view: { market: b.market_label, stake: b.stake ?? 0, result: b.result ?? (b.settled_by === "void" ? "void" : "lost"), payout: b.payout ?? 0, settledBy: b.settled_by ?? null, closedPct, at: warsawClock(b.settled_at), profileId: b.risk_profile_id ?? "medium" },
             at: b.settled_at ?? "",
           });
           result[b.strategy_id] = (result[b.strategy_id] ?? 0) + ((b.payout ?? 0) - (b.stake ?? 0));
@@ -403,7 +403,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
       const ratio = entry > 0 ? cur / entry : 1;
       return { nowPnl: r2v(live * (ratio - 1)), posStatus: "open" };
     }
-    if (b.status === "settled_won" || b.status === "settled_lost") {
+    if (R.isSettled(b.status)) {
       const key = pKey(b);
       const children = (betsByMatch.get(b.match_id) ?? []).filter((c) => c.settled_by === "partial" && c.id !== b.id && pKey(c) === key);
       const s0 = (b.stake ?? 0) + children.reduce((s, c) => s + (c.stake ?? 0), 0);
@@ -496,7 +496,7 @@ function computeStrategyStats(
         const st = out[b.strategy_id];
         if (!st) continue;
         const open = b.status === "open";
-        const settled = b.status === "settled_won" || b.status === "settled_lost";
+        const settled = R.isSettled(b.status);
         if (!open && !settled) continue; // proposed / not_filled — not a prediction yet
         // A partial fixation ('partial') is a settled SLICE of a position whose
         // remaining part is still an open bet row — its money is real, but it is
@@ -549,7 +549,7 @@ function computeQualityExtras(matchById: Map<string, Match>, bets: Bet[], base: 
       if (!m) continue;
       let matchPnl = 0, matchT: string | null = null;
       for (const b of mbets) {
-        if (b.status !== "settled_won" && b.status !== "settled_lost") continue;
+        if (!R.isSettled(b.status)) continue;
         const stake = b.stake ?? 0, entry = b.entry_price ?? 0;
         const pnl = (b.payout ?? 0) - stake;
         matchPnl += pnl;

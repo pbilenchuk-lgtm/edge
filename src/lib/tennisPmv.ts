@@ -264,7 +264,7 @@ export function settleTennisPmvBets(db: Database, deps: EngineDeps = {}): number
     const won = resolveTennisProp(b.market_label, fs, { retired: fin.retired, canceled: fin.canceled, firstIsP1: ml ? ml.firstIsP1 : true });
     const entry = b.entry_price ?? 0;
     if (won == null) {
-      R.updateBet(db, b.id, { status: "settled_lost", result: null, payout: b.stake ?? 0, closing_price: b.current_price ?? entry ?? null, settled_at: now, settled_by: "void" });
+      R.updateBet(db, b.id, { status: "settled_void", result: null, payout: b.stake ?? 0, closing_price: b.current_price ?? entry ?? null, settled_at: now, settled_by: "void" });
     } else {
       const payout = won && entry > 0 ? Math.round((b.stake ?? 0) * (100 / entry) * 100) / 100 : 0;
       R.updateBet(db, b.id, { status: won ? "settled_won" : "settled_lost", result: won ? "won" : "lost", payout, closing_price: won ? 100 : 0, settled_at: now });

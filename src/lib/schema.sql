@@ -205,7 +205,7 @@ CREATE TABLE IF NOT EXISTS bets (
   risk_profile_id TEXT,           -- риск-профиль пары, которым размещена ставка
   market_label   TEXT NOT NULL,
   status         TEXT NOT NULL CHECK (status IN
-                   ('proposed','open','not_filled','settled_won','settled_lost')),
+                   ('proposed','open','not_filled','settled_won','settled_lost','settled_void')),
   proposed_price REAL,             -- цена на момент предложения (центы)
   entry_price    REAL,             -- ФАКТИЧЕСКАЯ цена входа (может != proposed)
   current_price  REAL,             -- текущая цена (mark-to-market)

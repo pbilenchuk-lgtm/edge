@@ -80,7 +80,7 @@ export function budgetPosition(db: Database, nowIso?: string): BudgetPosition {
     const s0 = (b.stake ?? 0) + childStake;                 // original stake = open/settled remainder + closed slices
     const r = s0 > 0 ? committed / s0 : 0;                  // bank commitment per $ of original stake
     ratioByBet.set(betId, r);
-    const parentSettled = b.status === "settled_won" || b.status === "settled_lost";
+    const parentSettled = R.isSettled(b.status);
     const slices = parentSettled ? [...children, b] : children; // an OPEN remainder is unrealised (counted via reserves)
     for (const s of slices) {
       const pnl = r * ((s.payout ?? 0) - (s.stake ?? 0));

@@ -655,7 +655,7 @@ export function strategyCompRealized(db: Database, competitionId: string, strate
   let sum = 0;
   for (const mt of R.listMatches(db, competitionId))
     for (const b of R.betsForMatch(db, mt.id, strategyId))
-      if ((b.status === "settled_won" || b.status === "settled_lost") && (profileId == null || (b.risk_profile_id ?? "medium") === profileId)) sum += (b.payout ?? 0) - (b.stake ?? 0);
+      if (R.isSettled(b.status) && (profileId == null || (b.risk_profile_id ?? "medium") === profileId)) sum += (b.payout ?? 0) - (b.stake ?? 0);
   return sum;
 }
 // ============================================================

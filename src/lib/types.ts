@@ -9,7 +9,11 @@ export type BetStatus =
   | "open"
   | "not_filled"
   | "settled_won"
-  | "settled_lost";
+  | "settled_lost"
+  // A VOID (refund) — canceled / walkover / exact-line push / unresolvable-by-us / a strategy reset.
+  // NOT a loss: single-source truth in the STATUS field, so no consumer can miscount a refund as a
+  // loss by reading `status` directly (it always pairs with settled_by="void", result=null, payout=stake).
+  | "settled_void";
 export type ReassessTrigger =
   | "goal"
   | "red_card"

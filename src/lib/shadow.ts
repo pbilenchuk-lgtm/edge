@@ -261,7 +261,7 @@ export function shadowAnalytics(db: Database, cfg: ShadowConfig): ShadowAnalytic
     // un-funded fraction's realised P&L to the deficit.
     if (e.verdict !== "allowed" && e.bet_id) {
       const bet = R.getBet(db, e.bet_id);
-      if (bet && bet.payout != null && bet.stake != null && (bet.status === "settled_won" || bet.status === "settled_lost")) {
+      if (bet && bet.payout != null && bet.stake != null && R.isSettled(bet.status)) {
         const realPnl = bet.payout - bet.stake;
         const unfundedFrac = e.size_requested > 0 ? (e.size_requested - e.size_reserved) / e.size_requested : 0;
         missedPnl += realPnl * unfundedFrac;
@@ -299,7 +299,7 @@ export interface ReplaySummary {
 export function buildReplayEntries(db: Database): ReplayEntry[] {
   return R.allShadowEvents(db).map((e) => {
     const bet = e.bet_id ? R.getBet(db, e.bet_id) : null;
-    const settled = !!bet && (bet.status === "settled_won" || bet.status === "settled_lost");
+    const settled = !!bet && R.isSettled(bet.status);
     return {
       at: e.created_at, size: e.size_requested, edge: e.edge, isLive: !!e.is_live,
       matchId: e.match_id, competitionId: e.competition_id, strategyId: e.strategy_id,

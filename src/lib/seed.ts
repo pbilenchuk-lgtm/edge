@@ -858,7 +858,7 @@ export function migrateVoidOutOfScopePmv(db: Database, now: string): void {
   for (const b of R.openBets(db)) {
     if (b.strategy_id !== "tennis_pmv") continue;
     const m = R.getMatch(db, b.match_id); const c = m ? compById.get(m.competition_id) : null;
-    if (c && pmvTour(c) == null) R.updateBet(db, b.id, { status: "settled_lost", result: null, payout: b.stake ?? 0, closing_price: b.entry_price ?? null, settled_at: now, settled_by: "void" });
+    if (c && pmvTour(c) == null) R.updateBet(db, b.id, { status: "settled_void", result: null, payout: b.stake ?? 0, closing_price: b.entry_price ?? null, settled_at: now, settled_by: "void" });
   }
   R.metaSet(db, PMV_SCOPE_VOID_MARK, now, now);
 }
@@ -873,7 +873,7 @@ export function migrateVoidAllOpenPmv(db: Database, now: string): void {
   if (R.metaGet(db, PMV_VOID_ALL_MARK)) return;
   for (const b of R.openBets(db)) {
     if (b.strategy_id !== "tennis_pmv") continue;
-    R.updateBet(db, b.id, { status: "settled_lost", result: null, payout: b.stake ?? 0, closing_price: b.entry_price ?? null, settled_at: now, settled_by: "void" });
+    R.updateBet(db, b.id, { status: "settled_void", result: null, payout: b.stake ?? 0, closing_price: b.entry_price ?? null, settled_at: now, settled_by: "void" });
   }
   R.metaSet(db, PMV_VOID_ALL_MARK, now, now);
 }

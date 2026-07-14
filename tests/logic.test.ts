@@ -217,6 +217,30 @@ test("settlement: football market resolution from score 2:1", () => {
   assert.equal(mp({ score_home: 2, score_away: 1, minute: 118, end_note: null, duration: null }), true, "decided at 118' → ET");
   assert.equal(mp({ score_home: 2, score_away: 1, end_note: "After Extra Time", minute: null, duration: null }), true, "ET note");
   assert.equal(mp({ score_home: 2, score_away: 1, minute: null, end_note: null, duration: null }), null, "non-level, no minute/note → unknown");
+});
+
+test("void is settled-but-not-a-loss: single-source truth in the status field", async () => {
+  const R = await import("../src/lib/repo.js");
+  const { openDb } = await import("../src/lib/db.js");
+  // isSettled includes void; a void must never read as a loss via status alone.
+  assert.equal(R.isSettled("settled_void"), true, "void is terminal/settled");
+  assert.equal(R.isSettled("settled_won"), true);
+  assert.equal(R.isSettled("settled_lost"), true);
+  assert.equal(R.isSettled("open"), false);
+  assert.notEqual("settled_void", "settled_lost"); // the field itself distinguishes them
+  // the DB CHECK admits the new status (fresh schema) — a void bet persists as settled_void, not lost.
+  const db = openDb(":memory:");
+  R.upsertSport(db, "soccer", "Футбол");
+  R.upsertCompetition(db, { id: "c", sport_id: "soccer", name: "X", budget: 0, external_league: null, created_at: "t" } as any);
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "c", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t", minute: 90, score_home: 0, score_away: 2, final_score: "0:2", kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: mid } as any);
+  R.insertStrategy(db, { id: "s", sport_id: "soccer", name: "S", tag: null, color: "#fff", version: 1, model: null, model_live: null, created_at: "t", prompt: "p", prompt_live: null, params: {} } as any);
+  const bid = R.uid();
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: "s", risk_profile_id: "medium", market_label: "Extra Time — No", status: "open", proposed_price: 69, entry_price: 69, current_price: 99, closing_price: null, ai_prob: 0.74, stake: 50, rationale: null, entered_minute: "предматч", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: null, code_version: "e", created_at: "t" } as any);
+  R.updateBet(db, bid, { status: "settled_void", result: null, payout: 50, closing_price: 99, settled_at: "t", settled_by: "void" });
+  const b = R.getBet(db, bid)!;
+  assert.equal(b.status, "settled_void", "the field says void, not settled_lost");
+  assert.equal(b.result, null); assert.equal(b.settled_by, "void"); assert.equal(b.payout, b.stake, "refunded");
   // Polymarket "O/U 2.5" total (backs Over); team totals stay unsettleable
   assert.equal(resolveFootballMarket("O/U 2.5", 2, 1), true);  // total 3 > 2.5
   assert.equal(resolveFootballMarket("O/U 3.5", 2, 1), false); // total 3 < 3.5
