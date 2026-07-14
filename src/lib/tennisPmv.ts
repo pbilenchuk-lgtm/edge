@@ -67,6 +67,36 @@ const PMV_BUDGET = (() => { const n = Number(process.env.TENNIS_PAPER_BUDGET_USD
 export const pmvFlagOnly = (): boolean => process.env.TENNIS_PMV_FLAG_ONLY !== "false";
 const VOID_FAMILIES = new Set<PropFamily>(["total_sets", "set_handicap"]);
 const PMV_ACTED = "tennis_pmv_acted:"; // per-match idempotency (pre-match scan runs once)
+// P4 scan fixes. (1) Placeholder: a prop sitting at exactly ~50¢ is almost always an untraded default,
+// not a real market price — deviation against it is noise. (2) Uniformity guard: if >this share of a
+// family's PASSING deviations lean the SAME side (all "over", etc.), that's a model bias not an edge —
+// stop the family (the signature that caught the LLM phantoms; would fire on the 5th bet, not the 108th).
+const PMV_PLACEHOLDER_BAND = num(process.env.TENNIS_PMV_PLACEHOLDER_BAND, 0.5); // ¢ around 50
+const PMV_UNIFORM_SHARE = num(process.env.TENNIS_PMV_UNIFORM_SHARE, 0.65);
+const PMV_UNIFORM_MIN = Math.max(3, Math.round(num(process.env.TENNIS_PMV_UNIFORM_MIN, 5))); // need ≥N passing to judge
+// (2b) Correlation CLUSTER: Total Games and Total Sets are both driven by match LENGTH → one cluster,
+// so the ≤2-props/match cap can't double up on the same underlying (games+sets = one bet, not two).
+export function corrCluster(f: PropFamily): string {
+  if (f === "total_games" || f === "total_sets") return "length";
+  if (f === "set_handicap") return "handicap";
+  if (f === "set_winner") return "set_winner";
+  return f;
+}
+// The market-outcome SIDE a prop's price refers to, for the uniformity guard ("over"/"under"/"first").
+export function propSide(label: string): string { const p = parseProp(label); return p ? p.side : "?"; }
+// Does a collapsed prop's FIRST-named player = the match's player 1 (so its price aligns with the
+// moneyline's first-named)? Compares surnames of the "A vs B" in the label to players.p1/p2. null =
+// can't resolve (don't trade it — provenance).
+const surnTok = (s: string) => s.toLowerCase().replace(/[.,()+\-/]/g, " ").split(/\s+/).filter((t) => t.length > 2);
+export function propFirstIsP1(label: string, players: { p1: string; p2: string }): boolean | null {
+  const vs = /([^:]+?)\s+vs\.?\s+([^:]+?)(?:\s+(?:set|match|total|game|winner|handicap|over|under)\b.*)?$/i.exec(label);
+  if (!vs) return null;
+  const a = surnTok(vs[1]), p1 = new Set(surnTok(players.p1)), p2 = new Set(surnTok(players.p2));
+  const aIsP1 = a.some((t) => p1.has(t)), aIsP2 = a.some((t) => p2.has(t));
+  if (aIsP1 && !aIsP2) return true;
+  if (aIsP2 && !aIsP1) return false;
+  return null;
+}
 
 export type PropSide = "over" | "under" | "first";
 export interface ParsedProp { family: PropFamily; scope: "match" | "set"; setNum: number | null; line: number | null; side: PropSide; handicapOnFirst: boolean }
@@ -108,7 +138,7 @@ export function theoForProp(p: ParsedProp, theo: TennisTheo): number | null {
   return base == null ? null : voidAdj(base);
 }
 
-export interface PmvCandidate { label: string; family: PropFamily; midCents: number; theoCents: number; deviation: number; bookUsd: number; action: "enter" | "provenance_review" | "skip"; reason: string }
+export interface PmvCandidate { label: string; family: PropFamily; side: string; cluster: string; midCents: number; theoCents: number; deviation: number; bookUsd: number; action: "enter" | "provenance_review" | "skip"; reason: string }
 export interface PmvMatchScan { matchId: string; players: { p1: string; p2: string }; moneylineCents: number | null; delta: number | null; tradeable: boolean; candidates: PmvCandidate[] }
 
 // PMV scope: ATP/WTA SINGLES only (the Gate-0.1 build verdict was measured on pm-atp+pm-wta; base_hold
@@ -142,17 +172,25 @@ export function scanMatchProps(db: Database, matchId: string, players: { p1: str
     if (!parsed) continue; // moneyline or unknown
     const book = Number(mk.liquidity ?? 0) || 0;
     const mid = mk.price;
-    const theoProb = theoForProp(parsed, theo);
+    const push = (action: PmvCandidate["action"], reason: string, theoCents = 0, dev = 0) =>
+      out.candidates.push({ label: mk.label, family: parsed.family, side: parsed.side, cluster: corrCluster(parsed.family), midCents: mid, theoCents, deviation: dev, bookUsd: Math.round(book), action, reason });
+    // (P4.1) Placeholder: a prop pinned at ~50¢ is an untraded default, not a real price → skip.
+    if (Math.abs(mid - 50) <= PMV_PLACEHOLDER_BAND) { push("skip", `плейсхолдер ~50¢ (нет реальной цены)`); continue; }
+    // (P4.3) Contract-side provenance for the collapsed families:
+    //  • Set Handicap with an ambiguous "+/-1.5" (no explicit "(-1.5)" side) → we can't tell which
+    //    player the line favours → block (provenance), don't guess.
+    //  • Set Winner priced on the SECOND-named player → flip the theo to that side.
+    let theoProb = theoForProp(parsed, theo);
+    if (parsed.family === "set_handicap" && !/\(\s*[-−]\s*1\.5\s*\)/.test(mk.label)) { push("provenance_review", `сторона гандикапа неоднозначна (нет явного «(-1.5)») — провенанс, не торгуем`); continue; }
+    if (parsed.family === "set_winner" && theoProb != null) { const first = propFirstIsP1(mk.label, players); if (first === false) theoProb = 1 - theoProb; else if (first == null) { push("skip", `не удалось сопоставить стороны Set Winner — провенанс`); continue; } }
     if (theoProb == null) continue;
     const theoCents = Math.round(theoProb * 1000) / 10;
     const dev = Math.round((theoCents - mid) * 10) / 10;
-    let action: PmvCandidate["action"] = "skip"; let reason = "";
-    if (book < PMV_BOOK_MIN) reason = `книга $${Math.round(book)} < $${PMV_BOOK_MIN}`;
-    else if (mid < PMV_PRICE_MIN || mid > PMV_PRICE_MAX) reason = `цена ${mid}¢ вне полосы ${PMV_PRICE_MIN}-${PMV_PRICE_MAX}¢`;
-    else if (Math.abs(dev) >= PMV_DEV_PROVENANCE) { action = "provenance_review"; reason = `|dev| ${Math.abs(dev)}¢ ≥ ${PMV_DEV_PROVENANCE}¢ — анти-Draw: почти наверняка неверно понят контракт, блок до ручного разбора`; }
-    else if (dev >= PMV_DEV_ENTER) { action = "enter"; reason = `theo ${theoCents}¢ vs mid ${mid}¢ (dev +${dev}¢) — рынок недооценил, покупаем`; }
-    else reason = `dev ${dev}¢ < порога ${PMV_DEV_ENTER}¢`;
-    out.candidates.push({ label: mk.label, family: parsed.family, midCents: mid, theoCents, deviation: dev, bookUsd: Math.round(book), action, reason });
+    if (book < PMV_BOOK_MIN) push("skip", `книга $${Math.round(book)} < $${PMV_BOOK_MIN}`, theoCents, dev);
+    else if (mid < PMV_PRICE_MIN || mid > PMV_PRICE_MAX) push("skip", `цена ${mid}¢ вне полосы ${PMV_PRICE_MIN}-${PMV_PRICE_MAX}¢`, theoCents, dev);
+    else if (Math.abs(dev) >= PMV_DEV_PROVENANCE) push("provenance_review", `|dev| ${Math.abs(dev)}¢ ≥ ${PMV_DEV_PROVENANCE}¢ — анти-Draw: почти наверняка неверно понят контракт, блок до ручного разбора`, theoCents, dev);
+    else if (dev >= PMV_DEV_ENTER) push("enter", `theo ${theoCents}¢ vs mid ${mid}¢ (dev +${dev}¢) — рынок недооценил, покупаем`, theoCents, dev);
+    else push("skip", `dev ${dev}¢ < порога ${PMV_DEV_ENTER}¢`, theoCents, dev);
   }
   out.candidates.sort((a, b) => b.deviation - a.deviation);
   return out;
@@ -381,34 +419,61 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
   let opened = 0;
   const profilesAll = (() => { const ps = R.listRiskProfiles(db).map((p) => p.id); return ps.length ? ps : RISK_PROFILE_DEFS.map((d) => d.id); })();
 
+  // PASS 1: scan every pending in-scope match; collect the scans + accumulate per-FAMILY side counts
+  // across the WHOLE slate for the uniformity guard (a lean is a property of the family, not one match).
+  const pending: { comp: string; matchId: string; players: { p1: string; p2: string }; scan: PmvMatchScan }[] = [];
   for (const c of R.listCompetitions(db)) {
     if (c.sport_id !== "tennis") continue;
-    const scoped = pmvTour(c);
-    if (!scoped) continue; // PMV is ATP/WTA SINGLES only (spec + Gate 0.1 scope) — skip ITF / Challenger / doubles
-    const tour = scoped;
+    const tour = pmvTour(c);
+    if (!tour) continue; // ATP/WTA singles only
     for (const m of R.listMatches(db, c.id)) {
       if (m.state === "finished" || m.state === "live") continue; // PMV is PRE-MATCH only (v1)
       if (R.metaGet(db, PMV_ACTED + m.id)) continue;              // scan once per match
       const scan = scanMatchProps(db, m.id, { p1: m.home, p2: m.away }, tour, c.name);
-      if (!scan.tradeable) continue;                             // no moneyline / thin moneyline book
-      // Flag provenance-review props (blocked, logged) regardless of whether we trade this match.
+      if (!scan.tradeable) continue;
+      pending.push({ comp: c.id, matchId: m.id, players: { p1: m.home, p2: m.away }, scan });
+    }
+  }
+  // UNIFORMITY GUARD: per family, if > PMV_UNIFORM_SHARE of the PASSING deviations lean the same SIDE
+  // (all "over", etc.) over ≥ PMV_UNIFORM_MIN samples, that's a model bias not an edge → STOP the family.
+  const famSide = new Map<PropFamily, Map<string, number>>();
+  for (const p of pending) for (const cand of p.scan.candidates) if (cand.action === "enter") {
+    const s = famSide.get(cand.family) ?? famSide.set(cand.family, new Map()).get(cand.family)!;
+    s.set(cand.side, (s.get(cand.side) ?? 0) + 1);
+  }
+  const stoppedFamilies = new Map<PropFamily, string>();
+  for (const [fam, sides] of famSide) {
+    const total = [...sides.values()].reduce((a, b) => a + b, 0);
+    const top = Math.max(...sides.values());
+    if (total >= PMV_UNIFORM_MIN && top / total > PMV_UNIFORM_SHARE) {
+      const domSide = [...sides.entries()].find(([, v]) => v === top)![0];
+      stoppedFamilies.set(fam, `однородный крен: ${top}/${total} проходящих расхождений на «${domSide}» (>${Math.round(PMV_UNIFORM_SHARE * 100)}%) — модельный биас, стоп семьи`);
+    }
+  }
+
+  // PASS 2: act per match.
+  for (const { comp, matchId, players, scan } of pending) {
+    const c = { id: comp };
+    const m = { id: matchId, home: players.p1, away: players.p2 };
+    {
+      // Provenance flags (anti-Draw + contract-side) — logged regardless of trading.
       for (const cand of scan.candidates.filter((x) => x.action === "provenance_review"))
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `provenance_review «${cand.label}»: ${cand.reason}`, created_at: now });
-      const enters = scan.candidates.filter((x) => x.action === "enter");
+      // A stopped family's would-be entries are logged as uniformity_stop, never taken.
+      const enters = scan.candidates.filter((x) => x.action === "enter" && !stoppedFamilies.has(x.family));
+      for (const cand of scan.candidates.filter((x) => x.action === "enter" && stoppedFamilies.has(x.family)))
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `uniformity_stop «${cand.label}»: ${stoppedFamilies.get(cand.family)}`, created_at: now });
       if (!enters.length) { R.metaSet(db, PMV_ACTED + m.id, "no_edge", now); continue; }
-      // FLAG-ONLY (default until the core is re-calibrated): the scan produced a systematic one-sided
-      // fat edge on its FIRST day — phantom value from its own math, the same signature we caught the
-      // LLM making. So PMV places NO bets: it only LOGS the deviations it WOULD have taken (data keeps
-      // accumulating, contamination stopped). Open positions ride to settle as the diagnostic sample.
+      // FLAG-ONLY (default until re-calibrated): log the would-be entries, place NO bets.
       if (pmvFlagOnly()) {
         for (const cand of enters)
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `flag_only «${cand.label}»: theo ${cand.theoCents}¢ vs mid ${cand.midCents}¢ (dev +${cand.deviation}¢, δ=${scan.delta}, книга $${cand.bookUsd}) — ставка НЕ размещена (калибровка ядра)`, created_at: now });
         R.metaSet(db, PMV_ACTED + m.id, `flag_only:${enters.length}`, now);
         continue;
       }
-      // Correlation cap: ≤ MAX_PROPS of DIFFERENT families (all match props correlate through the result).
-      const chosen: PmvCandidate[] = []; const fams = new Set<PropFamily>();
-      for (const cand of enters) { if (chosen.length >= PMV_MAX_PROPS) break; if (fams.has(cand.family)) continue; fams.add(cand.family); chosen.push(cand); }
+      // Correlation cap: ≤ MAX_PROPS of different CLUSTERS (games+sets = one length cluster).
+      const chosen: PmvCandidate[] = []; const clusters = new Set<string>();
+      for (const cand of enters) { if (chosen.length >= PMV_MAX_PROPS) break; if (clusters.has(cand.cluster)) continue; clusters.add(cand.cluster); chosen.push(cand); }
       R.metaSet(db, PMV_ACTED + m.id, `entered:${chosen.length}`, now); // one shot per match
       const heldByProfile = (profile: string) => R.betsForMatch(db, m.id, PMV_STRATEGY).filter((b) => b.status === "open" && b.risk_profile_id === profile);
       for (const cand of chosen) {

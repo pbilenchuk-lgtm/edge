@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { parseProp, theoForProp, resolveTennisProp, scanMatchProps, finalSetsFromRaw, pmvTour, type FinalSets } from "../src/lib/tennisPmv.js";
+import { parseProp, theoForProp, resolveTennisProp, scanMatchProps, finalSetsFromRaw, pmvTour, corrCluster, propFirstIsP1, type FinalSets } from "../src/lib/tennisPmv.js";
 import { tennisTheo, BASE_HOLD } from "../src/lib/tennisMarkov.js";
 import { migrateTennisPmvStrategy } from "../src/lib/seed.js";
 
@@ -98,6 +98,52 @@ test("scan tick + correlation: ≤2 props/match of DIFFERENT families", async ()
   assert.equal(new Set(perFamPerProfile.map(key)).size, perFamPerProfile.length, "no duplicate family per profile");
 });
 async function tennisPmvTickImport(db: any) { const { tennisPmvTick } = await import("../src/lib/tennisPmv.js"); return tennisPmvTick(db, { now: () => "2026-07-14T19:00:00Z" }); }
+
+// ── P4 scan fixes + uniformity guard ──
+test("P4.1 placeholder: a prop pinned at ~50¢ is skipped as an untraded default", () => {
+  const db = openDb(":memory:");
+  const mid = seedScan(db, 65, [{ label: Q + "Set 1 Over 8.5", mid: 50, liq: 4000 }, { label: Q + "Set 2 Over 8.5", mid: 50.4, liq: 4000 }]);
+  const scan = scanMatchProps(db, mid, { p1: "Kawa", p2: "Waltert" }, "wta", "WTA");
+  for (const c of scan.candidates) { assert.equal(c.action, "skip"); assert.ok(/плейсхолдер/.test(c.reason)); }
+});
+
+test("P4.3 handicap side: ambiguous +/-1.5 → provenance; explicit (-1.5) → priced", () => {
+  const db = openDb(":memory:");
+  const mid = seedScan(db, 65, [
+    { label: Q + "Set Handicap +/-1.5", mid: 30, liq: 4000 },                     // ambiguous
+    { label: "WTA: Kawa (-1.5) vs Waltert (+1.5) Set Handicap", mid: 30, liq: 4000 }, // explicit
+  ]);
+  const scan = scanMatchProps(db, mid, { p1: "Kawa", p2: "Waltert" }, "wta", "WTA");
+  assert.equal(scan.candidates.find((c) => /\+\/-/.test(c.label))!.action, "provenance_review");
+  assert.notEqual(scan.candidates.find((c) => /\(-1\.5\)/.test(c.label))!.theoCents, 0, "explicit side gets priced");
+});
+
+test("P4.3 set-winner orientation: propFirstIsP1 aligns the priced side to the moneyline", () => {
+  assert.equal(propFirstIsP1("Set 1 Winner: Kawa vs Waltert", { p1: "Kawa", p2: "Waltert" }), true);
+  assert.equal(propFirstIsP1("Set 1 Winner: Waltert vs Kawa", { p1: "Kawa", p2: "Waltert" }), false, "reversed → flip theo");
+});
+
+test("P4.2 correlation cluster: Total Games + Total Sets are ONE length cluster", () => {
+  assert.equal(corrCluster("total_games"), corrCluster("total_sets"));
+  assert.notEqual(corrCluster("total_games"), corrCluster("set_handicap"));
+});
+
+test("P4 UNIFORMITY GUARD: a family whose passing edges all lean one side is STOPPED (no bets)", async () => {
+  const db = openDb(":memory:");
+  process.env.TENNIS_PMV_FLAG_ONLY = "false"; // would bet, but the guard must block the biased family
+  migrateTennisPmvStrategy(db);
+  const theo = tennisTheo(0.65, BASE_HOLD.wta);
+  const t = Math.round(theoForProp(parseProp(Q + "Set 1 Over 8.5")!, theo)! * 100);
+  // 6 matches, each with one "Set 1 OVER" underpriced → all passing edges lean "over" → model bias.
+  const mids: string[] = [];
+  for (let i = 0; i < 6; i++) mids.push(seedScan(db, 65, [{ label: `WTA: P${i}a vs P${i}b Set 1 Over 8.5`, mid: t - 12, liq: 4000 }]));
+  const { tennisPmvTick } = await import("../src/lib/tennisPmv.js");
+  const opened = await tennisPmvTick(db, { now: () => "2026-07-14T19:00:00Z" });
+  assert.equal(opened, 0, "the biased family is stopped — no bets placed");
+  const anyStop = mids.some((mid) => R.tradeLogForMatch(db, mid).some((l) => /uniformity_stop/.test(l.text)));
+  assert.ok(anyStop, "uniformity_stop logged");
+  delete process.env.TENNIS_PMV_FLAG_ONLY;
+});
 
 // ── Prop settle by family (Gate 0.2 clauses) ──
 const fsFull: FinalSets = { sets: [{ p1: 6, p2: 4 }, { p1: 6, p2: 3 }], setsWonP1: 2, setsWonP2: 0, matchGames: 19 }; // Kawa 2-0
