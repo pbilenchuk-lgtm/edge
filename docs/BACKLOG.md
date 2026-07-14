@@ -26,6 +26,32 @@ FLAGS+BLOCKS on a ≥8¢ divergence and never merges. It holds the money.
 3. Same class covers "broken labels" (`Team — Yes` = 100¢): a token with an unclear
    resolution condition, resolved by the same provenance pass.
 
+## Tennis retirement provenance — VERIFIED from Polymarket, mandatory pre-first-bet (DONE)
+
+Read the actual Polymarket H2H resolution text (gamma-api, tag 864). The clause is
+IDENTICAL across ATP / WTA / ITF singles AND doubles (verbatim, 2026-07):
+
+> "resolve to 'X' if X advances against Y … If the match begins but is not completed,
+> and one player advances due to the opponent's **retirement, default, or disqualification**,
+> this market will resolve to the **player who advances**. If the match ends in a **walkover**
+> (player withdraws **before the start**), this market will resolve to **50-50**. If the match
+> is **canceled** (not played at all), ends in a **tie**, or is **delayed beyond 7 days**
+> without a winner, this market will resolve to **50-50**."
+> Primary source: official tour info (ATP/WTA); a consensus of credible reporting may also be used.
+
+**Two resolution families — do NOT merge them:**
+- **Advancer wins** (a real YES/NO): normal win, mid-match **retirement / default / disqualification**.
+- **Void / 50-50** (refund, excluded from accuracy): **walkover** (pre-start withdrawal), canceled,
+  tie, delayed-no-winner.
+
+The subtlety that bites: a **walkover names a "winner" too**, but it's VOID, not a win —
+because the withdrawal was BEFORE the first ball. Retirement (mid-match) is a win for the advancer.
+
+**Code (settlement.ts resolveTennisWinner + tennisTrading.ts tennisFinalResult) matches this:**
+`canceled = /cancel|abandon|walkover|w\/o/` → void; `retired = /retir|ret|default|disqualif|dsq/`
+→ advancer wins. We only enter LIVE (post-break), so a pre-start walkover can't be an open
+entry anyway — but settle handles it correctly if one exists. Tests lock both families.
+
 ## Strategist LLM reliability — the 4-rung stack (DONE) — do NOT collapse a rung
 
 The live strategist is now a SAFETY precondition (price-stops were removed from melting

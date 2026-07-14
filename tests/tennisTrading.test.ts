@@ -124,6 +124,27 @@ test("tennisExitTick: a position with neither trigger stays OPEN (rides on)", ()
   assert.equal(R.getBet(db, "tex3")!.status, "open", "held — buyback not yet recovered, thesis intact");
 });
 
+test("tennisFinalResult: a mid-match DEFAULT/disqualification resolves to the advancer (not void) — matches Polymarket", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  R.insertTennisSnapshot(db, { event_key: "ED", provider: "apitennis", batch_at: "2026-07-14T11:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Default", sets_p1: 1, sets_p2: 0, set_num: 2, games_p1: 3, games_p2: 1, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "First Player" }) });
+  const fin = tennisFinalResult(db, mid)!;
+  assert.equal(fin.finished, true);
+  assert.equal(fin.retired, true, "default/DQ is classified in the advancer family, not void");
+  assert.equal(fin.canceled, false);
+  assert.equal(fin.advancing, "first", "Vukic advances on the opponent's default");
+});
+
+test("tennisFinalResult: a WALKOVER (pre-start withdrawal) is VOID, not an advancer win — matches Polymarket", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  R.insertTennisSnapshot(db, { event_key: "EW", provider: "apitennis", batch_at: "2026-07-14T11:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Walkover", sets_p1: 0, sets_p2: 0, set_num: 1, games_p1: 0, games_p2: 0, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "First Player" }) });
+  const fin = tennisFinalResult(db, mid)!;
+  assert.equal(fin.finished, true);
+  assert.equal(fin.canceled, true, "walkover → void (50-50), even though a winner is named");
+  assert.equal(fin.advancing, null);
+});
+
 test("settleTennisBets: a retirement resolves to the advancing (non-retiring) player", () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });

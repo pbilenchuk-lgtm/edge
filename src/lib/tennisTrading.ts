@@ -41,8 +41,12 @@ export function tennisFinalResult(db: Database, matchId: string): TennisFinal | 
   if (!rows.length) return null;
   const r = rows[0];
   const status = String(r.status ?? "");
+  // Polymarket resolution (verified from the market description, uniform across ATP/WTA/ITF/doubles):
+  //   • WALKOVER (withdraws BEFORE start) / canceled / tie / delayed>7d w/o winner → 50-50 → VOID.
+  //   • RETIREMENT / DEFAULT / DISQUALIFICATION mid-match → resolves to the player who ADVANCES.
+  // So walkover lives in the void family; retire/default/DQ live in the advancer family.
   const canceled = /cancel|abandon|walkover|w[\/.]o/i.test(status);
-  const retired = /retir|\bret\.?\b/i.test(status);
+  const retired = /retir|\bret\.?\b|default|disqualif|\bdsq\b/i.test(status);
   const finished = retired || canceled || r.live === 0 || /finish/i.test(status);
   if (!finished) return null;
   // Advancing = event_winner from raw if present, else the side with more sets.
