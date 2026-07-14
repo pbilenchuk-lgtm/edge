@@ -242,7 +242,8 @@ test("buildTennisFunnel: reconstructs the funnel + names each live match's drop-
   snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 50, setNum: 1 });
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
   const f = buildTennisFunnel(db);
-  assert.equal(f.live, 1);
+  assert.equal(f.liveApp, 1);
+  assert.equal(f.linked, 1, "the match has ≥2 mapped scout snapshots");
   assert.equal(f.withFavourite, 1);
   assert.equal(f.tradeable, 1, "book $5000 both sides ≥ $2000");
   assert.equal(f.withBreak, 1);
@@ -252,6 +253,15 @@ test("buildTennisFunnel: reconstructs the funnel + names each live match's drop-
   assert.equal(f.entriesAllTime, 0);
 });
 
+test("buildTennisFunnel: a live match with no linked scout snapshots is surfaced (no_scout_link), not dropped", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // live match, but NO tennis_snapshots for it
+  const f = buildTennisFunnel(db);
+  assert.equal(f.liveApp, 1);
+  assert.equal(f.linked, 0, "no mapped scout snapshots → invisible to the tick");
+  assert.equal(f.perMatch[0].stage, "no_scout_link", "the coverage blocker is named, not silent");
+});
+
 test("buildTennisFunnel: an underdog break is named a non-setup, not a silent skip", () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20 });
@@ -259,6 +269,7 @@ test("buildTennisFunnel: an underdog break is named a non-setup, not a silent sk
   snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "second", p1c: 82, setNum: 1 });
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 4, g2: 3, server: "first", p1c: 82, setNum: 1 });
   const f = buildTennisFunnel(db);
+  assert.equal(f.linked, 1);
   assert.equal(f.favBreak, 0);
   assert.equal(f.gatePass, 0);
   assert.equal(f.perMatch[0].stage, "underdog_broken");

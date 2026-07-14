@@ -195,7 +195,7 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
 // stage from current state so you can SEE it's alive and WHY it's holding fire. Pure read.
 export interface TennisFunnelRow { match: string; comp: string; stage: string; note: string }
 export interface TennisFunnel {
-  live: number; withFavourite: number; tradeable: number; withBreak: number; favBreak: number; gatePass: number;
+  liveApp: number; linked: number; withFavourite: number; tradeable: number; withBreak: number; favBreak: number; gatePass: number;
   openPositions: number; entriesAllTime: number;
   actionMarkers: Record<string, number>;
   perMatch: TennisFunnelRow[];
@@ -203,15 +203,19 @@ export interface TennisFunnel {
   note: string;
 }
 export function buildTennisFunnel(db: Database): TennisFunnel {
-  const f: TennisFunnel = { live: 0, withFavourite: 0, tradeable: 0, withBreak: 0, favBreak: 0, gatePass: 0, openPositions: 0, entriesAllTime: 0, actionMarkers: {}, perMatch: [], recentLog: [], note: "" };
+  const f: TennisFunnel = { liveApp: 0, linked: 0, withFavourite: 0, tradeable: 0, withBreak: 0, favBreak: 0, gatePass: 0, openPositions: 0, entriesAllTime: 0, actionMarkers: {}, perMatch: [], recentLog: [], note: "" };
   const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, m })));
   for (const { comp, m } of tennisMatches) {
     for (const b of R.betsForMatch(db, m.id, TENNIS_STRATEGY)) { f.entriesAllTime++; if (b.status === "open") f.openPositions++; }
     if (m.state !== "live") continue;
-    const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(m.id) as R.TennisSnapshotRow[];
-    if (snaps.length < 2) continue; // not enough scout data to charge/detect yet
-    f.live++;
+    f.liveApp++;
     const label = `${m.home} — ${m.away}`;
+    const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(m.id) as R.TennisSnapshotRow[];
+    // The tick joins scout snapshots by pm_match_id; a live app match the scout hasn't LINKED
+    // (fuzzy map didn't reach "auto", or the scout isn't seeing it in-play) is invisible to the
+    // tick — surface it here instead of dropping it silently. This is the true coverage blocker.
+    if (snaps.length < 2) { f.perMatch.push({ match: label, comp, stage: "no_scout_link", note: "нет привязанных снапшотов скаута — маппинг не сошёлся или скаут не видит матч live" }); continue; }
+    f.linked++;
     const row = (stage: string, note = ""): void => { f.perMatch.push({ match: label, comp, stage, note }); };
     const last = snaps[snaps.length - 1];
     const charge = chargeTennisMatch(db, m.id, { p1: last.p1 ?? "", p2: last.p2 ?? "" });
@@ -240,11 +244,14 @@ export function buildTennisFunnel(db: Database): TennisFunnel {
   // Cumulative per-break action markers (decided / gate_skip / no_market / blocked_second_buyback).
   for (const r of R.metaByPrefix(db, ACTED)) f.actionMarkers[r.value] = (f.actionMarkers[r.value] ?? 0) + 1;
   f.recentLog = R.recentTradeLog(db, 300).filter((l) => l.strategy_id === TENNIS_STRATEGY).slice(0, 15).map((l) => ({ at: l.created_at, type: l.type, text: l.text }));
+  const unlinked = f.liveApp - f.linked;
   f.note = f.entriesAllTime > 0
-    ? `${f.entriesAllTime} входов всего (${f.openPositions} открыто); из ${f.live} live-матчей ${f.gatePass} на взводе сейчас`
-    : f.gatePass > 0
-      ? `${f.gatePass}/${f.live} live-матчей на взводе — вход на следующем тике (или уже acted)`
-      : `${f.live} live-матчей, 0 на взводе прямо сейчас — воронка жива, сетап ещё не совпал (см. perMatch)`;
+    ? `${f.entriesAllTime} входов всего (${f.openPositions} открыто); live ${f.liveApp} (привязано ${f.linked}), на взводе ${f.gatePass}`
+    : unlinked > 0 && f.linked === 0
+      ? `live ${f.liveApp}, но НИ ОДИН не привязан к скауту (${unlinked} no_scout_link) — маппинг/скаут не покрывает текущие live-матчи, поэтому тик их не видит`
+      : f.gatePass > 0
+        ? `${f.gatePass}/${f.linked} привязанных live-матчей на взводе — вход на следующем тике (или уже acted)`
+        : `live ${f.liveApp} (привязано ${f.linked}), 0 на взводе — воронка жива, сетап ещё не совпал (см. perMatch)`;
   return f;
 }
 
@@ -253,7 +260,7 @@ export function tennisFunnelMarkdown(f: TennisFunnel): string {
   L.push(`# Теннис — воронка входа (live)`);
   L.push(f.note);
   L.push(`\n## Ступени сейчас`);
-  L.push(`live ${f.live} → с фаворитом ${f.withFavourite} → торгуемых ${f.tradeable} → с брейком ${f.withBreak} → брейк фаворита ${f.favBreak} → прошло гейт ${f.gatePass}`);
+  L.push(`live ${f.liveApp} → привязано к скауту ${f.linked} → с фаворитом ${f.withFavourite} → торгуемых ${f.tradeable} → с брейком ${f.withBreak} → брейк фаворита ${f.favBreak} → прошло гейт ${f.gatePass}`);
   L.push(`открытых позиций ${f.openPositions} · входов всего ${f.entriesAllTime}`);
   const am = Object.entries(f.actionMarkers);
   if (am.length) L.push(`\n## Маркеры решений (накоплено): ${am.map(([k, v]) => `${k}=${v}`).join(" · ")}`);
