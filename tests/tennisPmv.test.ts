@@ -195,6 +195,24 @@ test("core Brier criterion: markov ≤ implied → core_beats_market; <40 settle
   assert.equal(ready.verdict, "core_beats_market");
 });
 
+test("migrateVoidAllOpenPmv: voids every open PMV bet (frees the sim budget), marker-guarded", async () => {
+  const { migrateVoidAllOpenPmv } = await import("../src/lib/seed.js");
+  const db = openDb(":memory:");
+  migrateTennisPmvStrategy(db);
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "pm-atp", sport_id: "tennis", name: "ATP", budget: 0, external_league: null, created_at: "t" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-atp", home: "A", away: "B", state: "upcoming", lineup_out: false, kickoff_at: "t", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid } as any);
+  for (const p of ["aggressive", "medium"]) R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: "tennis_pmv", risk_profile_id: p, market_label: "ATP: A vs B Total Sets: Over 2.5", status: "open", proposed_price: 35, entry_price: 35, current_price: 35, closing_price: null, ai_prob: 0.5, stake: 80, rationale: "pmv", entered_minute: "предматч", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: null, code_version: "e·interim", created_at: "t" } as any);
+  migrateVoidAllOpenPmv(db, "2026-07-14T21:00:00Z");
+  const bets = R.betsForMatch(db, mid, "tennis_pmv");
+  assert.ok(bets.every((b) => b.status !== "open" && b.settled_by === "void" && b.payout === b.stake), "all voided + refunded");
+  // marker-guarded: a fresh open bet after the run is NOT touched again
+  R.insertBet(db, { id: "keep", match_id: mid, strategy_id: "tennis_pmv", risk_profile_id: "medium", market_label: "ATP: A vs B Match Over 21.5", status: "open", proposed_price: 40, entry_price: 40, current_price: 40, closing_price: null, ai_prob: 0.5, stake: 50, rationale: "r", entered_minute: "предматч", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: null, code_version: "e·interim-m1", created_at: "t" } as any);
+  migrateVoidAllOpenPmv(db, "2026-07-14T22:00:00Z");
+  assert.equal(R.getBet(db, "keep")!.status, "open", "runs once — later bets survive");
+});
+
 test("P2 frequency report: actual 3-set + hold rates from snapshots vs the model", async () => {
   const { buildTennisFrequencyReport } = await import("../src/lib/tennisPmv.js");
   const db = openDb(":memory:");

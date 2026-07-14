@@ -863,6 +863,21 @@ export function migrateVoidOutOfScopePmv(db: Database, now: string): void {
   R.metaSet(db, PMV_SCOPE_VOID_MARK, now, now);
 }
 
+// One-time: VOID every open PMV bet. They were all placed by the BROKEN first epoch (plain "interim",
+// pre-momentum, with the uniform one-sided lean), so letting them ride to settle would both drain the
+// simulated budget and pollute the Brier with the broken batch. Void = refund, P&L 0, excluded from the
+// criterion. PMV stays live in FLAG-ONLY (logs deviations, no new bets) until the recalibrated epoch is
+// re-enabled. The budget stays free for real strategy simulation, not burned by the broken run.
+const PMV_VOID_ALL_MARK = "pmv_void_all_broken_epoch_v1";
+export function migrateVoidAllOpenPmv(db: Database, now: string): void {
+  if (R.metaGet(db, PMV_VOID_ALL_MARK)) return;
+  for (const b of R.openBets(db)) {
+    if (b.strategy_id !== "tennis_pmv") continue;
+    R.updateBet(db, b.id, { status: "settled_lost", result: null, payout: b.stake ?? 0, closing_price: b.entry_price ?? null, settled_at: now, settled_by: "void" });
+  }
+  R.metaSet(db, PMV_VOID_ALL_MARK, now, now);
+}
+
 // The THIRD tennis strategy: PMV (prop consistency vs the moneyline anchor, deterministic, no LLM v1).
 export function migrateTennisPmvStrategy(db: Database): void {
   if (R.getStrategy(db, "tennis_pmv")) return;
