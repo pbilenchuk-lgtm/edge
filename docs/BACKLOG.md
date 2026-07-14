@@ -107,6 +107,34 @@ appear at kickoff/HT). A **timeout** is a transient network failure and is NOT
 cached (distinct from `not_resolved`). Confirmed-coverage leagues never hard-disable
 on transient errors.
 
+## Tennis PMV Gate 0.2 — prop RETIREMENT provenance, VERIFIED from gamma-api (DONE); families void differently
+
+The PMV core anchors every prop's theoretical price on the moneyline via a Markov chain. But a prop's
+resolution at RETIREMENT (tennis retires often) embeds an option that changes BOTH tradeability and
+the fair price. Read the live gamma-api clauses (tag 864, 2026-07) for each family — verbatim below.
+NO family has a murky clause → no clause-blacklist needed; but the void-on-incompletion semantics
+DIFFER by family and MUST be wired into settle AND folded into the theo price when the core is built.
+
+- **Moneyline (anchor):** retire/default/DQ mid-match → the ADVANCER wins; walkover / cancel / tie /
+  delay>7d → 50-50 (void). (Already documented under the retirement-provenance entry.)
+- **Total Sets O/U:** *"If the match begins but is not completed, this market will resolve 50-50."*
+  ⇒ ANY mid-match retire → VOID. A super-tiebreak counts as one set.
+- **Set Handicap (−1.5/+1.5):** *"If the match begins but is not completed, … 50-50 … Otherwise …
+  based on the final completed score."* ⇒ ANY mid-match retire → VOID.
+- **Total Games (Set N Games O/U):** *"If set N is not completed for any reason (including the match
+  ending before set N is reached), … 50-50."* ⇒ voids ONLY if THAT set is incomplete; a COMPLETED
+  set resolves even if the match later retires. Any tiebreak counts as one game.
+- **Set N Winner:** *"If the match begins but is not completed, and the first set is concluded with a
+  winner, this market will resolve based on that completed set. If the … set is not completed → 50-50."*
+  ⇒ resolves on the completed set REGARDLESS of a later retire; voids only if the set itself is incomplete.
+
+**Consequence for the core (do NOT skip):** Total Sets & Set Handicap are *conditional on the whole
+match completing* — their fair value is `P(outcome | completes)` with a void refund otherwise, so the
+Markov theo price MUST fold in P(non-completion) or it will read a phantom deviation against a mid that
+already prices the void option (the same class as the Draw / retire lessons). Total Games (a done set)
+and Set N Winner (a done set) are robust once their unit completes. Settle must implement: relevant
+unit incomplete → VOID (refund, excluded from Brier); unit complete → resolve on it even post-retire.
+
 ## Tennis Set-Value — the SECOND tennis strategy; the "lost set 1" trigger is DIVORCED from Overreaction (DONE)
 
 Two tennis strategies now trade the same "favourite is over-sold" thesis on the SAME moneyline, so
