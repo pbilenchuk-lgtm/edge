@@ -34,7 +34,7 @@ import { strategistDecide, effectiveEnv } from "./llm.js";
 import { hoursUntil, finishStamp } from "./time.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit, type ShadowEntryRequest } from "./shadow.js";
 import { collectSnapshots } from "./snapshots.js";
-import { collectTennisSnapshots } from "./tennisScout.js";
+import { collectTennisSnapshots, recordTennisBreakMarks } from "./tennisScout.js";
 import { overreactionShouldCall } from "./reassessGate.js";
 import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
@@ -1424,6 +1424,7 @@ export async function runAutoCycle(
   // Tennis provider scouting (Stage 0) — parallel, observe-only, gated on API_TENNIS_KEY.
   // Never touches football/money-path; isolated so a provider blip can't abort the tick.
   await step("tennisScout", () => collectTennisSnapshots(db, deps), 0);
+  stepSync("tennisBreakMarks", () => recordTennisBreakMarks(db, deps), 0); // mark completed break windows (≥6min old)
   const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [], llmCalls: 0, llmFail: 0 } as ReassessResult);
   const exited = [...await step("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
   const entered = await step("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
@@ -1627,6 +1628,7 @@ export async function runLiveCycle(
   stepSyncLive("captureLiveOpens", () => captureLiveOpens(db, deps), undefined); // snapshot kickoff prices the first time a match is live
   await stepLive("snapshots", () => collectSnapshots(db, deps), 0); // raw provider + Polymarket capture on the live cadence
   await stepLive("tennisScout", () => collectTennisSnapshots(db, deps), 0); // tennis scouting on the fast (~20s) cadence — dense break-lag data
+  stepSyncLive("tennisBreakMarks", () => recordTennisBreakMarks(db, deps), 0); // passive break marker (§4)
   // Reassessment fires on TWO conditions, unioned: (1) a high-impact on-pitch
   // event (goal / red card) — labelled by its type; (2) the periodic 5-min
   // heartbeat on any match with open risk — labelled "time". Both hand the

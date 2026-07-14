@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 import {
-  serverSide, parsePair, currentSet, normalizeLive, detectBreaks,
+  serverSide, parsePair, currentSet, normalizeLive, detectBreaks, detectTennisEvents,
   collectTennisSnapshots, buildTennisScoutReport, loadTennisConfig, tennisScoutMarkdown,
+  recordTennisBreakMarks, buildTennisBreakReport,
 } from "../src/lib/tennisScout.js";
 
 const T0 = Date.parse("2026-07-14T00:00:00.000Z");
@@ -41,7 +42,7 @@ test("normalizeLive maps the API-Tennis row to the internal shape", () => {
 const snap = (o: Partial<R.TennisSnapshotRow>): R.TennisSnapshotRow => ({
   id: R.uid(), event_key: "E1", provider: "apitennis", batch_at: iso(0), p1: "Arseneault", p2: "Martin",
   tournament: "Granby", event_type: "ATP Singles", live: 1, status: "Set 1", sets_p1: 0, sets_p2: 0,
-  set_num: 1, games_p1: 0, games_p2: 0, game_points: "0 - 0", server: "first", pm_match_id: null, pm_mid_cents: null, raw: null, created_at: iso(0), ...o,
+  set_num: 1, games_p1: 0, games_p2: 0, game_points: "0 - 0", server: "first", pm_match_id: null, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: null, created_at: iso(0), ...o,
 });
 
 test("detectBreaks: the SERVER losing a game is a break; a hold is not", () => {
@@ -68,6 +69,36 @@ test("detectBreaks: rollback and >1-game jumps are skipped (not guessed)", () =>
   assert.equal(detectBreaks(rows).length, 0);
 });
 
+test("detectTennisEvents: tiebreak set (6-6 → 7-6) is a set, NOT a break", () => {
+  const rows = [
+    snap({ batch_at: iso(0), set_num: 1, games_p1: 6, games_p2: 6, server: "first" }),
+    snap({ batch_at: iso(20), set_num: 1, games_p1: 7, games_p2: 6, server: "first" }),
+    snap({ batch_at: iso(40), set_num: 1, games_p1: 7, games_p2: 6, server: "first" }),
+  ];
+  const ev = detectTennisEvents(rows);
+  assert.equal(ev.filter((e) => e.type === "break").length, 0, "no break at 6-6");
+  assert.ok(ev.some((e) => e.type === "tiebreak_set"), "a tiebreak_set is emitted");
+});
+
+test("detectTennisEvents: a score that reverts next snapshot is a correction, not a break", () => {
+  const rows = [
+    snap({ batch_at: iso(0), set_num: 1, games_p1: 3, games_p2: 3, server: "first" }),
+    snap({ batch_at: iso(20), set_num: 1, games_p1: 3, games_p2: 4, server: "first" }), // apparent break…
+    snap({ batch_at: iso(40), set_num: 1, games_p1: 3, games_p2: 3, server: "first" }), // …reverted → correction
+  ];
+  const ev = detectTennisEvents(rows);
+  assert.equal(ev.filter((e) => e.type === "break").length, 0, "unstable score is not a break");
+  assert.ok(ev.some((e) => e.type === "correction"));
+});
+
+test("detectTennisEvents: retirement mid-game is detected from status", () => {
+  const rows = [
+    snap({ batch_at: iso(0), set_num: 2, games_p1: 3, games_p2: 2, server: "first", status: "Set 2" }),
+    snap({ batch_at: iso(20), set_num: 2, games_p1: 3, games_p2: 2, server: "first", status: "Retired", live: 0 }),
+  ];
+  assert.ok(detectTennisEvents(rows).some((e) => e.type === "retirement"), "retirement surfaced");
+});
+
 test("collectTennisSnapshots: no key → inert; with a mock feed → writes parsed live rows", async () => {
   const db = openDb(":memory:");
   assert.equal(loadTennisConfig({}).enabled, false);
@@ -92,4 +123,28 @@ test("buildTennisScoutReport aggregates coverage + breaks from stored snapshots"
   assert.equal(rep.breaks.length, 1, "the break is surfaced in the report");
   assert.equal(rep.coverageByType[0].type, "ATP Singles");
   assert.match(tennisScoutMarkdown(rep), /разведка провайдера/i);
+});
+
+test("recordTennisBreakMarks: marks the panic window on the broken player's winner price (§4)", () => {
+  const db = openDb(":memory:");
+  // First serving; second breaks at +20s. Broken side = 'first' → uses pm_p1_cents.
+  // P1 win price: 70 (pre) → dips to 55 (floor) → recovers 62. Break window: [T-1m, T+6m].
+  const S = (o: Partial<R.TennisSnapshotRow>) => R.insertTennisSnapshot(db, { ...snap(o), id: undefined as any, created_at: undefined as any });
+  S({ batch_at: iso(0), set_num: 1, games_p1: 3, games_p2: 3, server: "first", pm_match_id: "m1", pm_p1_cents: 70 });
+  S({ batch_at: iso(20), set_num: 1, games_p1: 3, games_p2: 4, server: "second", pm_match_id: "m1", pm_p1_cents: 66 }); // BREAK of first
+  S({ batch_at: iso(40), set_num: 1, games_p1: 3, games_p2: 4, server: "first", pm_match_id: "m1", pm_p1_cents: 60 });
+  S({ batch_at: iso(80), set_num: 1, games_p1: 3, games_p2: 4, server: "first", pm_match_id: "m1", pm_p1_cents: 55 }); // floor
+  S({ batch_at: iso(140), set_num: 1, games_p1: 3, games_p2: 4, server: "first", pm_match_id: "m1", pm_p1_cents: 62 }); // recovery ~1m from floor
+  // "now" is well past the +6min window so the break is markable.
+  const n = recordTennisBreakMarks(db, { now: () => iso(60 * 60) });
+  assert.equal(n, 1, "one break marked");
+  const marks = R.listTennisBreakMarks(db);
+  assert.equal(marks[0].broken_side, "first");
+  assert.equal(marks[0].broke_early, 1, "1st-set break tagged early");
+  assert.equal(marks[0].floor_cents, 55, "floor = lowest P1 win price in the window");
+  // idempotent: a second run does not duplicate
+  assert.equal(recordTennisBreakMarks(db, { now: () => iso(60 * 60) }), 0);
+  const brep = buildTennisBreakReport(db);
+  assert.equal(brep.totalMarks, 1);
+  assert.ok(!brep.ready, "1 of 100 → not calibration-ready");
 });

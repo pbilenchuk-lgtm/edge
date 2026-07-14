@@ -15,6 +15,9 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { loadPolymarketConfig, fetchMidpointCents } from "./polymarket.js";
+import { mapTennisMatch, logMapDecision, normName } from "./tennisMatch.js";
+import { computeWindowMetrics, polymarketSeries } from "./overreactionLatency.js";
+import { effectiveCodeVersion } from "./codeEpoch.js";
 
 const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 
@@ -82,22 +85,11 @@ export async function fetchTennisLivescores(cfg: TennisConfig, deps: EngineDeps 
   finally { clearTimeout(timer); }
 }
 
-const lastName = (name: string): string => {
-  const parts = String(name).replace(/[.,]/g, " ").trim().split(/\s+/).filter(Boolean);
-  return (parts[parts.length - 1] ?? "").toLowerCase();
-};
-/** Link a live tennis match to a discovered Polymarket tennis match by BOTH surnames. */
-export function linkPolymarketMatch(db: Database, live: TennisLive): { matchId: string } | null {
-  const a = lastName(live.p1), b = lastName(live.p2);
-  if (!a || !b) return null;
-  for (const c of R.listCompetitions(db)) {
-    if (c.sport_id !== "tennis") continue;
-    for (const m of R.listMatches(db, c.id)) {
-      const h = lastName(m.home), aw = lastName(m.away);
-      if ((h === a && aw === b) || (h === b && aw === a)) return { matchId: m.id };
-    }
-  }
-  return null;
+/** A market label's price is for player X's "to win" if the label contains X's surname. */
+function priceForPlayer(markets: { label: string; external_ref: string | null }[], player: string): string | null {
+  const toks = normName(player).replace(/\./g, " ").split(/\s+/).filter((t) => t.length > 1);
+  const hit = markets.find((mk) => { const l = normName(mk.label); return toks.some((t) => l.includes(t)); });
+  return hit?.external_ref ?? null;
 }
 
 /**
@@ -113,23 +105,29 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
   const live = (await fetchTennisLivescores(cfg, deps)).filter((m) => m.live === 1);
   const poly = deps.polymarket ?? loadPolymarketConfig(env);
   let written = 0;
+  const seenLog = new Set<string>(); // log a match's mapping verdict once per collection pass
   for (const m of live) {
-    let pmMatchId: string | null = null, pmMid: number | null = null;
+    let pmMatchId: string | null = null, pmMid: number | null = null, p1c: number | null = null, p2c: number | null = null;
     try {
-      const link = linkPolymarketMatch(db, m);
-      if (link) {
-        pmMatchId = link.matchId;
+      // PROPER fuzzy mapping (translit/diacritics/initials) — only an AUTO verdict links + trades.
+      const res = mapTennisMatch(db, { p1: m.p1, p2: m.p2, startMs: null });
+      if (!seenLog.has(m.eventKey)) { logMapDecision(db, m.eventKey, { p1: m.p1, p2: m.p2 }, res, batchAt); seenLog.add(m.eventKey); }
+      if (res.verdict === "auto" && res.matchId) {
+        pmMatchId = res.matchId;
         if (poly.enabled) {
-          const mk = R.latestMarkets(db, link.matchId).find((x) => x.external_ref);
-          if (mk?.external_ref) pmMid = await fetchMidpointCents(mk.external_ref, poly, { fetchImpl: deps.fetchImpl }).catch(() => null);
+          const mks = R.latestMarkets(db, res.matchId).filter((x) => x.external_ref).map((x) => ({ label: x.label, external_ref: x.external_ref }));
+          const t1 = priceForPlayer(mks, m.p1), t2 = priceForPlayer(mks, m.p2);
+          if (t1) p1c = await fetchMidpointCents(t1, poly, { fetchImpl: deps.fetchImpl }).catch(() => null);
+          if (t2) p2c = await fetchMidpointCents(t2, poly, { fetchImpl: deps.fetchImpl }).catch(() => null);
+          pmMid = p1c ?? p2c;
         }
       }
-    } catch { /* linking/pricing is best-effort, never blocks the snapshot */ }
+    } catch { /* mapping/pricing is best-effort, never blocks the snapshot */ }
     R.insertTennisSnapshot(db, {
       event_key: m.eventKey, provider: "apitennis", batch_at: batchAt, p1: m.p1, p2: m.p2,
       tournament: m.tournament, event_type: m.eventType, live: m.live, status: m.status,
       sets_p1: m.setsP1, sets_p2: m.setsP2, set_num: m.setNum, games_p1: m.gamesP1, games_p2: m.gamesP2,
-      game_points: m.gamePoints, server: m.server, pm_match_id: pmMatchId, pm_mid_cents: pmMid,
+      game_points: m.gamePoints, server: m.server, pm_match_id: pmMatchId, pm_mid_cents: pmMid, pm_p1_cents: p1c, pm_p2_cents: p2c,
       raw: JSON.stringify(m.raw),
     });
     written++;
@@ -137,39 +135,125 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
   return written;
 }
 
-// ── Offline break detector ──
-export interface BreakEvent {
-  eventKey: string; batchAt: string; setNum: number; server: "first" | "second"; winner: "first" | "second";
-  brokenPlayer: string; gameScore: string;
-}
+// ── §4 Passive break marker: the panic window on the broken player's winner market ──
+const MARK_DELAY_MS = 6 * 60_000; // a break is markable once its +6min window is complete
+const BREAK_R = [1, 2, 3, 5];
+
 /**
- * A break = the SERVER lost their just-finished service game. From consecutive snapshots of
- * one match: exactly ONE game completed (game total +1), no rollback, same set, server known,
- * and the game's WINNER ≠ the server. Jumps of >1 game (missed polls) are skipped as coverage
- * gaps, not guessed. Deterministic — zero heuristics.
+ * Persist a panic-window mark for every confirmed break on a MAPPED match, once the break's
+ * +6min window has elapsed. Idempotent (skip already-marked). Reuses the football window math
+ * (overreactionLatency.computeWindowMetrics) over the broken player's winner-price series
+ * captured in tennis_snapshots. Read-only; never throws into the caller.
  */
-export function detectBreaks(rows: R.TennisSnapshotRow[]): BreakEvent[] {
-  const out: BreakEvent[] = [];
-  const s = [...rows].sort((a, b) => (a.batch_at < b.batch_at ? -1 : 1));
-  for (let i = 1; i < s.length; i++) {
-    const a = s[i - 1], b = s[i];
-    if (a.set_num == null || b.set_num == null || a.set_num !== b.set_num) continue; // set boundary → games reset
-    if (a.games_p1 == null || a.games_p2 == null || b.games_p1 == null || b.games_p2 == null) continue;
-    const da = b.games_p1 - a.games_p1, dbb = b.games_p2 - a.games_p2;
-    if (da < 0 || dbb < 0) continue;      // score correction/rollback
-    if (da + dbb !== 1) continue;         // want exactly one clean completed game
-    const winner: "first" | "second" = da === 1 ? "first" : "second";
-    const server = a.server;              // who served the game that just finished
-    if (server !== "first" && server !== "second") continue;
-    if (winner !== server) {
-      out.push({
-        eventKey: b.event_key, batchAt: b.batch_at, setNum: b.set_num, server, winner,
-        brokenPlayer: server === "first" ? (b.p1 ?? "first") : (b.p2 ?? "second"),
-        gameScore: `${b.games_p1}-${b.games_p2}`,
+export function recordTennisBreakMarks(db: Database, deps: EngineDeps = {}): number {
+  const now = nowFn(deps)();
+  const nowMs = Date.parse(now) || Date.now();
+  const codeVer = effectiveCodeVersion(db);
+  let written = 0;
+  for (const key of R.tennisSnapshotEventKeys(db)) {
+    const rows = R.tennisSnapshotsForEvent(db, key);
+    const breaks = detectBreaks(rows);
+    if (!breaks.length) continue;
+    const already = R.tennisBreakMarkCountForEvent(db, key);
+    if (already >= breaks.length) continue; // all marked
+    // Build the broken player's winner-price series (bid unavailable → mid as the quote).
+    const marked = already; // simple high-water mark: only add breaks beyond the count we stored
+    let idx = 0;
+    for (const br of breaks) {
+      idx++;
+      if (idx <= marked) continue;                 // already persisted this break (ordered, idempotent)
+      const at = Date.parse(br.batchAt);
+      if (nowMs - at < MARK_DELAY_MS) continue;    // window not complete yet
+      const first = rows[0];
+      const pmMatchId = rows.find((r) => r.pm_match_id)?.pm_match_id ?? null;
+      // The broken side's winner price column.
+      const priceOf = (r: R.TennisSnapshotRow) => (br.server === "first" ? r.pm_p1_cents : r.pm_p2_cents);
+      const series = rows.filter((r) => priceOf(r) != null).map((r) => ({ provider: "polymarket", batch_at: r.batch_at, extracted: JSON.stringify({ markets: [{ label: "win", bidCents: priceOf(r), midCents: priceOf(r) }] }) }));
+      const wm = computeWindowMetrics(polymarketSeries(series, "win"), at, undefined, codeVer);
+      const setNum = br.setNum;
+      const broke_early = setNum != null && setNum <= 1 ? 1 : (setNum === 2 && (first?.sets_p1 ?? 0) + (first?.sets_p2 ?? 0) <= 1 ? 1 : 0);
+      R.insertTennisBreakMark(db, {
+        event_key: key, match_id: pmMatchId, players: `${first?.p1 ?? "?"} vs ${first?.p2 ?? "?"}`,
+        tournament: first?.tournament ?? null, event_type: first?.event_type ?? null, set_num: setNum,
+        broken_side: br.server, broke_early, t_event: br.batchAt,
+        pre_cents: wm.panicAmplitudeCents != null && wm.priceFloorCents != null ? Math.round((wm.priceFloorCents + wm.panicAmplitudeCents) * 10) / 10 : null,
+        floor_cents: wm.priceFloorCents, t_floor_sec: wm.tFloorSec, panic_cents: wm.panicAmplitudeCents,
+        recovery_1: wm.recovery["1"], recovery_2: wm.recovery["2"], recovery_3: wm.recovery["3"], recovery_5: wm.recovery["5"],
+        window_quotes: wm.windowQuotes, confidence_flags: wm.flags.length ? wm.flags.join(",") : null, code_version: codeVer, created_at: now,
       });
+      written++;
     }
   }
+  return written;
+}
+
+// ── Offline event detector (deterministic — §9.6: code, no LLM) ──
+export type TennisEventType = "break" | "hold" | "set_won" | "match_finished" | "retirement" | "walkover" | "correction" | "tiebreak_set";
+export interface TennisEvent {
+  eventKey: string; type: TennisEventType; batchAt: string;
+  setNum: number | null; server: "first" | "second" | null; winner: "first" | "second" | null;
+  brokenPlayer: string | null; scoreBefore: string | null; scoreAfter: string | null; note?: string;
+}
+export interface BreakEvent { eventKey: string; batchAt: string; setNum: number; server: "first" | "second"; winner: "first" | "second"; brokenPlayer: string; gameScore: string }
+
+const RETIRE = /retir|\bret\.?\b|ретай/i;
+const WALKOVER = /walkover|w[\/.]o\b|w\.o/i;
+const FINISHED = /finish|заверш|final/i;
+
+/**
+ * Full deterministic event stream from one match's snapshots (sorted). Handles:
+ *  · break (server lost their game) vs hold (server held)
+ *  · set_won / tiebreak_set (a 6-6 game decides the set — break logic does NOT apply)
+ *  · match_finished / retirement / walkover (from status)
+ *  · DEBOUNCE: a game change is confirmed only if it PERSISTS into the next snapshot; a
+ *    change that reverts next snapshot is a provider correction (emitted, not acted on).
+ *  · >1-game jumps (missed polls) are skipped as coverage gaps, never guessed.
+ */
+export function detectTennisEvents(rows: R.TennisSnapshotRow[]): TennisEvent[] {
+  const out: TennisEvent[] = [];
+  const s = [...rows].sort((a, b) => (a.batch_at < b.batch_at ? -1 : 1));
+  const gs = (r: R.TennisSnapshotRow) => `${r.games_p1}-${r.games_p2}`;
+  for (let i = 1; i < s.length; i++) {
+    const a = s[i - 1], b = s[i];
+    if (a.set_num == null || b.set_num == null) continue;
+    if (b.set_num > a.set_num) { // a set completed
+      out.push({ eventKey: b.event_key, type: "set_won", batchAt: b.batch_at, setNum: a.set_num, server: null, winner: null, brokenPlayer: null, scoreBefore: gs(a), scoreAfter: gs(b), note: a.games_p1 === 6 && a.games_p2 === 6 ? "tiebreak" : undefined });
+      continue;
+    }
+    if (b.set_num < a.set_num) continue;
+    if (a.games_p1 == null || a.games_p2 == null || b.games_p1 == null || b.games_p2 == null) continue;
+    const da = b.games_p1 - a.games_p1, dbb = b.games_p2 - a.games_p2;
+    if (da === 0 && dbb === 0) continue;
+    if (da < 0 || dbb < 0) { out.push({ eventKey: b.event_key, type: "correction", batchAt: b.batch_at, setNum: b.set_num, server: null, winner: null, brokenPlayer: null, scoreBefore: gs(a), scoreAfter: gs(b) }); continue; }
+    if (da + dbb !== 1) continue; // missed poll → coverage gap, don't guess
+    // Tiebreak: a game completed FROM 6-6 decides the set — not a break.
+    if (a.games_p1 === 6 && a.games_p2 === 6) { out.push({ eventKey: b.event_key, type: "tiebreak_set", batchAt: b.batch_at, setNum: b.set_num, server: null, winner: da === 1 ? "first" : "second", brokenPlayer: null, scoreBefore: gs(a), scoreAfter: gs(b), note: "tiebreak" }); continue; }
+    // DEBOUNCE: confirm the new score persists; a same-tick reversal is a correction.
+    const n = s[i + 1];
+    if (n && n.set_num === a.set_num && n.games_p1 === a.games_p1 && n.games_p2 === a.games_p2) { out.push({ eventKey: b.event_key, type: "correction", batchAt: b.batch_at, setNum: b.set_num, server: null, winner: null, brokenPlayer: null, scoreBefore: gs(a), scoreAfter: gs(b) }); continue; }
+    const winner: "first" | "second" = da === 1 ? "first" : "second";
+    const server = a.server; // who served the just-finished game
+    if (server !== "first" && server !== "second") continue;
+    if (winner === server) { out.push({ eventKey: b.event_key, type: "hold", batchAt: b.batch_at, setNum: b.set_num, server, winner, brokenPlayer: null, scoreBefore: gs(a), scoreAfter: gs(b) }); continue; }
+    out.push({ eventKey: b.event_key, type: "break", batchAt: b.batch_at, setNum: b.set_num, server, winner, brokenPlayer: server === "first" ? (b.p1 ?? "first") : (b.p2 ?? "second"), scoreBefore: gs(a), scoreAfter: gs(b) });
+  }
+  // Terminal state from the last snapshot's status (retirement mid-game is detectable here).
+  const last = s[s.length - 1];
+  if (last) {
+    const st = String(last.status ?? "");
+    if (RETIRE.test(st)) out.push({ eventKey: last.event_key, type: "retirement", batchAt: last.batch_at, setNum: last.set_num, server: null, winner: null, brokenPlayer: null, scoreBefore: null, scoreAfter: gs(last) });
+    else if (WALKOVER.test(st)) out.push({ eventKey: last.event_key, type: "walkover", batchAt: last.batch_at, setNum: last.set_num, server: null, winner: null, brokenPlayer: null, scoreBefore: null, scoreAfter: null });
+    else if (FINISHED.test(st) || last.live === 0) out.push({ eventKey: last.event_key, type: "match_finished", batchAt: last.batch_at, setNum: last.set_num, server: null, winner: null, brokenPlayer: null, scoreBefore: null, scoreAfter: gs(last) });
+  }
   return out;
+}
+
+/** Just the confirmed BREAK events (server lost their service game). */
+export function detectBreaks(rows: R.TennisSnapshotRow[]): BreakEvent[] {
+  return detectTennisEvents(rows).filter((e) => e.type === "break").map((e) => ({
+    eventKey: e.eventKey, batchAt: e.batchAt, setNum: e.setNum as number, server: e.server as "first" | "second",
+    winner: e.winner as "first" | "second", brokenPlayer: e.brokenPlayer as string, gameScore: e.scoreAfter as string,
+  }));
 }
 
 // ── Report ──
@@ -230,6 +314,35 @@ export function buildTennisScoutReport(db: Database): TennisScoutReport {
       "брейки при пропуске поллов (скачок >1 гейма за снапшот) не атрибутируются — считаются как gaps, не угадываются",
       "линк к Polymarket по фамилиям обоих игроков; несопоставленные матчи меряют только качество провайдера, без лага",
     ],
+  };
+}
+
+// ── §4 break-marker report: panic calibration by context ──
+export interface TennisBreakReport {
+  totalMarks: number; targetForCalibration: number; ready: boolean;
+  byContext: { context: string; n: number; medianPanic: number | null; medianFloor: number | null; medianTFloorSec: number | null }[];
+  overall: { medianPanic: number | null; medianFloor: number | null; medianRecovery2: number | null };
+  note: string;
+}
+const CALIB_TARGET = 100;
+export function buildTennisBreakReport(db: Database): TennisBreakReport {
+  const marks = R.listTennisBreakMarks(db).filter((m) => m.panic_cents != null); // measurable only
+  const groups = new Map<string, R.TennisBreakMarkRow[]>();
+  const levelOf = (t: string | null) => /challenger/i.test(t ?? "") ? "Challenger" : /wta/i.test(t ?? "") ? "WTA" : /atp|men/i.test(t ?? "") ? "ATP" : (t ?? "?");
+  for (const m of marks) {
+    const ctx = `${levelOf(m.event_type)} · ${m.broke_early ? "early" : "late"}`;
+    (groups.get(ctx) ?? groups.set(ctx, []).get(ctx)!).push(m);
+  }
+  const med = (xs: (number | null)[]) => { const v = xs.filter((x): x is number => x != null).sort((a, b) => a - b); return v.length ? (v.length % 2 ? v[(v.length - 1) / 2] : Math.round((v[v.length / 2 - 1] + v[v.length / 2]) / 2 * 10) / 10) : null; };
+  return {
+    totalMarks: marks.length, targetForCalibration: CALIB_TARGET, ready: marks.length >= CALIB_TARGET,
+    byContext: [...groups.entries()].map(([context, ms]) => ({
+      context, n: ms.length, medianPanic: med(ms.map((m) => m.panic_cents)), medianFloor: med(ms.map((m) => m.floor_cents)), medianTFloorSec: med(ms.map((m) => m.t_floor_sec)),
+    })).sort((a, b) => b.n - a.n),
+    overall: { medianPanic: med(marks.map((m) => m.panic_cents)), medianFloor: med(marks.map((m) => m.floor_cents)), medianRecovery2: med(marks.map((m) => m.recovery_2)) },
+    note: marks.length >= CALIB_TARGET
+      ? "≥100 брейков — можно калибровать армед-цены из распределения (новая эпоха, thresholds=calibrated)"
+      : `накоплено ${marks.length}/${CALIB_TARGET} брейков — армед-цены остаются interim, копим`,
   };
 }
 

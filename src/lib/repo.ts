@@ -1056,15 +1056,15 @@ export interface TennisSnapshotRow {
   live: number | null; status: string | null;
   sets_p1: number | null; sets_p2: number | null; set_num: number | null;
   games_p1: number | null; games_p2: number | null; game_points: string | null; server: string | null;
-  pm_match_id: string | null; pm_mid_cents: number | null; raw: string | null; created_at: string;
+  pm_match_id: string | null; pm_mid_cents: number | null; pm_p1_cents: number | null; pm_p2_cents: number | null; raw: string | null; created_at: string;
 }
 export function insertTennisSnapshot(db: Database, r: Omit<TennisSnapshotRow, "id" | "created_at"> & { id?: string; created_at?: string }): void {
   db.prepare(
     `INSERT INTO tennis_snapshots(id,event_key,provider,batch_at,p1,p2,tournament,event_type,live,status,
-       sets_p1,sets_p2,set_num,games_p1,games_p2,game_points,server,pm_match_id,pm_mid_cents,raw,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?, ?)`,
+       sets_p1,sets_p2,set_num,games_p1,games_p2,game_points,server,pm_match_id,pm_mid_cents,pm_p1_cents,pm_p2_cents,raw,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?,?, ?,?)`,
   ).run(r.id ?? uid(), r.event_key, r.provider, r.batch_at, r.p1, r.p2, r.tournament, r.event_type, r.live, r.status,
-    r.sets_p1, r.sets_p2, r.set_num, r.games_p1, r.games_p2, r.game_points, r.server, r.pm_match_id, r.pm_mid_cents, r.raw, r.created_at ?? nowIso());
+    r.sets_p1, r.sets_p2, r.set_num, r.games_p1, r.games_p2, r.game_points, r.server, r.pm_match_id, r.pm_mid_cents, r.pm_p1_cents ?? null, r.pm_p2_cents ?? null, r.raw, r.created_at ?? nowIso());
 }
 export function tennisSnapshotsForEvent(db: Database, eventKey: string): TennisSnapshotRow[] {
   return db.prepare(`SELECT * FROM tennis_snapshots WHERE event_key=? ORDER BY batch_at`).all(eventKey) as TennisSnapshotRow[];
@@ -1077,6 +1077,37 @@ export function tennisSnapshotCount(db: Database): number {
 }
 export function pruneTennisSnapshots(db: Database, olderThanIso: string): number {
   return db.prepare(`DELETE FROM tennis_snapshots WHERE batch_at < ?`).run(olderThanIso).changes ?? 0;
+}
+
+export interface TennisMapLogRow { id?: string; event_key: string; players: string | null; verdict: string; match_id: string | null; score: number | null; candidates: string | null; created_at: string }
+export function insertTennisMapLog(db: Database, r: TennisMapLogRow): void {
+  db.prepare(`INSERT INTO tennis_map_log(id,event_key,players,verdict,match_id,score,candidates,created_at) VALUES(?,?,?,?,?,?,?,?)`)
+    .run(r.id ?? uid(), r.event_key, r.players, r.verdict, r.match_id, r.score, r.candidates, r.created_at);
+}
+export function tennisMapLog(db: Database, limit = 500): TennisMapLogRow[] {
+  return db.prepare(`SELECT * FROM tennis_map_log ORDER BY created_at DESC LIMIT ?`).all(limit) as TennisMapLogRow[];
+}
+
+export interface TennisBreakMarkRow {
+  id?: string; event_key: string; match_id: string | null; players: string | null; tournament: string | null; event_type: string | null;
+  set_num: number | null; broken_side: string | null; broke_early: number | null; t_event: string;
+  pre_cents: number | null; floor_cents: number | null; t_floor_sec: number | null; panic_cents: number | null;
+  recovery_1: number | null; recovery_2: number | null; recovery_3: number | null; recovery_5: number | null;
+  window_quotes: number; confidence_flags: string | null; code_version: string | null; created_at: string;
+}
+export function insertTennisBreakMark(db: Database, r: TennisBreakMarkRow): void {
+  db.prepare(
+    `INSERT INTO tennis_break_marks(id,event_key,match_id,players,tournament,event_type,set_num,broken_side,broke_early,t_event,
+       pre_cents,floor_cents,t_floor_sec,panic_cents,recovery_1,recovery_2,recovery_3,recovery_5,window_quotes,confidence_flags,code_version,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(r.id ?? uid(), r.event_key, r.match_id, r.players, r.tournament, r.event_type, r.set_num, r.broken_side, r.broke_early, r.t_event,
+    r.pre_cents, r.floor_cents, r.t_floor_sec, r.panic_cents, r.recovery_1, r.recovery_2, r.recovery_3, r.recovery_5, r.window_quotes, r.confidence_flags, r.code_version, r.created_at);
+}
+export function listTennisBreakMarks(db: Database): TennisBreakMarkRow[] {
+  return db.prepare(`SELECT * FROM tennis_break_marks ORDER BY created_at`).all() as TennisBreakMarkRow[];
+}
+export function tennisBreakMarkCountForEvent(db: Database, eventKey: string): number {
+  return (db.prepare(`SELECT COUNT(*) n FROM tennis_break_marks WHERE event_key=?`).get(eventKey) as { n: number }).n;
 }
 
 export function getProviderRef(db: Database, matchId: string, provider: string): { provider_ref: string | null; resolved_at: string } | null {

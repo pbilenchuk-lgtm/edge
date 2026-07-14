@@ -530,8 +530,52 @@ CREATE TABLE IF NOT EXISTS tennis_snapshots (
   game_points   TEXT,                          -- "40 - 40"
   server        TEXT,                          -- 'first' | 'second' | null
   pm_match_id   TEXT,                          -- linked Polymarket match (nullable)
-  pm_mid_cents  REAL,                          -- linked market mid at batch (for lag vs market)
+  pm_mid_cents  REAL,                          -- linked match's primary market mid (coarse)
+  pm_p1_cents   REAL,                          -- P1 "to win" market mid (surname-matched)
+  pm_p2_cents   REAL,                          -- P2 "to win" market mid — the broken side's price for the marker
   raw           TEXT,                          -- full provider row (JSON)
   created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tennis_snap_event ON tennis_snapshots(event_key, batch_at);
+
+-- tennis_map_log — every API-Tennis ↔ Polymarket mapping decision (auto/review/skip) with
+-- its score + candidate list. An unmapped/gray match NEVER trades; this is the evidence
+-- trail (the Draw-provenance discipline applied up front). Observe-only.
+CREATE TABLE IF NOT EXISTS tennis_map_log (
+  id          TEXT PRIMARY KEY,
+  event_key   TEXT NOT NULL,
+  players     TEXT,
+  verdict     TEXT NOT NULL,   -- 'auto' | 'review' | 'skip'
+  match_id    TEXT,            -- linked Polymarket match when auto
+  score       REAL,
+  candidates  TEXT,            -- JSON: top scored candidates
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tennis_map_event ON tennis_map_log(event_key);
+
+-- tennis_break_marks — the passive break marker (Stage-1 main value): one row per detected
+-- break on ANY ATP/WTA match, with the winner-market panic window measured from the linked
+-- Polymarket price series. Computed at-event/at-settle while snapshots are hot, stored
+-- permanently → calibrates the armed buyback prices (replacing interim thresholds).
+CREATE TABLE IF NOT EXISTS tennis_break_marks (
+  id              TEXT PRIMARY KEY,
+  event_key       TEXT NOT NULL,
+  match_id        TEXT,            -- linked Polymarket match (nullable)
+  players         TEXT,
+  tournament      TEXT,
+  event_type      TEXT,
+  set_num         INTEGER,
+  broken_side     TEXT,            -- 'first' | 'second' (the server who was broken)
+  broke_early     INTEGER,         -- 1 = 1st set / start of 2nd (the documented setup)
+  t_event         TEXT NOT NULL,   -- break detection wall-clock
+  pre_cents       REAL,            -- broken player's winner price just before the break
+  floor_cents     REAL,            -- min real bid in the window
+  t_floor_sec     INTEGER,
+  panic_cents     REAL,            -- pre − floor
+  recovery_1      REAL, recovery_2 REAL, recovery_3 REAL, recovery_5 REAL,
+  window_quotes   INTEGER NOT NULL DEFAULT 0,
+  confidence_flags TEXT,
+  code_version    TEXT,
+  created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tennis_break_event ON tennis_break_marks(event_key);
