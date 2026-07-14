@@ -300,10 +300,26 @@ export function pmvEntryMeta(o: { theoCents: number; midCents: number; deviation
 // actual 3-set rate is far below the model's ~50%, the i.i.d.-sets assumption over-prices Total Sets
 // Over (fix = set-dependence momentum); if the actual hold rate is below base_hold, base_hold is too
 // high (→ fewer, longer... calibrate the constant). Pure read.
-export interface TennisFreqTour { tour: "atp" | "wta"; decidedMatches: number; threeSetRate: number | null; modelThreeSetRate: number; holdGames: number; actualHoldRate: number | null; modelHoldRate: number }
+// The two suspects are diagnosed SEPARATELY and must NOT be merged into one base_hold tweak:
+//   (a) base_hold too high → the ACTUAL service-hold rate (serve is in every snapshot; huge sample).
+//   (b) i.i.d. sets       → the 3-set rate among EVEN matches (|moneyline−50|≤band, a proxy for |δ|<0.05).
+// The discriminator is `modelThreeSetRateAtActualHold`: the i.i.d. model fed the REAL hold rate. If it
+// still says ~50% while the actual even-match 3-set rate is ~38%, base_hold is innocent — the set
+// independence is the culprit and only the momentum (P3) fixes it; re-tuning base_hold would be a new error.
+const EVEN_MONEYLINE_BAND = num(process.env.TENNIS_PMV_EVEN_BAND, 3); // ¢ around 50 ≈ |δ|<0.05
+export interface TennisFreqTour {
+  tour: "atp" | "wta";
+  holdGames: number; actualHoldRate: number | null; modelHoldRate: number;                 // suspect (a)
+  evenMatches: number; evenThreeSetRate: number | null;                                     // suspect (b)
+  modelThreeSetRateAtBase: number; modelThreeSetRateAtActualHold: number | null;            // the discriminator
+  allDecided: number; allThreeSetRate: number | null;
+  verdict: "base_hold_high" | "iid_sets" | "both" | "model_ok" | "insufficient";
+}
 export interface TennisFrequencyReport { generatedNote: string; tours: TennisFreqTour[] }
 export function buildTennisFrequencyReport(db: Database): TennisFrequencyReport {
-  const acc: Record<"atp" | "wta", { two: number; three: number; holds: number; breaks: number }> = { atp: { two: 0, three: 0, holds: 0, breaks: 0 }, wta: { two: 0, three: 0, holds: 0, breaks: 0 } };
+  const acc: Record<"atp" | "wta", { two: number; three: number; evenTwo: number; evenThree: number; holds: number; breaks: number }> = {
+    atp: { two: 0, three: 0, evenTwo: 0, evenThree: 0, holds: 0, breaks: 0 }, wta: { two: 0, three: 0, evenTwo: 0, evenThree: 0, holds: 0, breaks: 0 },
+  };
   for (const c of R.listCompetitions(db)) {
     if (c.sport_id !== "tennis") continue;
     const tour = pmvTour(c); if (!tour) continue;
@@ -313,21 +329,40 @@ export function buildTennisFrequencyReport(db: Database): TennisFrequencyReport 
       if (snaps.length < 2) continue;
       const last = snaps[snaps.length - 1];
       const totalSets = (last.sets_p1 ?? 0) + (last.sets_p2 ?? 0);
-      if (totalSets === 2) acc[tour].two++; else if (totalSets === 3) acc[tour].three++; // decided bo3 only
+      const decided3 = totalSets === 3, decided2 = totalSets === 2;
+      if (decided2) acc[tour].two++; else if (decided3) acc[tour].three++;
+      // EVEN filter: the START moneyline within EVEN_MONEYLINE_BAND of 50¢ (a proxy for |δ|<0.05).
+      const startRow = snaps.find((s) => s.pm_p1_cents != null);
+      const startP = startRow?.pm_p1_cents;
+      if (startP != null && Math.abs(startP - 50) <= EVEN_MONEYLINE_BAND && (decided2 || decided3)) {
+        if (decided2) acc[tour].evenTwo++; else acc[tour].evenThree++;
+      }
       for (const e of detectTennisEvents(snaps)) { if (e.type === "hold") acc[tour].holds++; else if (e.type === "break") acc[tour].breaks++; }
     }
   }
+  const r3 = (x: number) => Math.round(x * 1000) / 1000;
   const tours: TennisFreqTour[] = (["atp", "wta"] as const).map((tour) => {
-    const a = acc[tour]; const decided = a.two + a.three; const games = a.holds + a.breaks;
+    const a = acc[tour]; const games = a.holds + a.breaks; const allDecided = a.two + a.three; const evenDecided = a.evenTwo + a.evenThree;
     const base = tour === "wta" ? BASE_HOLD.wta : BASE_HOLD.atp_hard;
-    const md = matchDistribution(base, base, 0); // model at δ=0 (even match)
+    const actualHold = games ? a.holds / games : null;
+    const modelAtBase = r3(1 - matchDistribution(base, base, 0).pTwoSets);
+    const modelAtActual = actualHold != null ? r3(1 - matchDistribution(actualHold, actualHold, 0).pTwoSets) : null;
+    const evenRate = evenDecided ? a.evenThree / evenDecided : null;
+    // Verdict: hold gap vs 3-set gap AGAINST THE ACTUAL-HOLD model (isolates i.i.d.).
+    let verdict: TennisFreqTour["verdict"] = "insufficient";
+    if (games >= 200 && evenDecided >= 10 && actualHold != null && modelAtActual != null && evenRate != null) {
+      const holdOff = Math.abs(actualHold - base) >= 0.03;                       // base_hold materially wrong
+      const iidOff = modelAtActual - evenRate >= 0.08;                           // even with real holds, model over-prices 3-sets
+      verdict = holdOff && iidOff ? "both" : iidOff ? "iid_sets" : holdOff ? "base_hold_high" : "model_ok";
+    }
     return {
-      tour, decidedMatches: decided, threeSetRate: decided ? Math.round((a.three / decided) * 1000) / 1000 : null,
-      modelThreeSetRate: Math.round((1 - md.pTwoSets) * 1000) / 1000,
-      holdGames: games, actualHoldRate: games ? Math.round((a.holds / games) * 1000) / 1000 : null, modelHoldRate: base,
+      tour, holdGames: games, actualHoldRate: actualHold != null ? r3(actualHold) : null, modelHoldRate: base,
+      evenMatches: evenDecided, evenThreeSetRate: evenRate != null ? r3(evenRate) : null,
+      modelThreeSetRateAtBase: modelAtBase, modelThreeSetRateAtActualHold: modelAtActual,
+      allDecided, allThreeSetRate: allDecided ? r3(a.three / allDecided) : null, verdict,
     };
   });
-  const note = tours.map((t) => `${t.tour}: 3-сетовиков факт ${t.threeSetRate ?? "—"} vs модель ${t.modelThreeSetRate} (${t.decidedMatches} матчей); hold факт ${t.actualHoldRate ?? "—"} vs модель ${t.modelHoldRate} (${t.holdGames} геймов)`).join(" · ");
+  const note = tours.map((t) => `${t.tour} [${t.verdict}]: hold факт ${t.actualHoldRate ?? "—"} vs base ${t.modelHoldRate} (${t.holdGames} геймов) | 3-сетовиков на равных ${t.evenThreeSetRate ?? "—"} vs модель@факт-hold ${t.modelThreeSetRateAtActualHold ?? "—"} (${t.evenMatches} равных матчей)`).join(" · ");
   return { generatedNote: note, tours };
 }
 

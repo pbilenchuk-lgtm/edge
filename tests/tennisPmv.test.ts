@@ -231,10 +231,13 @@ test("P2 frequency report: actual 3-set + hold rates from snapshots vs the model
   finish(2, 2, 1, [{ g1: 0, g2: 1, server: "first" }]);  // 3-set match, 1 break (first broken)
   const rep = buildTennisFrequencyReport(db);
   const atp = rep.tours.find((t) => t.tour === "atp")!;
-  assert.equal(atp.decidedMatches, 2);
-  assert.equal(atp.threeSetRate, 0.5, "1 of 2 decided went to 3 sets");
-  assert.ok(atp.modelThreeSetRate > 0 && atp.modelThreeSetRate < 1, "model rate present for comparison");
-  assert.ok(atp.actualHoldRate != null, "hold rate computed");
+  assert.equal(atp.allDecided, 2);
+  assert.equal(atp.allThreeSetRate, 0.5, "1 of 2 decided went to 3 sets");
+  assert.ok(atp.modelThreeSetRateAtBase > 0 && atp.modelThreeSetRateAtBase < 1, "i.i.d. model rate at base present");
+  assert.ok(atp.actualHoldRate != null, "hold rate computed (suspect a)");
+  // the discriminator field exists: i.i.d. model fed the ACTUAL hold rate (isolates suspect b)
+  assert.ok(atp.modelThreeSetRateAtActualHold != null);
+  assert.ok(["insufficient", "iid_sets", "base_hold_high", "both", "model_ok"].includes(atp.verdict));
 });
 
 test("finalSetsFromRaw: parses API-Tennis scores into per-set games", () => {
