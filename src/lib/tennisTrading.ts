@@ -394,7 +394,11 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
   if (!strat) return 0; // strategy not seeded → tennis trading off
   const now = nowFn(deps)();
   const nowMs = Date.parse(now) || Date.now();
-  const codeVer = effectiveCodeVersion(db);
+  // Stamp the armed-threshold epoch INTO the bet's code_version so the showcase (which segments
+  // by code_version) hard-separates interim from calibrated tennis bets — the same epoch discipline
+  // that let the 247-football-bet analysis drop a broken era. An interim bet (none exist) would read
+  // «…·interim»; every bet from here reads «…·calibrated».
+  const codeVer = `${effectiveCodeVersion(db)}·${TENNIS_ARMED_EPOCH}`;
   const shadowCfg = loadShadowConfig(db, deps.env);
   let opened = 0;
 
