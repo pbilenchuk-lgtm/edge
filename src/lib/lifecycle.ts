@@ -35,7 +35,7 @@ import { hoursUntil, finishStamp } from "./time.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit, type ShadowEntryRequest } from "./shadow.js";
 import { collectSnapshots } from "./snapshots.js";
 import { collectTennisSnapshots, recordTennisBreakMarks } from "./tennisScout.js";
-import { tennisTradingTick, tennisExitTick, settleTennisBets, finishTennisMatches } from "./tennisTrading.js";
+import { tennisTradingTick, tennisExitTick, settleTennisBets, finishTennisMatches, tennisScoutInPlay, tennisFinalResult } from "./tennisTrading.js";
 import { overreactionShouldCall } from "./reassessGate.js";
 import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
@@ -260,6 +260,31 @@ export function advanceClocks(db: Database, deps: EngineDeps = {}): void {
   const nowIso = nowFn(deps)();
   const nowMs = Date.parse(nowIso) || Date.now();
   for (const { sport, match: m } of activeMatches(db)) {
+    // TENNIS: no provider clock — the SCOUT owns liveness (else the clock flips a match to "live"
+    // at its scheduled time even when API-Tennis never sees it in-play, and hasLiveData=false for
+    // tennis would then FINISH real in-play matches on the no-coverage grace). Fully scout-driven,
+    // then skip the football clock below.
+    if (sport === "tennis") {
+      const inPlay = tennisScoutInPlay(db, m.id, nowMs);
+      if (inPlay) {
+        if (m.state !== "live") R.updateMatch(db, m.id, { state: "live", lineup_out: true });
+      } else if (m.state === "live") {
+        // Not in-play per the scout. Keep following an OPEN position (settle/exit own it); otherwise
+        // a scout FINAL → finished, else a clock-phantom (never started / ended-and-missed) → un-live
+        // back to the schedule bucket so the scout can re-drive it if it actually starts.
+        if (!R.betsForMatch(db, m.id).some((b) => b.status === "open")) {
+          const fin = tennisFinalResult(db, m.id);
+          if (fin?.finished) R.updateMatch(db, m.id, { state: "finished", ...(!m.end_time ? { end_time: nowIso } : {}) });
+          else { const hh = hoursUntil(m.kickoff_at, nowMs); const back: MatchState = hh != null && hh > 0 && hh <= LINEUP_HOURS ? "lineup" : "upcoming"; R.updateMatch(db, m.id, { state: back, lineup_out: back === "lineup" }); }
+        }
+      } else if (m.state === "upcoming" || m.state === "lineup") {
+        // Pre-live scheduling for display only — NEVER clock-flip tennis to live (only the scout does).
+        const hh = hoursUntil(m.kickoff_at, nowMs);
+        if (hh != null && hh > 0 && hh <= LINEUP_HOURS && m.state !== "lineup") R.updateMatch(db, m.id, { state: "lineup", lineup_out: true });
+      }
+      continue;
+    }
+
     const h = hoursUntil(m.kickoff_at, nowMs);
     if (h == null) continue;
 

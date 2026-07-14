@@ -188,6 +188,17 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
   return closed;
 }
 
+// Tennis has NO provider clock, so the SCOUT is authoritative for liveness: a match is in-play
+// iff its newest LINKED snapshot says live=1 and is fresh. A generous stale window absorbs normal
+// scheduler gaps without churning state; a real outage (scout silent) correctly reads not-live.
+const TENNIS_SCOUT_STALE_MIN = (() => { const n = Number(process.env.TENNIS_SCOUT_STALE_MIN); return Number.isFinite(n) && n > 0 ? n : 15; })();
+export function tennisScoutInPlay(db: Database, matchId: string, nowMs: number, staleMin = TENNIS_SCOUT_STALE_MIN): boolean {
+  const r = db.prepare(`SELECT live, batch_at FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(matchId) as { live?: number; batch_at?: string } | undefined;
+  if (!r || r.live !== 1) return false;
+  const age = nowMs - (Date.parse(r.batch_at ?? "") || 0);
+  return age <= staleMin * 60_000;
+}
+
 // ── Observability: the entry funnel (read-only; reconstructs the tick's own gates) ──
 // The tick's skips are mostly SILENT (no_favourite / thin_book / no_break / underdog_broken /
 // out_of_window / price_far go to app_meta, not the trade log), so from the UI a running-but-

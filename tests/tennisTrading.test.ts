@@ -8,6 +8,7 @@ import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMat
 import { migrateTennisStrategy } from "../src/lib/seed.js";
 import { buildTennisCalibrationReport } from "../src/lib/tennisScout.js";
 import { buildTennisFunnel } from "../src/lib/tennisTrading.js";
+import { advanceClocks } from "../src/lib/lifecycle.js";
 
 test("resolveTennisWinner: advances→YES, loser→NO, canceled→void, retirement→advancing wins", () => {
   // Vukic advances (won or Broady retired)
@@ -233,6 +234,48 @@ test("Part B buildTennisCalibrationReport: splits marks into recovery vs no-reco
   assert.equal(rep.ready, false, "3 < 100 → interim, not ready");
   assert.ok((rep.noRecovery.slideCents.p90 ?? 0) >= 30, "no-recovery slide tail informs the floor");
   assert.ok(rep.byContext.some((c) => /ATP/.test(c.context)), "context split present");
+});
+
+test("advanceClocks tennis: kickoff passed but NO scout data → stays upcoming (no clock-phantom live)", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  R.updateMatch(db, mid, { state: "upcoming", lineup_out: false }); // reset from seed's "live"
+  // kickoff is in the past; a football match would flip to live here. Tennis must NOT (no scout).
+  advanceClocks(db, { now: () => "2026-07-14T12:00:00Z" });
+  assert.equal(R.getMatch(db, mid)!.state, "upcoming", "the clock never fabricates tennis live");
+});
+
+test("advanceClocks tennis: a FRESH in-play scout snapshot flips the match to live", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  R.updateMatch(db, mid, { state: "upcoming", lineup_out: false });
+  snap(db, mid, { at: "2026-07-14T11:59:00Z", g1: 2, g2: 1, server: "first", p1c: 60 }); // live=1, fresh
+  advanceClocks(db, { now: () => "2026-07-14T12:00:00Z" });
+  assert.equal(R.getMatch(db, mid)!.state, "live", "scout confirms in-play → live");
+});
+
+test("advanceClocks tennis: a clock-phantom live match (scout silent, no position) is un-lived", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // seeded state "live"
+  // no scout snapshots at all → not in-play. No open bet. kickoff in the past.
+  advanceClocks(db, { now: () => "2026-07-14T12:00:00Z" });
+  assert.equal(R.getMatch(db, mid)!.state, "upcoming", "phantom dropped out of live");
+});
+
+test("advanceClocks tennis: an open position keeps a stale-scout match LIVE (never strand a bet)", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // state "live"
+  R.insertBet(db, { id: "keep", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "сет 1", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: null, code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+  advanceClocks(db, { now: () => "2026-07-14T12:00:00Z" });
+  assert.equal(R.getMatch(db, mid)!.state, "live", "position is babysat, not stranded");
+});
+
+test("advanceClocks tennis: a scout FINAL finishes a live match (no open position)", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // state "live"
+  R.insertTennisSnapshot(db, { event_key: "EF", provider: "apitennis", batch_at: "2026-07-14T11:58:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Finished", sets_p1: 2, sets_p2: 0, set_num: 2, games_p1: 6, games_p2: 3, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "First Player" }) });
+  advanceClocks(db, { now: () => "2026-07-14T12:00:00Z" });
+  assert.equal(R.getMatch(db, mid)!.state, "finished", "scout final → finished, not un-lived to upcoming");
 });
 
 test("buildTennisFunnel: reconstructs the funnel + names each live match's drop-out stage", () => {
