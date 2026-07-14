@@ -616,12 +616,12 @@ function buildFeed(
     };
   };
   const rows: { at: string; item: FeedItem }[] = [];
-  for (const e of R.recentTradeLog(db, POOL)) {
-    // «Пропуски» were pure noise: every cron tick logs a skip per pair, which
-    // floods this bounded window and buries the real entries/settlements. Drop
-    // them from the feed entirely — the strategy card already explains why a
-    // pair isn't entering, so the лента only carries P&L-affecting rows.
-    if (e.type === "skip") continue;
+  // Exclude «пропуски» in SQL (excludeSkips): every cron tick logs a skip per pair, so
+  // with tennis (4 profiles × many live matches) the newest-POOL window was ALL skips and
+  // real enters/settles fell out — the лента showed no tennis entries though they happened.
+  // Now the pool is P&L-affecting rows only, so a fresh tennis entry always makes the feed.
+  for (const e of R.recentTradeLog(db, POOL, true)) {
+    if (e.type === "skip") continue; // belt-and-suspenders; SQL already excluded them
     const inf = info(e.match_id); if (!inf) continue;
     const st = stratById[e.strategy_id];
     // enter → «Входы»; exit (cash-out) AND settle → «Расчёты» (both realize P&L).

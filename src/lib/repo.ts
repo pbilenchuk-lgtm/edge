@@ -902,8 +902,13 @@ export function tradeLogForMatch(db: Database, matchId: string): TradeLogEntry[]
 }
 // Globally most-recent rows for the event feed — bounded LIMIT instead of
 // scanning every match's log/reassessments/events and slicing afterwards.
-export function recentTradeLog(db: Database, limit: number): TradeLogEntry[] {
-  return db.prepare(`SELECT * FROM trade_log ORDER BY created_at DESC LIMIT ?`).all(limit) as TradeLogEntry[];
+export function recentTradeLog(db: Database, limit: number, excludeSkips = false): TradeLogEntry[] {
+  // excludeSkips filters «пропуски» in SQL, not after: every cron tick logs a skip per
+  // (strategy,profile,match), so with tennis running 4 profiles × many live matches the
+  // newest-N window is flooded with skips and real enters/settles fall out of it. The feed
+  // wants the newest P&L-affecting rows, so it must exclude skips BEFORE the LIMIT.
+  const where = excludeSkips ? `WHERE type != 'skip'` : ``;
+  return db.prepare(`SELECT * FROM trade_log ${where} ORDER BY created_at DESC LIMIT ?`).all(limit) as TradeLogEntry[];
 }
 export function recentReassessments(db: Database, limit: number): Reassessment[] {
   return db.prepare(`SELECT * FROM reassessments ORDER BY created_at DESC LIMIT ?`).all(limit) as Reassessment[];

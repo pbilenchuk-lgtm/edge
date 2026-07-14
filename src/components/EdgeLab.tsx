@@ -1054,10 +1054,15 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                 {compPairs.length === 0 && (cardIsTennis
                   ? <div style={S.noStrat}>Теннисная стратегия ещё не активирована в этой категории.</div>
                   : <div style={S.noStrat}>Стратегия не активирована на «{comp.name}». Задай бюджет турниру (кнопка <b>$</b> на плашке) и распредели долю стратегии («⚙ Распределить доли %» над матчами) — тогда она начнёт играть и появится здесь.</div>)}
-                {cardIsTennis && compPairs.length > 0 && !(match.bets && Object.values(match.bets).some((v: any) => v?.items?.length)) && <div style={S.noStrat}>Движок ведёт этот матч ($1k/профиль). Ставка откроется на перелом фаворита (брейк-паника) — иначе честно ждём сигнал.</div>}
+                {cardIsTennis && compPairs.length > 0 && !(match.bets && Object.values(match.bets).some((v: any) => v?.items?.length)) && !(match.settledBets && Object.values(match.settledBets).some((v: any) => (v as any[])?.length)) && <div style={S.noStrat}>Движок ведёт этот матч ($1k/профиль). Ставка откроется на перелом фаворита (брейк-паника) — иначе честно ждём сигнал.</div>}
                 {compPairs.map((p: any) => {
                   const budget = p.budget;
                   const items = (match.bets?.[p.strategyId]?.items || []).filter((b: any) => (b.profileId || "medium") === p.profileId);
+                  // Closed positions for this pair on THIS match — a fast tennis round-trip
+                  // (buyback→take in minutes) is already settled by the time you look, so an
+                  // open-only block wrongly reads "нет входов". Surface the closes + realized P&L.
+                  const closed = (match.settledBets?.[p.strategyId] || []).filter((b: any) => (b.profileId || "medium") === p.profileId);
+                  const closedPnl = closed.reduce((a: number, b: any) => a + ((b.payout ?? 0) - (b.stake ?? 0)), 0);
                   return (
                     <div key={p.key} style={S.stratBlock}>
                       <div style={S.stratBlockHead}>
@@ -1086,7 +1091,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                           );
                         })()}
                       </div>
-                      {items.length === 0 ? <div style={S.noBets}>предматч-входов нет — стратегия ждёт своих условий (край / live-триггер)</div> : (
+                      {items.length === 0 && closed.length === 0 ? <div style={S.noBets}>входов нет — стратегия ждёт своих условий (край / live-триггер)</div> : (
                         <div style={S.betList}>
                           {items.map((b: any, i: number) => {
                             const curPrice = curByLabel[b.market] ?? b.currentPrice ?? b.entryPrice; // freshest quote
@@ -1119,7 +1124,24 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                               </div>
                             );
                           })}
-                          <div style={S.betTotal}>задействовано {fmtMoney(items.filter((b: any) => b.status !== "not_filled").reduce((a: number, b: any) => a + (b.stake != null ? b.stake : Math.round(budget * (b.pct || 0))), 0))} из {fmtMoney0(budget)}</div>
+                          {items.filter((b: any) => b.status !== "not_filled").length > 0 && <div style={S.betTotal}>задействовано {fmtMoney(items.filter((b: any) => b.status !== "not_filled").reduce((a: number, b: any) => a + (b.stake != null ? b.stake : Math.round(budget * (b.pct || 0))), 0))} из {fmtMoney0(budget)}</div>}
+                          {closed.map((b: any, i: number) => {
+                            const pnl = (b.payout ?? 0) - (b.stake ?? 0);
+                            const up = pnl >= 0;
+                            const isCash = !!b.settledBy; // early/partial cash-out vs a real resolution
+                            const statusTxt = isCash ? (b.closedPct >= 100 ? "закрыта" : `фиксация ${b.closedPct}%`) : (b.result === "won" ? "✓ выиграла" : "✕ проиграла");
+                            return (
+                              <div key={`c${i}`} style={{ ...S.betRow, opacity: 0.85 }}>
+                                <div style={S.betMain}><span style={S.betMarket}>{b.market}</span><span style={S.betOdds}>{statusTxt}</span></div>
+                                <div style={S.betMeta}>
+                                  <span style={S.betStake}>{fmtMoney(b.stake)}</span>
+                                  <span style={{ ...S.betLive, color: up ? "#5fd08a" : "#ff6b6b" }}>{up ? "▲+" : "▼"}{fmtMoney(pnl)}</span>
+                                </div>
+                                {b.at && <div style={S.betEntered}>закрыто: {b.at}</div>}
+                              </div>
+                            );
+                          })}
+                          {closed.length > 0 && <div style={S.betTotal}>закрыто {closed.length} · реализовано {closedPnl >= 0 ? "+" : "−"}{fmtMoney(Math.abs(closedPnl))}</div>}
                         </div>
                       )}
                     </div>
