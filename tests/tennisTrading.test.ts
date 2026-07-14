@@ -242,10 +242,11 @@ test("tennisTradingTick A3: when EVERY profile already holds a buyback on the ma
 test("tennisTradingTick: one overreaction opens a bet per FREE risk profile, each on its own budget (side-by-side)", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20, p1liq: 8000, p2liq: 8000 });
-  // Favourite (first) broken in set 1, price 50¢ → passes the gate.
-  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 50, setNum: 1 });
+  // Favourite (first) at a PRE-BREAK 62¢, broken in set 1, price panics to 50¢ → real 12% edge.
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 62, setNum: 1 });
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
-  // Mock the strategist to confirm the overreaction (buy the favourite) — ONE call, shared.
+  // Mock the strategist to confirm the overreaction AND report an INFLATED prob (0.70 > the 0.62
+  // pre-break reference) — the §9.6 clamp must ignore the inflation and size off 0.62.
   const body = { content: [{ text: JSON.stringify({ picks: [{ label: "Aleksandar Vukic", prob: 0.7, reason: "выкуп переоценки" }] }) }] };
   let llmCalls = 0;
   const fetchImpl = (async () => { llmCalls++; return { ok: true, status: 200, json: async () => body }; }) as unknown as typeof fetch;
@@ -254,6 +255,7 @@ test("tennisTradingTick: one overreaction opens a bet per FREE risk profile, eac
   assert.equal(opened, 3, "one bet per default profile (aggressive/medium/conservative)");
   const bets = R.betsForMatch(db, mid, "tennis_overreaction").filter((b) => b.status === "open");
   assert.deepEqual([...new Set(bets.map((b) => b.risk_profile_id))].sort(), ["aggressive", "conservative", "medium"], "distinct profiles, side-by-side");
+  assert.ok(bets.every((b) => b.ai_prob === 0.62), "§9.6: the LLM's inflated 0.70 was clamped to the armed pre-break 0.62 — no self-attributed edge");
   assert.ok(bets.every((b) => (b.stake ?? 0) > 0 && b.code_version?.includes("interim")), "each sized > 0 and carries the interim epoch");
 });
 
@@ -410,6 +412,12 @@ test("tennisTradingTick: an ITF match is NOT traded (tour scope — favourite-re
   const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl });
   assert.equal(opened, 0, "ITF is out of scope → no entry");
   assert.equal(R.betsForMatch(db, mid, "tennis_overreaction").length, 0, "no bet created for the ITF match");
+  // Single-source: the scope decision lives in chargeTennisMatch (charge.outOfScope / tradeable=false).
+  const charge = chargeTennisMatch(db, mid, { p1: "I. Barrera", p2: "M. Reasco" });
+  assert.equal(charge.outOfScope, true);
+  assert.equal(charge.tradeable, false, "an out-of-scope comp is never tradeable, for ANY strategy");
+  // …and the funnel names it distinctly (not mislabelled thin_book).
+  assert.equal(buildTennisFunnel(db).perMatch[0].stage, "out_of_scope");
 });
 
 test("tennisTradingTick BUG-1 flip: after the pre-match favourite loses set 1, the opponent's set-2 break is an UNDERDOG break (no favourite flip)", () => {

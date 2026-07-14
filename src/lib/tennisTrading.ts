@@ -304,6 +304,7 @@ export function buildTennisFunnel(db: Database): TennisFunnel {
     // Same as the tick: identify the favourite off the MATCH-START (pre-match) price, so neither a
     // live panic nor a completed set flips who reads as favourite.
     const charge = chargeTennisMatch(db, m.id, { p1: last.p1 ?? "", p2: last.p2 ?? "" }, startPrices(db, m.id));
+    if (charge.outOfScope) { row("out_of_scope", charge.bookNote); continue; } // ITF/Challenger/doubles — named, not silently mislabelled thin_book
     if (!charge.favSide) { row("no_favourite", "обе стороны > порога андердога"); continue; }
     f.withFavourite++;
     if (!charge.tradeable) { row("thin_book", charge.bookNote); continue; }
@@ -384,12 +385,17 @@ function favPriceFromScout(db: Database, matchId: string, favSide: "first" | "se
   return favSide === "first" ? r.pm_p1_cents : r.pm_p2_cents;
 }
 
-export interface TennisChargeInfo extends TennisCharge { matchId: string; tradeable: boolean; bookNote: string }
+export interface TennisChargeInfo extends TennisCharge { matchId: string; tradeable: boolean; outOfScope: boolean; bookNote: string }
 
 /**
  * DETERMINISTIC charge for one mapped tennis match: identify the favourite by the winner
  * prices, arm the interim triggers, and gate tradeability on winner-book depth ≥ threshold
  * on BOTH sides. Pure enough to unit-test with an injected market list.
+ *
+ * SINGLE-SOURCE SCOPE GATE: this is the one chokepoint EVERY tennis money path funnels through
+ * (both entry ticks + the funnel), so the "ATP/WTA singles only" rule lives HERE, once. A comp
+ * out of scope (ITF / Challenger / doubles — budget-0 dust class, thesis invalid, thin jumpy
+ * books) is marked outOfScope and forced NOT tradeable — no strategy can trade it, whoever asks.
  */
 export function chargeTennisMatch(db: Database, matchId: string, players: { p1: string; p2: string }, idPrices?: { p1: number | null; p2: number | null }): TennisChargeInfo {
   const ml = tennisMoneyline(db, matchId, players); // the WINNER market, resolved by structure (never a prop)
@@ -398,9 +404,15 @@ export function chargeTennisMatch(db: Database, matchId: string, players: { p1: 
   // back to the stored moneyline. No moneyline at all → no favourite (honest skip; caller logs).
   let charge = chargeTennisTriggers({ p1Cents: idPrices?.p1 ?? null, p2Cents: idPrices?.p2 ?? null });
   if (!charge.favSide) charge = chargeTennisTriggers({ p1Cents: ml?.p1Cents ?? null, p2Cents: ml?.p2Cents ?? null });
+  const match = R.getMatch(db, matchId);
+  const comp = match ? R.listCompetitions(db).find((c) => c.id === match.competition_id) : null;
+  const outOfScope = !comp || tennisTourOf(comp) == null; // ATP/WTA singles only — the ONE scope decision
   const liq = ml?.liquidity ?? 0; // ONE moneyline book (not per-prop)
-  const tradeable = !!ml && liq >= TENNIS_MIN_BOOK_USD;
-  return { ...charge, matchId, tradeable, bookNote: `манилайн ${ml ? `«${ml.label}»` : "НЕ НАЙДЕН"} · книга $${Math.round(liq)} (порог $${TENNIS_MIN_BOOK_USD})` };
+  const tradeable = !outOfScope && !!ml && liq >= TENNIS_MIN_BOOK_USD;
+  const bookNote = outOfScope
+    ? `вне скоупа: «${comp?.name ?? comp?.id ?? "?"}» — не ATP/WTA сингл (ITF/Challenger/пары не торгуем)`
+    : `манилайн ${ml ? `«${ml.label}»` : "НЕ НАЙДЕН"} · книга $${Math.round(liq)} (порог $${TENNIS_MIN_BOOK_USD})`;
+  return { ...charge, matchId, tradeable, outOfScope, bookNote };
 }
 
 /** Build the decision-time entry_meta for a tennis paper bet. */
@@ -477,10 +489,10 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
   const shadowCfg = loadShadowConfig(db, deps.env);
   let opened = 0;
 
-  const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, cObj: c, m })));
-  for (const { comp, cObj, m } of tennisMatches) {
+  const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, m })));
+  for (const { comp, m } of tennisMatches) {
     if (m.state === "finished") continue;
-    if (!tennisTourOf(cObj)) continue; // ATP/WTA singles only — ITF/Challenger/doubles out of scope (favourite-reversion thesis invalid there)
+    // (ITF/Challenger/doubles scope is enforced ONCE inside chargeTennisMatch via charge.tradeable=false.)
     // Latest scout snapshots for this mapped match.
     const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(m.id) as R.TennisSnapshotRow[];
     if (snaps.length < 2) continue;
@@ -550,9 +562,19 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     // rejected. The gate already uses the scout price; the entry must match it. Fall back to the row.
     const entryCents = favPrice ?? favMlPrice; // live scout moneyline price, else stored moneyline
     // CODE sizes PER free profile within its OWN $1k budget (§9.6). One LLM call → up to N side-by-side bets.
-    const ourProb = (pick.prob != null ? pick.prob * 100 : prePrice) / 100;
+    // §9.6 PROB CLAMP: the LLM judges real_shift (enter vs abstain) — it does NOT set the probability
+    // that drives money sizing. Its pick.prob is CLAMPED to the armed reference (the pre-break price):
+    // it may only lower conviction, never inflate the edge above the true panic amplitude
+    // (prePrice − entry). Without this the LLM manufactures its own edge ("истинная вероятность выше
+    // предматчевой" → 72% on a 38.5¢ side = a self-attributed 33.5% edge, the France–Morocco class bug).
+    const ourProb = Math.min(pick.prob != null ? pick.prob * 100 : prePrice, prePrice) / 100;
     const implied = entryCents / 100; // moneyline price IS the de-vigged implied for a 2-outcome winner market
     for (const profile of freeProfiles) {
+      // Race guard: freeProfiles was computed BEFORE the awaited LLM call — an overlapping tick
+      // (live + catch-up firing together) could have opened a buyback on this profile during the
+      // await. Re-check right before the insert so two overlapping ticks can't double-enter the same
+      // profile (the 22:00:22 + 22:00:42 double-batch that only the shadow cap caught).
+      if (R.betsForMatch(db, m.id).some((b) => TENNIS_STRATEGIES.has(b.strategy_id) && b.status === "open" && b.risk_profile_id === profile)) continue;
       const cfg = getProfileConfig(db, profile);
       const held = R.betsForMatch(db, m.id, TENNIS_STRATEGY).filter((b) => b.status === "open" && b.risk_profile_id === profile).reduce((s, b) => s + (b.stake ?? 0), 0);
       // allowLargeEdge OFF: unlike a football near-resolved market (where a huge edge is genuine), a
@@ -623,11 +645,11 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
   const shadowCfg = loadShadowConfig(db, deps.env);
   let opened = 0;
 
-  const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, cObj: c, m })));
-  for (const { comp, cObj, m } of tennisMatches) {
+  const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, m })));
+  for (const { comp, m } of tennisMatches) {
     if (m.state === "finished") continue;
-    if (!tennisTourOf(cObj)) continue; // ATP/WTA singles only — ITF/Challenger/doubles out of scope (competitive-comeback thesis invalid there)
     if (R.metaGet(db, SV_ACTED + m.id)) continue; // one Set-Value decision per match
+    // (ITF/Challenger/doubles scope is enforced ONCE inside chargeTennisMatch → charge.tradeable=false → gate skip.)
     const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(m.id) as R.TennisSnapshotRow[];
     if (snaps.length < 2) continue;
     const last = snaps[snaps.length - 1];
@@ -675,6 +697,9 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
     const ourProb = SET_VALUE_ARMED.comebackProb; // interim constant for a competitive lost set (calibrated later)
     const implied = entryCents / 100;
     for (const profile of freeProfiles) {
+      // Race guard (see Overreaction): freeProfiles predates the awaited LLM call — re-check the
+      // CROSS-strategy hold right before the insert so an overlapping tick can't double-enter.
+      if (R.betsForMatch(db, m.id).some((b) => TENNIS_STRATEGIES.has(b.strategy_id) && b.status === "open" && b.risk_profile_id === profile)) continue;
       const cfg = getProfileConfig(db, profile);
       const held = R.betsForMatch(db, m.id, SET_VALUE_STRATEGY).filter((b) => b.status === "open" && b.risk_profile_id === profile).reduce((s, b) => s + (b.stake ?? 0), 0);
       // allowLargeEdge OFF (same phantom-guard reasoning as Overreaction): a Set-Value edge is
