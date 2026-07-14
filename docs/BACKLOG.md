@@ -107,6 +107,31 @@ appear at kickoff/HT). A **timeout** is a transient network failure and is NOT
 cached (distinct from `not_resolved`). Confirmed-coverage leagues never hard-disable
 on transient errors.
 
+## Tennis PMV — phantom value from its OWN MATH; flag-only + recalibration + uniformity guard (DONE)
+
+PMV was built WITHOUT an LLM specifically to exclude phantom value — and on its first day produced
+phantom value anyway, from its own model, with the SAME signature we caught the LLM making: a uniform,
+one-sided, fat edge (theo systematically above mid on Total Sets Over / Match Over, 25 of 27 prop
+types). The signature is universal — "homogeneous heavy edge in one direction of one family" is a model
+bias whatever the source. Response, by priority:
+
+1. **FLAG-ONLY stop (pmvFlagOnly, default ON):** the scan still logs every would-be entry (data keeps
+   accumulating) but places NO bets. Open paper positions ride to settle as the diagnostic sample.
+   Contamination stopped at the tick it was noticed, not after a review cycle.
+2. **Frequency diagnosis (?report=pmv_freq):** actual 3-set rate + hold rate from our snapshots vs the
+   model's i.i.d. base_hold chain — closes the cause empirically.
+3. **Recalibration = new epoch ("interim-m1"):** set-dependence MOMENTUM (winner of a set gets +ε hold
+   in the next → fewer 3-setters, the direct fix for the Total Sets Over lean) + base_hold from our own
+   hold frequencies. ε interim (TENNIS_MOMENTUM=0.04), calibrated from P(win set2 | won set1).
+4. **UNIFORMITY GUARD (the durable fix):** across the whole slate, if >65% of a family's passing
+   deviations lean the same side over ≥5 samples → STOP the family (log uniformity_stop), don't bet. It
+   would have fired on the 5th bet, not the 108th. Plus placeholder filter (~50¢ untraded default),
+   totals correlation cluster (games+sets = one), and contract-side provenance (ambiguous Set Handicap
+   "+/-1.5" blocked; Set Winner orientation aligned to the moneyline).
+5. **Re-enable (TENNIS_PMV_FLAG_ONLY=false) ONLY after** the recalibrated epoch stops producing the
+   uniform lean, and then the Brier criterion judges the strategy on the CLEAN "interim-m1" sample as
+   the spec requires — never mixed with the broken first batch.
+
 ## Tennis PMV — the THIRD tennis strategy: prop consistency vs the moneyline anchor (DONE, v1 no-LLM)
 
 The epistemic inversion of the football PMV (which bled −$1022 on "I know better than the market"):
