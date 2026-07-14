@@ -48,6 +48,30 @@ export function settleBet(
 }
 
 /**
+ * Resolve a TENNIS winner market. Provenance (read from real Polymarket AO/WTA markets,
+ * 2026-07): the market resolves to whoever ADVANCES — normal win OR the opponent's
+ * retirement/default/disqualification (the non-retiring player advances). Canceled /
+ * not-played / no-winner → 50-50 (we VOID: null). A winner-market outcome label is a
+ * player NAME, so YES if the label matches the advancing player, NO if it matches the
+ * loser, null if it matches neither (unresolvable — keep open / flag).
+ */
+export function resolveTennisWinner(
+  label: string, p1: string, p2: string,
+  advancing: "first" | "second" | null, canceled: boolean,
+): boolean | null {
+  if (canceled || advancing == null) return null; // 50-50 → void/refund
+  const surnames = (name: string) => name.toLowerCase().replace(/[.,]/g, " ").split(/[\s-]+/).filter((t) => t.length > 1);
+  const l = label.toLowerCase();
+  const hit = (name: string) => surnames(name).some((t) => l.includes(t));
+  const winnerName = advancing === "first" ? p1 : p2;
+  const loserName = advancing === "first" ? p2 : p1;
+  const matchWinner = hit(winnerName), matchLoser = hit(loserName);
+  if (matchWinner && !matchLoser) return true;   // this outcome = the advancing player → YES
+  if (matchLoser && !matchWinner) return false;  // this outcome = the loser → NO
+  return null;                                   // ambiguous / neither → unresolvable
+}
+
+/**
  * Resolve a common football market from the final score.
  * Returns true (YES), false (NO), or null when the label needs external
  * info the score alone can't provide (e.g. "Team to Advance", penalties).

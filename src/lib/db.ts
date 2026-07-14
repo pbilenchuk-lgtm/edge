@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2 } from "./seed.js";
+import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy } from "./seed.js";
 import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
 
@@ -88,6 +88,10 @@ export function getDb(path = dbPath()): Database {
   // Bring the Live xG Momentum prompts to v2 (match_shape-tuned entry threshold,
   // pressure-sustainability filter, counterattack stop). Marker-guarded.
   try { migrateLiveXgV2(db); }
+  catch { /* non-fatal */ }
+  // Seed the tennis Overreaction strategy (sport=tennis). Idempotent; the tennis paper loop
+  // owns it, comps stay budget-0 so the football engine never touches tennis.
+  try { migrateTennisStrategy(db); }
   catch { /* non-fatal */ }
   // One-time: move every (category × strategy) allocation onto the AGGRESSIVE
   // profile (and retag live bets). Marker-guarded, so it runs once and respects

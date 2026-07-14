@@ -9,6 +9,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { extractThresholdsHeuristic } from "./thresholds.js";
+import { STRAT_TENNIS_OVR_PREMATCH, STRAT_TENNIS_OVR_LIVE } from "./tennisOverreaction.js";
 import { seedRiskProfiles, RISK_PROFILE_DEFS, listRiskProfileViews } from "./riskConfig.js";
 import { SPORT_LABELS } from "./polymarket.js";
 import type { Bet, Market } from "./types.js";
@@ -821,6 +822,18 @@ export function migratePrematchValueV3(db: Database): void {
 // open_new hard-bound to a fired trigger. Keeps Overreaction's PnL measured on its
 // OWN methodology (clean cross-strategy comparison).
 const OVERREACTION_VERSION = "OVERREACTION (v3)";
+/** Seed the tennis Overreaction strategy (sport=tennis). Idempotent. Its comps stay budget-0
+ *  — the tennis paper loop owns sizing, so the football engine never touches tennis. */
+export function migrateTennisStrategy(db: Database): void {
+  if (R.getStrategy(db, "tennis_overreaction")) return;
+  R.upsertSport(db, "tennis", "Теннис"); // FK target for strategies.sport_id (before discovery seeds it)
+  R.insertStrategy(db, {
+    id: "tennis_overreaction", sport_id: "tennis", name: "Tennis Overreaction", tag: "выкуп брейка",
+    color: "#c98bdb", version: 1, model: "Claude Opus 4.8", model_live: "Claude Sonnet 5",
+    created_at: new Date().toISOString(), prompt: STRAT_TENNIS_OVR_PREMATCH, prompt_live: STRAT_TENNIS_OVR_LIVE, params: {},
+  });
+}
+
 export function migrateOverreactionV2(db: Database): void {
   const s = R.getStrategy(db, "overreaction");
   if (!s) return;
