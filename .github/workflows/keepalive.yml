@@ -1,0 +1,49 @@
+name: keepalive
+
+# Keep the Render free-tier web service warm so its in-process scheduler (the cron)
+# never spins down. A GET to /api/health also drives the catch-up heartbeat
+# (scheduler.heartbeat): it resumes the live loop within ~a stamp-interval and the
+# full pre-match cycle if either stalled — so a steady ping = unbroken live management
+# and no missed pre-kickoff analysis windows. render.yaml recommends a ~1 min cadence;
+# GitHub's schedule minimum is 5 min, so each run also self-loops to approximate that
+# during its window and bridge GitHub's scheduling jitter.
+#
+# IMPORTANT: GitHub runs `schedule:` triggers ONLY from the repository's DEFAULT branch.
+# This file must land on the default branch to fire on a timer. `workflow_dispatch`
+# runs it manually from any branch. The repo is public, so Actions minutes are free.
+#
+# Override the target without editing this file by setting an Actions repo variable
+# KEEPALIVE_URL (Settings → Secrets and variables → Actions → Variables).
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Ping /api/health across the window
+        env:
+          URL: ${{ vars.KEEPALIVE_URL || 'https://edge-lab-oncj.onrender.com/api/health' }}
+        run: |
+          set +e
+          # 8 pings ~40s apart ≈ 5.5 min of coverage per run, so even a badly delayed
+          # next scheduled run leaves Render's ~15 min idle-spindown window unbreached.
+          for i in $(seq 1 8); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 --retry 2 --retry-delay 3 "$URL")
+            echo "$(date -u +%H:%M:%S) ping $i -> HTTP $code"
+            if [ "$i" -lt 8 ]; then sleep 40; fi
+          done
+          # A failed ping (cold start 502, transient) must NOT fail the workflow or spam
+          # notifications — waking the box is the point; the next ping catches up.
+          exit 0
