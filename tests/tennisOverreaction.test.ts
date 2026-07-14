@@ -2,12 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chargeTennisTriggers, tennisReassessShouldCall, TENNIS_ARMED } from "../src/lib/tennisOverreaction.js";
 
-test("charge: a clear favourite (underdog ≤ threshold) arms two calibrated triggers", () => {
+test("charge: a clear favourite (underdog ≤ threshold) arms two interim triggers", () => {
   const c = chargeTennisTriggers({ p1Cents: 78, p2Cents: 22 }); // p2 underdog → p1 favourite
   assert.equal(c.favSide, "first");
   assert.equal(c.favPriceCents, 78);
   assert.equal(c.triggers.length, 2);
-  assert.ok(c.triggers.every((t) => t.thresholds === "calibrated"));
+  assert.ok(c.triggers.every((t) => t.thresholds === "interim"));
   assert.deepEqual(c.triggers.map((t) => t.id).sort(), ["early_break", "lost_first_set"]);
 });
 

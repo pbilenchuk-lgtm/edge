@@ -93,11 +93,35 @@ function trimRaw(raw: any): string | null {
   try { return JSON.stringify(rest); } catch { return null; }
 }
 
-/** A market label's price is for player X's "to win" if the label contains X's surname. */
-function priceForPlayer(markets: { label: string; external_ref: string | null }[], player: string): string | null {
-  const toks = normName(player).replace(/\./g, " ").split(/\s+/).filter((t) => t.length > 1);
-  const hit = markets.find((mk) => { const l = normName(mk.label); return toks.some((t) => l.includes(t)); });
-  return hit?.external_ref ?? null;
+// Prop-market keywords. A tennis MONEYLINE is the ONLY market carrying NONE of these; every prop
+// (Match/Set totals O/U, handicaps, Set-N winners) does. Do NOT surname-match — every tennis label
+// is "Tournament: A vs B <suffix>" and contains BOTH surnames (BACKLOG: tennis price layer).
+const TENNIS_PROP_RE = /\b(over|under|handicap|winner|games?|odd|even|tie\s*break|total\s*sets?|set\s*\d)\b|[+-]\s*\d/i;
+const nameToks = (s: string) => normName(s).replace(/\./g, " ").split(/\s+/).filter((t) => t.length > 1);
+const surnamesOverlap = (a: string, b: string) => { const A = new Set(nameToks(a)); return nameToks(b).some((t) => A.has(t)); };
+
+export interface TennisMoneyline { p1Cents: number; p2Cents: number; label: string; token: string | null; liquidity: number; firstIsP1: boolean }
+/**
+ * Resolve a match's MONEYLINE (match-winner) price per player from the stored markets. The moneyline
+ * is the SINGLE non-prop market ("Tournament: A vs B", stored price = P(first-named player); the
+ * second player = 100 − that). Its "A vs B" is aligned to the match's players by surname. Returns
+ * null — an HONEST SKIP — on 0 or >1 non-prop markets, or a label that can't be aligned; NEVER the
+ * closest prop (that garbage-in bug is exactly what this replaces). Same discipline as player mapping.
+ */
+export function tennisMoneyline(db: Database, matchId: string, players: { p1: string; p2: string }): TennisMoneyline | null {
+  const nonProp = R.latestMarkets(db, matchId).filter((m) => m.label && !TENNIS_PROP_RE.test(m.label));
+  if (nonProp.length !== 1) return null; // 0 = no moneyline listed; >1 = ambiguous → skip loudly (caller logs)
+  const mk = nonProp[0];
+  const pFirst = mk.price; // stored = P(first-named player = gamma outcomes[0])
+  const core = mk.label.replace(/^[^:]+:\s*/, ""); // strip "Tournament: "
+  const vs = /^(.+?)\s+vs\.?\s+(.+)$/i.exec(core);
+  if (!vs) return null; // not an "A vs B" title → can't be the moneyline
+  const p1IsA = surnamesOverlap(players.p1, vs[1]), p1IsB = surnamesOverlap(players.p1, vs[2]);
+  let p1Cents: number;
+  if (p1IsA && !p1IsB) p1Cents = pFirst;            // players.p1 = A (first outcome)
+  else if (p1IsB && !p1IsA) p1Cents = 100 - pFirst; // players.p1 = B (second outcome)
+  else return null; // ambiguous / unalignable → honest skip
+  return { p1Cents: Math.round(p1Cents * 10) / 10, p2Cents: Math.round((100 - p1Cents) * 10) / 10, label: mk.label, token: mk.external_ref, liquidity: Number(mk.liquidity ?? 0) || 0, firstIsP1: p1IsA && !p1IsB };
 }
 
 /**
@@ -122,12 +146,16 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
       if (!seenLog.has(m.eventKey)) { logMapDecision(db, m.eventKey, { p1: m.p1, p2: m.p2 }, res, batchAt); seenLog.add(m.eventKey); }
       if (res.verdict === "auto" && res.matchId) {
         pmMatchId = res.matchId;
-        if (poly.enabled) {
-          const mks = R.latestMarkets(db, res.matchId).filter((x) => x.external_ref).map((x) => ({ label: x.label, external_ref: x.external_ref }));
-          const t1 = priceForPlayer(mks, m.p1), t2 = priceForPlayer(mks, m.p2);
-          if (t1) p1c = await fetchMidpointCents(t1, poly, { fetchImpl: deps.fetchImpl }).catch(() => null);
-          if (t2) p2c = await fetchMidpointCents(t2, poly, { fetchImpl: deps.fetchImpl }).catch(() => null);
-          pmMid = p1c ?? p2c;
+        // Price off the MONEYLINE (winner market), NOT a surname-matched prop. The stored moneyline
+        // gives P per player; a live CLOB midpoint on its token refines it (the token backs the
+        // LABEL's first outcome, so align by firstIsP1). No moneyline → prices stay null (honest).
+        const ml = tennisMoneyline(db, res.matchId, { p1: m.p1, p2: m.p2 });
+        if (ml) {
+          let liveFirst: number | null = null;
+          if (poly.enabled && ml.token) liveFirst = await fetchMidpointCents(ml.token, poly, { fetchImpl: deps.fetchImpl }).catch(() => null);
+          if (liveFirst != null) { p1c = ml.firstIsP1 ? liveFirst : Math.round((100 - liveFirst) * 10) / 10; p2c = Math.round((100 - p1c) * 10) / 10; }
+          else { p1c = ml.p1Cents; p2c = ml.p2Cents; } // fall back to the stored discovery moneyline
+          pmMid = p1c;
         }
       }
     } catch { /* mapping/pricing is best-effort, never blocks the snapshot */ }

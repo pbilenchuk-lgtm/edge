@@ -16,7 +16,7 @@ import type { EngineDeps } from "./engine.js";
 import { settleBet, resolveTennisWinner } from "./settlement.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { chargeTennisTriggers, tennisReassessShouldCall, type TennisCharge } from "./tennisOverreaction.js";
-import { detectBreaks, detectTennisEvents } from "./tennisScout.js";
+import { detectBreaks, detectTennisEvents, tennisMoneyline } from "./tennisScout.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -148,7 +148,10 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
     const priceOn = (r: R.TennisSnapshotRow) => (favSide === "first" ? r.pm_p1_cents : r.pm_p2_cents);
     const priced = snaps.filter((s) => priceOn(s) != null);
     const curRow = priced[priced.length - 1] ?? null;
-    const cur = (curRow ? priceOn(curRow) : null) ?? winnerMarketFor(db, b.match_id, b.market_label)?.price ?? null;
+    // Current favourite price: freshest scout moneyline, else the stored moneyline (never a prop).
+    const last = snaps[snaps.length - 1];
+    const mlNow = (curRow ? priceOn(curRow) : null) == null ? tennisMoneyline(db, b.match_id, { p1: last.p1 ?? "", p2: last.p2 ?? "" }) : null;
+    const cur = (curRow ? priceOn(curRow) : null) ?? (mlNow ? (favSide === "first" ? mlNow.p1Cents : mlNow.p2Cents) : null);
     if (cur == null) continue;
     const prev = priced.length >= 2 ? priceOn(priced[priced.length - 2]) : null;
     // Post-entry events: receiving-game count (server = opponent) + break-back + a new favourite break.
@@ -304,12 +307,6 @@ export function finishTennisMatches(db: Database, deps: EngineDeps = {}): number
   return n;
 }
 
-/** Winner-market tokens for the favourite/underdog sides of a linked match, by surname. */
-function winnerMarketFor(db: Database, matchId: string, playerName: string): { label: string; price: number; liquidity: string | null } | null {
-  const toks = surnames(playerName);
-  const mk = R.latestMarkets(db, matchId).find((m) => { const l = norm(m.label); return toks.some((t) => l.includes(t)); });
-  return mk ? { label: mk.label, price: mk.price, liquidity: mk.liquidity } : null;
-}
 
 /** The favourite's current winner price (cents) for the linked match, using the last scout snapshot. */
 function favPriceFromScout(db: Database, matchId: string, favSide: "first" | "second"): number | null {
@@ -326,16 +323,15 @@ export interface TennisChargeInfo extends TennisCharge { matchId: string; tradea
  * on BOTH sides. Pure enough to unit-test with an injected market list.
  */
 export function chargeTennisMatch(db: Database, matchId: string, players: { p1: string; p2: string }, idPrices?: { p1: number | null; p2: number | null }): TennisChargeInfo {
-  const m1 = winnerMarketFor(db, matchId, players.p1), m2 = winnerMarketFor(db, matchId, players.p2);
-  // Favourite ID prefers the PRE-BREAK price: a live break panics the favourite's price toward the
-  // underdog threshold (the market row AND the scout both follow it down), which would erase the
-  // favourite exactly when the buyback should fire. Fall back to the current market row when the
-  // pre-break signal is missing or ambiguous (e.g. tests / a match the scout joined mid-panic).
+  const ml = tennisMoneyline(db, matchId, players); // the WINNER market, resolved by structure (never a prop)
+  // Favourite ID prefers the PRE-BREAK moneyline price: a live break panics the favourite toward the
+  // underdog threshold, which would erase the favourite exactly when the buyback should fire. Fall
+  // back to the stored moneyline. No moneyline at all → no favourite (honest skip; caller logs).
   let charge = chargeTennisTriggers({ p1Cents: idPrices?.p1 ?? null, p2Cents: idPrices?.p2 ?? null });
-  if (!charge.favSide) charge = chargeTennisTriggers({ p1Cents: m1?.price ?? null, p2Cents: m2?.price ?? null });
-  const liq1 = Number(m1?.liquidity ?? 0) || 0, liq2 = Number(m2?.liquidity ?? 0) || 0;
-  const tradeable = liq1 >= TENNIS_MIN_BOOK_USD && liq2 >= TENNIS_MIN_BOOK_USD;
-  return { ...charge, matchId, tradeable, bookNote: `книга: ${players.p1} $${Math.round(liq1)} / ${players.p2} $${Math.round(liq2)} (порог $${TENNIS_MIN_BOOK_USD})` };
+  if (!charge.favSide) charge = chargeTennisTriggers({ p1Cents: ml?.p1Cents ?? null, p2Cents: ml?.p2Cents ?? null });
+  const liq = ml?.liquidity ?? 0; // ONE moneyline book (not per-prop)
+  const tradeable = !!ml && liq >= TENNIS_MIN_BOOK_USD;
+  return { ...charge, matchId, tradeable, bookNote: `манилайн ${ml ? `«${ml.label}»` : "НЕ НАЙДЕН"} · книга $${Math.round(liq)} (порог $${TENNIS_MIN_BOOK_USD})` };
 }
 
 /** Both sides' winner price just BEFORE a break (the pre-panic favourite reference for charge). */
@@ -375,20 +371,22 @@ const ACTED = "tennis_acted:"; // per (match, break) idempotency marker
 // only numbers that swap in from the §4 distribution are the ENTRY armed prices, not this. Env-tunable.
 const TENNIS_TAKE_BUFFER = (() => { const n = Number(process.env.TENNIS_TAKE_BUFFER_CENTS); return Number.isFinite(n) && n >= 0 ? n : 3; })();
 // A1 game-count stop (the strategy's MAIN stop): exit after the favourite has played this many
-// RECEIVING games since entry without a break-back. CALIBRATED from 105 §4/B marks: recovery is
-// FAST (within-window p75 = 1 min), so the edge lives ≈ 2 receiving games — beyond that we'd be
-// holding a directional bet, not trading the overreaction. Was interim 3. Env-tunable.
-const TENNIS_GAME_COUNT_STOP = (() => { const n = Number(process.env.TENNIS_GAME_COUNT_STOP); return Number.isFinite(n) && n > 0 ? Math.round(n) : 2; })();
+// RECEIVING games since entry without a break-back. Back to the INTERIM 3: the 105 marks that once
+// set this to 2 were measured on PROP prices, not the moneyline (see BACKLOG "price layer = the
+// MONEYLINE"), so they're discarded — the moneyline panic/recovery amplitude is almost certainly
+// different and must re-accumulate before this tightens again. Env-tunable.
+const TENNIS_GAME_COUNT_STOP = (() => { const n = Number(process.env.TENNIS_GAME_COUNT_STOP); return Number.isFinite(n) && n > 0 ? Math.round(n) : 3; })();
 // A2 catastrophic floor (¢ below entry): a BACKSTOP, not a working stop. Deliberately WIDE so it
 // never catches game jitter (±5-8¢ on a deuce), only a collapse (injury/cascade) before the second
-// break. HELD at 15 under the calibrated epoch: the §4 marks measure pre-break→floor (the panic
-// amplitude), NOT further-collapse-below-ENTRY (we enter near the floor already), so they don't
-// cleanly set this backstop — 15¢ of further collapse stays a sound structural cut. Env-tunable.
+// break. Held at 15¢: the §4 marks measure pre-break→floor (the panic amplitude), NOT
+// further-collapse-below-ENTRY (we enter near the floor already), so they don't cleanly set this
+// backstop — 15¢ of further collapse stays a sound structural cut, price-layer-independent. Env-tunable.
 const TENNIS_CATASTROPHIC_FLOOR = (() => { const n = Number(process.env.TENNIS_CATASTROPHIC_FLOOR_CENTS); return Number.isFinite(n) && n > 0 ? n : 15; })();
-// Armed-threshold epoch. Now "calibrated": the strategy has been validated against ≥100 real
-// break marks (105) — 64% of favourite-breaks recover to the take level, recovery p75 = 1 min.
-// Exits carry this so bets stay segmentable by which era's thresholds fired. Env-tunable.
-const TENNIS_ARMED_EPOCH = process.env.TENNIS_ARMED_EPOCH || "calibrated";
+// Armed-threshold epoch. Reset to "interim": the 105 calibration marks were measured on PROP prices
+// (winnerMarketFor grabbed the closest prop, not the moneyline) and are discarded. Thresholds return
+// to interim until ~100 marks re-accumulate on the MONEYLINE. Exits carry this so bets stay
+// segmentable by which era's thresholds fired. Env-tunable.
+const TENNIS_ARMED_EPOCH = process.env.TENNIS_ARMED_EPOCH || "interim";
 
 /** The favourite's winner price just BEFORE a break (the recovery target reference). */
 function prePriceBefore(db: Database, matchId: string, favSide: "first" | "second", breakBatch: string): number | null {
@@ -410,8 +408,8 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
   const nowMs = Date.parse(now) || Date.now();
   // Stamp the armed-threshold epoch INTO the bet's code_version so the showcase (which segments
   // by code_version) hard-separates interim from calibrated tennis bets — the same epoch discipline
-  // that let the 247-football-bet analysis drop a broken era. An interim bet (none exist) would read
-  // «…·interim»; every bet from here reads «…·calibrated».
+  // that let the 247-football-bet analysis drop a broken era. Every bet from here reads «…·interim»
+  // (the prop-priced calibration was discarded); it becomes «…·calibrated» once the moneyline marks land.
   const codeVer = `${effectiveCodeVersion(db)}·${TENNIS_ARMED_EPOCH}`;
   const shadowCfg = loadShadowConfig(db, deps.env);
   let opened = 0;
@@ -437,9 +435,12 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     if (!tennisReassessShouldCall(charge, signal)) { R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "gate_skip", now); continue; }
 
     const favName = charge.favSide === "first" ? players.p1 : players.p2;
-    const favMk = winnerMarketFor(db, m.id, favName);
-    if (!favMk || favMk.price == null) { R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "no_market", now); continue; }
-    const prePrice = prePriceBefore(db, m.id, charge.favSide, br.batchAt) ?? favMk.price;
+    // Trade the MONEYLINE (winner market). The bet's market_label is the FAVOURITE'S NAME so settle's
+    // resolveTennisWinner matches it to the advancing player. No moneyline → HONEST skip (never a prop).
+    const ml = tennisMoneyline(db, m.id, players);
+    if (!ml) { R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "no_moneyline", now); R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `манилайн не найден (только пропы / неоднозначно) — вход пропущен (no_moneyline)`, created_at: now }); continue; }
+    const favMlPrice = charge.favSide === "first" ? ml.p1Cents : ml.p2Cents;
+    const prePrice = prePriceBefore(db, m.id, charge.favSide, br.batchAt) ?? favMlPrice;
 
     // A3 (per profile): each risk profile holds at most ONE buyback per match — no "докупка в
     // падающую" WITHIN a profile — but the profiles run SIDE-BY-SIDE, each on its OWN $1k budget,
@@ -460,13 +461,13 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       strategyName: strat.name, strategyPrompt: strat.prompt_live ?? strat.prompt,
       match: { home: players.p1, away: players.p2, sport: "tennis", state: "live", minute: null, scoreHome: null, scoreAway: null },
       assessment: { confidence: "средняя", short: "", verdict: "" },
-      markets: [{ label: favMk.label, priceCents: favMk.price, aiProb: prePrice / 100, liquidity: Number(favMk.liquidity ?? 0) || null }],
+      markets: [{ label: favName, priceCents: favMlPrice, aiProb: prePrice / 100, liquidity: ml.liquidity || null }],
       openPositions: [],
       context: `БРЕЙК: сломали ${br.server === charge.favSide ? "ФАВОРИТА" : "андердога"} в сете ${br.setNum}, фаворит проиграл сетов: ${favSetsLost}. Цена фаворита ${favPrice}¢ (до брейка ~${prePrice}¢). Заряжен триггер ${favSetsLost >= 1 ? "lost_first_set" : "early_break"}. Реши: overreaction (выкупаем) или real_shift (воздерживаемся).`,
     }, strat.model_live ?? strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
     R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "decided", now); // one shot per break
 
-    const pick = dec.ok ? dec.picks.find((p) => norm(p.label) === norm(favMk.label) || surnames(favName).some((t) => norm(p.label).includes(t))) : null;
+    const pick = dec.ok ? dec.picks.find((p) => norm(p.label) === norm(favName) || surnames(favName).some((t) => norm(p.label).includes(t))) : null;
     if (!dec.ok) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `стратег недоступен (${dec.error || "нет ответа"}) — входа нет`, created_at: now }); continue; }
     if (!pick) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `real_shift: стратег воздержался (не overreaction) — ${dec.note?.slice(0, 120) ?? ""}`, created_at: now }); continue; }
 
@@ -474,26 +475,26 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     // can lag the import (~pre-break level), which is right for IDENTIFYING the favourite but wrong
     // for sizing: sizing the buyback against a stale high price zeroes the edge and every entry is
     // rejected. The gate already uses the scout price; the entry must match it. Fall back to the row.
-    const entryCents = favPrice ?? favMk.price;
+    const entryCents = favPrice ?? favMlPrice; // live scout moneyline price, else stored moneyline
     // CODE sizes PER free profile within its OWN $1k budget (§9.6). One LLM call → up to N side-by-side bets.
     const ourProb = (pick.prob != null ? pick.prob * 100 : prePrice) / 100;
-    const implied = impliedProbs([{ label: favMk.label, priceCents: entryCents, liquidity: Number(favMk.liquidity ?? 0) || 0 }]).get(favMk.label)?.implied ?? entryCents / 100;
+    const implied = entryCents / 100; // moneyline price IS the de-vigged implied for a 2-outcome winner market
     for (const profile of freeProfiles) {
       const cfg = getProfileConfig(db, profile);
       const held = R.betsForMatch(db, m.id, TENNIS_STRATEGY).filter((b) => b.status === "open" && b.risk_profile_id === profile).reduce((s, b) => s + (b.stake ?? 0), 0);
-      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: Number(favMk.liquidity ?? 0) || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: true });
+      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: true });
       if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `[${profile}] overreaction подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
-      const meta = tennisEntryMeta({ favPrice: entryCents, prePrice, edge: r.edge, kelly: r.kellyFraction, stake: r.stake, thinnessUsd: Number(favMk.liquidity ?? 0) || null, setNum: br.setNum });
+      const meta = tennisEntryMeta({ favPrice: entryCents, prePrice, edge: r.edge, kelly: r.kellyFraction, stake: r.stake, thinnessUsd: ml.liquidity || null, setNum: br.setNum });
       const betId = R.uid();
       R.insertBet(db, {
-        id: betId, match_id: m.id, strategy_id: TENNIS_STRATEGY, risk_profile_id: profile, market_label: favMk.label,
+        id: betId, match_id: m.id, strategy_id: TENNIS_STRATEGY, risk_profile_id: profile, market_label: favName,
         status: "open", proposed_price: entryCents, entry_price: entryCents, current_price: entryCents, closing_price: null,
-        ai_prob: ourProb, stake: r.stake, rationale: `выкуп переоценки (теннис): фаворит сломан в сете ${br.setNum}, цена ${entryCents}¢ vs предбрейк ${prePrice}¢. ${pick.reason || dec.note || ""}`,
+        ai_prob: ourProb, stake: r.stake, rationale: `выкуп переоценки (теннис): фаворит «${favName}» сломан в сете ${br.setNum}, манилайн ${entryCents}¢ vs предбрейк ${prePrice}¢. ${pick.reason || dec.note || ""}`,
         entered_minute: `сет ${br.setNum}`, result: null, payout: null, settled_by: null, settled_at: null,
         entry_meta: serializeEntryMeta(meta), code_version: codeVer, created_at: now,
       });
       try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: r.stake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП фаворита «${favMk.label}» @ ${favMk.price}¢ · $${Math.round(r.stake)} (edge ${(r.edge * 100).toFixed(1)}%, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${favMk.price - TENNIS_CATASTROPHIC_FLOOR}¢, пороги:${TENNIS_ARMED_EPOCH})`, created_at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${entryCents}¢ · $${Math.round(r.stake)} (edge ${(r.edge * 100).toFixed(1)}%, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${entryCents - TENNIS_CATASTROPHIC_FLOOR}¢, пороги:${TENNIS_ARMED_EPOCH})`, created_at: now });
       opened++;
     }
   }

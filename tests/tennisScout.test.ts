@@ -5,11 +5,61 @@ import * as R from "../src/lib/repo.js";
 import {
   serverSide, parsePair, currentSet, normalizeLive, detectBreaks, detectTennisEvents,
   collectTennisSnapshots, buildTennisScoutReport, loadTennisConfig, tennisScoutMarkdown,
-  recordTennisBreakMarks, buildTennisBreakReport,
+  recordTennisBreakMarks, buildTennisBreakReport, tennisMoneyline,
 } from "../src/lib/tennisScout.js";
 
 const T0 = Date.parse("2026-07-14T00:00:00.000Z");
 const iso = (s: number) => new Date(T0 + s * 1000).toISOString();
+
+// The REAL 15-market set for Granby: Kaichi Uchida vs Alexis Galarneau (from prod). The ONLY
+// non-prop label is the bare moneyline @ 6.4¢ (= P(Uchida, the first-named)); everything else is a prop.
+const UCHIDA_MARKETS: [string, number][] = [
+  ["Granby: Kaichi Uchida vs Alexis Galarneau Match Over 21.5", 70.5],
+  ["Granby: Kaichi Uchida vs Alexis Galarneau Match Under 21.5", 29.5],
+  ["Granby: Kaichi Uchida vs Alexis Galarneau Total Sets: Over 2.5", 13.5],
+  ["Granby: Kaichi Uchida vs Alexis Galarneau Total Sets: Under 2.5", 86.5],
+  ["Granby: Kaichi Uchida vs Alexis Galarneau Set Handicap +/-1.5", 50],
+  ["Granby: Kaichi Uchida vs Alexis Galarneau", 6.4], // ← the moneyline
+  ["Granby: Kaichi Uchida vs Alexis Galarneau Set 1 Over 10.5", 50],
+  ["Granby: Kaichi Uchida vs Alexis Galarneau Set 1 Under 10.5", 50],
+  ["Granby: Kaichi Uchida vs Alexis Galarneau Set 1 Winner", 37.5],
+  ["Granby: Kaichi Uchida vs Alexis Galarneau Set 2 Winner", 12],
+  ["Granby: Kaichi Uchida vs Alexis Galarneau Set 1 Over 9.5", 50],
+  ["Granby: Kaichi Uchida vs Alexis Galarneau Match Over 23.5", 50],
+];
+function seedUchida(db: ReturnType<typeof openDb>, markets = UCHIDA_MARKETS) {
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "pm-atp", sport_id: "tennis", name: "ATP", budget: 0, external_league: null, created_at: "t" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-atp", home: "Kaichi Uchida", away: "Alexis Galarneau", state: "live", lineup_out: true, kickoff_at: "t", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid } as any);
+  for (const [label, price] of markets) R.insertMarket(db, { id: R.uid(), match_id: mid, label, price, ai_prob: null, liquidity: "4000", external_ref: R.uid(), snapshot_at: "t", is_closing: false } as any);
+  return mid;
+}
+
+test("tennisMoneyline: returns the bare moneyline (not a prop) with per-player prices, from the real 15-market set", () => {
+  const db = openDb(":memory:");
+  const mid = seedUchida(db);
+  const ml = tennisMoneyline(db, mid, { p1: "Kaichi Uchida", p2: "Alexis Galarneau" })!;
+  assert.ok(ml, "moneyline resolved");
+  assert.equal(ml.label, "Granby: Kaichi Uchida vs Alexis Galarneau", "the bare label, NOT Match Over 21.5");
+  assert.equal(ml.p1Cents, 6.4, "P(Uchida) = stored first-outcome price");
+  assert.equal(ml.p2Cents, 93.6, "P(Galarneau) = 100 − first");
+  // scout format names (K. Uchida) still align by surname
+  assert.equal(tennisMoneyline(db, mid, { p1: "A. Galarneau", p2: "K. Uchida" })!.p1Cents, 93.6, "aligned to whichever player is p1");
+});
+
+test("tennisMoneyline: HONEST SKIP (null) when there is no moneyline, never the closest prop", () => {
+  const db = openDb(":memory:");
+  // Same set but WITHOUT the bare moneyline → only props remain → must return null, not Match Over 21.5.
+  const mid = seedUchida(db, UCHIDA_MARKETS.filter(([l]) => l !== "Granby: Kaichi Uchida vs Alexis Galarneau"));
+  assert.equal(tennisMoneyline(db, mid, { p1: "Kaichi Uchida", p2: "Alexis Galarneau" }), null, "no non-prop market → skip, not a prop");
+});
+
+test("tennisMoneyline: HONEST SKIP when two non-prop markets are ambiguous", () => {
+  const db = openDb(":memory:");
+  const mid = seedUchida(db, [["Granby: Kaichi Uchida vs Alexis Galarneau", 6.4], ["Granby: Kaichi Uchida vs Alexis Galarneau (alt)", 30]]);
+  assert.equal(tennisMoneyline(db, mid, { p1: "Kaichi Uchida", p2: "Alexis Galarneau" }), null, "two candidates → ambiguous → skip");
+});
 
 // A real API-Tennis livescore row shape (from the live probe).
 const apiRow = (over: any = {}) => ({

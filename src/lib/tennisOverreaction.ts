@@ -15,10 +15,10 @@
 
 const num = (v: string | undefined, d: number) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
 
-// Armed prices (cents). CALIBRATED: validated against 105 §4 break marks — 64% of favourite-breaks
-// recover to the take level, and the median early-break favourite floor (42-48¢) sits inside these
-// buyback bands, so the original interim values held. Env-tunable; refine per-context if the
-// recovery-share splits materially by level/timing.
+// Armed prices (cents). INTERIM constants: the 105 §4 break marks that once "validated" these were
+// measured on PROP prices, not the moneyline (BACKLOG "price layer = the MONEYLINE"), so they're
+// discarded. The moneyline panic amplitude is almost certainly LARGER than a game-total prop's, so
+// these bands will likely widen once ~100 marks re-accumulate on the moneyline. Env-tunable.
 export const TENNIS_ARMED = {
   // A side priced ≤ this (¢) is the clear UNDERDOG ⇒ the other side is the favourite we buy back.
   favUnderdogMax: num(process.env.TENNIS_FAV_UNDERDOG_MAX, 40),
@@ -51,10 +51,10 @@ export function chargeTennisTriggers(winner: { p1Cents: number | null; p2Cents: 
   return {
     favSide, favPriceCents,
     triggers: [
-      { id: "early_break", favSide, buybackMaxCents: TENNIS_ARMED.earlyBreakBuyMax, window: "сет 1 / начало сета 2", thresholds: "calibrated" },
-      { id: "lost_first_set", favSide, buybackMaxCents: TENNIS_ARMED.lostFirstSetBuyMax, window: "после проигранного сета 1 (bo3)", thresholds: "calibrated" },
+      { id: "early_break", favSide, buybackMaxCents: TENNIS_ARMED.earlyBreakBuyMax, window: "сет 1 / начало сета 2", thresholds: "interim" },
+      { id: "lost_first_set", favSide, buybackMaxCents: TENNIS_ARMED.lostFirstSetBuyMax, window: "после проигранного сета 1 (bo3)", thresholds: "interim" },
     ],
-    note: `фаворит = ${favSide} @ ${favPriceCents}¢; заряжено 2 триггера (calibrated)`,
+    note: `фаворит = ${favSide} @ ${favPriceCents}¢; заряжено 2 триггера (interim)`,
   };
 }
 

@@ -37,8 +37,10 @@ function seedTennisMatch(db: ReturnType<typeof openDb>, opts: { p1: string; p2: 
   R.upsertCompetition(db, { id: "pm-atp", sport_id: "tennis", name: "ATP", budget: 0, external_league: null, created_at: "t" });
   const mid = R.uid();
   R.insertMatch(db, { id: mid, competition_id: "pm-atp", home: opts.p1, away: opts.p2, state: "live", lineup_out: true, kickoff_at: "2026-07-14T09:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
-  R.insertMarket(db, { id: R.uid(), match_id: mid, label: opts.p1, price: opts.p1price ?? 80, ai_prob: null, liquidity: String(opts.p1liq ?? 5000), external_ref: "t1", snapshot_at: "t", is_closing: false });
-  R.insertMarket(db, { id: R.uid(), match_id: mid, label: opts.p2, price: opts.p2price ?? 20, ai_prob: null, liquidity: String(opts.p2liq ?? 5000), external_ref: "t2", snapshot_at: "t", is_closing: false });
+  // ONE moneyline market ("Tournament: A vs B", stored price = P(first-named player)); resolved
+  // by structure (never a prop). The book is a single gate — thin either side thins the moneyline.
+  const book = Math.min(opts.p1liq ?? 5000, opts.p2liq ?? 5000);
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: `ATP: ${opts.p1} vs ${opts.p2}`, price: opts.p1price ?? 80, ai_prob: null, liquidity: String(book), external_ref: "t1", snapshot_at: "t", is_closing: false });
   return mid;
 }
 
@@ -134,12 +136,13 @@ function buybackBet(db: ReturnType<typeof openDb>, mid: string, id: string, plan
   R.insertBet(db, { id, match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: profile, market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: plan }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
 }
 
-test("tennis calibration: the entry plan carries the CALIBRATED defaults (K=2, epoch=calibrated)", () => {
-  // From 105 §4/B marks: recovery p75 = 1 min → K=2; strategy validated → epoch=calibrated.
+test("tennis calibration: the entry plan carries the INTERIM defaults (K=3, epoch=interim)", () => {
+  // The prop-priced 105-mark calibration was discarded (BACKLOG "price layer = the MONEYLINE"):
+  // thresholds return to interim (K=3) until ~100 marks re-accumulate on the moneyline.
   const meta = tennisEntryMeta({ favPrice: 45, prePrice: 62, edge: 0.1, kelly: 0.2, stake: 100, thinnessUsd: 5000, setNum: 1 });
   const plan = meta.exitPlan as any;
-  assert.equal(plan.game_count_stop.receiver_games, 2, "calibrated game-count stop");
-  assert.equal(plan.armed_epoch, "calibrated");
+  assert.equal(plan.game_count_stop.receiver_games, 3, "interim game-count stop");
+  assert.equal(plan.armed_epoch, "interim");
   assert.equal(plan.take_price.at_cents, 59, "pre-break 62 − 3¢ buffer (kept)");
   assert.equal(plan.catastrophic_floor.at_cents, 30, "entry 45 − 15¢ floor (held structural)");
 });
@@ -248,7 +251,7 @@ test("tennisTradingTick: one overreaction opens a bet per FREE risk profile, eac
   assert.equal(opened, 3, "one bet per default profile (aggressive/medium/conservative)");
   const bets = R.betsForMatch(db, mid, "tennis_overreaction").filter((b) => b.status === "open");
   assert.deepEqual([...new Set(bets.map((b) => b.risk_profile_id))].sort(), ["aggressive", "conservative", "medium"], "distinct profiles, side-by-side");
-  assert.ok(bets.every((b) => (b.stake ?? 0) > 0 && b.code_version?.includes("calibrated")), "each sized > 0 and carries the calibrated epoch");
+  assert.ok(bets.every((b) => (b.stake ?? 0) > 0 && b.code_version?.includes("interim")), "each sized > 0 and carries the interim epoch");
 });
 
 test("Part B buildTennisCalibrationReport: splits marks into recovery vs no-recovery", () => {

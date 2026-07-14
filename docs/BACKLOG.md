@@ -106,3 +106,37 @@ failures the provider drops to a SLOW retry (not permanent silence — mappings 
 appear at kickoff/HT). A **timeout** is a transient network failure and is NOT
 cached (distinct from `not_resolved`). Confirmed-coverage leagues never hard-disable
 on transient errors.
+
+## Tennis price layer = the MONEYLINE, resolved by structure — never surname-match (DONE)
+
+**The bug that hid under "взведено, но пусто":** Polymarket lists a tennis match as ONE
+moneyline market **plus many props** (Match Over/Under total games, Total Sets O/U, Set
+Handicap, Set N Winner, Set N O/U). EVERY label is `"Tournament: A vs B <suffix>"` — so it
+contains BOTH surnames. `winnerMarketFor` matched by surname → grabbed the FIRST such market
+(a PROP, e.g. `Match Over 21.5 @ 70.5¢`) instead of the moneyline (`6.4¢`). Every derived
+value — favourite detection, armed bands, book gate, and 105 calibration marks — inherited
+the substitution. Garbage-in up the whole vertical, masked because 70¢ looks plausible.
+Same class as the Draw-dedup and player-mapping lessons: string-match + a contract-semantics
+assumption is the quietest, costliest bug.
+
+**Orientation — VERIFIED from gamma-api (source of truth), 2026-07, verbatim:**
+A tennis H2H market has `groupItemTitle: ""`, `outcomes: ["PlayerA","PlayerB"]` (index 0 =
+the FIRST-named player), `outcomePrices: ["P(A)","P(B)"]` (sum 1), `clobTokenIds: [tA,tB]`.
+Evidence: `Croatia Open: Lukas Neumayer vs Juan Carlos Prado` → `["0.665","0.335"]` (Neumayer,
+first-named & higher-ranked, 66.5%); `Segundo Goity Zapico vs Juan Estevez` → `["0.09","0.91"]`.
+Our importer (marketSides) collapses this to ONE stored market because the `"A vs B"` title
+contains both outcome names (`namesOutcome=true` → no expansion): label = the question,
+**price = outcomePrices[0] = P(first-named player)**, `external_ref` = clobTokenIds[0] (first
+player's token). So the second player's price = `100 − stored`.
+
+**RULE (resolver): the moneyline is the SINGLE market with NO prop keyword** (over/under/total
+sets/handicap/set N/winner/games/odd-even/tiebreak/±handicap). Align its `A vs B` to the
+match's players by surname. **0 or >1 non-prop markets → HONEST SKIP with a log — never take
+the closest match.** Same discipline as honest player-mapping. A resolver test on the real
+15-market Uchida–Galarneau fixture must return exactly the bare market and fail LOUD otherwise.
+
+**Calibration reset:** the 105 marks were measured on PROP prices (game totals move far LESS
+on a break than the winner market). They are discarded, and ALL tennis thresholds return to the
+`interim` epoch until ~100 marks re-accumulate on the moneyline. The exit DESIGN (game-count
+stop, floor, take buffer) is price-independent and stays; its NUMBERS do not carry over — the
+moneyline panic amplitude is almost certainly LARGER, so armed bands + recovery stats will shift.

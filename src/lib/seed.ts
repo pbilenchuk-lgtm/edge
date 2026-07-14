@@ -905,6 +905,18 @@ export function migrateSharesToAggressive(db: Database, now: string): void {
   R.metaSet(db, AGGRESSIVE_MARK, now, now);
 }
 
+// One-time: discard the 105 tennis calibration marks. They were measured on PROP prices
+// (winnerMarketFor grabbed the closest prop, not the moneyline — see BACKLOG "price layer =
+// the MONEYLINE"), so every derived number is off-price and MUST NOT carry into the moneyline
+// era. Wipe the table so marks re-accumulate on the corrected moneyline resolver; thresholds
+// are already reverted to the interim epoch in code. Marker-guarded → runs exactly once.
+const TENNIS_MARKS_RESET_MARK = "tennis_marks_reset_moneyline_v1";
+export function migrateResetTennisMarks(db: Database, now: string): void {
+  if (R.metaGet(db, TENNIS_MARKS_RESET_MARK)) return;
+  try { db.prepare(`DELETE FROM tennis_break_marks`).run(); } catch { /* table may not exist yet */ }
+  R.metaSet(db, TENNIS_MARKS_RESET_MARK, now, now);
+}
+
 // One-time: put the FULL grid of pairs on every football category — all 3
 // strategists × all 3 risk profiles = 9 pairs, funds split evenly — so every
 // (strategy, profile) combination is simulated side by side. Marker-guarded:

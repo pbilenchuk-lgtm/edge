@@ -144,6 +144,18 @@ function pairEquityOnComp(matchDb: any, comp: any, stratId: string, profileId: s
   }
   return { equity: budget + realized + unreal, realized, unreal, staked };
 }
+// Tennis does NOT use the casна→турнир→доли money flow — the engine runs the
+// overreaction strategy on a fixed PAPER budget per (strategy, profile), mirroring
+// the server's TENNIS_PAPER_BUDGET default. So the tennis tab surfaces those pairs
+// directly (every profile, engine-managed) instead of the football budget prompts.
+const TENNIS_PAPER_BUDGET = 1000;
+function tennisPairsOf(sportStrats: any[], riskProfiles: any[]) {
+  const profs = (riskProfiles || []);
+  const out: any[] = [];
+  for (const st of sportStrats) for (const p of profs)
+    out.push({ key: `${st.id}::${p.id}`, strategyId: st.id, profileId: p.id, name: st.name, color: st.color, profileName: p.name || p.id, budget: TENNIS_PAPER_BUDGET });
+  return out;
+}
 // The (strategy, profile) pairs funded on a competition, each a display row.
 function compPairsOf(shareRows: any, catalog: any[], riskProfiles: any[], compId: string, compBudget: any) {
   if (!(compBudget[compId] > 0)) return [];
@@ -618,12 +630,18 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
         <>
           <div style={S.compRow}>
             {sportComps.map((c) => {
-              const budget = compBudget[c.id] || 0;
+              const isTennis = c.sport === "tennis";
+              // Tennis is engine-managed (fixed paper budget per profile), NOT the tournament
+              // money flow — aggregate its P&L across the engine pairs, not the shares table.
               const cStrats = sportStrats.filter((s) => (shares[c.id]?.[s.id] || 0) > 0);
+              const tPairs = isTennis ? tennisPairsOf(sportStrats, riskProfiles) : [];
+              const budget = isTennis ? tPairs.reduce((a, p) => a + p.budget, 0) : (compBudget[c.id] || 0);
               // delta is PURE P&L (realized + open mark-to-market) across the comp's
               // strategies — 0 until something is actually bet, so a freshly-funded
               // tournament shows "бюджет свободен", not a phantom -100%.
-              const agg = cStrats.reduce((acc, s) => { const e = stratEquityOnComp(matchDb, c, s.id, stratBudget(compBudget, c.id, shares, s.id)); return { delta: acc.delta + e.realized + e.unreal, staked: acc.staked + e.staked }; }, { delta: 0, staked: 0 });
+              const agg = isTennis
+                ? tPairs.reduce((acc, p) => { const e = pairEquityOnComp(matchDb, c, p.strategyId, p.profileId, p.budget); return { delta: acc.delta + e.realized + e.unreal, staked: acc.staked + e.staked }; }, { delta: 0, staked: 0 })
+                : cStrats.reduce((acc, s) => { const e = stratEquityOnComp(matchDb, c, s.id, stratBudget(compBudget, c.id, shares, s.id)); return { delta: acc.delta + e.realized + e.unreal, staked: acc.staked + e.staked }; }, { delta: 0, staked: 0 });
               const delta = agg.delta;
               const eq = budget + delta;
               // "Bets exist" is money IN PLAY or already realized — NOT "delta != 0".
@@ -633,32 +651,40 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
               // ROI denominator = the ACTIVE (allocated) strategy budgets, not the
               // whole comp budget — so the comp-card % reconciles with the sum of
               // the per-strategy rows below instead of being diluted by idle budget.
-              const activeBudget = cStrats.reduce((a, s) => a + stratBudget(compBudget, c.id, shares, s.id), 0);
+              const activeBudget = isTennis ? budget : cStrats.reduce((a, s) => a + stratBudget(compBudget, c.id, shares, s.id), 0);
+              const funded = isTennis ? tPairs.length > 0 : budget > 0;
               return (
                 <div key={c.id} style={{ ...S.compCard, ...(c.id === comp?.id ? S.compOn : {}) }}>
                   <button style={S.compMain} onClick={() => setCompId(c.id)}>
                     <div style={S.compName}>{c.name}{liveCompIds.has(c.id) && <span style={S.liveDot} title="сейчас идёт матч" />}</div>
-                    {budget > 0 ? <>
-                      <div style={S.compBudget}>{fmtMoney0(budget)} <span style={S.compBudgetLbl}>бюджет</span></div>
+                    {funded ? <>
+                      <div style={S.compBudget}>{fmtMoney0(budget)} <span style={S.compBudgetLbl}>{isTennis ? "движок · $1k/профиль" : "бюджет"}</span></div>
                       {hasBets
                         ? <div style={{ ...S.compDelta, color: delta >= 0 ? "#5fd08a" : "#ff6b6b" }}>{delta >= 0 ? "▲ +" : "▼ "}{fmtMoney(delta)} ({delta >= 0 ? "+" : ""}{(activeBudget > 0 ? (delta / activeBudget) * 100 : 0).toFixed(1)}%) <span style={S.compRoi}>· {agg.staked > 0.005 ? `${fmtMoney0(agg.staked)} в игре` : `сейчас ${fmtMoney0(eq)}`}</span></div>
-                        : <div style={S.compFlat}>ставок нет · бюджет свободен</div>}
-                    </> : <div style={S.compUnalloc}>{c.matches.length ? "нет бюджета" : "нет матчей"}</div>}
+                        : <div style={S.compFlat}>{isTennis ? "ставок нет · движок ждёт сигнал" : "ставок нет · бюджет свободен"}</div>}
+                    </> : <div style={S.compUnalloc}>{c.matches.length ? (isTennis ? "стратегия не активна" : "нет бюджета") : "нет матчей"}</div>}
                   </button>
-                  <button style={S.allocIcon} title="Бюджет турнира" onClick={() => setCompModal(c.id)}>$</button>
+                  {!isTennis && <button style={S.allocIcon} title="Бюджет турнира" onClick={() => setCompModal(c.id)}>$</button>}
                 </div>
               );
             })}
           </div>
 
+          {(() => {
+          const compIsTennis = comp?.sport === "tennis";
+          const pairs = compIsTennis ? tennisPairsOf(sportStrats, riskProfiles) : compPairsOf(shareRows, catalog, riskProfiles, comp.id, compBudget);
+          return <>
           <div style={S.stratStripHead}>
             <span style={S.stratStripTitle}>Стратегии на «{comp?.name}»</span>
-            {compBudget[comp?.id] > 0 && <button style={S.shareBtn} onClick={() => setShareModal(comp.id)}>⚙ Распределить доли %</button>}
+            {compIsTennis
+              ? <span style={S.compBudgetLbl}>движок · $1k на профиль · без ручного бюджета</span>
+              : compBudget[comp?.id] > 0 && <button style={S.shareBtn} onClick={() => setShareModal(comp.id)}>⚙ Распределить доли %</button>}
           </div>
           <div style={S.bankStrip} className="el-bank-grid">
-            {(compBudget[comp?.id] || 0) === 0 && <div style={S.noStrat}>У «{comp?.name}» нет бюджета. Нажми $ на плашке турнира.</div>}
-            {compBudget[comp?.id] > 0 && compStrats.length === 0 && <div style={S.noStrat}>Бюджет есть, но доли стратегий не заданы. Нажми «Распределить доли %».</div>}
-            {compBudget[comp?.id] > 0 && compPairsOf(shareRows, catalog, riskProfiles, comp.id, compBudget).map((p: any) => {
+            {compIsTennis && pairs.length === 0 && <div style={S.noStrat}>Теннисная стратегия ещё не активирована в этой категории.</div>}
+            {!compIsTennis && (compBudget[comp?.id] || 0) === 0 && <div style={S.noStrat}>У «{comp?.name}» нет бюджета. Нажми $ на плашке турнира.</div>}
+            {!compIsTennis && compBudget[comp?.id] > 0 && compStrats.length === 0 && <div style={S.noStrat}>Бюджет есть, но доли стратегий не заданы. Нажми «Распределить доли %».</div>}
+            {pairs.map((p: any) => {
               const e = pairEquityOnComp(matchDb, comp, p.strategyId, p.profileId, p.budget);
               const d = e.equity - p.budget;
               return (
@@ -666,13 +692,15 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
                   <span style={{ ...S.dot, background: p.color }} />
                   <span style={S.bankNm}>{p.name}</span>
                   <ProfileBadge id={p.profileId} name={p.profileName} />
-                  <span style={S.bankBudget}>{fmtPct(p.pct)}% · {fmtMoney0(p.budget)}</span>
+                  <span style={S.bankBudget}>{compIsTennis ? fmtMoney0(p.budget) : `${fmtPct(p.pct)}% · ${fmtMoney0(p.budget)}`}</span>
                   <span style={S.bankEq}>{fmtMoney(e.equity)}</span>
                   <span style={{ ...S.bankD, color: d >= 0 ? "#5fd08a" : "#ff6b6b" }}>{d >= 0 ? "▲" : "▼"}{fmtMoney(d)} ({d >= 0 ? "+" : ""}{p.budget ? ((d / p.budget) * 100).toFixed(1) : "0.0"}%)</span>
                 </div>
               );
             })}
           </div>
+          </>;
+          })()}
 
           <main style={S.main}>
             {(() => {

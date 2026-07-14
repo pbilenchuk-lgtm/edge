@@ -460,6 +460,10 @@ export function hasLiveData(db: Database, m: Match): boolean {
 export function liveDelivering(db: Database, m: Match, sport: string): boolean {
   // Real in-match event (goal/card/…) — the strongest, unforgeable proof.
   if (R.eventsForMatch(db, m.id).some((e) => e.type !== "stats" && e.type !== "other")) return true;
+  // Tennis has NO provider clock and writes NO match_live row — the SCOUT is authoritative for
+  // liveness (same source advanceClocks flips state on). Prove delivery from a fresh live snapshot,
+  // else every live tennis match reads a permanent misleading «ждём данные».
+  if (sport === "tennis") return tennisScoutInPlay(db, m.id, Date.now());
   // Non-lineup sports write match_live only from the live board, so the row is the signal.
   if (!R.LINEUP_SPORTS.has(sport)) return !!R.getMatchLive(db, m.id);
   // Football: the ONLY reliable "provider is delivering in-play" signal is a real
