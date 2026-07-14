@@ -12,7 +12,7 @@ import {
   isNoiseMarket, matchMarketSnapshots, parseMatchTitle, discoverSportMatches,
 } from "../src/lib/polymarket.js";
 import {
-  resolveModel, apiKeyFor, callLLM, generateStrategyName, heuristicName,
+  resolveModel, apiKeyFor, callLLM, callLLMParsed, generateStrategyName, heuristicName,
   effectiveEnv, providerEnabled, parseJsonLoose, repairJson, strategistDecide,
 } from "../src/lib/llm.js";
 import { extractThresholds } from "../src/lib/thresholds.js";
@@ -631,6 +631,64 @@ test("callLLM: a 529 overloaded IS retried; retries exhausted returns the last e
   );
   assert.equal(res.ok, false);
   assert.equal(calls, 3, "1 + 2 retries all hit the wall");
+});
+
+// A mocked anthropic provider that returns a scripted sequence of reply texts and
+// records the user-turn content of each request (to prove the re-ask nudge was sent).
+function seqAnthropic(texts: string[], sentPrompts?: string[]) {
+  let i = 0;
+  return (async (_url: any, init: any) => {
+    if (sentPrompts) { try { sentPrompts.push(JSON.parse(init.body).messages[0].content); } catch { sentPrompts.push(""); } }
+    const text = texts[Math.min(i, texts.length - 1)]; i++;
+    return { ok: true, status: 200, json: async () => ({ content: [{ text }] }) };
+  }) as unknown as typeof fetch;
+}
+const OPTS = { env: { ANTHROPIC_API_KEY: "k" }, sleep: async () => {} };
+
+test("callLLMParsed: re-asks ONCE on unparseable output, then parses the corrected reply", async () => {
+  const sent: string[] = [];
+  const fetchImpl = seqAnthropic(["извини, это не JSON вовсе", '{"a":1}'], sent);
+  const r = await callLLMParsed({ model: "Claude Opus 4.8", prompt: "дай JSON" }, (t) => parseJsonLoose(t), { ...OPTS, fetchImpl });
+  assert.equal(r.ok, true, "recovered on the 2nd (corrected) reply");
+  if (r.ok) assert.equal(r.value.a, 1);
+  assert.equal(sent.length, 2, "one re-ask, not more");
+  assert.ok(!sent[0].includes("распарсился"), "first ask is the clean prompt");
+  assert.ok(sent[1].includes("распарсился"), "the re-ask carries the JSON-only nudge");
+});
+
+test("callLLMParsed: a PROVIDER failure is NOT content-re-asked (that's callLLM's job)", async () => {
+  let calls = 0;
+  const bad = (async () => { calls++; return { ok: false, status: 400, text: async () => "bad request" }; }) as unknown as typeof fetch;
+  const r = await callLLMParsed({ model: "Claude Opus 4.8", prompt: "hi" }, (t) => parseJsonLoose(t), { ...OPTS, fetchImpl: bad });
+  assert.equal(r.ok, false);
+  assert.equal(calls, 1, "400 fails once — no content re-ask on a provider error");
+});
+
+test("callLLMParsed: persistently unparseable → ok:false with a diagnosable tail, bounded to 1+1 asks", async () => {
+  const sent: string[] = [];
+  const fetchImpl = seqAnthropic(["мусор один", "мусор два раз и навсегда"], sent);
+  const r = await callLLMParsed({ model: "Claude Opus 4.8", prompt: "дай JSON" }, (t) => parseJsonLoose(t), { ...OPTS, fetchImpl });
+  assert.equal(r.ok, false);
+  if (!r.ok) { assert.match(r.error, /невалидный JSON/); assert.match(r.error, /навсегда/, "tail of the last bad reply is surfaced"); }
+  assert.equal(sent.length, 2, "exactly one re-ask then give up");
+});
+
+test("strategistDecide: a malformed reply is RECOVERED by one JSON re-ask (protects football reassess AND tennis buyback)", async () => {
+  // First reply: a refusal/prose that reaches no valid JSON. Second: a clean pick.
+  const good = JSON.stringify({ picks: [{ label: "Over 2.5", prob: 0.62, reason: "выкуп после перелёта" }], note: "" });
+  const sent: string[] = [];
+  const fetchImpl = seqAnthropic(["Конечно! Вот мой анализ рынка без JSON…", good], sent);
+  const dec = await strategistDecide(
+    { strategyName: "s", strategyPrompt: "p",
+      match: { home: "A", away: "B", sport: "football", state: "live", minute: 60, scoreHome: 0, scoreAway: 1 },
+      assessment: { confidence: "средняя", short: "s", verdict: "v" },
+      markets: [{ label: "Over 2.5", priceCents: 44, aiProb: 0.5 }], openPositions: [] },
+    "Claude Opus 4.8", { ...OPTS, fetchImpl },
+  );
+  assert.equal(dec.ok, true, "the strategist did NOT go dark — it recovered on the re-ask");
+  assert.equal(dec.picks.length, 1);
+  assert.equal(dec.picks[0].label, "Over 2.5");
+  assert.equal(sent.length, 2, "one re-ask was enough");
 });
 
 test("strategistDecide: caches the rules+methodology prefix in the system block, not the volatile user turn", async () => {

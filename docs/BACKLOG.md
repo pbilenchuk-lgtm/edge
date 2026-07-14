@@ -26,6 +26,29 @@ FLAGS+BLOCKS on a ≥8¢ divergence and never merges. It holds the money.
 3. Same class covers "broken labels" (`Team — Yes` = 100¢): a token with an unclear
    resolution condition, resolved by the same provenance pass.
 
+## Strategist LLM reliability — the 4-rung stack (DONE) — do NOT collapse a rung
+
+The live strategist is now a SAFETY precondition (price-stops were removed from melting
+options — only the strategist / deterministic time_stop protect them from riding to zero),
+and tennis shares the same `strategistDecide` call on SHORT break windows. A parse failure
+at the wrong moment = a missed buyback. Four independent rungs, each covering a different
+failure class — removing one re-opens the "невалидный JSON от стратега" skip that reproduced twice:
+
+1. **NETWORK retry** (`callLLM`, llm.ts) — a dropped socket / 5xx / 429 / 529 re-sends the
+   SAME request with backoff. A transient hiccup must not sink a whole live cycle.
+2. **JSON repair** (`parseJsonLoose`→`repairJson`, llm.ts) — salvages the routine LLM
+   malformations IN PLACE (trailing commas, bare control chars, truncation, stray brackets).
+   Never applied to a reply that already parsed — a valid response is never altered.
+3. **CONTENT re-ask** (`callLLMParsed`, llm.ts) — when a reply is UNsalvageable (prose /
+   refusal / wrong shape), re-ask ONCE with a JSON-only nudge before declaring failure.
+   `parse` throwing is the re-ask signal, so a structurally-wrong-but-valid-JSON reply
+   (missing xg core, etc.) also triggers it. NOT re-asked on a provider/network failure
+   (rung 1's job). This rung is what keeps a one-off parse hiccup from falsely tripping rung 4.
+4. **DEGRADED-mode** (`strategistDegraded` + exit-net price-stop restoration, lifecycle.ts) —
+   when the strategist is in an ACTIVE outage (last outcome failed, recent), RESTORE the
+   deterministic price stop to the melting-option positions the strategist was trusted to
+   manage. The insurance auto-returns exactly when the layer recovers.
+
 ## Sportmonks negative-cache (coverage) — DONE (see providerCoverage.ts)
 
 `fixture not resolved` on Allsvenskan is a **provider-coverage** fact (Sportmonks

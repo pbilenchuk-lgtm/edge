@@ -156,6 +156,43 @@ export async function callLLM(
   return last;
 }
 
+/** Appended verbatim to the prompt on a CONTENT re-ask. Firm, format-only — it
+ *  never changes the task, only insists on clean JSON. */
+export const JSON_REPAIR_NUDGE =
+  "\n\nВНИМАНИЕ: твой предыдущий ответ НЕ распарсился как JSON. Верни СТРОГО один валидный JSON-объект по описанной выше схеме — без markdown-заборов (```), без любого текста до или после, все строки в двойных кавычках, без висячих запятых. Только JSON.";
+
+/**
+ * callLLM + parse, with ONE content-level RE-ASK on unparseable output. This is the
+ * rung ABOVE parseJsonLoose/repairJson: the repair fixes salvageable malformations in
+ * place; when a reply is UNsalvageable (truncated mid-value, a refusal/prose, the wrong
+ * shape) we re-ask once with a firm "JSON only" nudge before declaring the call failed.
+ * Distinct from callLLM's NETWORK retry — a dropped socket re-sends the SAME request;
+ * this re-sends a CORRECTED request, and ONLY after we actually got text that won't
+ * parse. On a provider/network failure it returns {ok:false} WITHOUT a content re-ask
+ * (not a formatting problem — callLLM already retried it). `parse` throwing is the
+ * signal to re-ask, so callers throw for a structurally-wrong-but-valid-JSON reply too
+ * (e.g. missing required fields), not just for a JSON syntax error.
+ */
+export async function callLLMParsed<T>(
+  req: LLMRequest,
+  parse: (text: string) => T,
+  deps: Deps = {},
+  jsonRetries = 1,
+): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
+  const attempts = 1 + Math.max(0, jsonRetries);
+  let lastText = "";
+  let providerErr: string | null = null;
+  for (let a = 1; a <= attempts; a++) {
+    const r = await callLLM(a === 1 ? req : { ...req, prompt: req.prompt + JSON_REPAIR_NUDGE }, deps);
+    if (!r.ok) { providerErr = r.error; break; } // network/provider outage — no content re-ask
+    lastText = r.text;
+    try { return { ok: true, value: parse(r.text) }; } catch { /* re-ask on the next iteration, or fall out */ }
+  }
+  if (providerErr != null) return { ok: false, error: providerErr };
+  const tail = lastText.slice(-160).replace(/\s+/g, " ");
+  return { ok: false, error: `невалидный JSON от модели (хвост: …${tail})` };
+}
+
 /** One HTTP attempt. Returns the result plus whether the failure is worth a retry. */
 async function callLLMOnce(
   req: LLMRequest, deps: Deps, provider: ProviderId, apiId: string, key: string,
@@ -471,7 +508,7 @@ const num = (x: unknown, def = 0): number => (Number.isFinite(x) ? Number(x) : d
 export async function assessFootballStructured(
   input: FootballAssessInput, model: string, deps: Deps = {},
 ): Promise<FootballAnalysis> {
-  const res = await callLLM({
+  const parsed = await callLLMParsed({
     model,
     system:
       "Ты — футбольный аналитик Слоя 1. Следуй методологии из промпта пользователя и верни СТРОГО один JSON-объект по схеме ниже — без markdown-заборов, без текста вокруг. " +
@@ -486,12 +523,15 @@ export async function assessFootballStructured(
       "Блок derived НЕ заполняй — его считает код.",
     prompt: `${input.analyticsPrompt}\n\n## ВХОДНЫЕ ДАННЫЕ\nМатч: ${input.home} — ${input.away} (состояние: ${input.state}).\nДоступные рынки (ТОЛЬКО чтобы определить match_type — это НЕ котировки, цен тут нет):\n${input.marketLabels.map((l) => `- ${l}`).join("\n")}\n${input.context ? `\nФАКТИЧЕСКИЕ ДАННЫЕ (составы/статистика/события):\n${input.context}\n` : ""}\nВерни ТОЛЬКО JSON по схеме.`,
     maxTokens: 6000,
-  }, deps);
-  if (!res.ok) return failedFootball(res.error);
-  try {
-    const j = parseJsonLoose(res.text);
+  },
+  // Throw on unparseable OR structurally-wrong (no xg core) so callLLMParsed re-asks
+  // once with a JSON-only nudge before the analysis is marked failed.
+  (text) => { const j = parseJsonLoose(text); if (!Number.isFinite(j?.core?.xg_home) || !Number.isFinite(j?.core?.xg_away)) throw new Error("нет xg_home/xg_away в core"); return j; },
+  deps);
+  if (!parsed.ok) return failedFootball(parsed.error);
+  {
+    const j = parsed.value;
     const c = j.core ?? {};
-    if (!Number.isFinite(c.xg_home) || !Number.isFinite(c.xg_away)) return failedFootball("нет xg_home/xg_away в core");
     const mt = ["group", "knockout", "uncertain"].includes(j.match_type) ? j.match_type : "uncertain";
     return {
       ok: true,
@@ -517,8 +557,6 @@ export async function assessFootballStructured(
       },
       unknowns: Array.isArray(j.unknowns) ? j.unknowns.map((u: any) => String(u)).filter(Boolean) : [],
     };
-  } catch {
-    return failedFootball("невалидный JSON от модели");
   }
 }
 function failedFootball(error?: string): FootballAnalysis {
@@ -549,7 +587,8 @@ export async function assessCategoryModifier(
 ): Promise<CategoryDelta> {
   // Show the specialist the Layer-1 output (NO prices) so it corrects, not recomputes.
   const baseJson = JSON.stringify({ match_type: base.matchType, core: base.core, drivers: base.drivers, scenarios: base.scenarios, calibration: base.calibration, unknowns: base.unknowns });
-  const res = await callLLM({
+  const failedDelta = (error?: string): CategoryDelta => ({ ok: false, coreAdjustments: [], newDrivers: [], newScenarios: [], overrideAdjustments: [], confidenceXgDelta: 0, confidenceScenarioDelta: 0, notes: "", error });
+  const parsed = await callLLMParsed({
     model,
     system:
       "Ты — специалист по специфике КАТЕГОРИИ (напр. ЧМ). Тебе дан готовый базовый анализ (Слой 1). Ты НЕ пересчитываешь матч и НЕ выдаёшь готовые вероятности — только ДЕЛЬТЫ, специфичные для категории, каждая с причиной. Котировки не используешь. Верни СТРОГО один JSON — без markdown, без текста вокруг. " +
@@ -562,10 +601,10 @@ export async function assessCategoryModifier(
       "Пусто — если специфики мало. Лучше две обоснованные поправки, чем десять натянутых.",
     prompt: `${modifierPrompt}\n\n## БАЗОВЫЙ АНАЛИЗ (Слой 1) — корректируй его, не переписывай:\nМатч: ${home} — ${away}.\n${baseJson}\n\nВерни ТОЛЬКО JSON с дельтами по схеме.`,
     maxTokens: 3000,
-  }, deps);
-  if (!res.ok) return { ok: false, coreAdjustments: [], newDrivers: [], newScenarios: [], overrideAdjustments: [], confidenceXgDelta: 0, confidenceScenarioDelta: 0, notes: "", error: res.error };
-  try {
-    const j = parseJsonLoose(res.text);
+  }, (text) => parseJsonLoose(text), deps);
+  if (!parsed.ok) return failedDelta(parsed.error);
+  {
+    const j = parsed.value;
     const reasoned = (x: any) => x && typeof x.reason === "string" && x.reason.trim();
     return {
       ok: true,
@@ -577,8 +616,6 @@ export async function assessCategoryModifier(
       confidenceScenarioDelta: num(j.confidence_adjustments?.scenario_confidence_delta, 0),
       notes: String(j.notes ?? ""),
     };
-  } catch {
-    return { ok: false, coreAdjustments: [], newDrivers: [], newScenarios: [], overrideAdjustments: [], confidenceXgDelta: 0, confidenceScenarioDelta: 0, notes: "", error: "невалидный JSON от модификатора" };
   }
 }
 
@@ -780,7 +817,7 @@ export async function strategistDecide(
   const liveMin = input.match.state !== "live" ? ""
     : input.match.minute != null ? `, ${input.match.minute}'`
     : input.match.minuteApprox != null ? `, ≈${input.match.minuteApprox}' (оценка по таймеру)` : "";
-  const res = await callLLM({
+  const parsed = await callLLMParsed({
     model,
     system:
       "Ты — трейдер на прогнозных рынках, действующий СТРОГО по методологии из промта стратегии (это твой единственный свод правил). На основе оценки матча, дерева исходов и цен реши ДЕЙСТВИЯ. " +
@@ -805,17 +842,15 @@ export async function strategistDecide(
     // old 900 the JSON was truncated mid-object → "невалидный JSON" on EVERY pair
     // → base-model fallback (the identical-bets bug). Give it room.
     maxTokens: 3500,
-  }, deps);
-  if (!res.ok) return { ok: false, picks: [], exits: [], note: "", source: "none", error: res.error };
-  try {
-    const j = parseJsonLoose(res.text);
-    return { ...normalizeStrategistJson(j), ok: true, source: "llm" };
-  } catch {
-    // Capture the tail of the raw reply so the failure is diagnosable (truncation
-    // shows as a JSON that cuts off; a refusal/preamble shows as prose).
-    const tail = (res.text ?? "").slice(-160).replace(/\s+/g, " ");
-    return { ok: false, picks: [], exits: [], note: "", source: "none", error: `невалидный JSON от стратега (хвост ответа: …${tail})` };
-  }
+  },
+  // parseJsonLoose already repairs salvageable malformations; a throw here means the
+  // reply is UNsalvageable (truncated / prose / refusal) → callLLMParsed re-asks ONCE
+  // with a JSON-only nudge before we declare the strategist unavailable. This is the
+  // exact "невалидный JSON от стратега" skip that reproduced twice — one re-ask
+  // recovers it instead of dropping the whole reassess (and, for tennis, the buyback).
+  (text) => normalizeStrategistJson(parseJsonLoose(text)), deps);
+  if (!parsed.ok) return { ok: false, picks: [], exits: [], note: "", source: "none", error: parsed.error };
+  return { ...parsed.value, ok: true, source: "llm" };
 }
 
 export interface ImprovementProposal {
