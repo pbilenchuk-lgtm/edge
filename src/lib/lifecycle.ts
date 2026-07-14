@@ -1441,7 +1441,7 @@ export async function runAutoCycle(
   stepSync("reconcileFootball", () => reconcileFootballCategories(db, nowFn(deps)(), espnLeagueForSeries).deleted, 0);
   stepSync("pruneCategories", () => R.pruneRemovedCategories(db, {
     keepSports: new Set(Object.keys(SPORT_LABELS)),
-    tennisSeriesAllow: seriesAllowFor("tennis", deps.env) ?? new Set(),
+    tennisSeriesAllow: seriesAllowFor("tennis", deps.env), // null = unrestricted (keep all liquid tennis)
   }), 0);
   return {
     synced: synced.length, imported: synced.filter((r) => r.created).length, discovered,

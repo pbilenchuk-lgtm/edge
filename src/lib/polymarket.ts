@@ -63,16 +63,16 @@ export interface PolymarketConfig {
  * union the relevant league tags. Discovery queries every tag and dedups events
  * by id, so overlaps are harmless.
  */
-// Discovery is scoped to FOOTBALL only for now (user). Football has real live
-// coverage (StatPal soccer + ESPN, broad league depth) and is where the trading
-// works. Tennis/esports were dropped: StatPal's tennis feed is top-tour only
-// while Polymarket's tennis liquidity is Challengers/ITF, and esports coverage was
-// thin — not worth spending discovery/enrich/parse cycles on. Basketball/hockey/
-// table-tennis have no live feed at all. Re-add a sport here ONLY once it has real
-// live coverage AND liquid Polymarket matches (see SPORT_LABELS + STATPAL_FEED).
+// Football is the live-trading sport (ESPN + Sportmonks live coverage). TENNIS is back
+// in discovery as DISPLAY-ONLY (user): tag 864 lists real, liquid matches on Polymarket —
+// Challenger/ITF/qualies/Slam-futures — so we surface them + their Polymarket quotes on the
+// site. NO live-score provider is wired yet (Stage-0 scouting pending, see
+// docs/tennis_provider_scouting.md), so tennis comps import unfunded (budget 0) and don't
+// enrich (external_league null → no ESPN) — nothing analyses or trades until a covered
+// provider is chosen. Basketball/hockey/table-tennis stay out (no live feed).
 export const SPORT_TAG_IDS: Record<string, number[]> = {
-  football: [100350],          // soccer (NOT tag 10 = American football) — StatPal soccer + ESPN
-  // tennis/esports removed — thin/absent live coverage vs Polymarket liquidity (user).
+  football: [100350],          // soccer (NOT tag 10 = American football) — ESPN + Sportmonks
+  tennis: [864],               // display-only from Polymarket; unrestricted series (seriesAllowFor)
   // basketball/hockey/tabletennis removed — no live feed (would bleed capital, user).
   // cricket removed — no liquidity on Polymarket (user).
 };
@@ -82,6 +82,7 @@ export const SPORT_TAG_IDS: Record<string, number[]> = {
  *  so a sport dropped above is auto-pruned from comps/matches/sports). */
 export const SPORT_LABELS: Record<string, string> = {
   football: "Футбол",
+  tennis: "Теннис",
 };
 
 /** The Gamma tag ids backing a sport (empty for an unknown sport). */

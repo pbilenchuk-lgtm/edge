@@ -723,6 +723,23 @@ test("pruneRemovedCategories drops cricket + non-ATP tennis (no-bet), keeps ATP 
   assert.ok(db.prepare("SELECT 1 FROM sports WHERE id='tennis'").get(), "tennis sport row kept (still has comps)");
 });
 
+test("pruneRemovedCategories: UNRESTRICTED tennis (null allow) keeps every liquid series — display-only tennis survives", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertSport(db, "tennis", "Теннис");
+  const mk = (comp: string) => {
+    R.upsertCompetition(db, { id: comp, sport_id: "tennis", name: comp, budget: 0, external_league: null, created_at: "t" });
+    const id = R.uid();
+    R.insertMatch(db, { id, competition_id: comp, home: "A"+id, away: "B"+id, state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+  };
+  mk("pm-swiss-open"); mk("pm-itf-irvine"); mk("pm-wta-cervia");
+  // null allow-list = no series restriction (the real default via seriesAllowFor).
+  const removed = R.pruneRemovedCategories(db, { keepSports: new Set(["football", "tennis"]), tennisSeriesAllow: null });
+  assert.equal(removed, 0, "no tennis category pruned when unrestricted");
+  for (const id of ["pm-swiss-open", "pm-itf-irvine", "pm-wta-cervia"])
+    assert.ok(R.listCompetitions(db).some((c) => c.id === id), `${id} kept`);
+});
+
 test("pruneRemovedCategories retires a dropped sport ENTIRELY — funded comp + strategy + shares + bets", () => {
   const db = openDb(":memory:");
   seedDatabase(db);
