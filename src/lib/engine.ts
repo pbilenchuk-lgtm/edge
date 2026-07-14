@@ -258,7 +258,7 @@ export function settleMatch(
       // is never active again. Void it: refund the stake, zero P&L, tagged
       // 'void' so it's excluded from win/lose accuracy.
       R.updateBet(db, b.id, {
-        status: "settled_lost", result: null, payout: b.stake ?? 0, settled_at: now,
+        status: "settled_void", result: null, payout: b.stake ?? 0, settled_at: now,
         closing_price: b.current_price ?? b.entry_price ?? null, settled_by: "void",
       });
       releaseShadow(b.id);

@@ -12,6 +12,7 @@ import { extractThresholdsHeuristic } from "./thresholds.js";
 import { STRAT_TENNIS_OVR_PREMATCH, STRAT_TENNIS_OVR_LIVE } from "./tennisOverreaction.js";
 import { STRAT_SET_VALUE_PREMATCH, STRAT_SET_VALUE_LIVE } from "./tennisSetValue.js";
 import { STRAT_PMV_DESC, pmvTour } from "./tennisPmv.js";
+import { resolveFootballMarket, matchPhase, settleBet } from "./settlement.js";
 import { seedRiskProfiles, RISK_PROFILE_DEFS, listRiskProfileViews } from "./riskConfig.js";
 import { SPORT_LABELS } from "./polymarket.js";
 import type { Bet, Market } from "./types.js";
@@ -876,6 +877,39 @@ export function migrateVoidAllOpenPmv(db: Database, now: string): void {
     R.updateBet(db, b.id, { status: "settled_void", result: null, payout: b.stake ?? 0, closing_price: b.entry_price ?? null, settled_at: now, settled_by: "void" });
   }
   R.metaSet(db, PMV_VOID_ALL_MARK, now, now);
+}
+
+// One-time: RE-SETTLE historical Extra-Time / Penalties bets that were VOIDED before the phase-aware
+// resolver existed (e.g. France 0:2 Spain: "Extra Time — No" won but refunded). Three guarantees:
+//   • idempotent — marker-guarded, and it only touches settled_by="void" rows (a re-settled bet is no
+//     longer void, so a second pass can't find it);
+//   • auditable — logs old→new (возврат $X → выигрыш $Y) per bet;
+//   • CONSERVATIVE — only ET/penalties markets the fact-resolver is now CONFIDENT about (won != null);
+//     any other void (canceled / advancement / unknown label) is left exactly as-is.
+const RESETTLE_ET_MARK = "resettle_extra_time_voids_v1";
+const ET_MARKET_RE = /extra[\s-]*time|over[\s-]*time|penalt|shoot[\s-]*out|овертайм|пенальт/i;
+export function migrateResettleExtraTimeVoids(db: Database, now: string): void {
+  if (R.metaGet(db, RESETTLE_ET_MARK)) return;
+  for (const b of R.allBets(db)) {
+    if (b.settled_by !== "void") continue; // the void truth is in settled_by (old rows are status settled_lost)
+    // Re-settle ONLY ET/penalties markets the fact-resolver is now confident about.
+    if (ET_MARKET_RE.test(b.market_label)) {
+      const m = R.getMatch(db, b.match_id);
+      if (m && m.state === "finished" && m.score_home != null && m.score_away != null) {
+        const won = resolveFootballMarket(b.market_label, m.score_home, m.score_away, { home: m.home, away: m.away }, matchPhase(m));
+        if (won != null) {
+          const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, won ? 100 : 0);
+          R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price, settled_at: now, settled_by: null });
+          R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: "финал", type: "settle", text: `ре-сеттл ET/пенальти «${b.market_label}»: возврат $${(b.stake ?? 0).toFixed(2)} → ${won ? "выигрыш" : "проигрыш"} $${patch.payout.toFixed(2)} (P&L ${patch.pnl >= 0 ? "+" : ""}$${patch.pnl.toFixed(2)}) — резолвер стал знать фазу матча`, created_at: now });
+          continue;
+        }
+      }
+    }
+    // Any other void (canceled / advancement / unknown, or an ET one still unresolvable): leave it VOID,
+    // but normalize the STATUS to settled_void so historical rows match the new single-source field.
+    if (b.status !== "settled_void") R.updateBet(db, b.id, { status: "settled_void" });
+  }
+  R.metaSet(db, RESETTLE_ET_MARK, now, now);
 }
 
 // The THIRD tennis strategy: PMV (prop consistency vs the moneyline anchor, deterministic, no LLM v1).

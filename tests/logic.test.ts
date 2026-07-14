@@ -241,6 +241,24 @@ test("void is settled-but-not-a-loss: single-source truth in the status field", 
   const b = R.getBet(db, bid)!;
   assert.equal(b.status, "settled_void", "the field says void, not settled_lost");
   assert.equal(b.result, null); assert.equal(b.settled_by, "void"); assert.equal(b.payout, b.stake, "refunded");
+
+  // RE-SETTLE migration: the voided "Extra Time — No" (0:2 regulation) becomes a win, old→new logged;
+  // a non-ET void (canceled) is left void but normalized to settled_void; idempotent.
+  const { migrateResettleExtraTimeVoids } = await import("../src/lib/seed.js");
+  const cx = R.uid();
+  R.insertBet(db, { id: cx, match_id: mid, strategy_id: "s", risk_profile_id: "medium", market_label: "Team to Advance — A", status: "settled_lost", proposed_price: 40, entry_price: 40, current_price: 40, closing_price: 40, ai_prob: 0.4, stake: 30, rationale: null, entered_minute: "предматч", result: null, payout: 30, settled_by: "void", settled_at: "t", entry_meta: null, code_version: "e", created_at: "t" } as any); // old-style void (status settled_lost)
+  migrateResettleExtraTimeVoids(db, "2026-07-14T22:00:00Z");
+  const et = R.getBet(db, bid)!;
+  assert.equal(et.status, "settled_won", "the ET void re-settled to a win");
+  assert.equal(et.settled_by, null, "now a real resolution, not a void");
+  assert.ok((et.payout ?? 0) > (et.stake ?? 0), "paid out (69¢ → 100¢)");
+  const adv = R.getBet(db, cx)!;
+  assert.equal(adv.status, "settled_void", "advancement void: normalized status, still void");
+  assert.equal(adv.settled_by, "void");
+  // idempotent — second run changes nothing
+  const before = R.getBet(db, bid)!.payout;
+  migrateResettleExtraTimeVoids(db, "2026-07-14T23:00:00Z");
+  assert.equal(R.getBet(db, bid)!.payout, before, "marker-guarded, no double re-settle");
   // Polymarket "O/U 2.5" total (backs Over); team totals stay unsettleable
   assert.equal(resolveFootballMarket("O/U 2.5", 2, 1), true);  // total 3 > 2.5
   assert.equal(resolveFootballMarket("O/U 3.5", 2, 1), false); // total 3 < 3.5
