@@ -30,7 +30,9 @@ export const TENNIS_ARMED = {
   nearBuffer: num(process.env.TENNIS_NEAR_BUFFER, 10),
 };
 
-export type TennisTriggerId = "early_break" | "lost_first_set";
+// NOTE: "lost_first_set" (the old trigger #2) has moved ENTIRELY to the Set-Value strategy
+// (tennisSetValue.ts). Overreaction now arms ONLY the intra-set break (snapback horizon = minutes).
+export type TennisTriggerId = "early_break";
 export interface ArmedTennisTrigger { id: TennisTriggerId; favSide: "first" | "second"; buybackMaxCents: number; window: string; thresholds: "interim" | "calibrated" }
 export interface TennisCharge { favSide: "first" | "second" | null; favPriceCents: number | null; triggers: ArmedTennisTrigger[]; note: string }
 
@@ -50,11 +52,11 @@ export function chargeTennisTriggers(winner: { p1Cents: number | null; p2Cents: 
   const favPriceCents = favSide === "first" ? p1Cents : p2Cents;
   return {
     favSide, favPriceCents,
+    // ONLY the intra-set break (snapback). "Lost set 1" is Set-Value's trigger now (см. развод).
     triggers: [
       { id: "early_break", favSide, buybackMaxCents: TENNIS_ARMED.earlyBreakBuyMax, window: "сет 1 / начало сета 2", thresholds: "interim" },
-      { id: "lost_first_set", favSide, buybackMaxCents: TENNIS_ARMED.lostFirstSetBuyMax, window: "после проигранного сета 1 (bo3)", thresholds: "interim" },
     ],
-    note: `фаворит = ${favSide} @ ${favPriceCents}¢; заряжено 2 триггера (interim)`,
+    note: `фаворит = ${favSide} @ ${favPriceCents}¢; заряжен триггер early_break (interim)`,
   };
 }
 
@@ -70,12 +72,12 @@ export interface TennisBreakSignal { brokenSide: "first" | "second"; setNum: num
 export function tennisReassessShouldCall(charge: TennisCharge, s: TennisBreakSignal): boolean {
   if (!charge.favSide) return false;                 // no favourite armed → no entry possible
   if (s.brokenSide !== charge.favSide) return false; // the UNDERDOG was broken → not our setup
+  // ONLY the intra-set EARLY break (set 1 / start of set 2, no set yet lost). After the favourite
+  // has LOST a set the setup belongs to Set-Value (longer horizon) — Overreaction stays out.
   const earlyWindow = s.setNum <= 1 || (s.setNum === 2 && s.favSetsLost === 0);
-  const lostSet1 = s.favSetsLost >= 1;
-  if (!earlyWindow && !lostSet1) return false;       // outside both armed windows
+  if (!earlyWindow) return false;                    // outside the early-break window (or a set already lost)
   if (s.favPriceCents == null) return true;          // can't verify price → call (fail-open)
-  const cap = lostSet1 ? TENNIS_ARMED.lostFirstSetBuyMax : TENNIS_ARMED.earlyBreakBuyMax;
-  return s.favPriceCents <= cap + TENNIS_ARMED.nearBuffer; // near/below the armed buyback
+  return s.favPriceCents <= TENNIS_ARMED.earlyBreakBuyMax + TENNIS_ARMED.nearBuffer; // near/below the armed buyback
 }
 
 // ── Prompt pair (ready for §6 to seed as the tennis_overreaction strategy) ──
@@ -85,24 +87,23 @@ export const STRAT_TENNIS_OVR_PREMATCH = `# [ОКНО: ПРЕДМАТЧ] ТЕН�
 позиции, а ЗАРЯДИТЬ триггеры выкупа фаворита в live. Основной капитал разворачивается в live.
 
 ## ЧТО ТАКОЕ ТВОЙ EDGE
-Фаворита ЛОМАЮТ на подаче рано (сет 1 / начало сета 2) ИЛИ он проигрывает 1-й сет → winner-рынок
-переоценивает падение → выкупаешь фаворита дёшево → выходишь на возврате. Узкий, редкий edge.
+Фаворита ЛОМАЮТ на подаче рано (сет 1 / начало сета 2) → winner-рынок переоценивает падение →
+выкупаешь фаворита дёшево → выходишь на возврате за минуты (снапбек). Узкий, редкий edge.
+(Проигранный 1-й сет — это уже ДРУГАЯ стратегия, Set-Value, с горизонтом в матч; сюда не входит.)
 
 ## ЗАРЯДКА (минимум, без марковского ядра)
 - Фаворит определяется ЦЕНОЙ Polymarket: сторона с ценой ≤ порога андердога делает другую фаворитом.
   Нет явного фаворита (обе близко к 50¢) → сетапа нет, не заряжай.
 - Формат bo3.
 - Армед-цены — ВРЕМЕННЫЕ КОНСТАНТЫ (thresholds=interim), заменяются калибровкой из разметки брейков.
-- Триггер #1: фаворит теряет подачу в сете 1 / начале сета 2 → выкуп winner фаворита ниже армед-X.
-- Триггер #2: фаворит проиграл сет 1 (bo3) → выкуп ниже Y (паника максимальна).
+- Триггер (единственный): фаворит теряет подачу в сете 1 / начале сета 2 → выкуп winner фаворита ниже армед-X.
 
 ## ВЫХОД (battle_sheet) — строгий JSON
 \`\`\`
 { "strategist": "tennis_overreaction", "phase": "prematch",
   "favourite": "first|second|none", "favourite_price_cents": ,
   "live_triggers_armed": [
-    { "id": "early_break", "buyback_target_cents": , "window": "сет1/нач.сета2", "thresholds": "interim" },
-    { "id": "lost_first_set", "buyback_target_cents": , "window": "после сета1", "thresholds": "interim" } ],
+    { "id": "early_break", "buyback_target_cents": , "window": "сет1/нач.сета2", "thresholds": "interim" } ],
   "notes": "" }
 \`\`\``;
 

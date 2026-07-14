@@ -10,6 +10,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { extractThresholdsHeuristic } from "./thresholds.js";
 import { STRAT_TENNIS_OVR_PREMATCH, STRAT_TENNIS_OVR_LIVE } from "./tennisOverreaction.js";
+import { STRAT_SET_VALUE_PREMATCH, STRAT_SET_VALUE_LIVE } from "./tennisSetValue.js";
 import { seedRiskProfiles, RISK_PROFILE_DEFS, listRiskProfileViews } from "./riskConfig.js";
 import { SPORT_LABELS } from "./polymarket.js";
 import type { Bet, Market } from "./types.js";
@@ -831,6 +832,18 @@ export function migrateTennisStrategy(db: Database): void {
     id: "tennis_overreaction", sport_id: "tennis", name: "Tennis Overreaction", tag: "выкуп брейка",
     color: "#c98bdb", version: 1, model: "Claude Opus 4.8", model_live: "Claude Sonnet 5",
     created_at: new Date().toISOString(), prompt: STRAT_TENNIS_OVR_PREMATCH, prompt_live: STRAT_TENNIS_OVR_LIVE, params: {},
+  });
+}
+
+// The SECOND tennis strategy: Set-Value (buy the favourite after a competitive lost set 1, hold to
+// resolution). Seeded once; the entry/exit machinery is in tennisTrading (tennisSetValueTick).
+export function migrateTennisSetValueStrategy(db: Database): void {
+  if (R.getStrategy(db, "tennis_set_value")) return;
+  R.upsertSport(db, "tennis", "Теннис");
+  R.insertStrategy(db, {
+    id: "tennis_set_value", sport_id: "tennis", name: "Tennis Set-Value", tag: "камбэк после сета",
+    color: "#7fb3d5", version: 1, model: "Claude Opus 4.8", model_live: "Claude Sonnet 5",
+    created_at: new Date().toISOString(), prompt: STRAT_SET_VALUE_PREMATCH, prompt_live: STRAT_SET_VALUE_LIVE, params: {},
   });
 }
 

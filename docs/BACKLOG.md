@@ -107,6 +107,39 @@ appear at kickoff/HT). A **timeout** is a transient network failure and is NOT
 cached (distinct from `not_resolved`). Confirmed-coverage leagues never hard-disable
 on transient errors.
 
+## Tennis Set-Value — the SECOND tennis strategy; the "lost set 1" trigger is DIVORCED from Overreaction (DONE)
+
+Two tennis strategies now trade the same "favourite is over-sold" thesis on the SAME moneyline, so
+they MUST NOT both hold a position on one match (hidden double exposure). The split is by HORIZON:
+
+- **Overreaction** (horizon = minutes, snapback): keeps ONLY the intra-set break. `chargeTennisTriggers`
+  arms one trigger (`early_break`); `tennisReassessShouldCall` fires only in the early window
+  (set 1 / start of set 2, no set yet lost). The old trigger #2 (`lost_first_set`) is GONE from here.
+- **Set-Value** (horizon = the match): buys the favourite AFTER it loses set 1 (bo3) into the 30-45¢
+  band and HOLDS to resolution. Trigger #2 moved here ENTIRELY (tennisSetValue.ts + tennisSetValueTick).
+
+**Cross-strategy one-position rule (hard, code):** before a Set-Value entry, a profile holding ANY
+open tennis buyback (Overreaction OR Set-Value) on the match is NOT free — Set-Value WAITS (no acted
+marker, logs `blocked_cross_strategy` once) and enters once the block clears (e.g. Overreaction closed
+by its K-stop). Overreaction fires earlier (pre-set-loss) so it needs no symmetric guard.
+
+**Favourite ID from the MATCH-START price, never the current one:** after losing set 1 the favourite's
+price drops into 30-45¢, so identifying off the current price would FLIP the favourite to the opponent.
+Set-Value reads the first priced snapshot (startPrices) for favourite ID.
+
+**Deterministic vs LLM (§9.6):** CODE gates format (bo3 only — a Grand Slam men's singles is bo5,
+filtered by `isBestOfFive`), the lost-set-1 state, and the price band (<25¢ = "market knows more",
+never enter; >45¢ = no panic; 30-45¢ = armed). The LLM judges ONLY competitive-set vs blowout +
+retire-risk. Exit (deterministic, tennisExitTick, order retire → thesis_stop → floor → take):
+thesis_stop = broken in set 2 with NO break-back within K=2 receiving games; catastrophic_floor =
+entry−12¢ (phantom-guarded by persistence); take = PARTIAL 50% fixation at 55¢, remainder to settle.
+
+**Interim numbers — do NOT hand-tune from the first bets (epoch discipline):** P(comeback)=0.50 for a
+competitive lost set, band 30-45¢, floor 12¢, take 55¢ are INTERIM constants tagged `armed_epoch:"interim"`.
+**Pending calibration (backlog):** a set_won cut on tennis_break_marks (favourite-lost-set-1 → price
+after the set, comeback win-rate from finals, set-2 price trajectory); report at ≥40 setups replaces
+P(comeback) and the band; bump `TENNIS_SV_EPOCH` to `calibrated` then. Markov core deliberately NOT built.
+
 ## Tennis price layer = the MONEYLINE, resolved by structure — never surname-match (DONE)
 
 **The bug that hid under "взведено, но пусто":** Polymarket lists a tennis match as ONE

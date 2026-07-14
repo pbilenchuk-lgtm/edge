@@ -16,6 +16,7 @@ import type { EngineDeps } from "./engine.js";
 import { settleBet, resolveTennisWinner } from "./settlement.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { chargeTennisTriggers, tennisReassessShouldCall, type TennisCharge } from "./tennisOverreaction.js";
+import { SET_VALUE_STRATEGY, SET_VALUE_ARMED, SET_VALUE_EPOCH, setValueGate } from "./tennisSetValue.js";
 import { detectBreaks, detectTennisEvents, tennisMoneyline } from "./tennisScout.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
@@ -32,6 +33,9 @@ const surnames = (name: string) => norm(name).replace(/[.,]/g, " ").split(/[\s-]
 // Per-match tradeability: winner-book depth ≥ this ($) on BOTH sides at charge time. Env-tunable.
 const TENNIS_MIN_BOOK_USD = (() => { const n = Number(process.env.TENNIS_MIN_BOOK_USD); return Number.isFinite(n) && n > 0 ? n : 2000; })();
 const TENNIS_STRATEGY = "tennis_overreaction";
+// Both tennis strategies share the settle / exit / one-position machinery (both buy the favourite's
+// moneyline). Set-Value adds the "lost set 1" horizon-of-a-match entry with a partial-take exit.
+const TENNIS_STRATEGIES = new Set([TENNIS_STRATEGY, SET_VALUE_STRATEGY]);
 
 /** Latest scout state for a Polymarket-linked match: the final result if it's over. */
 export interface TennisFinal { finished: boolean; canceled: boolean; retired: boolean; advancing: "first" | "second" | null; p1: string; p2: string }
@@ -67,7 +71,7 @@ export function settleTennisBets(db: Database, deps: EngineDeps = {}): number {
   let settled = 0;
   const tennisMatchIds = new Set(R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => m.id)));
   for (const b of R.openBets(db)) {
-    if (b.strategy_id !== TENNIS_STRATEGY || !tennisMatchIds.has(b.match_id)) continue;
+    if (!TENNIS_STRATEGIES.has(b.strategy_id) || !tennisMatchIds.has(b.match_id)) continue;
     const fin = tennisFinalResult(db, b.match_id);
     if (!fin || !fin.finished) continue; // still live → leave open
     const won = resolveTennisWinner(b.market_label, fin.p1, fin.p2, fin.advancing, fin.canceled);
@@ -79,7 +83,7 @@ export function settleTennisBets(db: Database, deps: EngineDeps = {}): number {
       R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price, settled_at: now });
     }
     try { shadowOnExit(db, b.id, 1, shadowCfg, now); } catch { /* observe-only */ }
-    R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: TENNIS_STRATEGY, minute: "финал", type: "settle", text: `${b.market_label}: ${won == null ? "возврат (не сыграл/ретайр-неоднозначность)" : won ? "выигрыш" : "проигрыш"}${fin.retired ? " · ретайр" : ""}`, created_at: now });
+    R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: "финал", type: "settle", text: `${b.market_label}: ${won == null ? "возврат (не сыграл/ретайр-неоднозначность)" : won ? "выигрыш" : "проигрыш"}${fin.retired ? " · ретайр" : ""}`, created_at: now });
     settled++;
   }
   return settled;
@@ -112,8 +116,36 @@ function closeTennisBetEarly(db: Database, betId: string, currentCents: number, 
   const pnl = Math.round((payout - stake) * 100) / 100;
   R.updateBet(db, betId, { status: pnl >= 0 ? "settled_won" : "settled_lost", result: pnl >= 0 ? "won" : "lost", payout, closing_price: currentCents, settled_by: "early", settled_at: now });
   try { shadowOnExit(db, betId, 1, loadShadowConfig(db, deps.env), now); } catch { /* observe-only */ }
-  const tail = `геймы ${extra.gameScore ?? "?"}, приёмных ${extra.recvGames ?? 0} · слиппедж 0¢ (paper) · пороги:${TENNIS_ARMED_EPOCH}`;
-  R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: TENNIS_STRATEGY, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} · ${tail} (${trigger})`, created_at: now });
+  const epoch = fresh.strategy_id === SET_VALUE_STRATEGY ? SET_VALUE_EPOCH : TENNIS_ARMED_EPOCH;
+  const tail = `геймы ${extra.gameScore ?? "?"}, приёмных ${extra.recvGames ?? 0} · слиппедж 0¢ (paper) · пороги:${epoch}`;
+  R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: fresh.strategy_id, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} · ${tail} (${trigger})`, created_at: now });
+  return pnl;
+}
+
+/** Partial fixation: close a FRACTION of an open tennis position (mirrors football's closeBetPortion).
+ *  The closed slice is booked as a settled child (settled_by="partial", rationale carries the %),
+ *  the open bet's stake shrinks by that slice, and the remainder rides to settle. §9.6: pure arithmetic.
+ *  Returns the realized P&L on the slice, or null if the position is gone / already fully closed. */
+function closeTennisBetPortion(db: Database, betId: string, fraction: number, currentCents: number, reason: string, deps: EngineDeps, now: string): number | null {
+  if (fraction >= 1) return closeTennisBetEarly(db, betId, currentCents, "take_price", reason, deps, now);
+  const fresh = R.getBet(db, betId);
+  if (!fresh || fresh.status !== "open") return null;
+  const stake = fresh.stake ?? 0, entry = fresh.entry_price ?? 0;
+  const closed = Math.round(stake * fraction * 100) / 100;
+  if (closed <= 0 || entry <= 0) return closeTennisBetEarly(db, betId, currentCents, "take_price", reason, deps, now);
+  const payout = Math.round(closed * (currentCents / entry) * 100) / 100;
+  const pnl = Math.round((payout - closed) * 100) / 100;
+  R.insertBet(db, {
+    id: R.uid(), match_id: fresh.match_id, strategy_id: fresh.strategy_id, risk_profile_id: fresh.risk_profile_id ?? "medium",
+    market_label: fresh.market_label, status: pnl >= 0 ? "settled_won" : "settled_lost", proposed_price: fresh.proposed_price,
+    entry_price: entry, current_price: currentCents, closing_price: currentCents, ai_prob: fresh.ai_prob, stake: closed,
+    rationale: `частичная фиксация ${Math.round(fraction * 100)}%`, entered_minute: fresh.entered_minute,
+    result: pnl >= 0 ? "won" : "lost", payout, settled_by: "partial", settled_at: now, created_at: now,
+  });
+  R.updateBet(db, betId, { stake: Math.round((stake - closed) * 100) / 100 }); // keep the remainder open to settle
+  try { shadowOnExit(db, betId, fraction, loadShadowConfig(db, deps.env), now); } catch { /* observe-only */ }
+  const epoch = fresh.strategy_id === SET_VALUE_STRATEGY ? SET_VALUE_EPOCH : TENNIS_ARMED_EPOCH;
+  R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: fresh.strategy_id, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · фиксация ${Math.round(fraction * 100)}% · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} · остаток до финала · пороги:${epoch} (take_partial)`, created_at: now });
   return pnl;
 }
 
@@ -134,7 +166,7 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
   let closed = 0;
   const tennisMatchIds = new Set(R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => m.id)));
   for (const b of R.openBets(db)) {
-    if (b.strategy_id !== TENNIS_STRATEGY || !tennisMatchIds.has(b.match_id)) continue;
+    if (!TENNIS_STRATEGIES.has(b.strategy_id) || !tennisMatchIds.has(b.match_id)) continue;
     // A4 #1: a finished/retired match is settleTennisBets' job (advancer wins / void) — never a price exit.
     if (tennisFinalResult(db, b.match_id)?.finished) continue;
     const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(b.match_id) as R.TennisSnapshotRow[];
@@ -160,6 +192,42 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
     const counterBreak = evs.some((e) => e.type === "break" && e.server === oppSide); // favourite broke opponent back
     const gs = curRow ? `${curRow.games_p1}-${curRow.games_p2}` : "?";
     const ext = { gameScore: gs, recvGames };
+
+    // ── SET-VALUE ladder (horizon = the match): retire → thesis_stop → floor → partial take ──
+    // (retire/finish already handled above by the finished-continue.) Defensive exits outrank the
+    // profit fixation; the partial take realizes HALF and holds the rest to resolution.
+    if (b.strategy_id === SET_VALUE_STRATEGY) {
+      // thesis_stop: the favourite was broken IN SET 2 after entry and did NOT break back within K
+      // receiving games — not "any break", a break WITH NO RETURN (the comeback thesis is dead).
+      const set2FavBreaks = evs.filter((e) => e.type === "break" && e.server === favSide && e.setNum === 2);
+      const lastBk = set2FavBreaks[set2FavBreaks.length - 1];
+      if (lastBk) {
+        const bkMs = Date.parse(lastBk.batchAt) || 0;
+        const after = evs.filter((e) => (Date.parse(e.batchAt) || 0) > bkMs);
+        const recvAfter = after.filter((e) => (e.type === "hold" || e.type === "break") && e.server === oppSide).length;
+        const brokeBack = after.some((e) => e.type === "break" && e.server === oppSide); // favourite broke opponent back
+        const K = Number.isFinite(plan?.thesis_stop?.receiver_games) ? Number(plan.thesis_stop.receiver_games) : SET_VALUE_ARMED.thesisStopReceiverGames;
+        if (!brokeBack && recvAfter >= K) {
+          if (closeTennisBetEarly(db, b.id, cur, "thesis_stop", `стоп тезиса: брейк во 2-м сете без возврата за ${recvAfter} приёмных`, deps, now, ext) != null) closed++;
+          continue;
+        }
+      }
+      // catastrophic_floor — real collapse to ≤ floor, phantom-guarded by persistence (cur AND prev ≤ floor).
+      const svFloor = Number.isFinite(plan?.catastrophic_floor?.at_cents) ? Number(plan.catastrophic_floor.at_cents) : null;
+      if (svFloor != null && cur <= svFloor && prev != null && prev <= svFloor) {
+        if (closeTennisBetEarly(db, b.id, cur, "catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${svFloor}¢, подтверждён)`, deps, now, ext) != null) closed++;
+        continue;
+      }
+      // take_price — favourite recovered into the take band → fix HALF once, hold the rest to settle.
+      const svTake = Number.isFinite(plan?.take_price?.at_cents) ? Number(plan.take_price.at_cents) : SET_VALUE_ARMED.takeLowCents;
+      const frac = Number.isFinite(plan?.take_price?.fraction) ? Number(plan.take_price.fraction) : SET_VALUE_ARMED.takeFraction;
+      const alreadyPartial = R.betsForMatch(db, b.match_id, SET_VALUE_STRATEGY).some((x) => x.settled_by === "partial" && (x.risk_profile_id ?? "medium") === (b.risk_profile_id ?? "medium") && x.market_label === b.market_label);
+      if (cur >= svTake && !alreadyPartial) {
+        if (closeTennisBetPortion(db, b.id, frac, cur, `тейк камбэка: фаворит вернулся к ${cur}¢ (цель ≥${svTake}¢)`, deps, now) != null) closed++;
+        continue;
+      }
+      continue; // Set-Value handled — never fall through to the Overreaction ladder
+    }
 
     // #2 thesis_stop — a NEW break of the FAVOURITE's serve after entry.
     if (evs.some((e) => e.type === "break" && e.server === favSide)) {
@@ -495,6 +563,124 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       });
       try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: r.stake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
       R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${entryCents}¢ · $${Math.round(r.stake)} (edge ${(r.edge * 100).toFixed(1)}%, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${entryCents - TENNIS_CATASTROPHIC_FLOOR}¢, пороги:${TENNIS_ARMED_EPOCH})`, created_at: now });
+      opened++;
+    }
+  }
+  return opened;
+}
+
+const SV_ACTED = "tennis_sv_acted:"; // per-match idempotency (the lost-set-1 event is singular)
+const SV_WAIT = "tennis_sv_wait:";   // one-shot "waiting for the cross-strategy block to clear" log guard
+
+/** Both sides' winner price at the START of the match (first priced snapshot) — the CLEAN pre-match
+ *  favourite reference. After the favourite loses set 1 its price drops into 30-45¢, which would
+ *  flip the favourite to the opponent if we identified off the CURRENT price. */
+function startPrices(db: Database, matchId: string): { p1: number | null; p2: number | null } {
+  const r = db.prepare(`SELECT pm_p1_cents,pm_p2_cents FROM tennis_snapshots WHERE pm_match_id=? AND pm_p1_cents IS NOT NULL ORDER BY batch_at ASC LIMIT 1`).get(matchId) as { pm_p1_cents?: number; pm_p2_cents?: number } | undefined;
+  return { p1: r?.pm_p1_cents ?? null, p2: r?.pm_p2_cents ?? null };
+}
+
+/** Decision-time entry_meta for a Set-Value paper bet — a PARTIAL-take, hold-to-settle exit plan. */
+export function tennisSetValueEntryMeta(o: { favPrice: number; edge: number; kelly: number; stake: number; thinnessUsd: number | null; setNum: number }): BetEntryMeta {
+  return {
+    phase: "live", minute: null, scoreHome: null, scoreAway: null,
+    edge: Math.round(o.edge * 1000) / 1000, aiProb: Math.round(SET_VALUE_ARMED.comebackProb * 1000) / 1000, derivedProb: null,
+    marketPrice: o.favPrice, impliedProb: Math.round((o.favPrice / 100) * 1000) / 1000, liveProbAdjusted: null,
+    kellyFraction: Math.round(o.kelly * 1000) / 1000, sizeRequested: Math.round(o.stake * 100) / 100, sizeFilled: null, entrySlipCents: null,
+    calibration: null, branchWeightSum: null, phantomCheck: null, marketThinnessUsd: o.thinnessUsd,
+    winsOnEvent: false, exitPlan: {
+      take_price: { at_cents: SET_VALUE_ARMED.takeLowCents, fraction: SET_VALUE_ARMED.takeFraction, note: "частичная фиксация камбэка, остаток до финала" },
+      thesis_stop: { receiver_games: SET_VALUE_ARMED.thesisStopReceiverGames, note: "брейк во 2-м сете без возврата за K приёмных" },
+      catastrophic_floor: { at_cents: o.favPrice - SET_VALUE_ARMED.floorBelowEntryCents },
+      armed_epoch: SET_VALUE_EPOCH,
+    },
+    models: { analysis: null, strategist: null },
+  };
+}
+
+/**
+ * §6 PAPER entry for SET-VALUE: on a match where the FAVOURITE lost set 1 (bo3) and its moneyline
+ * price sits in the armed band, ask the strategist ONLY the competitive-set / retire-risk question;
+ * if the set was competitive, open a CODE-sized paper bet on the favourite's winner market with the
+ * partial-take/hold-to-settle exit. Cross-strategy one-position rule: a profile already holding ANY
+ * open tennis buyback (Overreaction OR Set-Value) on the match is not free — Set-Value waits for it
+ * to close. Isolated + guarded; never throws into the tick. Returns entries opened.
+ */
+export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): Promise<number> {
+  const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
+  const strat = getStrategy(db, SET_VALUE_STRATEGY);
+  if (!strat) return 0; // strategy not seeded → Set-Value off
+  const now = nowFn(deps)();
+  const codeVer = `${effectiveCodeVersion(db)}·${SET_VALUE_EPOCH}`;
+  const shadowCfg = loadShadowConfig(db, deps.env);
+  let opened = 0;
+
+  const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, m })));
+  for (const { comp, m } of tennisMatches) {
+    if (m.state === "finished") continue;
+    if (R.metaGet(db, SV_ACTED + m.id)) continue; // one Set-Value decision per match
+    const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(m.id) as R.TennisSnapshotRow[];
+    if (snaps.length < 2) continue;
+    const last = snaps[snaps.length - 1];
+    const players = { p1: last.p1 ?? "", p2: last.p2 ?? "" };
+    // Favourite ID from the MATCH-START price (the post-set price is depressed into the band, which
+    // would flip the favourite to the opponent). Book gate reuses the moneyline depth.
+    const charge = chargeTennisMatch(db, m.id, players, startPrices(db, m.id));
+    const favSetsWon = charge.favSide === "first" ? (last.sets_p1 ?? 0) : (last.sets_p2 ?? 0);
+    const favSetsLost = charge.favSide === "first" ? (last.sets_p2 ?? 0) : (last.sets_p1 ?? 0);
+    const favPrice = charge.favSide ? favPriceFromScout(db, m.id, charge.favSide) : null;
+    const gate = setValueGate({ favSide: charge.favSide, tradeable: charge.tradeable, favPriceCents: favPrice, favSetsWon, favSetsLost, setNum: last.set_num, eventType: last.event_type, tournament: last.tournament });
+    if (!gate.armed) continue; // transient (price not in band / set not yet lost) OR terminal — re-checked cheaply each tick; never mark acted until we actually decide
+
+    const favName = charge.favSide === "first" ? players.p1 : players.p2;
+    const ml = tennisMoneyline(db, m.id, players);
+    if (!ml) { R.metaSet(db, SV_ACTED + m.id, "no_moneyline", now); R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `манилайн не найден — вход пропущен (no_moneyline)`, created_at: now }); continue; }
+
+    // Cross-strategy one-position rule (tennis): a profile holding ANY open tennis buyback on this
+    // match is not free. If ALL profiles are blocked, WAIT (don't mark acted) — Set-Value enters
+    // once the block clears (e.g. the Overreaction position closed by its K-stop).
+    const profiles = (() => { const ps = R.listRiskProfiles(db).map((p) => p.id); return ps.length ? ps : RISK_PROFILE_DEFS.map((d) => d.id); })();
+    const heldProfiles = new Set(R.betsForMatch(db, m.id).filter((b) => TENNIS_STRATEGIES.has(b.strategy_id) && b.status === "open").map((b) => b.risk_profile_id));
+    const freeProfiles = profiles.filter((p) => !heldProfiles.has(p));
+    if (!freeProfiles.length) {
+      if (!R.metaGet(db, SV_WAIT + m.id)) { R.metaSet(db, SV_WAIT + m.id, "waiting", now); R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `Set-Value ждёт: по матчу открыта выкупная позиция (Overreaction/Set-Value) — вход после её закрытия (blocked_cross_strategy)`, created_at: now }); }
+      continue; // do NOT mark acted — retry after the block clears
+    }
+
+    // LLM judges ONLY competitive-set vs blowout (+ retire-risk) — ONCE, shared across profiles.
+    const dec = await strategistDecide({
+      strategyName: strat.name, strategyPrompt: strat.prompt_live ?? strat.prompt,
+      match: { home: players.p1, away: players.p2, sport: "tennis", state: "live", minute: null, scoreHome: null, scoreAway: null },
+      assessment: { confidence: "средняя", short: "", verdict: "" },
+      markets: [{ label: favName, priceCents: favPrice ?? 0, aiProb: SET_VALUE_ARMED.comebackProb, liquidity: ml.liquidity || null }],
+      openPositions: [],
+      context: `ФАВОРИТ ПРОИГРАЛ 1-Й СЕТ (bo3). Счёт по сетам фаворита: выиграно ${favSetsWon}, проиграно ${favSetsLost}; сейчас сет ${last.set_num}, геймы ${last.games_p1}-${last.games_p2}. Цена фаворита ${favPrice}¢ (полоса входа 30-45¢). Реши: конкурентный сет (покупаем камбэк) или разгром / ретайр-риск (воздерживаемся).`,
+    }, strat.model_live ?? strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
+    R.metaSet(db, SV_ACTED + m.id, "decided", now); // one shot per match
+
+    if (!dec.ok) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `стратег недоступен (${dec.error || "нет ответа"}) — входа нет`, created_at: now }); continue; }
+    const pick = dec.picks.find((p) => norm(p.label) === norm(favName) || surnames(favName).some((t) => norm(p.label).includes(t)));
+    if (!pick) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `не конкурентный сет / ретайр-риск: стратег воздержался — ${dec.note?.slice(0, 120) ?? ""}`, created_at: now }); continue; }
+
+    const entryCents = favPrice ?? (charge.favSide === "first" ? ml.p1Cents : ml.p2Cents);
+    const ourProb = SET_VALUE_ARMED.comebackProb; // interim constant for a competitive lost set (calibrated later)
+    const implied = entryCents / 100;
+    for (const profile of freeProfiles) {
+      const cfg = getProfileConfig(db, profile);
+      const held = R.betsForMatch(db, m.id, SET_VALUE_STRATEGY).filter((b) => b.status === "open" && b.risk_profile_id === profile).reduce((s, b) => s + (b.stake ?? 0), 0);
+      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: true });
+      if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `[${profile}] конкурентный сет подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
+      const meta = tennisSetValueEntryMeta({ favPrice: entryCents, edge: r.edge, kelly: r.kellyFraction, stake: r.stake, thinnessUsd: ml.liquidity || null, setNum: last.set_num ?? 2 });
+      const betId = R.uid();
+      R.insertBet(db, {
+        id: betId, match_id: m.id, strategy_id: SET_VALUE_STRATEGY, risk_profile_id: profile, market_label: favName,
+        status: "open", proposed_price: entryCents, entry_price: entryCents, current_price: entryCents, closing_price: null,
+        ai_prob: ourProb, stake: r.stake, rationale: `set-value (теннис): фаворит «${favName}» проиграл 1-й сет, манилайн ${entryCents}¢, P(камбэк)≈${Math.round(ourProb * 100)}%. ${pick.reason || dec.note || ""}`,
+        entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null,
+        entry_meta: serializeEntryMeta(meta), code_version: codeVer, created_at: now,
+      });
+      try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: SET_VALUE_STRATEGY, profileId: profile, size: r.stake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "enter", text: `[${profile}] SET-VALUE «${favName}» @ ${entryCents}¢ · $${Math.round(r.stake)} (edge ${(r.edge * 100).toFixed(1)}%, тейк 50% @ ${SET_VALUE_ARMED.takeLowCents}¢ / стоп брейк-невозврат K${SET_VALUE_ARMED.thesisStopReceiverGames} / floor ${entryCents - SET_VALUE_ARMED.floorBelowEntryCents}¢, пороги:${SET_VALUE_EPOCH})`, created_at: now });
       opened++;
     }
   }

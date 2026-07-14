@@ -50,7 +50,7 @@ test("chargeTennisMatch: identifies the favourite + gates tradeability on winner
   const c = chargeTennisMatch(db, mid, { p1: "A. Vukic", p2: "L. Broady" });
   assert.equal(c.favSide, "first");
   assert.equal(c.tradeable, true);
-  assert.equal(c.triggers.length, 2);
+  assert.equal(c.triggers.length, 1); // only early_break — lost_first_set moved to Set-Value
   // thin book on one side → not tradeable
   const mid2 = seedTennisMatch(db, { p1: "X Player", p2: "Y Player", p1price: 80, p2price: 20, p1liq: 5000, p2liq: 100 });
   assert.equal(chargeTennisMatch(db, mid2, { p1: "X Player", p2: "Y Player" }).tradeable, false);
