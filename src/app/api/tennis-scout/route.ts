@@ -36,6 +36,13 @@ export async function GET(req: Request) {
       const pmv = await import("@/lib/tennisPmv");
       return NextResponse.json(pmv.buildPmvBrierReport(getDb()));
     }
+    // ?report=pmv_bets → audit export: every PMV entry with full provenance (+ anti-Draw flags). csv|json.
+    if (url.searchParams.get("report") === "pmv_bets") {
+      const pmv = await import("@/lib/tennisPmv");
+      const rep = pmv.buildPmvBetsReport(getDb());
+      if (format === "csv") return new NextResponse(pmv.pmvBetsCsv(rep), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="pmv-bets.csv"` } });
+      return NextResponse.json(rep);
+    }
     // ?report=calibration → Part B recovery-vs-no-recovery split (calibrates K / floor / take buffer).
     if (url.searchParams.get("report") === "calibration") {
       if (format === "csv") return new NextResponse(scout.tennisCalibrationCsv(getDb()), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="tennis-calibration.csv"` } });

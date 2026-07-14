@@ -18,7 +18,7 @@ import type { EngineDeps } from "./engine.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit } from "./shadow.js";
 import { tennisFinalResult } from "./tennisTrading.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
-import { serializeEntryMeta, type BetEntryMeta } from "./betMeta.js";
+import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { sizePrematch } from "./strategist.js";
 import { getProfileConfig, RISK_PROFILE_DEFS } from "./riskConfig.js";
 import { tennisMoneyline, propFamily, type PropFamily } from "./tennisScout.js";
@@ -245,6 +245,49 @@ export function pmvEntryMeta(o: { theoCents: number; midCents: number; deviation
     },
     models: { analysis: null, strategist: null },
   };
+}
+
+// ── Entries export (audit): every PMV bet with its full decision provenance + the anti-Draw flags ──
+export interface PmvBetRow {
+  createdAt: string; match: string; comp: string; profile: string; prop: string; family: PropFamily | null;
+  side: string; line: number | null; midCents: number | null; theoCents: number | null; deviationCents: number | null;
+  delta: number | null; bookUsd: number | null; edgePct: number | null; stake: number | null;
+  status: string; result: string | null; payout: number | null; voided: boolean; epoch: string | null; rationale: string;
+}
+export interface PmvBetsReport { generatedNote: string; entries: PmvBetRow[]; provenanceFlags: { at: string; match: string; text: string }[]; skips: { at: string; match: string; text: string }[] }
+
+export function buildPmvBetsReport(db: Database): PmvBetsReport {
+  const comps = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
+  const matchMeta = (mid: string) => { const m = R.getMatch(db, mid); const c = m ? comps.get(m.competition_id) : null; return { name: m ? `${m.home} — ${m.away}` : mid, comp: c?.name ?? m?.competition_id ?? "?" }; };
+  const entries: PmvBetRow[] = [];
+  for (const b of R.allBets(db)) {
+    if (b.strategy_id !== PMV_STRATEGY) continue;
+    const mm = matchMeta(b.match_id);
+    const meta = parseEntryMeta(b.entry_meta) as any;
+    const plan = meta?.exitPlan ?? {};
+    const parsed = parseProp(b.market_label);
+    entries.push({
+      createdAt: b.created_at, match: mm.name, comp: mm.comp, profile: b.risk_profile_id ?? "medium",
+      prop: b.market_label, family: parsed?.family ?? null, side: parsed?.side ?? "?", line: parsed?.line ?? null,
+      midCents: b.entry_price ?? null, theoCents: b.ai_prob != null ? Math.round(b.ai_prob * 1000) / 10 : null,
+      deviationCents: plan.deviation_cents ?? null, delta: plan.markov_delta ?? null, bookUsd: meta?.marketThinnessUsd ?? null,
+      edgePct: meta?.edge != null ? Math.round(meta.edge * 1000) / 10 : null, stake: b.stake ?? null,
+      status: b.status, result: b.result ?? null, payout: b.payout ?? null, voided: b.settled_by === "void",
+      epoch: (b.code_version ?? "").split("·").pop() ?? null, rationale: b.rationale ?? "",
+    });
+  }
+  entries.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)); // newest first
+  const log = R.recentTradeLog(db, 2000).filter((l) => l.strategy_id === PMV_STRATEGY);
+  const provenanceFlags = log.filter((l) => /provenance_review/.test(l.text)).map((l) => ({ at: l.created_at, match: matchMeta(l.match_id).name, text: l.text }));
+  const skips = log.filter((l) => l.type === "skip" && !/provenance_review/.test(l.text)).map((l) => ({ at: l.created_at, match: matchMeta(l.match_id).name, text: l.text })).slice(0, 200);
+  return { generatedNote: `${entries.length} PMV-ставок · ${provenanceFlags.length} provenance-флагов · ${skips.length} прочих скипов`, entries, provenanceFlags, skips };
+}
+
+export function pmvBetsCsv(r: PmvBetsReport): string {
+  const esc = (v: unknown) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const head = ["created_at", "match", "comp", "profile", "prop", "family", "side", "line", "mid_cents", "theo_cents", "deviation_cents", "delta", "book_usd", "edge_pct", "stake", "status", "result", "payout", "voided", "epoch", "rationale"];
+  const rows = r.entries.map((e) => [e.createdAt, e.match, e.comp, e.profile, e.prop, e.family, e.side, e.line, e.midCents, e.theoCents, e.deviationCents, e.delta, e.bookUsd, e.edgePct, e.stake, e.status, e.result, e.payout, e.voided, e.epoch, e.rationale].map(esc).join(","));
+  return [head.join(","), ...rows].join("\n");
 }
 
 // ── Core success criterion (written before data): Brier of the Markov prob vs the implied mid ──
