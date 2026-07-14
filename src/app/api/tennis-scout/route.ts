@@ -31,6 +31,11 @@ export async function GET(req: Request) {
       if (format === "json") return NextResponse.json(rep);
       return new NextResponse(scout.tennisPropLiquidityMarkdown(rep), { status: 200, headers: { "Content-Type": "text/markdown; charset=utf-8" } });
     }
+    // ?report=pmv_freq → P2 diagnosis: actual 3-set + hold rates from our snapshots vs the model.
+    if (url.searchParams.get("report") === "pmv_freq") {
+      const pmv = await import("@/lib/tennisPmv");
+      return NextResponse.json(pmv.buildTennisFrequencyReport(getDb()));
+    }
     // ?report=pmv_brier → PMV core success criterion: Brier of the Markov prob vs the implied mid.
     if (url.searchParams.get("report") === "pmv_brier") {
       const pmv = await import("@/lib/tennisPmv");

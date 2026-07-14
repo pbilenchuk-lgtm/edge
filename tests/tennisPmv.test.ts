@@ -149,6 +149,30 @@ test("core Brier criterion: markov ≤ implied → core_beats_market; <40 settle
   assert.equal(ready.verdict, "core_beats_market");
 });
 
+test("P2 frequency report: actual 3-set + hold rates from snapshots vs the model", async () => {
+  const { buildTennisFrequencyReport } = await import("../src/lib/tennisPmv.js");
+  const db = openDb(":memory:");
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "pm-atp", sport_id: "tennis", name: "ATP", budget: 0, external_league: null, created_at: "t" });
+  const finish = (i: number, sets1: number, sets2: number, holdBreaks: { g1: number; g2: number; server: "first" | "second" }[]) => {
+    const mid = R.uid();
+    R.insertMatch(db, { id: mid, competition_id: "pm-atp", home: `A${i}`, away: `B${i}`, state: "finished", lineup_out: true, kickoff_at: "t", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: mid } as any);
+    let n = 0;
+    const put = (g1: number, g2: number, server: "first" | "second" | null, s1: number, s2: number) => R.insertTennisSnapshot(db, { event_key: "E" + i, provider: "apitennis", batch_at: `2026-07-14T10:${String(n++).padStart(2, "0")}:00Z`, p1: `A${i}`, p2: `B${i}`, tournament: "ATP", event_type: "ATP Singles", live: 1, status: "live", sets_p1: s1, sets_p2: s2, set_num: 1, games_p1: g1, games_p2: g2, game_points: null, server, pm_match_id: mid, pm_mid_cents: 50, pm_p1_cents: 50, pm_p2_cents: 50, raw: "{}" } as any);
+    put(0, 0, holdBreaks[0]?.server ?? "first", 0, 0);
+    for (const hb of holdBreaks) put(hb.g1, hb.g2, hb.server, 0, 0);
+    R.insertTennisSnapshot(db, { event_key: "E" + i, provider: "apitennis", batch_at: `2026-07-14T11:00:00Z`, p1: `A${i}`, p2: `B${i}`, tournament: "ATP", event_type: "ATP Singles", live: 0, status: "Finished", sets_p1: sets1, sets_p2: sets2, set_num: 3, games_p1: 6, games_p2: 4, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: 50, pm_p1_cents: 50, pm_p2_cents: 50, raw: "{}" } as any);
+  };
+  finish(1, 2, 0, [{ g1: 1, g2: 0, server: "first" }]);  // 2-set match, 1 hold (first held)
+  finish(2, 2, 1, [{ g1: 0, g2: 1, server: "first" }]);  // 3-set match, 1 break (first broken)
+  const rep = buildTennisFrequencyReport(db);
+  const atp = rep.tours.find((t) => t.tour === "atp")!;
+  assert.equal(atp.decidedMatches, 2);
+  assert.equal(atp.threeSetRate, 0.5, "1 of 2 decided went to 3 sets");
+  assert.ok(atp.modelThreeSetRate > 0 && atp.modelThreeSetRate < 1, "model rate present for comparison");
+  assert.ok(atp.actualHoldRate != null, "hold rate computed");
+});
+
 test("finalSetsFromRaw: parses API-Tennis scores into per-set games", () => {
   const raw = JSON.stringify({ scores: [{ score_set: 2, score_first: 6, score_second: 3 }, { score_set: 1, score_first: 4, score_second: 6 }] });
   const fs = finalSetsFromRaw(raw)!;

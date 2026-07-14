@@ -21,8 +21,8 @@ import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { sizePrematch } from "./strategist.js";
 import { getProfileConfig, RISK_PROFILE_DEFS } from "./riskConfig.js";
-import { tennisMoneyline, propFamily, type PropFamily } from "./tennisScout.js";
-import { tennisTheo, baseHoldFor, type TennisTheo } from "./tennisMarkov.js";
+import { tennisMoneyline, propFamily, detectTennisEvents, type PropFamily } from "./tennisScout.js";
+import { tennisTheo, baseHoldFor, matchDistribution, BASE_HOLD, type TennisTheo } from "./tennisMarkov.js";
 
 export const STRAT_PMV_DESC = `# ТЕННИС — PMV (консистентность пропов, v1, БЕЗ LLM)
 
@@ -250,6 +250,44 @@ export function pmvEntryMeta(o: { theoCents: number; midCents: number; deviation
     },
     models: { analysis: null, strategist: null },
   };
+}
+
+// ── P2 diagnosis: ACTUAL frequencies from our own snapshots vs the model's assumptions ──────────
+// The first-day lean (theo says 3-setters / long matches more likely than the market) has two possible
+// causes. This closes the diagnosis empirically: our finished-match snapshots give the REAL 3-set rate
+// and the REAL service-hold rate per tour; the model's are the i.i.d. base_hold chain at δ=0. If the
+// actual 3-set rate is far below the model's ~50%, the i.i.d.-sets assumption over-prices Total Sets
+// Over (fix = set-dependence momentum); if the actual hold rate is below base_hold, base_hold is too
+// high (→ fewer, longer... calibrate the constant). Pure read.
+export interface TennisFreqTour { tour: "atp" | "wta"; decidedMatches: number; threeSetRate: number | null; modelThreeSetRate: number; holdGames: number; actualHoldRate: number | null; modelHoldRate: number }
+export interface TennisFrequencyReport { generatedNote: string; tours: TennisFreqTour[] }
+export function buildTennisFrequencyReport(db: Database): TennisFrequencyReport {
+  const acc: Record<"atp" | "wta", { two: number; three: number; holds: number; breaks: number }> = { atp: { two: 0, three: 0, holds: 0, breaks: 0 }, wta: { two: 0, three: 0, holds: 0, breaks: 0 } };
+  for (const c of R.listCompetitions(db)) {
+    if (c.sport_id !== "tennis") continue;
+    const tour = pmvTour(c); if (!tour) continue;
+    for (const m of R.listMatches(db, c.id)) {
+      if (m.state !== "finished") continue;
+      const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(m.id) as R.TennisSnapshotRow[];
+      if (snaps.length < 2) continue;
+      const last = snaps[snaps.length - 1];
+      const totalSets = (last.sets_p1 ?? 0) + (last.sets_p2 ?? 0);
+      if (totalSets === 2) acc[tour].two++; else if (totalSets === 3) acc[tour].three++; // decided bo3 only
+      for (const e of detectTennisEvents(snaps)) { if (e.type === "hold") acc[tour].holds++; else if (e.type === "break") acc[tour].breaks++; }
+    }
+  }
+  const tours: TennisFreqTour[] = (["atp", "wta"] as const).map((tour) => {
+    const a = acc[tour]; const decided = a.two + a.three; const games = a.holds + a.breaks;
+    const base = tour === "wta" ? BASE_HOLD.wta : BASE_HOLD.atp_hard;
+    const md = matchDistribution(base, base, 0); // model at δ=0 (even match)
+    return {
+      tour, decidedMatches: decided, threeSetRate: decided ? Math.round((a.three / decided) * 1000) / 1000 : null,
+      modelThreeSetRate: Math.round((1 - md.pTwoSets) * 1000) / 1000,
+      holdGames: games, actualHoldRate: games ? Math.round((a.holds / games) * 1000) / 1000 : null, modelHoldRate: base,
+    };
+  });
+  const note = tours.map((t) => `${t.tour}: 3-сетовиков факт ${t.threeSetRate ?? "—"} vs модель ${t.modelThreeSetRate} (${t.decidedMatches} матчей); hold факт ${t.actualHoldRate ?? "—"} vs модель ${t.modelHoldRate} (${t.holdGames} геймов)`).join(" · ");
+  return { generatedNote: note, tours };
 }
 
 // ── Entries export (audit): every PMV bet with its full decision provenance + the anti-Draw flags ──
