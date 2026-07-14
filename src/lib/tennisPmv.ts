@@ -103,6 +103,17 @@ export function theoForProp(p: ParsedProp, theo: TennisTheo): number | null {
 export interface PmvCandidate { label: string; family: PropFamily; midCents: number; theoCents: number; deviation: number; bookUsd: number; action: "enter" | "provenance_review" | "skip"; reason: string }
 export interface PmvMatchScan { matchId: string; players: { p1: string; p2: string }; moneylineCents: number | null; delta: number | null; tradeable: boolean; candidates: PmvCandidate[] }
 
+// PMV scope: ATP/WTA SINGLES only (the Gate-0.1 build verdict was measured on pm-atp+pm-wta; base_hold
+// constants exist only for ATP/WTA; ITF/Challenger have different hold rates + thinner books). Returns
+// the tour for an in-scope comp, or null to skip. Doubles are excluded (a different chain entirely).
+export function pmvTour(c: { id: string; name: string; external_league?: string | null }): "atp" | "wta" | null {
+  const hay = `${c.id} ${c.name} ${c.external_league ?? ""}`.toLowerCase();
+  if (/doubles|itf|challenger/.test(hay)) return null;
+  if (/\bwta\b/.test(hay)) return "wta";
+  if (/\batp\b/.test(hay)) return "atp";
+  return null;
+}
+
 const surfaceOf = (tournament: string | null): "hard" | "clay" | "grass" | null => {
   const t = (tournament ?? "").toLowerCase();
   if (/roland garros|french open|clay|monte|madrid|rome|hamburg|kitzb|umag|bastad|gstaad/.test(t)) return "clay";
@@ -283,7 +294,9 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
 
   for (const c of R.listCompetitions(db)) {
     if (c.sport_id !== "tennis") continue;
-    const tour: "atp" | "wta" = /wta/i.test(c.id) || /wta/i.test(c.name) ? "wta" : "atp";
+    const scoped = pmvTour(c);
+    if (!scoped) continue; // PMV is ATP/WTA SINGLES only (spec + Gate 0.1 scope) — skip ITF / Challenger / doubles
+    const tour = scoped;
     for (const m of R.listMatches(db, c.id)) {
       if (m.state === "finished" || m.state === "live") continue; // PMV is PRE-MATCH only (v1)
       if (R.metaGet(db, PMV_ACTED + m.id)) continue;              // scan once per match

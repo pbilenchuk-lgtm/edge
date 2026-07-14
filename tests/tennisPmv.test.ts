@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { parseProp, theoForProp, resolveTennisProp, scanMatchProps, finalSetsFromRaw, type FinalSets } from "../src/lib/tennisPmv.js";
+import { parseProp, theoForProp, resolveTennisProp, scanMatchProps, finalSetsFromRaw, pmvTour, type FinalSets } from "../src/lib/tennisPmv.js";
 import { tennisTheo, BASE_HOLD } from "../src/lib/tennisMarkov.js";
 import { migrateTennisPmvStrategy } from "../src/lib/seed.js";
 
@@ -16,6 +16,14 @@ test("parseProp: classifies each prop family + line/side/set", () => {
   const h = parseProp("Set Handicap: Kawa (-1.5) vs Waltert (+1.5)")!;
   assert.equal(h.family, "set_handicap"); assert.equal(h.handicapOnFirst, true);
   assert.equal(parseProp("Iasi Open: Kawa vs Waltert"), null, "moneyline → null");
+});
+
+test("pmvTour: PMV is ATP/WTA singles only — ITF / Challenger / doubles are out of scope", () => {
+  assert.equal(pmvTour({ id: "pm-atp", name: "ATP" }), "atp");
+  assert.equal(pmvTour({ id: "pm-wta", name: "WTA" }), "wta");
+  assert.equal(pmvTour({ id: "pm-itf", name: "ITF" }), null, "ITF out of scope");
+  assert.equal(pmvTour({ id: "pm-wta-doubles", name: "WTA Doubles" }), null, "doubles out");
+  assert.equal(pmvTour({ id: "pm-challenger", name: "Challenger" }), null, "challenger out");
 });
 
 // ── Consistency scan: gates (deviation ≥7 enter, ≥18 anti-Draw, price band, book gate) ──

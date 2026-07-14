@@ -11,7 +11,7 @@ import * as R from "./repo.js";
 import { extractThresholdsHeuristic } from "./thresholds.js";
 import { STRAT_TENNIS_OVR_PREMATCH, STRAT_TENNIS_OVR_LIVE } from "./tennisOverreaction.js";
 import { STRAT_SET_VALUE_PREMATCH, STRAT_SET_VALUE_LIVE } from "./tennisSetValue.js";
-import { STRAT_PMV_DESC } from "./tennisPmv.js";
+import { STRAT_PMV_DESC, pmvTour } from "./tennisPmv.js";
 import { seedRiskProfiles, RISK_PROFILE_DEFS, listRiskProfileViews } from "./riskConfig.js";
 import { SPORT_LABELS } from "./polymarket.js";
 import type { Bet, Market } from "./types.js";
@@ -846,6 +846,21 @@ export function migrateTennisSetValueStrategy(db: Database): void {
     color: "#7fb3d5", version: 1, model: "Claude Opus 4.8", model_live: "Claude Sonnet 5",
     created_at: new Date().toISOString(), prompt: STRAT_SET_VALUE_PREMATCH, prompt_live: STRAT_SET_VALUE_LIVE, params: {},
   });
+}
+
+// One-time: VOID any open PMV bets on OUT-OF-SCOPE comps (ITF / Challenger / doubles) — an early
+// build entered ITF matches before PMV was restricted to ATP/WTA singles, and those were priced with
+// the wrong base_hold. Void = refund, excluded from the core Brier criterion so it stays honest.
+const PMV_SCOPE_VOID_MARK = "pmv_void_out_of_scope_v1";
+export function migrateVoidOutOfScopePmv(db: Database, now: string): void {
+  if (R.metaGet(db, PMV_SCOPE_VOID_MARK)) return;
+  const compById = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
+  for (const b of R.openBets(db)) {
+    if (b.strategy_id !== "tennis_pmv") continue;
+    const m = R.getMatch(db, b.match_id); const c = m ? compById.get(m.competition_id) : null;
+    if (c && pmvTour(c) == null) R.updateBet(db, b.id, { status: "settled_lost", result: null, payout: b.stake ?? 0, closing_price: b.entry_price ?? null, settled_at: now, settled_by: "void" });
+  }
+  R.metaSet(db, PMV_SCOPE_VOID_MARK, now, now);
 }
 
 // The THIRD tennis strategy: PMV (prop consistency vs the moneyline anchor, deterministic, no LLM v1).
