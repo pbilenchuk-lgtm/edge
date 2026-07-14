@@ -8,10 +8,18 @@ test("core: δ=0 (equal players) → everything is symmetric 50/50", () => {
   const set = setDistribution(0.75, 0.75, true, 0);
   assert.ok(Math.abs(set.pA - 0.5) < 1e-9, "equal holds → set is a coin flip");
   assert.ok(Math.abs(matchWinProbA(0.75, 0) - 0.5) < 1e-9, "match too");
-  const t = tennisTheo(0.5, 0.75);
+  const t = tennisTheo(0.5, 0.75, 0); // i.i.d. base chain (momentum off)
   assert.ok(Math.abs(t.set1WinnerA - 0.5) < 1e-6);
-  assert.ok(Math.abs(t.setHandicapA15 - 0.25) < 1e-6, "P(2-0) = 0.25 when each set is 50/50");
-  assert.ok(Math.abs(t.totalSetsOver25 - 0.5) < 1e-6, "P(3 sets) = 0.5");
+  assert.ok(Math.abs(t.setHandicapA15 - 0.25) < 1e-6, "P(2-0) = 0.25 when each set is 50/50 and i.i.d.");
+  assert.ok(Math.abs(t.totalSetsOver25 - 0.5) < 1e-6, "P(3 sets) = 0.5 i.i.d.");
+});
+
+test("P3 momentum: set-dependence LOWERS the 3-set rate (winner consolidates)", () => {
+  const iid = tennisTheo(0.5, 0.75, 0), mom = tennisTheo(0.5, 0.75, 0.05);
+  assert.ok(mom.totalSetsOver25 < iid.totalSetsOver25, `momentum ${mom.totalSetsOver25.toFixed(3)} < iid ${iid.totalSetsOver25.toFixed(3)}`);
+  assert.ok(mom.setHandicapA15 > iid.setHandicapA15, "→ more straight-sets (2-0) outcomes");
+  // round-trip still holds with momentum: δ solved for the same momentum reproduces the moneyline.
+  assert.ok(Math.abs(tennisTheo(0.7, 0.80, 0.05).dist.pMatchA - 0.7) < 0.02);
 });
 
 test("core: distributions sum to 1", () => {

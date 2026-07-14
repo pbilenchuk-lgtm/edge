@@ -42,7 +42,10 @@ const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 const num = (v: string | undefined, d: number) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
 
 export const PMV_STRATEGY = "tennis_pmv";
-export const PMV_EPOCH = process.env.TENNIS_PMV_EPOCH || "interim";
+// Epoch tag stamped on bets for Brier segmentation. "interim-m1" = the recalibrated model (set-
+// dependence momentum + base_hold under review); the first (broken, i.i.d., ITF-polluted) batch was
+// plain "interim" and is flag-only/voided, so re-enabled bets never mix with it.
+export const PMV_EPOCH = process.env.TENNIS_PMV_EPOCH || "interim-m1";
 
 // Entry thresholds (interim — props are noisier than football, so the entry bar is higher).
 const PMV_DEV_ENTER = num(process.env.TENNIS_PMV_DEV_ENTER, 7);        // deviation ≥ this (¢) → enter the convergence side

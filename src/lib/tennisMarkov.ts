@@ -105,10 +105,11 @@ export interface MatchDistribution {
  * per-set game totals (a set A wins has a different game-total shape than one B wins), so the
  * match-total correctly reflects that straight-sets blowouts carry fewer games.
  */
-export function matchDistribution(pHoldA: number, pHoldB: number, delta: number): MatchDistribution {
+export function matchDistribution(pHoldA: number, pHoldB: number, delta: number, momentum = 0): MatchDistribution {
   const set = setDistribution(pHoldA, pHoldB, true, delta);
   const pSetA = set.pA;
-  // Conditional per-set game-total distributions (| winner).
+  // Conditional per-set game-total distributions (| winner) — from the level (no-momentum) set, a
+  // v1 approximation (momentum mainly shifts WHO wins a set, less the games-within-set shape).
   const totA: number[] = [], totB: number[] = [], totMarg: number[] = [];
   for (const [key, p] of set.scoreProb) {
     const [a, b] = key.split("-").map(Number); const t = a + b;
@@ -117,9 +118,20 @@ export function matchDistribution(pHoldA: number, pHoldB: number, delta: number)
   }
   const normed = (arr: number[], mass: number): number[] => { const o: number[] = []; for (let i = 0; i < arr.length; i++) o[i] = mass > 0 ? (arr[i] ?? 0) / mass : 0; return o; };
   const gA = normed(totA, pSetA), gB = normed(totB, 1 - pSetA); // game-total | A/B won a set
-  // Set-score outcomes (bo3).
-  const a20 = pSetA * pSetA, b20 = (1 - pSetA) * (1 - pSetA);
-  const a21 = 2 * pSetA * pSetA * (1 - pSetA), b21 = 2 * (1 - pSetA) * (1 - pSetA) * pSetA;
+  // SET-DEPENDENCE MOMENTUM (P3): the winner of a set gets +momentum to hold strength (loser −momentum)
+  // in the NEXT set — i.i.d. sets over-priced 3-setters (the Total Sets Over lean). ε=0 → i.i.d.
+  const clamp = (x: number) => Math.min(0.999, Math.max(0.001, x));
+  const pSetAafter = (winnerWasA: boolean): number => {
+    if (momentum === 0) return pSetA;
+    const dA = winnerWasA ? momentum : -momentum;
+    return setDistribution(clamp(pHoldA + dA), clamp(pHoldB - dA), true, delta).pA;
+  };
+  const s2A_ifA = pSetAafter(true), s2A_ifB = pSetAafter(false);   // P(A wins set2 | A/B won set1)
+  const s3A_ifA = s2A_ifA, s3A_ifB = s2A_ifB;                       // set3 momentum from set2 winner (same shift)
+  // Set-score outcomes (bo3) with momentum-conditioned set 2 / set 3.
+  const a20 = pSetA * s2A_ifA, b20 = (1 - pSetA) * (1 - s2A_ifB);
+  const a21 = pSetA * (1 - s2A_ifA) * s3A_ifB + (1 - pSetA) * s2A_ifB * s3A_ifA;
+  const b21 = pSetA * (1 - s2A_ifA) * (1 - s3A_ifB) + (1 - pSetA) * s2A_ifB * (1 - s3A_ifA);
   const pMatchA = a20 + a21;
   // Match total games: weight each set-sequence by its prob, convolve its per-set conditional totals.
   const acc: number[] = [];
@@ -136,11 +148,16 @@ export function matchDistribution(pHoldA: number, pHoldB: number, delta: number)
   };
 }
 
+// Set-dependence momentum ε (interim): the winner of a set gets +ε hold strength in the next set.
+// Reduces 3-set rate (winner consolidates) — the fix for the Total Sets Over lean. Calibrated later
+// from our snapshots' P(win set2 | won set1); tagged interim. ε=0 recovers the i.i.d.-sets v1.
+export const TENNIS_MOMENTUM = num(process.env.TENNIS_MOMENTUM, 0.04);
+
 /** P(A wins the bo3 match) for a given δ around base (monotone increasing in δ). */
-export function matchWinProbA(base: number, delta: number): number {
+export function matchWinProbA(base: number, delta: number, momentum = TENNIS_MOMENTUM): number {
   const pA = Math.min(0.999, Math.max(0.001, base + delta / 2));
   const pB = Math.min(0.999, Math.max(0.001, base - delta / 2));
-  return matchDistribution(pA, pB, delta).pMatchA;
+  return matchDistribution(pA, pB, delta, momentum).pMatchA;
 }
 
 /**
@@ -148,13 +165,13 @@ export function matchWinProbA(base: number, delta: number): number {
  * search (matchWinProbA is monotone in δ). This is the whole anchor: no strength estimate of ours, the
  * market's moneyline dictates δ. Returns δ clamped to the range that keeps both holds in (0,1).
  */
-export function deltaFromMoneyline(pMoneylineA: number, base: number): number {
+export function deltaFromMoneyline(pMoneylineA: number, base: number, momentum = TENNIS_MOMENTUM): number {
   const target = Math.min(0.999, Math.max(0.001, pMoneylineA));
   const maxD = 2 * Math.min(base, 1 - base) * 0.999; // keep pA,pB within (0,1)
   let lo = -maxD, hi = maxD;
-  if (matchWinProbA(base, hi) <= target) return hi;   // market more lopsided than the model can reach
-  if (matchWinProbA(base, lo) >= target) return lo;
-  for (let i = 0; i < 60; i++) { const mid = (lo + hi) / 2; if (matchWinProbA(base, mid) < target) lo = mid; else hi = mid; }
+  if (matchWinProbA(base, hi, momentum) <= target) return hi;   // market more lopsided than the model can reach
+  if (matchWinProbA(base, lo, momentum) >= target) return lo;
+  for (let i = 0; i < 60; i++) { const mid = (lo + hi) / 2; if (matchWinProbA(base, mid, momentum) < target) lo = mid; else hi = mid; }
   return (lo + hi) / 2;
 }
 
@@ -171,12 +188,12 @@ export interface TennisTheo {
   dist: MatchDistribution;
 }
 
-/** Build every listed prop's theoretical probability from the moneyline anchor + base_hold. */
-export function tennisTheo(pMoneylineA: number, base: number): TennisTheo {
-  const delta = deltaFromMoneyline(pMoneylineA, base);
+/** Build every listed prop's theoretical probability from the moneyline anchor + base_hold + momentum. */
+export function tennisTheo(pMoneylineA: number, base: number, momentum = TENNIS_MOMENTUM): TennisTheo {
+  const delta = deltaFromMoneyline(pMoneylineA, base, momentum);
   const pHoldA = Math.min(0.999, Math.max(0.001, base + delta / 2));
   const pHoldB = Math.min(0.999, Math.max(0.001, base - delta / 2));
-  const dist = matchDistribution(pHoldA, pHoldB, delta);
+  const dist = matchDistribution(pHoldA, pHoldB, delta, momentum);
   const gamesOver = (dist2: number[]) => (line: number) => tailProb(dist2, Math.ceil(line + 0.5));
   return {
     delta, pHoldA, pHoldB,
