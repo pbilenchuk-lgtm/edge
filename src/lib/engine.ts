@@ -21,6 +21,7 @@ import { computeMetrics, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig } from "./polymarket.js";
 import { liquidationCents } from "./execution.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
+import { recordComebackLatency } from "./overreactionLatency.js";
 import { isIso, finishStamp } from "./time.js";
 import type { SportsProvider } from "./sports.js";
 
@@ -298,6 +299,10 @@ export function settleMatch(
     affected.add(b.strategy_id);
   }
   for (const sid of affected) recomputeMetrics(db, sid, deps);
+  // Compute-at-settle: persist this match's Overreaction latency cases while snapshots are
+  // still hot (rolling measurement). Observe-only + fully guarded — a failure here must
+  // NEVER break settlement. Idempotent (a per-match marker), so repeated settle calls no-op.
+  try { recordComebackLatency(db, match, deps); } catch (e) { console.warn(`[comeback-latency] ${match.id}: ${e instanceof Error ? e.message : String(e)}`); }
   return { settled, skipped, affectedStrategies: [...affected] };
 }
 /** Append a short reason to a bet rationale (engine-local; mirrors lifecycle's). */

@@ -1012,6 +1012,40 @@ export function upsertProviderCoverage(db: Database, r: ProviderCoverageRow): vo
     ON CONFLICT(provider,league) DO UPDATE SET consec_fail=excluded.consec_fail, muted_until=excluded.muted_until, last_probe_at=excluded.last_probe_at, updated_at=excluded.updated_at`)
     .run(r.provider, r.league, r.consec_fail, r.muted_until, r.last_probe_at, r.updated_at);
 }
+// ── comeback_latency_metrics — persisted Overreaction latency cases (computed at settle) ──
+export interface ComebackLatencyRow {
+  id: string; match_id: string; competition_id: string; case_type: string;
+  market_label: string; token: string | null;
+  event_type: string; event_text: string | null; t_event: string; event_minute: number | null;
+  panic_amplitude_cents: number | null; price_floor_cents: number | null; t_floor_sec: number | null;
+  entry_price_cents: number | null; t_entry_sec: number | null; missed_cents: number | null; lag_floor_to_entry_sec: number | null;
+  recovery_1: number | null; recovery_2: number | null; recovery_3: number | null; recovery_5: number | null;
+  floor_thinness_usd: number | null; paper_floor: number | null;
+  price_trigger_cents: number | null; floor_below_trigger_cents: number | null;
+  window_quotes: number; confidence_flags: string | null; code_version: string | null; created_at: string;
+}
+export function insertComebackLatencyMetric(db: Database, r: ComebackLatencyRow): void {
+  db.prepare(
+    `INSERT INTO comeback_latency_metrics(
+       id,match_id,competition_id,case_type,market_label,token,event_type,event_text,t_event,event_minute,
+       panic_amplitude_cents,price_floor_cents,t_floor_sec,entry_price_cents,t_entry_sec,missed_cents,lag_floor_to_entry_sec,
+       recovery_1,recovery_2,recovery_3,recovery_5,floor_thinness_usd,paper_floor,price_trigger_cents,floor_below_trigger_cents,
+       window_quotes,confidence_flags,code_version,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?)`,
+  ).run(
+    r.id, r.match_id, r.competition_id, r.case_type, r.market_label, r.token, r.event_type, r.event_text, r.t_event, r.event_minute,
+    r.panic_amplitude_cents, r.price_floor_cents, r.t_floor_sec, r.entry_price_cents, r.t_entry_sec, r.missed_cents, r.lag_floor_to_entry_sec,
+    r.recovery_1, r.recovery_2, r.recovery_3, r.recovery_5, r.floor_thinness_usd, r.paper_floor, r.price_trigger_cents, r.floor_below_trigger_cents,
+    r.window_quotes, r.confidence_flags, r.code_version, r.created_at,
+  );
+}
+export function listComebackLatencyMetrics(db: Database): ComebackLatencyRow[] {
+  return db.prepare(`SELECT * FROM comeback_latency_metrics ORDER BY created_at`).all() as ComebackLatencyRow[];
+}
+export function comebackLatencyCountForMatch(db: Database, matchId: string): number {
+  return (db.prepare(`SELECT COUNT(*) n FROM comeback_latency_metrics WHERE match_id=?`).get(matchId) as { n: number }).n;
+}
+
 export function getProviderRef(db: Database, matchId: string, provider: string): { provider_ref: string | null; resolved_at: string } | null {
   const r = db.prepare(`SELECT provider_ref,resolved_at FROM provider_match_map WHERE match_id=? AND provider=?`).get(matchId, provider);
   return r ?? null;

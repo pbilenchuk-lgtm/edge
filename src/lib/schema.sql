@@ -464,3 +464,44 @@ CREATE TABLE IF NOT EXISTS provider_coverage (
   updated_at   TEXT NOT NULL,
   PRIMARY KEY (provider, league)
 );
+
+-- comeback_latency_metrics — Overreaction latency "недобранное дно паники", computed
+-- AT SETTLE (while snapshots are hot) and stored PERMANENTLY, so snapshot retention no
+-- longer affects the measurement. One row per comeback CASE. Read-only/observe-only:
+-- the compute runs after settle and never blocks money-path (failure is caught + logged).
+--   case_type: 'entry'            — an Overreaction armed-trigger buyback that filled
+--              'trigger_no_entry' — a match with an armed buyback target + a panic event but no entry
+--              'event_only'       — a panic event on an overreaction-active match, no armed target
+CREATE TABLE IF NOT EXISTS comeback_latency_metrics (
+  id                       TEXT PRIMARY KEY,
+  match_id                 TEXT NOT NULL,
+  competition_id           TEXT NOT NULL,
+  case_type                TEXT NOT NULL,
+  market_label             TEXT NOT NULL,
+  token                    TEXT,
+  event_type               TEXT NOT NULL,
+  event_text               TEXT,
+  t_event                  TEXT NOT NULL,   -- ISO wall-clock of the trigger event (detection)
+  event_minute             INTEGER,
+  panic_amplitude_cents    REAL,            -- pre-event bid − floor (panic depth)
+  price_floor_cents        REAL,            -- min REAL bid in the window
+  t_floor_sec              INTEGER,         -- floor time relative to T_event
+  entry_price_cents        REAL,            -- entry cases only
+  t_entry_sec              INTEGER,         -- entry cases only
+  missed_cents             REAL,            -- entry − floor (headline); entry cases only
+  lag_floor_to_entry_sec   INTEGER,         -- entry cases only
+  recovery_1               REAL,
+  recovery_2               REAL,
+  recovery_3               REAL,
+  recovery_5               REAL,
+  floor_thinness_usd       REAL,            -- per-bet liquidity proxy (NOT floor depth)
+  paper_floor              INTEGER,         -- 1 = thinness < half stake (soft floor); 0/null otherwise
+  price_trigger_cents      REAL,            -- armed buyback target (trigger cases)
+  floor_below_trigger_cents REAL,           -- trigger − floor when floor < trigger (invisible setup, measured)
+  window_quotes            INTEGER NOT NULL DEFAULT 0,
+  confidence_flags         TEXT,            -- comma-joined: low_confidence / snapshot_gap / phantom_era …
+  code_version             TEXT,
+  created_at               TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_clm_match ON comeback_latency_metrics(match_id);
+CREATE INDEX IF NOT EXISTS idx_clm_case ON comeback_latency_metrics(case_type);
