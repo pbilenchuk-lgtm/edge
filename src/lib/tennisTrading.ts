@@ -361,17 +361,20 @@ const ACTED = "tennis_acted:"; // per (match, break) idempotency marker
 // only numbers that swap in from the §4 distribution are the ENTRY armed prices, not this. Env-tunable.
 const TENNIS_TAKE_BUFFER = (() => { const n = Number(process.env.TENNIS_TAKE_BUFFER_CENTS); return Number.isFinite(n) && n >= 0 ? n : 3; })();
 // A1 game-count stop (the strategy's MAIN stop): exit after the favourite has played this many
-// RECEIVING games since entry without a break-back. §4: overreaction lives ~7.6min and recovery
-// shows in a 3-5min window ≈ a few receiving games — beyond that we'd be holding a directional bet,
-// not trading the overreaction. INTERIM; calibrated from the §4/B recovery split. Env-tunable.
-const TENNIS_GAME_COUNT_STOP = (() => { const n = Number(process.env.TENNIS_GAME_COUNT_STOP); return Number.isFinite(n) && n > 0 ? Math.round(n) : 3; })();
+// RECEIVING games since entry without a break-back. CALIBRATED from 105 §4/B marks: recovery is
+// FAST (within-window p75 = 1 min), so the edge lives ≈ 2 receiving games — beyond that we'd be
+// holding a directional bet, not trading the overreaction. Was interim 3. Env-tunable.
+const TENNIS_GAME_COUNT_STOP = (() => { const n = Number(process.env.TENNIS_GAME_COUNT_STOP); return Number.isFinite(n) && n > 0 ? Math.round(n) : 2; })();
 // A2 catastrophic floor (¢ below entry): a BACKSTOP, not a working stop. Deliberately WIDE so it
 // never catches game jitter (±5-8¢ on a deuce), only a collapse (injury/cascade) before the second
-// break. INTERIM; calibrated from the §4/B no-recovery trajectory. Env-tunable.
+// break. HELD at 15 under the calibrated epoch: the §4 marks measure pre-break→floor (the panic
+// amplitude), NOT further-collapse-below-ENTRY (we enter near the floor already), so they don't
+// cleanly set this backstop — 15¢ of further collapse stays a sound structural cut. Env-tunable.
 const TENNIS_CATASTROPHIC_FLOOR = (() => { const n = Number(process.env.TENNIS_CATASTROPHIC_FLOOR_CENTS); return Number.isFinite(n) && n > 0 ? n : 15; })();
-// Armed-threshold epoch: "interim" until the §4/B calibration swaps the numbers; bump to
-// "calibrated" alongside the real values so exits are segmentable by which era's thresholds fired.
-const TENNIS_ARMED_EPOCH = process.env.TENNIS_ARMED_EPOCH || "interim";
+// Armed-threshold epoch. Now "calibrated": the strategy has been validated against ≥100 real
+// break marks (105) — 64% of favourite-breaks recover to the take level, recovery p75 = 1 min.
+// Exits carry this so bets stay segmentable by which era's thresholds fired. Env-tunable.
+const TENNIS_ARMED_EPOCH = process.env.TENNIS_ARMED_EPOCH || "calibrated";
 
 /** The favourite's winner price just BEFORE a break (the recovery target reference). */
 function prePriceBefore(db: Database, matchId: string, favSide: "first" | "second", breakBatch: string): number | null {

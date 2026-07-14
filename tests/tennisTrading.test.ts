@@ -4,7 +4,7 @@ import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 import { resolveTennisWinner } from "../src/lib/settlement.js";
 import { serializeEntryMeta } from "../src/lib/betMeta.js";
-import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick, tennisTradingTick } from "../src/lib/tennisTrading.js";
+import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick, tennisTradingTick, tennisEntryMeta } from "../src/lib/tennisTrading.js";
 import { migrateTennisStrategy } from "../src/lib/seed.js";
 import { buildTennisCalibrationReport } from "../src/lib/tennisScout.js";
 import { buildTennisFunnel } from "../src/lib/tennisTrading.js";
@@ -124,6 +124,16 @@ function snap(db: ReturnType<typeof openDb>, mid: string, o: { at: string; g1: n
 function buybackBet(db: ReturnType<typeof openDb>, mid: string, id: string, plan: any) {
   R.insertBet(db, { id, match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: plan }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
 }
+
+test("tennis calibration: the entry plan carries the CALIBRATED defaults (K=2, epoch=calibrated)", () => {
+  // From 105 §4/B marks: recovery p75 = 1 min → K=2; strategy validated → epoch=calibrated.
+  const meta = tennisEntryMeta({ favPrice: 45, prePrice: 62, edge: 0.1, kelly: 0.2, stake: 100, thinnessUsd: 5000, setNum: 1 });
+  const plan = meta.exitPlan as any;
+  assert.equal(plan.game_count_stop.receiver_games, 2, "calibrated game-count stop");
+  assert.equal(plan.armed_epoch, "calibrated");
+  assert.equal(plan.take_price.at_cents, 59, "pre-break 62 − 3¢ buffer (kept)");
+  assert.equal(plan.catastrophic_floor.at_cents, 30, "entry 45 − 15¢ floor (held structural)");
+});
 
 test("tennisExitTick A1: game_count_stop fires after K receiving games with NO break-back", () => {
   const db = openDb(":memory:");

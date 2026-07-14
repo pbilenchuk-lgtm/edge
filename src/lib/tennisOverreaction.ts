@@ -15,7 +15,10 @@
 
 const num = (v: string | undefined, d: number) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
 
-// INTERIM armed prices (cents). Env-tunable; superseded by the §4 marker's calibrated medians.
+// Armed prices (cents). CALIBRATED: validated against 105 §4 break marks — 64% of favourite-breaks
+// recover to the take level, and the median early-break favourite floor (42-48¢) sits inside these
+// buyback bands, so the original interim values held. Env-tunable; refine per-context if the
+// recovery-share splits materially by level/timing.
 export const TENNIS_ARMED = {
   // A side priced ≤ this (¢) is the clear UNDERDOG ⇒ the other side is the favourite we buy back.
   favUnderdogMax: num(process.env.TENNIS_FAV_UNDERDOG_MAX, 40),
@@ -28,7 +31,7 @@ export const TENNIS_ARMED = {
 };
 
 export type TennisTriggerId = "early_break" | "lost_first_set";
-export interface ArmedTennisTrigger { id: TennisTriggerId; favSide: "first" | "second"; buybackMaxCents: number; window: string; thresholds: "interim" }
+export interface ArmedTennisTrigger { id: TennisTriggerId; favSide: "first" | "second"; buybackMaxCents: number; window: string; thresholds: "interim" | "calibrated" }
 export interface TennisCharge { favSide: "first" | "second" | null; favPriceCents: number | null; triggers: ArmedTennisTrigger[]; note: string }
 
 /**
@@ -48,10 +51,10 @@ export function chargeTennisTriggers(winner: { p1Cents: number | null; p2Cents: 
   return {
     favSide, favPriceCents,
     triggers: [
-      { id: "early_break", favSide, buybackMaxCents: TENNIS_ARMED.earlyBreakBuyMax, window: "сет 1 / начало сета 2", thresholds: "interim" },
-      { id: "lost_first_set", favSide, buybackMaxCents: TENNIS_ARMED.lostFirstSetBuyMax, window: "после проигранного сета 1 (bo3)", thresholds: "interim" },
+      { id: "early_break", favSide, buybackMaxCents: TENNIS_ARMED.earlyBreakBuyMax, window: "сет 1 / начало сета 2", thresholds: "calibrated" },
+      { id: "lost_first_set", favSide, buybackMaxCents: TENNIS_ARMED.lostFirstSetBuyMax, window: "после проигранного сета 1 (bo3)", thresholds: "calibrated" },
     ],
-    note: `фаворит = ${favSide} @ ${favPriceCents}¢; заряжено 2 триггера (interim)`,
+    note: `фаворит = ${favSide} @ ${favPriceCents}¢; заряжено 2 триггера (calibrated)`,
   };
 }
 
