@@ -151,6 +151,24 @@ test("correlationKey: LOW-total bets share one cluster (Under-symmetry — Örgr
   assert.notEqual(correlationKey("Both Teams to Score — Yes", home, away), "total:under");
 });
 
+test("correlationKey: Draw-No ≡ Extra-Time-No share a cluster (knockout equivalence — France–Spain double bet)", () => {
+  const home = "France", away = "Spain";
+  // In a knockout "no draw at 90'" ⟺ "no extra time" — the SAME outcome. Both must cluster together so
+  // buying both isn't an uncapped double-size position (the pre-match_value «якорь+спутник» that was empty).
+  const drawNo = correlationKey("Draw — No", home, away);
+  const etNo = correlationKey("Will the Match Go to Extra Time? — No", home, away);
+  assert.equal(drawNo, "ko:decided");
+  assert.equal(etNo, "ko:decided");
+  assert.equal(drawNo, etNo, "Draw-No and ET-No are one correlation cluster");
+  assert.equal(correlationKey("Will the Match Go to Penalties? — No", home, away), "ko:decided", "penalties-No: conservative co-cap");
+  // The opposite (level/tie) trajectory is its OWN cluster — Yes sides don't co-lose with No sides.
+  assert.equal(correlationKey("Draw — Yes", home, away), "ko:level");
+  assert.equal(correlationKey("Will the Match Go to Extra Time? — Yes", home, away), "ko:level");
+  assert.notEqual(correlationKey("Draw — No", home, away), correlationKey("Draw — Yes", home, away));
+  // Draw No Bet is NOT the draw market — must not fold in.
+  assert.notEqual(correlationKey("France Draw No Bet", home, away), "ko:decided");
+});
+
 test("sizePrematch: correlated cluster is capped like a single position", () => {
   // medium max_position_pct = 5% of 1000 = $50. A cluster already holding $48
   // leaves only $2 of correlated room even though match/comp room is ample.

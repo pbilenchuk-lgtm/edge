@@ -90,6 +90,17 @@ export function impliedProbs(markets: MarketQuote[]): Map<string, ImpliedInfo> {
  */
 export function correlationKey(label: string, home: string, away: string): string | null {
   const n = norm(label);
+  // EXPLICIT equivalence/implication table for special knockout result-trajectory markets — checked
+  // FIRST, and never inferred from generic keywords (explicit beats clever — the mapping lesson). In a
+  // knockout the result trajectory drives Draw / Extra-Time / Penalties off the SAME 90'/ET outcome:
+  //   • "no draw at 90'" ⟺ "no extra time" (ET happens iff a draw at 90') — EQUIVALENT, not just nested;
+  //     "Draw — No" + "Extra Time — No" is one bet at double size (France–Spain bought it twice, the 2nd
+  //     leg 6¢ dearer). Penalties-No is IMPLIED by the same "decided" trajectory (conservative co-cap).
+  //   • the "Yes" sides mirror it (a level/tie trajectory). A market with no clear Yes/No side → not clustered.
+  // Extend this table as new special markets are met; do NOT auto-derive nesting from labels.
+  const koSide = /[—:]\s*(yes|no)\s*$/.exec(n)?.[1] ?? null;
+  const isKoResult = (/\bdraw\b/.test(n) && !/no bet|dnb/.test(n)) || /extra[\s-]*time|over[\s-]*time|go to extra/.test(n) || /\bpenalt|shoot[\s-]*out\b/.test(n);
+  if (isKoResult && koSide) return koSide === "no" ? "ko:decided" : "ko:level";
   const h = norm(home), a = norm(away);
   const hasH = h.length > 1 && n.includes(h);
   const hasA = a.length > 1 && n.includes(a);
