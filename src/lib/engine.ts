@@ -16,7 +16,7 @@ import * as R from "./repo.js";
 import type { Bet, Match, MatchState } from "./types.js";
 import type { SportsMatchStatus } from "./sports.js";
 import { reassessNarrative, effectiveEnv } from "./llm.js";
-import { settleBet, resolveFootballMarket } from "./settlement.js";
+import { settleBet, resolveFootballMarket, matchPhase } from "./settlement.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig } from "./polymarket.js";
 import { liquidationCents } from "./execution.js";
@@ -333,7 +333,7 @@ export function settleStaleOpenBets(db: Database, deps: EngineDeps = {}): number
 function resolveOutcome(bet: Bet, match: Match, overrides: Record<string, boolean>): boolean | null {
   if (bet.market_label in overrides) return overrides[bet.market_label];
   if (match.score_home == null || match.score_away == null) return null;
-  return resolveFootballMarket(bet.market_label, match.score_home, match.score_away, { home: match.home, away: match.away });
+  return resolveFootballMarket(bet.market_label, match.score_home, match.score_away, { home: match.home, away: match.away }, matchPhase(match));
 }
 
 // ------------------------------------------------------------

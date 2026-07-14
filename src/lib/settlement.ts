@@ -9,7 +9,19 @@
 // On settlement we also snapshot closing_price on the bet for CLV (§2.10).
 // ============================================================
 
-import type { Bet } from "./types.js";
+import type { Bet, Match } from "./types.js";
+
+// Did the match go to EXTRA TIME? A knockout does iff it was level after 90'. Signals, in order:
+//   • a LEVEL final score ⇒ the tie was unbroken through ET → penalties → definitely ET (true);
+//   • an ET/penalties note in end_note/duration ⇒ true;
+//   • a known final MINUTE ⇒ ET was played iff it ran past regulation (≥100'); ≤99' = regulation (false);
+//   • nothing known ⇒ null (leave the ET market external/void, as before — never guess).
+export function matchPhase(match: Match): { wentToExtraTime: boolean | null } {
+  if (match.score_home != null && match.score_away != null && match.score_home === match.score_away) return { wentToExtraTime: true };
+  if (/extra[\s-]*time|over[\s-]*time|penalt|shoot[\s-]*out|доп\.?\s*время|овертайм|пенальт/i.test(`${match.end_note ?? ""} ${match.duration ?? ""}`)) return { wentToExtraTime: true };
+  if (match.minute != null) return { wentToExtraTime: match.minute >= 100 };
+  return { wentToExtraTime: null };
+}
 
 /** Total return ($) of a bet: stake plus profit if won, else 0. */
 export function payout(entryPriceCents: number, stake: number, won: boolean): number {
@@ -86,6 +98,7 @@ export function resolveFootballMarket(
   scoreHome: number,
   scoreAway: number,
   teams?: { home: string; away: string },
+  phase?: { wentToExtraTime: boolean | null },
 ): boolean | null {
   const total = scoreHome + scoreAway;
   const l = label.toLowerCase();
@@ -96,9 +109,20 @@ export function resolveFootballMarket(
   const sideSuffix = l.match(/[—:]\s*(yes|no)\s*$/);
   if (sideSuffix) {
     const base = label.slice(0, sideSuffix.index).replace(/[\s—:]+$/, "");
-    const r = resolveFootballMarket(base, scoreHome, scoreAway, teams);
+    const r = resolveFootballMarket(base, scoreHome, scoreAway, teams, phase); // forward phase to the base
     return r == null ? null : sideSuffix[1] === "no" ? !r : r;
   }
+
+  // "Will the match go to EXTRA TIME / OVERTIME?" — a knockout goes to ET iff it was level after 90.
+  // Not derivable from the score alone (a match level at 90 can be decided in ET → non-level final),
+  // so it needs the match PHASE (regulation vs ET, from the final minute / a level final / an ET note).
+  // Resolvable when the caller supplies it; else external (null) as before. Advancement stays external.
+  if (/\bextra[\s-]*time\b|\bover[\s-]*time\b|go to extra|дополнительное время|овертайм/.test(l)) {
+    return phase?.wentToExtraTime ?? null;
+  }
+  // "Will the match go to PENALTIES / shootout?" — a knockout ends on penalties iff it's still level
+  // after extra time, i.e. the FINAL score is level. Derivable from the score alone.
+  if (/\bpenalt|\bshoot[\s-]*out\b|пенальт|серии пенальти/.test(l)) return scoreHome === scoreAway;
 
   // Totals — "Over/Under X", or Polymarket's "O/U X" (backs Over). A team total
   // ("Colombia Over 2.5") names a side → settle against THAT team's goals, not

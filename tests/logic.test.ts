@@ -9,7 +9,7 @@ import { edgePct, impliedProb, decimalOdds } from "../src/lib/edge.js";
 import {
   extractThresholdsHeuristic, validateParams, sizeBet, confidenceRank,
 } from "../src/lib/thresholds.js";
-import { payout, settleBet, resolveFootballMarket } from "../src/lib/settlement.js";
+import { payout, settleBet, resolveFootballMarket, matchPhase } from "../src/lib/settlement.js";
 import {
   brierScore, clvValue, calibration, computeMetrics, verdict, MIN_SAMPLES,
 } from "../src/lib/metrics.js";
@@ -199,7 +199,24 @@ test("settlement: football market resolution from score 2:1", () => {
   assert.equal(resolveFootballMarket("Both Teams to Score — No", 2, 0), true);  // away blanked → BTTS-No wins
   assert.equal(resolveFootballMarket("Draw — No", 2, 1), true);                 // not a draw → Draw-No wins
   assert.equal(resolveFootballMarket("Draw — No", 1, 1), false);                // a draw → Draw-No loses
-  assert.equal(resolveFootballMarket("Team to Advance — Португалия", 2, 1), null); // external
+  assert.equal(resolveFootballMarket("Team to Advance — Португалия", 2, 1), null); // advancement stays external
+  // Extra time: derivable from the match PHASE (regulation vs ET), not the score alone. France 0:2 in
+  // regulation → the tie market's "No" WINS (was voided before the fix).
+  assert.equal(resolveFootballMarket("Will the Match Go to Extra Time? — No", 0, 2, undefined, { wentToExtraTime: false }), true);
+  assert.equal(resolveFootballMarket("Will the Match Go to Extra Time? — Yes", 0, 2, undefined, { wentToExtraTime: false }), false);
+  assert.equal(resolveFootballMarket("Will the Match Go to Extra Time? — No", 1, 1, undefined, { wentToExtraTime: true }), false); // ET happened → No loses
+  assert.equal(resolveFootballMarket("Will the Match Go to Extra Time? — No", 0, 2, undefined, { wentToExtraTime: null }), null);  // phase unknown → external, as before
+  assert.equal(resolveFootballMarket("Will the Match Go to Extra Time? — No", 0, 2), null);                                        // no phase supplied → external
+  // Penalties: derivable from the score alone (a knockout ends on pens iff it's still level).
+  assert.equal(resolveFootballMarket("Will the Match Go to Penalties? — No", 0, 2), true);  // decided → no pens → No wins
+  assert.equal(resolveFootballMarket("Will the Match Go to Penalties? — Yes", 1, 1), true); // level → pens → Yes wins
+  // matchPhase: the ET signal from the match record.
+  const mp = (o: any) => matchPhase(o).wentToExtraTime;
+  assert.equal(mp({ score_home: 0, score_away: 2, minute: 90, end_note: null, duration: null }), false, "0:2 at 90' → regulation");
+  assert.equal(mp({ score_home: 1, score_away: 1, minute: 90, end_note: null, duration: null }), true, "level final → went to ET/pens");
+  assert.equal(mp({ score_home: 2, score_away: 1, minute: 118, end_note: null, duration: null }), true, "decided at 118' → ET");
+  assert.equal(mp({ score_home: 2, score_away: 1, end_note: "After Extra Time", minute: null, duration: null }), true, "ET note");
+  assert.equal(mp({ score_home: 2, score_away: 1, minute: null, end_note: null, duration: null }), null, "non-level, no minute/note → unknown");
   // Polymarket "O/U 2.5" total (backs Over); team totals stay unsettleable
   assert.equal(resolveFootballMarket("O/U 2.5", 2, 1), true);  // total 3 > 2.5
   assert.equal(resolveFootballMarket("O/U 3.5", 2, 1), false); // total 3 < 3.5

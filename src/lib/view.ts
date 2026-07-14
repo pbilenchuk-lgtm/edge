@@ -10,7 +10,7 @@ import { providerEnabled, effectiveEnv } from "./llm.js";
 import { jobActive } from "./analysis.js";
 import { warsawLabel, warsawClock, isIso } from "./time.js";
 import { SPORT_LABELS, isNoiseMarket } from "./polymarket.js";
-import { resolveFootballMarket } from "./settlement.js";
+import { resolveFootballMarket, matchPhase } from "./settlement.js";
 import { maxLiveMinutes, liveDelivering } from "./lifecycle.js";
 import { listRiskProfileViews, type RiskProfileView } from "./riskConfig.js";
 import { loadShadowConfig, shadowPoolState, shadowAnalytics, buildReplayEntries, shadowProject, type ShadowConfig, type ShadowPoolState, type ShadowAnalytics, type ProjectionSummary } from "./shadow.js";
@@ -570,7 +570,7 @@ function computeQualityExtras(matchById: Map<string, Match>, bets: Bet[], base: 
           actualSum += pnl;
           const early = b.settled_by === "early" || b.settled_by === "partial";
           if (early) {
-            const won = resolveFootballMarket(b.market_label, m.score_home, m.score_away, { home: m.home, away: m.away });
+            const won = resolveFootballMarket(b.market_label, m.score_home, m.score_away, { home: m.home, away: m.away }, matchPhase(m));
             if (won != null) { heldSum += (won ? (entry > 0 ? stake / (entry / 100) : 0) : 0) - stake; managed++; }
             else heldSum += pnl; // can't derive the held outcome → treat as neutral
           } else heldSum += pnl; // resolution / void: it WAS held to the end
