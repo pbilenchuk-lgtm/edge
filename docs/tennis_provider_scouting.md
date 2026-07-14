@@ -5,6 +5,32 @@ is the decision table below + the one blocking input needed before any code.
 
 ---
 
+## DECISION (2026-07-14)
+
+**Trading scope narrowed to ATP + WTA SINGLES** (user; ITF + doubles dropped via
+`TENNIS_SERIES=atp,wta`). That **dissolves the coverage-mismatch crux** — ATP/WTA is
+top-tour, which *every* candidate covers — so the deciding axis collapses to the hard
+requirement: **a live server flag** (no server flag ⇒ a break is indistinguishable from a
+hold). New probe evidence:
+
+- **ESPN tennis — REJECTED.** Confirmed it exposes **no server field anywhere**: scoreboard
+  competitors carry only per-set `linescores` + `order`; the tennis `summary` endpoint is
+  empty. It can mirror the set score but cannot detect a break. Free, but fails the bar.
+- **API-Tennis — CHOSEN (primary, paper phase).** Only free/cheap option that meets the bar:
+  documented `get_livescore` + **`event_serve`** (server flag) + ATP/WTA coverage. Free trial
+  confirms lag + rate limits before any spend — respects "no paid contract before the table".
+- **Sportmonks Tennis — paid backup.** Separate subscription (confirmed `/v3/tennis` → 401),
+  likely has a serving indicator; reuses our snapshot layer + coverage cache. Evaluate only
+  if API-Tennis trial limits prove too tight for live-cadence polling. No reason to pay first.
+- **Polymarket price-move — detection accelerator** on top of the primary (poll score on a
+  ≥N¢ move). **SportRadar — deferred** to Stage 2-3.
+
+**Blocking input:** an **API-Tennis free-trial key** (`API_TENNIS_KEY`). With it, build the
+tennis snapshot collector + break detector and fill the lag numbers to confirm API-Tennis
+before it's permanent.
+
+---
+
 ## TL;DR — the crux is COVERAGE LEVEL, not lag
 
 The scouting question the spec frames as "which provider has the lowest break-detection

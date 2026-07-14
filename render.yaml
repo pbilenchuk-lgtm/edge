@@ -66,6 +66,11 @@ services:
       # BOTH models, or analysis fails on that arm's half of the slate.
       - key: ANALYSIS_DUEL
         value: "on"
+      # TENNIS scope: trade ATP + WTA SINGLES only (user). Drops ITF + doubles from both
+      # import and the category prune (seriesAllowFor → pruneRemovedCategories). Slugs are
+      # atp/wta (singles) vs atp-doubles/wta-doubles/itf. Unset = show every liquid series.
+      - key: TENNIS_SERIES
+        value: "atp,wta"
       # Live Claude analysis needs a key. sync:false means Render PROMPTS you for
       # the value in the dashboard on first deploy and KEEPS it across redeploys.
       # Recommended over entering the key in the UI: the env var is read before

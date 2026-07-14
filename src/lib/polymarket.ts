@@ -72,7 +72,7 @@ export interface PolymarketConfig {
 // provider is chosen. Basketball/hockey/table-tennis stay out (no live feed).
 export const SPORT_TAG_IDS: Record<string, number[]> = {
   football: [100350],          // soccer (NOT tag 10 = American football) — ESPN + Sportmonks
-  tennis: [864],               // display-only from Polymarket; unrestricted series (seriesAllowFor)
+  tennis: [864],               // from Polymarket; scoped to ATP/WTA singles via TENNIS_SERIES (seriesAllowFor)
   // basketball/hockey/tabletennis removed — no live feed (would bleed capital, user).
   // cricket removed — no liquidity on Polymarket (user).
 };
