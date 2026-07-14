@@ -153,6 +153,9 @@ test("recordTennisBreakMarks: marks the panic window on the broken player's winn
   assert.equal(marks[0].broken_side, "first");
   assert.equal(marks[0].broke_early, 1, "1st-set break tagged early");
   assert.equal(marks[0].floor_cents, 55, "floor = lowest P1 win price in the window");
+  // further-collapse metric: deepest post-break price + time, over the FULL forward series.
+  assert.equal(marks[0].post_entry_min_cents, 55, "deepest favourite price from the break forward");
+  assert.equal(marks[0].post_entry_min_sec, 60, "reached 60s after the break (t=80s − break 20s)");
   // idempotent: a second run does not duplicate
   assert.equal(recordTennisBreakMarks(db, { now: () => iso(60 * 60) }), 0);
   const brep = buildTennisBreakReport(db);

@@ -185,6 +185,17 @@ export function recordTennisBreakMarks(db: Database, deps: EngineDeps = {}): num
       };
       const series = rows.filter((r) => priceOf(r) != null).map((r) => ({ provider: "polymarket", batch_at: r.batch_at, extracted: JSON.stringify({ markets: [{ label: "win", bidCents: priceOf(r), midCents: priceOf(r) }] }) }));
       const wm = computeWindowMetrics(polymarketSeries(series, "win"), at, undefined, codeVer);
+      // Further-collapse metric (floor calibration, read later): from the break (≈ where the
+      // buyback enters) FORWARD over the full available series — the LOWEST favourite price and
+      // time to it. Unlike floor_cents (bounded to the ±window), this sees a LATE collapse
+      // (injury/cascade past the recovery window); how far it falls below entry is what a
+      // data-driven catastrophic floor needs, which the panic-amplitude columns can't set.
+      let postMinCents: number | null = null, postMinSec: number | null = null;
+      for (const r of rows) {
+        const t = Date.parse(r.batch_at), p = priceOf(r);
+        if (p == null || !(t >= at)) continue;
+        if (postMinCents == null || p < postMinCents) { postMinCents = p; postMinSec = Math.round((t - at) / 1000); }
+      }
       const setNum = br.setNum;
       const broke_early = setNum != null && setNum <= 1 ? 1 : (setNum === 2 && (first?.sets_p1 ?? 0) + (first?.sets_p2 ?? 0) <= 1 ? 1 : 0);
       R.insertTennisBreakMark(db, {
@@ -194,6 +205,7 @@ export function recordTennisBreakMarks(db: Database, deps: EngineDeps = {}): num
         pre_cents: wm.panicAmplitudeCents != null && wm.priceFloorCents != null ? Math.round((wm.priceFloorCents + wm.panicAmplitudeCents) * 10) / 10 : null,
         floor_cents: wm.priceFloorCents, t_floor_sec: wm.tFloorSec, panic_cents: wm.panicAmplitudeCents,
         recovery_1: wm.recovery["1"], recovery_2: wm.recovery["2"], recovery_3: wm.recovery["3"], recovery_5: wm.recovery["5"],
+        post_entry_min_cents: postMinCents, post_entry_min_sec: postMinSec,
         window_quotes: wm.windowQuotes, confidence_flags: wm.flags.length ? wm.flags.join(",") : null, code_version: codeVer, created_at: now,
       });
       written++;
@@ -468,8 +480,8 @@ export function tennisCalibrationCsv(db: Database): string {
 /** Per-break-mark CSV — inspect the actual pre/floor/panic per break (is the panic real?). */
 export function tennisBreakMarksCsv(db: Database): string {
   const esc = (v: unknown) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-  const head = ["t_event", "players", "tournament", "event_type", "set_num", "broken_side", "broke_early", "match_id", "pre_cents", "floor_cents", "panic_cents", "t_floor_sec", "recovery_1", "recovery_2", "recovery_5", "window_quotes", "flags"];
-  const rows = R.listTennisBreakMarks(db).map((m) => [m.t_event, m.players, m.tournament, m.event_type, m.set_num, m.broken_side, m.broke_early, m.match_id, m.pre_cents, m.floor_cents, m.panic_cents, m.t_floor_sec, m.recovery_1, m.recovery_2, m.recovery_5, m.window_quotes, m.confidence_flags].map(esc).join(","));
+  const head = ["t_event", "players", "tournament", "event_type", "set_num", "broken_side", "broke_early", "match_id", "pre_cents", "floor_cents", "panic_cents", "t_floor_sec", "recovery_1", "recovery_2", "recovery_5", "post_entry_min_cents", "post_entry_min_sec", "window_quotes", "flags"];
+  const rows = R.listTennisBreakMarks(db).map((m) => [m.t_event, m.players, m.tournament, m.event_type, m.set_num, m.broken_side, m.broke_early, m.match_id, m.pre_cents, m.floor_cents, m.panic_cents, m.t_floor_sec, m.recovery_1, m.recovery_2, m.recovery_5, m.post_entry_min_cents, m.post_entry_min_sec, m.window_quotes, m.confidence_flags].map(esc).join(","));
   return [head.join(","), ...rows].join("\n");
 }
 

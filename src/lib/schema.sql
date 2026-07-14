@@ -573,6 +573,12 @@ CREATE TABLE IF NOT EXISTS tennis_break_marks (
   t_floor_sec     INTEGER,
   panic_cents     REAL,            -- pre − floor
   recovery_1      REAL, recovery_2 REAL, recovery_3 REAL, recovery_5 REAL,
+  -- Further-collapse metric (floor calibration, read after 1-2 weeks): after the panic TROUGH
+  -- (where the buyback enters), how much LOWER the favourite went and when — a second-leg
+  -- collapse (injury/cascade) drives this below floor_cents. The panic-amplitude columns above
+  -- can't set the catastrophic floor because entry == trough; this can. NULL = no post-trough data.
+  post_entry_min_cents REAL,   -- min favourite price AFTER the trough
+  post_entry_min_sec   INTEGER,-- seconds from the trough to that min
   window_quotes   INTEGER NOT NULL DEFAULT 0,
   confidence_flags TEXT,
   code_version    TEXT,

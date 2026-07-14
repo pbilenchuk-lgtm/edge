@@ -160,6 +160,8 @@ export function initSchema(db: Database): void {
     "ALTER TABLE bets ADD COLUMN code_version TEXT",
     "ALTER TABLE tennis_snapshots ADD COLUMN pm_p1_cents REAL",
     "ALTER TABLE tennis_snapshots ADD COLUMN pm_p2_cents REAL",
+    "ALTER TABLE tennis_break_marks ADD COLUMN post_entry_min_cents REAL",
+    "ALTER TABLE tennis_break_marks ADD COLUMN post_entry_min_sec INTEGER",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }
