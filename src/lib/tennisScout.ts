@@ -124,6 +124,92 @@ export function tennisMoneyline(db: Database, matchId: string, players: { p1: st
   return { p1Cents: Math.round(p1Cents * 10) / 10, p2Cents: Math.round((100 - p1Cents) * 10) / 10, label: mk.label, token: mk.external_ref, liquidity: Number(mk.liquidity ?? 0) || 0, firstIsP1: p1IsA && !p1IsB };
 }
 
+// ── Tennis PMV — Stage-0 Gate 0.1: prop LIQUIDITY survey (build-vs-park decision) ──
+// The PMV consistency-scan can only trade props with a real book. This surveys the stored prop
+// markets by FAMILY (Total Games / Set Handicap / Set N Winner / Total Sets) and asks: what share
+// of ATP/WTA matches carry at least one prop above the book gate? CRITERION (written before data):
+// <15% → PMV parks (nothing to trade); ≥15% → build, trading only props above the gate.
+//
+// CAVEAT (honest): the stored `liquidity` is gamma's single POOL number, not the two-sided CLOB
+// order-book depth the spec ultimately wants. It's the accessible proxy for the park/build call; if
+// this passes or lands borderline, a live two-sided CLOB probe on a prop sample is the confirmatory
+// step before wiring real sizing. If it decisively fails, PMV parks regardless — the proxy only ever
+// OVER-states depth (a pool ≥ $X does not guarantee $X on each side), so a fail here is a hard fail.
+const PMV_PROP_BOOK_MIN = (() => { const n = Number(process.env.TENNIS_PMV_BOOK_MIN); return Number.isFinite(n) && n > 0 ? n : 500; })();
+const PMV_GATE_PCT = (() => { const n = Number(process.env.TENNIS_PMV_GATE_PCT); return Number.isFinite(n) && n > 0 ? n : 0.15; })();
+
+export type PropFamily = "total_games" | "set_handicap" | "set_winner" | "total_sets" | "other";
+/** Classify a prop label into a PMV family (priority order matters — "Total Sets: Under 2.5" is a
+ *  total_sets line, not a total_games one). Returns null for the moneyline (no prop keyword). */
+export function propFamily(label: string): PropFamily | null {
+  if (!label || !TENNIS_PROP_RE.test(label)) return null; // the moneyline itself
+  if (/total\s*sets/i.test(label)) return "total_sets";
+  if (/set\s*\d+\s*winner|\bwinner\b/i.test(label) && /set\s*\d/i.test(label)) return "set_winner";
+  if (/handicap|spread/i.test(label)) return "set_handicap";
+  if (/\b(over|under)\b|[+-]\s*\d|total\s*games/i.test(label)) return "total_games";
+  return "other";
+}
+
+export interface PropLiquidityFamily { family: PropFamily; props: number; withBook: number; medianLiquidity: number; maxLiquidity: number }
+export interface PropLiquidityReport {
+  scope: string; bookGateUsd: number; gatePct: number;
+  matches: number; matchesWithProps: number; matchesQualifying: number; qualifyingPct: number;
+  totalProps: number; families: PropLiquidityFamily[];
+  verdict: "build" | "park" | "insufficient_data"; note: string; caveat: string;
+}
+const medianLiq = (xs: number[]): number => { if (!xs.length) return 0; const s = [...xs].sort((a, b) => a - b); const m = s.length >> 1; return s.length % 2 ? s[m] : Math.round(((s[m - 1] + s[m]) / 2) * 100) / 100; };
+
+/** Gate 0.1 survey over the stored ATP/WTA prop markets. Pure read; scope = which comps to include. */
+export function buildTennisPropLiquidity(db: Database, scopeComps: string[] = ["pm-atp", "pm-wta"]): PropLiquidityReport {
+  const scopeSet = new Set(scopeComps);
+  const comps = R.listCompetitions(db).filter((c) => c.sport_id === "tennis" && (scopeSet.has(c.id) || scopeSet.has(c.external_league ?? "")));
+  const byFam = new Map<PropFamily, number[]>();
+  let matches = 0, matchesWithProps = 0, matchesQualifying = 0, totalProps = 0;
+  for (const c of comps) {
+    for (const m of R.listMatches(db, c.id)) {
+      matches++;
+      const props = R.latestMarkets(db, m.id).map((mk) => ({ fam: propFamily(mk.label), liq: Number(mk.liquidity ?? 0) || 0 })).filter((p): p is { fam: PropFamily; liq: number } => p.fam != null);
+      if (!props.length) continue;
+      matchesWithProps++;
+      totalProps += props.length;
+      let qualifies = false;
+      for (const p of props) { (byFam.get(p.fam) ?? byFam.set(p.fam, []).get(p.fam)!).push(p.liq); if (p.liq >= PMV_PROP_BOOK_MIN) qualifies = true; }
+      if (qualifies) matchesQualifying++;
+    }
+  }
+  const families: PropLiquidityFamily[] = [...byFam.entries()].map(([family, liqs]) => ({
+    family, props: liqs.length, withBook: liqs.filter((l) => l >= PMV_PROP_BOOK_MIN).length,
+    medianLiquidity: medianLiq(liqs), maxLiquidity: Math.max(0, ...liqs),
+  })).sort((a, b) => b.withBook - a.withBook);
+  const denom = matchesWithProps; // the gate is over matches that actually list props
+  const qualifyingPct = denom > 0 ? Math.round((matchesQualifying / denom) * 1000) / 1000 : 0;
+  const verdict: PropLiquidityReport["verdict"] = denom < 10 ? "insufficient_data" : qualifyingPct >= PMV_GATE_PCT ? "build" : "park";
+  const note = verdict === "insufficient_data"
+    ? `недостаточно данных (${denom} матчей с пропами < 10) — прогнать позже, когда накопятся снапшоты`
+    : verdict === "build"
+      ? `${(qualifyingPct * 100).toFixed(1)}% матчей несут проп с книгой ≥$${PMV_PROP_BOOK_MIN} (порог ${(PMV_GATE_PCT * 100).toFixed(0)}%) — гейт ПРОЙДЕН, строим ядро (только пропы выше гейта)`
+      : `лишь ${(qualifyingPct * 100).toFixed(1)}% матчей несут проп с книгой ≥$${PMV_PROP_BOOK_MIN} (порог ${(PMV_GATE_PCT * 100).toFixed(0)}%) — торговать нечего, PMV ПАРКУЕТСЯ`;
+  return {
+    scope: [...scopeSet].join("+"), bookGateUsd: PMV_PROP_BOOK_MIN, gatePct: PMV_GATE_PCT,
+    matches, matchesWithProps, matchesQualifying, qualifyingPct, totalProps, families, verdict, note,
+    caveat: "liquidity = gamma POOL-число (не двусторонняя CLOB-глубина); проксирует depth и лишь ЗАВЫШАЕт её. Fail здесь = твёрдый fail; pass/borderline → нужен живой CLOB-замер до сайзинга.",
+  };
+}
+
+export function tennisPropLiquidityMarkdown(r: PropLiquidityReport): string {
+  const L: string[] = [];
+  L.push(`# Tennis PMV — Gate 0.1: ликвидность пропов (${r.scope})`);
+  L.push(`**Вердикт: ${r.verdict.toUpperCase()}** — ${r.note}`);
+  L.push(`\nматчей ${r.matches} · с пропами ${r.matchesWithProps} · проходят гейт книги ${r.matchesQualifying} (${(r.qualifyingPct * 100).toFixed(1)}%) · всего пропов ${r.totalProps}`);
+  L.push(`гейт книги $${r.bookGateUsd} · порог доли ${(r.gatePct * 100).toFixed(0)}%`);
+  L.push(`\n## По семьям пропов`);
+  L.push(`| семья | пропов | с книгой ≥$${r.bookGateUsd} | медиана liq | макс liq |`);
+  L.push(`|---|---|---|---|---|`);
+  for (const f of r.families) L.push(`| ${f.family} | ${f.props} | ${f.withBook} | $${f.medianLiquidity} | $${f.maxLiquidity} |`);
+  L.push(`\n> ⚠ ${r.caveat}`);
+  return L.join("\n");
+}
+
 /**
  * Collect one poll of live tennis into tennis_snapshots. Observe-only; never throws into
  * the caller (the collector is wrapped). Optionally captures the linked Polymarket match's

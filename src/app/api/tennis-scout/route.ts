@@ -25,6 +25,12 @@ export async function GET(req: Request) {
       if (format === "json") return NextResponse.json(f);
       return new NextResponse(trading.tennisFunnelMarkdown(f), { status: 200, headers: { "Content-Type": "text/markdown; charset=utf-8" } });
     }
+    // ?report=prop_liquidity → PMV Stage-0 Gate 0.1: prop book-depth survey (build-vs-park decision).
+    if (url.searchParams.get("report") === "prop_liquidity") {
+      const rep = scout.buildTennisPropLiquidity(getDb());
+      if (format === "json") return NextResponse.json(rep);
+      return new NextResponse(scout.tennisPropLiquidityMarkdown(rep), { status: 200, headers: { "Content-Type": "text/markdown; charset=utf-8" } });
+    }
     // ?report=calibration → Part B recovery-vs-no-recovery split (calibrates K / floor / take buffer).
     if (url.searchParams.get("report") === "calibration") {
       if (format === "csv") return new NextResponse(scout.tennisCalibrationCsv(getDb()), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="tennis-calibration.csv"` } });
