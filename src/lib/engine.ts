@@ -594,6 +594,24 @@ const inferEspnLeague = (name: string | null): string | null => {
   for (const [re, code] of LEAGUE_NAME_ESPN) if (re.test(name)) return code;
   return null;
 };
+// A UEFA club competition splits across TWO ESPN scoreboards by round: the main draw
+// (e.g. uefa.champions) and the qualifying rounds (uefa.champions_qual). Our comp maps to
+// the main slug, so the summer qualifiers — obscure clubs but real Polymarket liquidity —
+// went dark (empty main board → no lineups/live → football analysis gated off → 0 trades;
+// the SK Iberia 1999 — FC Flora case). Poll BOTH slugs: the team-name match then finds the
+// fixture wherever ESPN files it, and matchDetail/match_live key off the board's own slug, so
+// lineups + events resolve under the right league. A non-existent slug 400s → scoreboard
+// returns [] (harmless). Not a coverage gap; no new provider needed.
+const ESPN_QUAL_SIBLING: Record<string, string> = {
+  "uefa.champions": "uefa.champions_qual",
+  "uefa.europa": "uefa.europa_qual",
+  "uefa.europa.conf": "uefa.europa.conf_qual",
+  "uefa.wchampions": "uefa.wchampions_qual",
+};
+export function espnLeagueVariants(league: string): string[] {
+  const q = ESPN_QUAL_SIBLING[league];
+  return q ? [league, q] : [league];
+}
 const slugify = (s: string) => s.toLowerCase().normalize("NFD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
 /**
@@ -853,7 +871,9 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
   const addJob = (sport: string, league: string | null) => {
     if (!league) return;
     let set = jobs.get(sport); if (!set) jobs.set(sport, (set = new Set()));
-    set.add(league);
+    // Expand a UEFA main-draw slug to also poll its qualifying-round sibling (no-op for
+    // every other league). Team-name matching gates each board, so an extra probe is safe.
+    for (const v of espnLeagueVariants(league)) set.add(v);
   };
   for (const c of R.linkedCompetitions(db)) addJob(c.sport_id, c.external_league);
   if (!jobs.has("football")) addJob("football", "fifa.world");

@@ -156,6 +156,37 @@ test("syncCompetitions drops a LIVE ESPN fixture Polymarket never listed (no mar
   assert.ok(upcoming, "market-less UPCOMING fixture kept — odds may still list closer to kickoff");
 });
 
+test("enrichFromEspn: a UEFA comp finds its fixture in the qualifying-round board (uefa.champions_qual)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  // Comp maps to the MAIN slug (uefa.champions), which is empty during the summer qualifiers.
+  R.upsertCompetition(db, { id: "pm-ucl-2025", sport_id: "football", name: "UEFA Champions League", budget: 8000, external_league: "uefa.champions", created_at: "t" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-ucl-2025", home: "SK Iberia 1999", away: "FC Flora", state: "lineup", lineup_out: true, kickoff_at: "2026-07-14T16:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+
+  const provider: SportsProvider = {
+    name: "mock",
+    // The fixture exists ONLY in the qualifying board; the main board is empty (as in prod).
+    async scoreboard(_sport: string, league: string) {
+      if (league !== "uefa.champions_qual") return [];
+      return [{ externalRef: "Q1", home: "SK Iberia 1999", away: "FC Flora", state: "live", minute: 20, scoreHome: 0, scoreAway: 1, final: false }] as SportsMatchStatus[];
+    },
+    async matchDetail(_sport: string, league: string) {
+      // matchDetail must be called with the BOARD's slug, not the comp's stored slug.
+      assert.equal(league, "uefa.champions_qual", "lineups fetched under the qualifying slug");
+      return { lineupOut: true, lineups: { home: { team: "SK Iberia 1999", formation: "4-4-2", starters: ["A"] }, away: { team: "FC Flora", formation: "4-3-3", starters: ["B"] } }, events: [] } as MatchDetail;
+    },
+  };
+
+  const res = await enrichFromEspn(db, provider, {});
+  assert.equal(res.enriched, 1, "the qualifier fixture was matched via the _qual board");
+  const m = R.getMatch(db, mid)!;
+  assert.equal(m.state, "live");
+  assert.equal(m.score_away, 1, "live score synced from the qualifying board");
+  const live = R.getMatchLive(db, mid);
+  assert.ok(live && live.home_lineup && live.away_lineup, "lineups now present → football analysis is no longer gated");
+});
+
 test("enrichFromEspn stores lineups, records new events, reports triggers, and feeds matchContext", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
