@@ -75,7 +75,9 @@ if (missCats.size) {
   console.log(`\nКатегории, которые whitelist НЕ покрывает (${missCats.size}) — вот дыра:`);
   [...missCats.entries()].sort((a, b) => b[1].n - a[1].n).forEach(([id, v]) => console.log(`  ${v.n}×  ${v.name}  [${id}]`));
 }
+const dominant = Math.max(tally.category_miss, tally.strategy_miss, tally.size_zero, tally.no_decision);
 console.log(`\nВывод: ${bets.length === 0 ? "футбольных входов нет — нечего диагностировать (тихий календарь)."
+  : tally.no_decision === dominant ? "доминирует no_decision — ставки до Phase A (decision_id NULL, миграция без бэкфилла). Историческое; новые входы после 16:04 UTC 15.07 зеркалят."
   : tally.would_mirror > 0
   ? "часть входов ДОЛЖНА была зеркалиться — если ордеров 0, копаем place() / tokenId (external_ref)."
   : tally.category_miss >= tally.strategy_miss && tally.category_miss >= tally.size_zero

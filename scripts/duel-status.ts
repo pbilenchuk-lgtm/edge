@@ -59,6 +59,20 @@ const arms = [...byArm.entries()].sort((a, b) => b[1].n - a[1].n);
 console.log(`Ставки по армам (${rows.length} футбольных всего):`);
 for (const [a, g] of arms) console.log(`  ${a.padEnd(14)} ${fmt(g)}`);
 
+// TRUE hash split — matches ANALYSED per model (from analysis_artifacts). The duel picks per MATCH, so
+// THIS is the ~50/50 check; bet counts skew with markets-per-match. Opus≫Fable HERE = a broken/erroring
+// Fable arm; balanced HERE but skewed bets = variance/conversion, keep accumulating.
+const analysed = db.prepare(
+  `SELECT a.model, COUNT(DISTINCT a.match_id) matches
+   FROM analysis_artifacts a JOIN matches m ON m.id=a.match_id JOIN competitions c ON c.id=m.competition_id
+   WHERE c.sport_id='football' AND a.model IS NOT NULL
+   GROUP BY a.model ORDER BY matches DESC`,
+).all() as any[];
+const opusM = analysed.filter((r) => /opus/i.test(r.model)).reduce((s, r) => s + r.matches, 0);
+const fableM = analysed.filter((r) => /fable/i.test(r.model)).reduce((s, r) => s + r.matches, 0);
+console.log(`\nМатчей проанализировано по модели (истинный хэш-сплит):`);
+for (const r of analysed) console.log(`  ${String(r.model).padEnd(18)} ${r.matches} матч.`);
+
 // Head-to-head + liveness verdict.
 const opus = arms.find(([a]) => /opus/.test(a))?.[1];
 const fable = arms.find(([a]) => /fable/.test(a))?.[1];
@@ -66,8 +80,10 @@ console.log(`\nВердикт:`);
 if (!duel.enabled) console.log(`  duel OFF в env — арм не размечался. Все матчи одной моделью. Гейт НЕ копится: включи ANALYSIS_DUEL=on + проверь доступ ключа к claude-fable-5.`);
 else if (!opus || !fable) console.log(`  duel ON, но один арм пуст (opus=${opus?.n ?? 0}, fable=${fable?.n ?? 0}) — ТИХИЙ НОЛЬ №2. Fable-анализы падают или не выбираются: смотри trade_log/лог ошибок LLM по claude-fable-5.`);
 else {
-  const bal = Math.min(opus.n, fable.n) / Math.max(opus.n, fable.n);
-  console.log(`  duel ЖИВ: opus n=${opus.n}, fable n=${fable.n} (баланс ${(bal * 100).toFixed(0)}% — ждём ~50/50 по хэшу).`);
-  console.log(`  Готовность гейта: нужно ≥~30 settled/арм. Сейчас settled: opus ${opus.settled} · fable ${fable.settled}.`);
-  console.log(`  ${Math.min(opus.settled, fable.settled) >= 30 ? "→ ДОЗРЕЛО: сравнивай win%/CLV/calib выше." : "→ рано: копим до 30/арм, потом решаем какая модель точнее."}`);
+  const matchBal = opusM && fableM ? Math.min(opusM, fableM) / Math.max(opusM, fableM) : 0;
+  console.log(`  duel ЖИВ: анализ по матчам opus=${opusM} / fable=${fableM} (баланс ${(matchBal * 100).toFixed(0)}%), ставки opus n=${opus.n} / fable n=${fable.n}.`);
+  if (fableM === 0) console.log(`  ⚠ Fable проанализировал 0 матчей при duel=on — арм НЕ выбирается/падает. ТИХИЙ НОЛЬ №2: смотри лог ошибок LLM по claude-fable-5.`);
+  else if (matchBal < 0.5) console.log(`  ⚠ хэш-сплit матчей перекошен (${(matchBal * 100).toFixed(0)}%) — Fable-анализы, вероятно, ПАДАЮТ (меньше матчей доходит до ставок). Проверь ошибки claude-fable-5, это чинимый арм, не дисперсия.`);
+  else console.log(`  ✓ сплит матчей ~ровный — перекос ставок это дисперсия/конверсия, не поломка. Копим.`);
+  console.log(`  Готовность гейта: нужно ≥~30 settled/арм. Сейчас settled: opus ${opus.settled} · fable ${fable.settled} → ${Math.min(opus.settled, fable.settled) >= 30 ? "ДОЗРЕЛО." : "рано, копим."}`);
 }
