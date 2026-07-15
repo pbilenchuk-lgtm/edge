@@ -101,6 +101,18 @@ stale-priced exit as `void` → OUT of the win-rate/calibration slices (a stale 
 
 Orientation guard (test): a sell fills into the **38¢ bid**, never the 40¢ ask.
 
+## First-day observability (post-deploy, POLYMARKET_ENABLED=true)
+
+Four numbers to eyeball on day one, plus one full cycle:
+1. Skip share by type (`untradeable_market` / `orderbook_unavailable` / `no_edge` / `phantom`)
+   on ATP moneylines with declared liquidity ≥ $10k — criterion **<10–20%**; higher ⇒ suspect
+   OUR book mapping first (tokenId / book side / limit vs spread).
+2. First Set-Value entry at a book price — the whole cycle by eye.
+3. PMV flag-only stream — confirm routing did not touch it.
+4. **`exitStalePrice` share** among protective exits. Stale exits are voided out of the win-rate/
+   calibration slices, so a HIGH share (>10–15%, realistic on thin tennis bid books) means the stop
+   slices UNDER-count — not a reason to change the void logic, but a known caveat for calibration.
+
 ## Invariants (never violated by any phase)
 
 1. Simulation → whitelist → real is the ONLY direction. Real never writes back to sim

@@ -591,3 +591,121 @@ CREATE TABLE IF NOT EXISTS tennis_break_marks (
   created_at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tennis_break_event ON tennis_break_marks(event_key);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- REAL-TRADING contour (spec §2.3). Build != enable: these tables exist so the
+-- dry-run/real executor has a book of record; NOTHING writes here until
+-- REAL_TRADING is turned on by the owner. The simulation never reads or writes
+-- them. Isolation is one-directional: sim → whitelist → real, never back.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- §2.3 real_orders — one row per order the executor built (paper twin has the same decision_id).
+-- The CURRENT status lives here; the FULL transition trail (with per-transition timestamps, for
+-- §7 latency + incident forensics) lives in real_order_events — never reconstruct latency from
+-- this row alone.
+CREATE TABLE IF NOT EXISTS real_orders (
+  id                 TEXT PRIMARY KEY,
+  client_order_id    TEXT NOT NULL UNIQUE,   -- deterministic idempotency key (decisionId+leg+seq)
+  exchange_order_id  TEXT,                   -- set once the exchange acks (NULL for dry_run)
+  decision_id        TEXT NOT NULL,          -- twin link to the paper bet (§0.1)
+  strategy_id        TEXT NOT NULL,
+  profile_id         TEXT NOT NULL,
+  match_id           TEXT NOT NULL,
+  token_id           TEXT NOT NULL,          -- CLOB token_id
+  side               TEXT NOT NULL CHECK (side IN ('BUY','SELL')),
+  leg                TEXT NOT NULL,          -- entry | exit | exit_partial | settle
+  limit_price_cents  REAL NOT NULL,
+  size_usd           REAL NOT NULL,          -- requested notional (may fill less; may be clamped)
+  tif_sec            INTEGER NOT NULL,       -- time-in-force; on expiry → cancel + order_expired
+  status             TEXT NOT NULL CHECK (status IN
+                       ('created','placed','partial','filled','expired','cancelled','rejected','dry_run')),
+  filled_size_usd    REAL NOT NULL DEFAULT 0,-- actually filled so far (partial-aware, §2.2)
+  avg_fill_cents     REAL,                   -- VWAP of the fills so far
+  code_version       TEXT,                   -- epoch on the order
+  whitelist_version  INTEGER,                -- real_whitelist version in force when built (§5)
+  note               TEXT,
+  created_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_real_orders_decision ON real_orders(decision_id);
+CREATE INDEX IF NOT EXISTS idx_real_orders_status   ON real_orders(status);
+
+-- §2.3 real_order_events — append-only status-transition log. ONE row per transition, each with its
+-- own timestamp, so §7 latency (decision→place→first_fill) reads exactly, not by inference.
+CREATE TABLE IF NOT EXISTS real_order_events (
+  id         TEXT PRIMARY KEY,
+  order_id   TEXT NOT NULL REFERENCES real_orders(id),
+  status     TEXT NOT NULL CHECK (status IN
+               ('created','placed','partial','filled','expired','cancelled','rejected','dry_run')),
+  at         TEXT NOT NULL,   -- wall-clock of THIS transition (the latency source)
+  note       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_real_order_events_order ON real_order_events(order_id, at);
+
+-- §2.3 real_fills — one row per fill (price/size/fee). Position accounting is by ACTUAL filled size.
+CREATE TABLE IF NOT EXISTS real_fills (
+  id               TEXT PRIMARY KEY,
+  order_id         TEXT NOT NULL REFERENCES real_orders(id),
+  client_order_id  TEXT NOT NULL,
+  token_id         TEXT NOT NULL,
+  side             TEXT NOT NULL CHECK (side IN ('BUY','SELL')),
+  size_usd         REAL NOT NULL,
+  price_cents      REAL NOT NULL,   -- effective incl. slippage
+  fee_usd          REAL NOT NULL DEFAULT 0,
+  at               TEXT NOT NULL,   -- exchange/fill timestamp
+  created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_real_fills_order ON real_fills(order_id);
+
+-- §2.3 real_positions — aggregate per token (the executor's own view; reconciled vs the exchange, §4.4).
+CREATE TABLE IF NOT EXISTS real_positions (
+  token_id           TEXT PRIMARY KEY,
+  match_id           TEXT,
+  strategy_id        TEXT,
+  size_shares        REAL NOT NULL DEFAULT 0,
+  avg_price_cents    REAL,
+  realized_pnl_usd   REAL NOT NULL DEFAULT 0,
+  unrealized_pnl_usd REAL,
+  updated_at         TEXT NOT NULL
+);
+
+-- §2.3 real_ledger — every USDC movement, TYPED (enum) so reconciliation (§4.4) reasons by kind,
+-- not free text. amount_usd is signed: credits (deposit, redemption win) positive, debits
+-- (fill cost, fee, gas, withdrawal) negative.
+CREATE TABLE IF NOT EXISTS real_ledger (
+  id          TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL CHECK (kind IN
+                ('deposit','fill','fee','redemption','gas','withdrawal')),
+  amount_usd  REAL NOT NULL,   -- signed
+  token_id    TEXT,
+  order_id    TEXT,            -- REFERENCES real_orders(id) when the movement is order-driven
+  ref         TEXT,            -- tx hash / external ref
+  at          TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_real_ledger_kind ON real_ledger(kind, at);
+
+-- §5 real_whitelist — the ONLY gate from sim into real. Starts EMPTY (real trades nothing).
+-- sport is hard-pinned 'football' this stage (validation rejects anything else). categories =
+-- JSON array of allowed category ids. Every real order carries the `version` in force.
+CREATE TABLE IF NOT EXISTS real_whitelist (
+  id            TEXT PRIMARY KEY,
+  strategy_id   TEXT NOT NULL,
+  sport         TEXT NOT NULL CHECK (sport = 'football'),   -- hard-pinned: tennis can't reach real this stage
+  categories    TEXT NOT NULL DEFAULT '[]',                 -- JSON array of category ids
+  max_order_usd REAL NOT NULL,
+  enabled       INTEGER NOT NULL DEFAULT 0,
+  version       INTEGER NOT NULL DEFAULT 1,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+
+-- §5 real_whitelist_log — who/when/what for every whitelist change (auditable history); each real
+-- order stamps the version so a bet's gate is reconstructable.
+CREATE TABLE IF NOT EXISTS real_whitelist_log (
+  id        TEXT PRIMARY KEY,
+  version   INTEGER NOT NULL,
+  action    TEXT NOT NULL,   -- add | update | remove | enable | disable
+  detail    TEXT,            -- JSON snapshot of the change
+  actor     TEXT,            -- who made it (owner)
+  at        TEXT NOT NULL
+);
