@@ -14,7 +14,18 @@ console.log("═══ DRY-RUN CONTOUR STATUS ═══\n");
 // (а) dry-ордера рождаются на paper-входах
 const ord = one(`SELECT COUNT(*) n, SUM(status='filled') filled, SUM(status='partial') part, SUM(status='expired') exp, SUM(status='rejected') rej FROM real_orders`);
 console.log(`(а) dry-ордера: всего ${ord.n||0} · filled ${ord.filled||0} · partial ${ord.part||0} · expired ${ord.exp||0} · rejected ${ord.rej||0}`);
-console.log(`    ${(ord.n||0) > 0 ? "✓ рождаются" : "✗ НОЛЬ — проверь REAL_TRADING=dry_run, whitelist, что футбол вообще входит в paper"}\n`);
+console.log(`    ${(ord.n||0) > 0 ? "✓ рождаются" : "✗ НОЛЬ — см. диагностику ниже"}`);
+// Диагностика нуля: были ли футбольные paper-входы вообще, и не сыпал ли mirror ошибками.
+const fbOpen = one(`SELECT COUNT(*) n FROM bets b JOIN matches m ON m.id=b.match_id JOIN competitions c ON c.id=m.competition_id
+  WHERE c.sport_id='football' AND b.status IN ('open','settled_won','settled_lost','settled_void') AND b.entry_price IS NOT NULL`);
+const mirrorErr = one(`SELECT COUNT(*) n FROM trade_log WHERE text LIKE 'real-mirror:%'`);
+console.log(`    футбольных paper-входов (сыграли/открыты): ${fbOpen.n||0} · ошибок mirror в логе: ${mirrorErr.n||0}`);
+if ((ord.n||0) === 0) {
+  if ((fbOpen.n||0) === 0) console.log(`    → входов ещё не было — тихий календарь, просто ждём (норма сразу после включения)`);
+  else if ((mirrorErr.n||0) > 0) console.log(`    → ВХОДЫ БЫЛИ, но mirror сыпал ошибками — смотри их: SELECT text FROM trade_log WHERE text LIKE 'real-mirror:%' LIMIT 5`);
+  else console.log(`    → ВХОДЫ БЫЛИ, ошибок нет, а ордеров 0 — mirror не вызывается или size=0 (нулевой edge). Копаем маршрутизацию.`);
+}
+console.log("");
 
 // (б) реальные книги пусты (dry-тег в бою)
 const realBal = RR.realLedgerBalance(db, true), realPos = RR.listRealPositions(db, true).length;
