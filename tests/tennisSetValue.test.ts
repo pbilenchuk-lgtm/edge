@@ -56,7 +56,38 @@ test("tennisSetValueTick: favourite lost a competitive set 1, price in band → 
   assert.ok(opened >= 1, "opened at least one profile");
   const bets = R.betsForMatch(db, mid, "tennis_set_value").filter((b) => b.status === "open");
   assert.ok(bets.length >= 1 && bets.every((b) => b.market_label === "Vitoria Zuccon" && (b.stake ?? 0) > 0), "favourite name, sized");
-  assert.ok(bets.every((b) => b.code_version?.includes("interim")), "interim epoch");
+  assert.ok(bets.every((b) => b.code_version?.includes("book-fill-m1")), "book-fill-m1 epoch (hard break from the 0¢ era)");
+});
+
+// Combined fetch: CLOB /book requests get an order book; everything else is the LLM strategist.
+const bookAndLLM = (label: string, book: { bids: { price: string; size: string }[]; asks: { price: string; size: string }[] }) =>
+  (async (url: any) => String(url).includes("/book")
+    ? ({ ok: true, status: 200, json: async () => book } as any)
+    : ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [{ label, prob: 0.5, reason: "конкурентный сет 6-4" }] }) }] }) } as any)) as unknown as typeof fetch;
+const lostSet1 = (db: ReturnType<typeof openDb>, mid: string, p1: string, p2: string) => {
+  svSnap(db, mid, { at: "2026-07-14T10:00:00Z", p1, p2, s1: 0, s2: 0, setNum: 1, g1: 5, g2: 3, server: "first", p1c: 80 });
+  svSnap(db, mid, { at: "2026-07-14T10:05:00Z", p1, p2, s1: 0, s2: 1, setNum: 2, g1: 0, g2: 0, server: "first", p1c: 38 });
+};
+
+test("tennisSetValueTick (book-fill-m1): execution ON + EMPTY book → honest no_book_liquidity skip, never a 0¢ fill", async () => {
+  const db = openDb(":memory:");
+  const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins", startPrice: 80 });
+  lostSet1(db, mid, "Vitoria Zuccon", "Carolina Martins");
+  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl: bookAndLLM("Vitoria Zuccon", { bids: [], asks: [] }) });
+  assert.equal(opened, 0, "no book → no entry (the deliberate book-fill-m1 fix: no fabricated fill)");
+  assert.equal(R.betsForMatch(db, mid, "tennis_set_value").filter((b) => b.status === "open").length, 0);
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => /no_book_liquidity/.test(l.text ?? "")), "typed no_book_liquidity skip logged");
+});
+
+test("tennisSetValueTick (book-fill-m1): execution ON + real book → fills at the BOOK price, not the 38¢ quote", async () => {
+  const db = openDb(":memory:");
+  const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins", startPrice: 80 });
+  lostSet1(db, mid, "Vitoria Zuccon", "Carolina Martins");
+  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl: bookAndLLM("Vitoria Zuccon", { bids: [{ price: "0.36", size: "1000" }], asks: [{ price: "0.40", size: "1000" }] }) });
+  assert.ok(opened >= 1, "real book → fills");
+  const b = R.betsForMatch(db, mid, "tennis_set_value").find((x) => x.status === "open")!;
+  assert.ok((b.entry_price ?? 0) >= 40, `filled at the 40¢ ask (+fee), not the 38¢ quote — got ${b.entry_price}`);
+  assert.ok(b.decision_id, "the fill carries a decision_id (twin link to a future real order)");
 });
 
 test("tennisSetValueTick: a blowout / retire-risk (strategist abstains) → no entry", async () => {

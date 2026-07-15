@@ -54,6 +54,43 @@ metrics via the live book, UI, safety belt, tests); F is a thin adapter over a p
 | **F** | `RealExecutor` (live CLOB) — **deferred**, separate review | deferred |
 | **G/H/I** | UI (Sim/Real, twin-link, [STOP]) · `real_vs_paper` metrics · §9 tests | pending |
 
+## Tennis epoch break — `book-fill-m1` (recorded before the data)
+
+From `book-fill-m1`, tennis **entries** fill against the LIVE moneyline order book (VWAP
+or honest skip), replacing the old `0¢`/quote insert. This is a **hard break, no bridge**:
+- Pre-`book-fill-m1` tennis marks/bets were priced in a different world (fabricated `0¢`
+  fills, exits at entry price — the Travaglia bug). They are **incomparable** with the new
+  ones: NO cross-epoch aggregates. Per-sport views default to the current epoch.
+- Old tennis statistics are **diagnostic, not calibration**. The interrupted PMV/Set-Value
+  sample was already poisoned (zero fills, entry-price exits); the break stops accumulating
+  garbage, it doesn't lose signal.
+- Overreaction + Set-Value carry `book-fill-m1`. **PMV is untouched** — it is flag-only and
+  never touches the book, so its epoch (`interim-m1`) is unchanged.
+
+### Two-fork skip map (recorded before the data)
+
+Every non-fill is tagged with a machine `reason` so two questions get separate counters:
+- `untradeable_market` — book EMPTY / placeholder → **coverage map**: which tours/markets are dead.
+- `orderbook_unavailable` — book exists, no offers now / fetch failed → transient.
+- `no_edge` — depth exists but slippage eats the edge → priced out.
+- `phantom` — effective price drifted from the decision → stale/phantom book.
+- A THIN book (depth < requested) does NOT reject — it fills SMALLER and sets `clamped`
+  (the "where we lose size" signal / the future partial-fill argument, §2.2).
+
+### Set-Value routing criterion (recorded before the data)
+
+On moneylines with **declared liquidity ≥ $10k**, the `no_book_liquidity` skip rate should be
+**LOW (<10–20%)**. A HIGH rate there is a signal of OUR book mapping (wrong tokenId, wrong
+book side, limit price missing the spread) FIRST, the market SECOND. First day post-deploy:
+eyeball this slice on ATP moneylines.
+
+### Still pending in Phase A
+
+- **Exit routing.** Entries now book-fill; **exits still use the snapshot midpoint** (`cur`).
+  Next step: route protective/close exits through `paperSellFill` (sell VWAP), and for the
+  §4.5 no-book case use the last bid + a **stale flag that reaches the exit record** so those
+  P&L can later be filtered as "executed at a stale price".
+
 ## Invariants (never violated by any phase)
 
 1. Simulation → whitelist → real is the ONLY direction. Real never writes back to sim

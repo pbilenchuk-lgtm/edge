@@ -18,6 +18,9 @@ import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { chargeTennisTriggers, tennisReassessShouldCall, type TennisCharge } from "./tennisOverreaction.js";
 import { SET_VALUE_STRATEGY, SET_VALUE_ARMED, SET_VALUE_EPOCH, setValueGate } from "./tennisSetValue.js";
 import { detectBreaks, detectTennisEvents, tennisMoneyline, tennisTourOf, fetchTennisFixtures, trimRaw, TENNIS_TERMINAL_RE, loadTennisConfig } from "./tennisScout.js";
+import { loadPolymarketConfig, type OrderBookFetch } from "./polymarket.js";
+import { PaperExecutor } from "./executor/paper.js";
+import { clientOrderIdFor, type OrderAck } from "./executor/types.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -591,7 +594,37 @@ const TENNIS_CATASTROPHIC_FLOOR = (() => { const n = Number(process.env.TENNIS_C
 // (winnerMarketFor grabbed the closest prop, not the moneyline) and are discarded. Thresholds return
 // to interim until ~100 marks re-accumulate on the MONEYLINE. Exits carry this so bets stay
 // segmentable by which era's thresholds fired. Env-tunable.
-const TENNIS_ARMED_EPOCH = process.env.TENNIS_ARMED_EPOCH || "interim";
+// EPOCH BREAK — book-fill-m1: from here tennis entries fill against the LIVE order book
+// (VWAP / honest skip), not the old 0¢/quote shortcut. Pre-book-fill-m1 tennis marks were
+// priced in a different world (fabricated 0¢ fills, exits at entry price — the Travaglia bug)
+// and are INCOMPARABLE: no cross-epoch aggregates. Old tennis stats are diagnostic, not
+// calibration (build notes). Env-tunable if a later recalibration needs a fresh tag.
+const TENNIS_ARMED_EPOCH = process.env.TENNIS_ARMED_EPOCH || "book-fill-m1";
+
+// Entry-order lifetime (spec §2.2: the live-panic window). Paper fills/skips immediately, so TIF is
+// carried only so the field is real for dry-run/real later.
+const TENNIS_ENTRY_TIF_SEC = 45;
+
+// Skip-reason → eyeball gloss for the tennis entry log. The MACHINE tag (ack.reason) is what the
+// coverage-map / thin-map counters read; this text is only for a human scanning the log.
+const TENNIS_SKIP_KIND: Record<string, string> = {
+  untradeable_market: "пусто/плейсхолдер — торговать нечем (никогда)",
+  orderbook_unavailable: "нет предложений в стакане (транзиентно)",
+  no_edge: "глубина есть, но слиппедж съел эдж",
+  phantom: "фантом/устаревшая книга",
+};
+
+/** Route a tennis entry through the shared book-fill engine (epoch book-fill-m1): no fabricated 0¢
+ *  fills. Returns the executor ack — caller inserts the bet on a fill (at the REAL price/size) or
+ *  logs the TYPED no_book_liquidity skip. One decisionId per profile bet = its twin-link to a future
+ *  real order (so two profiles never share a clientOrderId). */
+async function fillTennisEntry(executor: PaperExecutor, decisionId: string, o: { token: string | null; entryCents: number; sizeUsd: number; fairProbPct: number; strategyId: string; profileId: string; matchId: string }): Promise<OrderAck> {
+  return executor.place({
+    clientOrderId: clientOrderIdFor(decisionId, "entry"), tokenId: o.token ?? "", side: "BUY",
+    limitPriceCents: o.entryCents, sizeUsd: o.sizeUsd, timeInForceSec: TENNIS_ENTRY_TIF_SEC,
+    decisionId, strategyId: o.strategyId, profileId: o.profileId, matchId: o.matchId, fairValueCents: o.fairProbPct,
+  });
+}
 
 /** The favourite's winner price just BEFORE a break (the recovery target reference). */
 function prePriceBefore(db: Database, matchId: string, favSide: "first" | "second", breakBatch: string): number | null {
@@ -617,6 +650,9 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
   // (the prop-priced calibration was discarded); it becomes «…·calibrated» once the moneyline marks land.
   const codeVer = `${effectiveCodeVersion(db)}·${TENNIS_ARMED_EPOCH}`;
   const shadowCfg = loadShadowConfig(db, deps.env);
+  // book-fill-m1: entries fill against the LIVE book via the shared engine (one book fetch per token
+  // per tick, cached). No book / no edge / phantom → honest skip, never a fabricated 0¢ fill.
+  const executor = new PaperExecutor({ poly: deps.polymarket ?? loadPolymarketConfig(env), deps, bookCache: new Map<string, OrderBookFetch>(), nowMs: () => nowMs });
   let opened = 0;
 
   const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, m })));
@@ -714,17 +750,26 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       // backstop here (defense-in-depth behind the pre-match favourite anchor). Legit snapbacks are 5-12%.
       const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg });
       if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `[${profile}] overreaction подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
-      const meta = tennisEntryMeta({ favPrice: entryCents, prePrice, edge: r.edge, kelly: r.kellyFraction, stake: r.stake, thinnessUsd: ml.liquidity || null, setNum: br.setNum });
+      // book-fill-m1: fill against the LIVE moneyline book (VWAP / honest skip) — no more 0¢ fills.
+      const decisionId = R.uid();
+      const ack = await fillTennisEntry(executor, decisionId, { token: ml.token, entryCents, sizeUsd: r.stake, fairProbPct: ourProb * 100, strategyId: TENNIS_STRATEGY, profileId: profile, matchId: m.id });
+      if (ack.status !== "filled") {
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `[${profile}] ВЫКУП «${favName}» не исполнен: no_book_liquidity:${ack.reason} (${TENNIS_SKIP_KIND[ack.reason ?? ""] ?? ack.reason}) — манилайн ${entryCents}¢, заявл. ликв. $${Math.round(ml.liquidity || 0)}`, created_at: now });
+        continue;
+      }
+      const fillCents = ack.avgFillPriceCents ?? entryCents; // REAL book fill price
+      const fillStake = ack.filledSizeUsd;                    // depth-aware size (thin book → smaller)
+      const meta = tennisEntryMeta({ favPrice: fillCents, prePrice, edge: r.edge, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: br.setNum });
       const betId = R.uid();
       R.insertBet(db, {
         id: betId, match_id: m.id, strategy_id: TENNIS_STRATEGY, risk_profile_id: profile, market_label: favName,
-        status: "open", proposed_price: entryCents, entry_price: entryCents, current_price: entryCents, closing_price: null,
-        ai_prob: ourProb, stake: r.stake, rationale: `выкуп переоценки (теннис): фаворит «${favName}» сломан в сете ${br.setNum}, манилайн ${entryCents}¢ vs предбрейк ${prePrice}¢. ${pick.reason || dec.note || ""}`,
+        status: "open", proposed_price: entryCents, entry_price: fillCents, current_price: fillCents, closing_price: null,
+        ai_prob: ourProb, stake: fillStake, rationale: `выкуп переоценки (теннис): фаворит «${favName}» сломан в сете ${br.setNum}, манилайн ${entryCents}¢ vs предбрейк ${prePrice}¢. ${pick.reason || dec.note || ""}`,
         entered_minute: `сет ${br.setNum}`, result: null, payout: null, settled_by: null, settled_at: null,
-        entry_meta: serializeEntryMeta(meta), code_version: codeVer, created_at: now,
+        entry_meta: serializeEntryMeta(meta), code_version: codeVer, decision_id: decisionId, created_at: now,
       });
-      try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: r.stake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${entryCents}¢ · $${Math.round(r.stake)} (edge ${(r.edge * 100).toFixed(1)}%, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${entryCents - TENNIS_CATASTROPHIC_FLOOR}¢, пороги:${TENNIS_ARMED_EPOCH})`, created_at: now });
+      try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: fillStake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(r.edge * 100).toFixed(1)}%, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${fillCents - TENNIS_CATASTROPHIC_FLOOR}¢, пороги:${TENNIS_ARMED_EPOCH})`, created_at: now });
       opened++;
     }
   }
@@ -775,6 +820,8 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
   const now = nowFn(deps)();
   const codeVer = `${effectiveCodeVersion(db)}·${SET_VALUE_EPOCH}`;
   const shadowCfg = loadShadowConfig(db, deps.env);
+  const svNowMs = Date.parse(now) || Date.now();
+  const executor = new PaperExecutor({ poly: deps.polymarket ?? loadPolymarketConfig(env), deps, bookCache: new Map<string, OrderBookFetch>(), nowMs: () => svNowMs });
   let opened = 0;
 
   const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, m })));
@@ -841,17 +888,28 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
       // catches a legitimate entry — it only backstops a bad-quote / mislabelled-favourite artifact.
       const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg });
       if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `[${profile}] конкурентный сет подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
-      const meta = tennisSetValueEntryMeta({ favPrice: entryCents, edge: r.edge, kelly: r.kellyFraction, stake: r.stake, thinnessUsd: ml.liquidity || null, setNum: last.set_num ?? 2 });
+      // book-fill-m1: fill against the LIVE moneyline book. On ≥$10k-declared moneylines the skip rate
+      // should be LOW — a high no_book_liquidity rate here points at OUR book mapping first (tokenId /
+      // side / limit vs spread), then the market (build notes: Set-Value routing criterion).
+      const decisionId = R.uid();
+      const ack = await fillTennisEntry(executor, decisionId, { token: ml.token, entryCents, sizeUsd: r.stake, fairProbPct: ourProb * 100, strategyId: SET_VALUE_STRATEGY, profileId: profile, matchId: m.id });
+      if (ack.status !== "filled") {
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `[${profile}] SET-VALUE «${favName}» не исполнен: no_book_liquidity:${ack.reason} (${TENNIS_SKIP_KIND[ack.reason ?? ""] ?? ack.reason}) — манилайн ${entryCents}¢, заявл. ликв. $${Math.round(ml.liquidity || 0)}`, created_at: now });
+        continue;
+      }
+      const fillCents = ack.avgFillPriceCents ?? entryCents;
+      const fillStake = ack.filledSizeUsd;
+      const meta = tennisSetValueEntryMeta({ favPrice: fillCents, edge: r.edge, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: last.set_num ?? 2 });
       const betId = R.uid();
       R.insertBet(db, {
         id: betId, match_id: m.id, strategy_id: SET_VALUE_STRATEGY, risk_profile_id: profile, market_label: favName,
-        status: "open", proposed_price: entryCents, entry_price: entryCents, current_price: entryCents, closing_price: null,
-        ai_prob: ourProb, stake: r.stake, rationale: `set-value (теннис): фаворит «${favName}» проиграл 1-й сет, манилайн ${entryCents}¢, P(камбэк)≈${Math.round(ourProb * 100)}%. ${pick.reason || dec.note || ""}`,
+        status: "open", proposed_price: entryCents, entry_price: fillCents, current_price: fillCents, closing_price: null,
+        ai_prob: ourProb, stake: fillStake, rationale: `set-value (теннис): фаворит «${favName}» проиграл 1-й сет, манилайн ${entryCents}¢, P(камбэк)≈${Math.round(ourProb * 100)}%. ${pick.reason || dec.note || ""}`,
         entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null,
-        entry_meta: serializeEntryMeta(meta), code_version: codeVer, created_at: now,
+        entry_meta: serializeEntryMeta(meta), code_version: codeVer, decision_id: decisionId, created_at: now,
       });
-      try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: SET_VALUE_STRATEGY, profileId: profile, size: r.stake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "enter", text: `[${profile}] SET-VALUE «${favName}» @ ${entryCents}¢ · $${Math.round(r.stake)} (edge ${(r.edge * 100).toFixed(1)}%, тейк 50% @ ${SET_VALUE_ARMED.takeLowCents}¢ / стоп брейк-невозврат K${SET_VALUE_ARMED.thesisStopReceiverGames} / floor ${entryCents - SET_VALUE_ARMED.floorBelowEntryCents}¢, пороги:${SET_VALUE_EPOCH})`, created_at: now });
+      try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: SET_VALUE_STRATEGY, profileId: profile, size: fillStake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "enter", text: `[${profile}] SET-VALUE «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(r.edge * 100).toFixed(1)}%, тейк 50% @ ${SET_VALUE_ARMED.takeLowCents}¢ / стоп брейк-невозврат K${SET_VALUE_ARMED.thesisStopReceiverGames} / floor ${fillCents - SET_VALUE_ARMED.floorBelowEntryCents}¢, пороги:${SET_VALUE_EPOCH})`, created_at: now });
       opened++;
     }
   }

@@ -63,6 +63,11 @@ export interface OrderAck {
   filledSizeUsd: number;          // actually filled so far (partial-aware; §2.2)
   avgFillPriceCents: Cents | null;
   note?: string;                  // human trace (VWAP / slippage / clamp / skip reason)
+  /** Machine reason a BUY did not fill (untradeable_market / orderbook_unavailable /
+   *  no_edge / phantom) — the two-fork liquidity map. Absent on a fill. */
+  reason?: string;
+  /** A fill was clamped by book depth (THIN book: filled smaller than requested). */
+  clamped?: boolean;
 }
 
 export interface CancelAck { clientOrderId: string; cancelled: boolean; note?: string }

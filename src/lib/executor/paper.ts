@@ -39,12 +39,12 @@ export class PaperExecutor implements Executor {
       const fair = order.fairValueCents ?? order.limitPriceCents;
       const r = paperBuyFill(bookRes, order.sizeUsd, fair, order.limitPriceCents, order.limitPriceCents, poly.exec, ENTRY_PHANTOM_DIVERGENCE);
       if (r.skip) {
-        // No tradeable book / phantom → NEVER a fabricated fill. Honest reject; the
-        // note carries the machine reason (untradeable_market_block / orderbook_unavailable /
-        // entry_phantom_block) so the caller can classify it as no_book_liquidity.
-        return { clientOrderId: order.clientOrderId, exchangeOrderId: null, status: "rejected", filledSizeUsd: 0, avgFillPriceCents: null, note: r.note ?? NO_BOOK_LIQUIDITY };
+        // No tradeable book / phantom → NEVER a fabricated fill. Honest reject; `reason`
+        // is the machine code (untradeable_market = empty/placeholder vs orderbook_unavailable
+        // = transient vs no_edge vs phantom) so the caller maps it to the right skip counter.
+        return { clientOrderId: order.clientOrderId, exchangeOrderId: null, status: "rejected", filledSizeUsd: 0, avgFillPriceCents: null, reason: r.reason ?? "untradeable_market", note: r.note ?? NO_BOOK_LIQUIDITY };
       }
-      return { clientOrderId: order.clientOrderId, exchangeOrderId: null, status: "filled", filledSizeUsd: r.stake, avgFillPriceCents: r.priceCents, note: r.note };
+      return { clientOrderId: order.clientOrderId, exchangeOrderId: null, status: "filled", filledSizeUsd: r.stake, avgFillPriceCents: r.priceCents, clamped: r.clamped, note: r.note };
     }
     // SELL: sell the shares implied by sizeUsd at the limit into the bid side.
     const shares = order.limitPriceCents > 0 ? order.sizeUsd / (order.limitPriceCents / 100) : 0;

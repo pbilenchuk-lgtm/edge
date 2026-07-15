@@ -36,8 +36,19 @@ export function scaleCost(cost: FillCost, frac: number): FillCost {
   return { ...cost, shares: cost.shares * f, notionalUsd: cost.notionalUsd * f, feeUsd: cost.feeUsd * f, slipUsd: cost.slipUsd * f };
 }
 
+/**
+ * Machine reason an entry did NOT fill — a two-fork liquidity map over time (build notes):
+ *  - untradeable_market : book EMPTY / placeholder — nothing to trade, ever (coverage map)
+ *  - orderbook_unavailable : book exists but no offers right now / fetch failed — transient
+ *  - no_edge : depth exists but slippage eats the edge — priced out
+ *  - phantom : effective price drifted from the decision — stale/phantom book
+ * A THIN book (depth < requested size) does NOT reject — it fills SMALLER and sets `clamped`
+ * (the "where we lose size" signal / the future partial-fill argument, §2.2).
+ */
+export type FillRejectReason = "untradeable_market" | "orderbook_unavailable" | "no_edge" | "phantom";
+
 /** The result of an entry fill (was `EntryExec` in lifecycle). */
-export interface EntryFillResult { skip: boolean; priceCents: number; stake: number; note?: string; retry?: boolean; cost?: FillCost }
+export interface EntryFillResult { skip: boolean; priceCents: number; stake: number; note?: string; retry?: boolean; cost?: FillCost; reason?: FillRejectReason; clamped?: boolean }
 /** The result of an exit fill (was the return of `sellVwapCents`). */
 export interface SellFillResult { cents: number; note?: string; fromBook: boolean; bestBidCents?: number; cost?: FillCost }
 
@@ -74,15 +85,15 @@ export function paperBuyFill(
   if (book && book.asks.length) {
     const bestAsk = book.asks[0].priceCents;
     const capUsd = maxExecutableBuyUsd(book.asks, fairCents, { edgeFloorCents: exec.edgeFloorCents, maxImpactCents: exec.maxImpactCents, feeRate: exec.takerFeeRate });
-    if (capUsd <= 0) return { skip: true, priceCents: quoteCents, stake: 0, note: `нет объёма с эджем (аск ${bestAsk}¢ vs справ. ${fairCents.toFixed(0)}¢, слиппедж съедает край)` };
+    if (capUsd <= 0) return { skip: true, priceCents: quoteCents, stake: 0, reason: "no_edge", note: `нет объёма с эджем (аск ${bestAsk}¢ vs справ. ${fairCents.toFixed(0)}¢, слиппедж съедает край)` };
     const stake = Math.min(sizeUsd, capUsd);
     const fill = simulateBuy(book.asks, stake);
     const fee = takerFeeCents(fill.avgPriceCents, exec.takerFeeRate);
     const eff = Math.round((fill.avgPriceCents + fee) * 10) / 10;
     const slip = Math.round((fill.avgPriceCents - bestAsk) * 10) / 10;
     const ph = phantomFill(eff);
-    if (ph) return { skip: true, priceCents: eff, stake: 0, note: ph };
-    const capped = stake < sizeUsd - 0.5;
+    if (ph) return { skip: true, priceCents: eff, stake: 0, reason: "phantom", note: ph };
+    const capped = stake < sizeUsd - 0.5; // depth < requested → THIN: filled smaller (not a reject)
     const note = `VWAP ${fill.avgPriceCents}¢ (котир. ${bestAsk}¢${slip > 0 ? `, слип +${slip}¢` : ""}) + комиссия ${fee}¢ · сдвиг→${fill.newTopCents}¢${capped ? ` · урезан по глубине $${Math.round(sizeUsd)}→$${Math.round(stake)}` : ""}`;
     const slipAdverse = Math.max(0, slip);
     const cost: FillCost = {
@@ -91,7 +102,7 @@ export function paperBuyFill(
       feeCents: fee, feeUsd: (fill.shares * fee) / 100,
       slipCents: slipAdverse, slipUsd: (fill.shares * slipAdverse) / 100, fromBook: true,
     };
-    return { skip: false, priceCents: eff, stake: Math.round(stake), note, cost };
+    return { skip: false, priceCents: eff, stake: Math.round(stake), note, cost, clamped: capped };
   }
   // No tradeable ask book → never a parametric fill (won't open a position we couldn't
   // price against a live book). Split the reason so a transient outage != a placeholder:

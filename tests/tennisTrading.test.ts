@@ -179,13 +179,14 @@ function buybackBet(db: ReturnType<typeof openDb>, mid: string, id: string, plan
   R.insertBet(db, { id, match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: profile, market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: plan }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
 }
 
-test("tennis calibration: the entry plan carries the INTERIM defaults (K=3, epoch=interim)", () => {
+test("tennis calibration: the entry plan carries the INTERIM defaults (K=3, epoch=book-fill-m1)", () => {
   // The prop-priced 105-mark calibration was discarded (BACKLOG "price layer = the MONEYLINE"):
-  // thresholds return to interim (K=3) until ~100 marks re-accumulate on the moneyline.
+  // thresholds return to interim (K=3) until ~100 marks re-accumulate on the moneyline. The epoch
+  // tag is now book-fill-m1 — the hard break where entries fill against the live book, not 0¢.
   const meta = tennisEntryMeta({ favPrice: 45, prePrice: 62, edge: 0.1, kelly: 0.2, stake: 100, thinnessUsd: 5000, setNum: 1 });
   const plan = meta.exitPlan as any;
   assert.equal(plan.game_count_stop.receiver_games, 3, "interim game-count stop");
-  assert.equal(plan.armed_epoch, "interim");
+  assert.equal(plan.armed_epoch, "book-fill-m1");
   assert.equal(plan.take_price.at_cents, 59, "pre-break 62 − 3¢ buffer (kept)");
   assert.equal(plan.catastrophic_floor.at_cents, 30, "entry 45 − 15¢ floor (held structural)");
 });
