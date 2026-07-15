@@ -221,6 +221,7 @@ CREATE TABLE IF NOT EXISTS bets (
   entry_meta     TEXT,             -- JSON snapshot at decision time (edge/kelly/probs/calibration/
                                    -- phase/score/thinness/exitPlan/…) for risk-profile analytics
   code_version   TEXT,             -- system epoch at entry — segregate pre/post-fix eras in analysis
+  decision_id    TEXT,             -- stable id of the decision (twin link paper↔real order, spec §0.1)
   created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bets_match_strat ON bets(match_id, strategy_id);

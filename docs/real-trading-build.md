@@ -1,0 +1,65 @@
+# Real-Trading Infrastructure — Build Notes
+
+Companion to the owner spec (`real_trading_infrastructure_spec.md`). Tracks how the
+spec maps onto THIS codebase and the sequencing decisions taken with the owner.
+
+## Prime directive: build ≠ enable
+
+Everything is built with `REAL_TRADING=off` (default). The simulation does not change,
+loses no data point, and takes no LLM out / puts none in. Enabling real money is a
+separate owner decision gated on the §8 checklist.
+
+## Scope decision (owner, this session)
+
+Build **through DryRun** now (Phases A–E + UI/metrics/tests). Defer the live
+`RealExecutor` (Phase F, `@polymarket/clob-client` + wallet secrets + allowances) to a
+focused, separately-reviewed change once the owner's §10 actions (account, wallet, USDC,
+uptime monitor) are done. Rationale: F has no preconditions yet, is unverifiable against
+the exchange today, and money-moving code deserves an isolated security review — not a
+diff buried inside the mega-build. A–E deliver all the value immediately (execution-realism
+metrics via the live book, UI, safety belt, tests); F is a thin adapter over a proven contract.
+
+## Architecture findings that shape the build
+
+- **Two distinct paper-fill paths today** (the executor must unify both):
+  - **Football**: decision → `insertBet(status:"proposed")` → `autoEnter` tick runs
+    `executeEntry` (real order-book VWAP: slippage, taker fee, depth cap, phantom guard,
+    `lifecycle.ts:541`) → `updateBet(status:"open")` at `lifecycle.ts:696-717`. A real fill model.
+  - **Tennis**: decision inserts **directly** `status:"open"` at the quote with **`0¢ (paper)`**
+    slippage (`tennisTrading.ts:719/846`, `tennisPmv.ts:555`). No book model at all.
+- **The tennis path is the root of a whole bug class** (yesterday's "exit at entry price,
+  P&L fabricated to $0"): tennis never had a book-fill model. Phase A unifying tennis onto
+  the PaperExecutor's book-VWAP fill is therefore a **deliberate FIX, not an invariant**.
+  → Football: snapshot test asserts behavior UNCHANGED.
+  → Tennis: tests assert the behavior CHANGES (honest book prices, not 0¢ / entry price).
+- **No `decision_id` exists** anywhere. Added as a `bets` column (twin link paper↔real).
+  `clientOrderId` is derived deterministically from `decisionId + leg` → idempotency key.
+- **Polymarket client is read-only** (`/midpoint`, `/book`); no CLOB write client. Good —
+  the real executor is genuinely new surface. `markets.external_ref` = CLOB `token_id`.
+- **Migration idiom**: new tables via `CREATE TABLE IF NOT EXISTS` in `schema.sql`; new
+  columns via `ALTER TABLE … ADD COLUMN` in the `db.ts:178` try/catch array; CHECK changes
+  via table-rebuild (`db.ts:239`). UI toggle lives in the header `S.treasury` block
+  (`EdgeLab.tsx:603`).
+
+## Phases
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| **A** | `Executor` contract + `PaperExecutor` (unify both fill paths) + `decision_id`/`clientOrderId` | in progress |
+| **B** | `real_orders/fills/positions/ledger/whitelist` tables + repo | pending |
+| **C** | Safety belt: 4 caps, kill switch (off/dry_run/exits_only/on), idempotent retry, reconciliation, fail-closed prices | pending |
+| **spike** | CLOB capabilities-vs-assumptions doc (before D) | pending |
+| **D** | `DryRunExecutor` (real path, fills vs live book, no send) | pending |
+| **E** | Whitelist filter (single sim→real gate, `sport=football` hardcoded) | pending |
+| **F** | `RealExecutor` (live CLOB) — **deferred**, separate review | deferred |
+| **G/H/I** | UI (Sim/Real, twin-link, [STOP]) · `real_vs_paper` metrics · §9 tests | pending |
+
+## Invariants (never violated by any phase)
+
+1. Simulation → whitelist → real is the ONLY direction. Real never writes back to sim
+   (budgets, strategy stats, calibration, shadow).
+2. No LLM in the real contour. All executor decisions deterministic (§9.6).
+3. Real-contour failure degrades to paper-only with an alert (try/catch at the boundary).
+4. Tennis can never reach real this stage (`sport=football` hardcoded in whitelist validation).
+5. Hard caps + kill switch are checked IN the executor, after every upstream gate — the
+   last belt, trusting no upper layer.
