@@ -616,6 +616,15 @@ test("collectTennisSnapshots #3: a terminal transition row (live=0 Finished) is 
   assert.equal(written, 1, "the terminal Finished row (T1) is kept; the non-terminal live=0 row (T2) is still dropped");
 });
 
+test("capTennisSnapshots: hard row-cap keeps the newest N (prevents the 1.2GB bloat)", () => {
+  const db = openDb(":memory:");
+  R.upsertSport(db, "tennis", "Теннис");
+  for (let i = 0; i < 25; i++) R.insertTennisSnapshot(db, { event_key: "E", provider: "p", batch_at: `2026-07-14T00:${String(i).padStart(2, "0")}:00Z`, p1: "a", p2: "b", tournament: null, event_type: null, live: 1, status: null, sets_p1: 0, sets_p2: 0, set_num: 1, games_p1: 0, games_p2: 0, game_points: null, server: null, pm_match_id: "m", pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: "{}" });
+  assert.equal(R.capTennisSnapshots(db, 10), 15, "dropped the oldest 15");
+  assert.equal(R.tennisSnapshotCount(db), 10, "newest 10 kept");
+  assert.equal(R.capTennisSnapshots(db, 10), 0, "idempotent — already at cap");
+});
+
 test("settleTennisBets: a retirement resolves to the advancing (non-retiring) player", () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });

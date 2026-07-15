@@ -1474,7 +1474,7 @@ export async function runAutoCycle(
   const exited = [...await step("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
   const entered = await step("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
   stepSync("prune", () => R.pruneMarketSnapshots(db), 0); // keep the snapshot history bounded (persistent DB)
-  stepSync("pruneProviderSnapshots", () => { const cut = new Date((Date.parse(nowFn(deps)()) || Date.now()) - SNAPSHOT_RETENTION_DAYS * 86400_000).toISOString(); R.pruneSnapshots(db, cut); R.pruneTennisSnapshots(db, cut); return 0; }, 0); // snapshot retention — bounded for the 1 GB disk (football + tennis)
+  stepSync("pruneProviderSnapshots", () => { const cut = new Date((Date.parse(nowFn(deps)()) || Date.now()) - SNAPSHOT_RETENTION_DAYS * 86400_000).toISOString(); R.pruneSnapshots(db, cut); R.pruneTennisSnapshots(db, cut); R.capTennisSnapshots(db); R.capTennisMapLog(db); return 0; }, 0); // snapshot retention + hard row-caps — a burst once bloated tennis_snapshots to 1.2 GB and starved boot
   // Bound the matches table: drop finished/stale matches that carry NO bets (the
   // Polymarket discovery flood). Never touches a match with betting history, so
   // metrics/P&L are preserved. Keeps buildAppData's per-poll scan bounded (§502).

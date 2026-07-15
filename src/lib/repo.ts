@@ -1097,6 +1097,21 @@ export function tennisSnapshotCount(db: Database): number {
 export function pruneTennisSnapshots(db: Database, olderThanIso: string): number {
   return db.prepare(`DELETE FROM tennis_snapshots WHERE batch_at < ?`).run(olderThanIso).changes ?? 0;
 }
+// Hard row-cap backstop: if a burst (e.g. a catch-up storm) wrote far more snapshots than the
+// time-retention keeps, drop the oldest beyond `keep`. Prevents the table (with its big raw blobs)
+// from bloating the DB file — it hit 1.2 GB once, which starved boot. Cheap (uses the batch_at index).
+export function capTennisSnapshots(db: Database, keep = 20000): number {
+  const n = tennisSnapshotCount(db);
+  if (n <= keep) return 0;
+  return db.prepare(`DELETE FROM tennis_snapshots WHERE batch_at < (SELECT batch_at FROM tennis_snapshots ORDER BY batch_at DESC LIMIT 1 OFFSET ?)`).run(keep).changes ?? 0;
+}
+// tennis_map_log is pure observability (mapping decisions) and is written every collection pass —
+// it accumulated 47k rows. Keep only the newest `keep`.
+export function capTennisMapLog(db: Database, keep = 3000): number {
+  const n = (db.prepare(`SELECT COUNT(*) n FROM tennis_map_log`).get() as { n: number }).n;
+  if (n <= keep) return 0;
+  return db.prepare(`DELETE FROM tennis_map_log WHERE created_at < (SELECT created_at FROM tennis_map_log ORDER BY created_at DESC LIMIT 1 OFFSET ?)`).run(keep).changes ?? 0;
+}
 
 export interface TennisMapLogRow { id?: string; event_key: string; players: string | null; verdict: string; match_id: string | null; score: number | null; candidates: string | null; created_at: string }
 export function insertTennisMapLog(db: Database, r: TennisMapLogRow): void {

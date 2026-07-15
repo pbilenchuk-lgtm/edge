@@ -537,6 +537,11 @@ CREATE TABLE IF NOT EXISTS tennis_snapshots (
   created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tennis_snap_event ON tennis_snapshots(event_key, batch_at);
+-- The per-MATCH lookup ("newest snapshot for pm_match_id") is the hot path for settle / finish /
+-- exit / the fixtures poller and for every match card. WITHOUT this index each of those was a FULL
+-- SCAN of tennis_snapshots — fine when tiny, but at ~50k rows it blocked the event loop for minutes
+-- on boot (the Render "no open HTTP ports" port-scan timeout). Keep it.
+CREATE INDEX IF NOT EXISTS idx_tennis_snap_match ON tennis_snapshots(pm_match_id, batch_at);
 
 -- tennis_map_log — every API-Tennis ↔ Polymarket mapping decision (auto/review/skip) with
 -- its score + candidate list. An unmapped/gray match NEVER trades; this is the evidence
