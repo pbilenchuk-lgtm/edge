@@ -2,9 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { parseProp, theoForProp, resolveTennisProp, scanMatchProps, finalSetsFromRaw, pmvTour, corrCluster, propFirstIsP1, type FinalSets } from "../src/lib/tennisPmv.js";
+import { parseProp, theoForProp, resolveTennisProp, scanMatchProps, finalSetsFromRaw, pmvTour, corrCluster, propFirstIsP1, settleTennisPmvBets, type FinalSets } from "../src/lib/tennisPmv.js";
 import { tennisTheo, BASE_HOLD } from "../src/lib/tennisMarkov.js";
 import { migrateTennisPmvStrategy } from "../src/lib/seed.js";
+import { serializeEntryMeta } from "../src/lib/betMeta.js";
 
 const Q = "Iasi Open: Kawa vs Waltert ";
 
@@ -41,7 +42,7 @@ test("scan: deviation ≥7¢ → enter; ≥18¢ → provenance_review (anti-Draw
   const db = openDb(":memory:");
   const theo = tennisTheo(0.65, BASE_HOLD.wta); // must match the scan's anchor (WTA, hard)
   const setGamesLabel = Q + "Set 1 Over 8.5";
-  const t = Math.round(theoForProp(parseProp(setGamesLabel)!, theo)! * 100); // theoCents for this prop
+  const t = Math.round(theoForProp(parseProp(setGamesLabel)!, theo, true)! * 100); // theoCents for this prop
   const mid = seedScan(db, 65, [
     { label: setGamesLabel, mid: t - 10, liq: 3000 },                 // dev +10 → ENTER
     { label: Q + "Set 2 Over 8.5", mid: t - 25, liq: 3000 },          // dev +25 → PROVENANCE (anti-Draw)
@@ -67,7 +68,7 @@ test("flag-only mode (default): the scan logs would-be entries but places NO bet
   migrateTennisPmvStrategy(db);
   const theo = tennisTheo(0.65, BASE_HOLD.wta);
   const l = Q + "Set 1 Over 8.5";
-  const mid = seedScan(db, 65, [{ label: l, mid: Math.round(theoForProp(parseProp(l)!, theo)! * 100) - 12, liq: 4000 }]);
+  const mid = seedScan(db, 65, [{ label: l, mid: Math.round(theoForProp(parseProp(l)!, theo, true)! * 100) - 12, liq: 4000 }]);
   delete process.env.TENNIS_PMV_FLAG_ONLY; // default → flag-only ON
   const opened = await tennisPmvTickImport(db);
   assert.equal(opened, 0, "no bets placed in flag-only mode");
@@ -80,7 +81,7 @@ test("scan tick + correlation: ≤2 props/match of DIFFERENT families", async ()
   process.env.TENNIS_PMV_FLAG_ONLY = "false"; // exercise the real betting path
   migrateTennisPmvStrategy(db);
   const theo = tennisTheo(0.65, BASE_HOLD.wta);
-  const cents = (label: string) => Math.round(theoForProp(parseProp(label)!, theo)! * 100);
+  const cents = (label: string) => Math.round(theoForProp(parseProp(label)!, theo, true)! * 100);
   const l1 = Q + "Set 1 Over 8.5", l2 = Q + "Set 2 Over 8.5", l3 = Q + "Total Sets: Over 2.5", l4 = Q + "Match Over 20.5";
   const mid = seedScan(db, 65, [
     { label: l1, mid: cents(l1) - 12, liq: 4000 },  // total_games (set)
@@ -133,7 +134,7 @@ test("P4 UNIFORMITY GUARD: a family whose passing edges all lean one side is STO
   process.env.TENNIS_PMV_FLAG_ONLY = "false"; // would bet, but the guard must block the biased family
   migrateTennisPmvStrategy(db);
   const theo = tennisTheo(0.65, BASE_HOLD.wta);
-  const t = Math.round(theoForProp(parseProp(Q + "Set 1 Over 8.5")!, theo)! * 100);
+  const t = Math.round(theoForProp(parseProp(Q + "Set 1 Over 8.5")!, theo, true)! * 100);
   // 6 matches, each with one "Set 1 OVER" underpriced → all passing edges lean "over" → model bias.
   const mids: string[] = [];
   for (let i = 0; i < 6; i++) mids.push(seedScan(db, 65, [{ label: `WTA: P${i}a vs P${i}b Set 1 Over 8.5`, mid: t - 12, liq: 4000 }]));
@@ -156,6 +157,35 @@ test("prop settle: a completed match resolves every family", () => {
   assert.equal(resolveTennisProp(Q + "Match Under 23.5", fsFull, opt), true, "19 games < 24 → under");
   assert.equal(resolveTennisProp("Set 1 Winner: Kawa vs Waltert", fsFull, opt), true, "Kawa took set 1");
   assert.equal(resolveTennisProp(Q + "Set 1 Over 8.5", fsFull, opt), true, "set 1 had 10 games");
+});
+
+test("orientation (D): theoForProp orients set_winner AND set_handicap by firstIsP1 (single source)", () => {
+  const theo = tennisTheo(0.65, BASE_HOLD.wta); // scout p1 is the favourite
+  const hcap = parseProp("Set Handicap: Kawa (-1.5) vs Waltert (+1.5)")!; // handicapOnFirst=true (label-first carries -1.5)
+  const asP1 = theoForProp(hcap, theo, true)!;  // label-first == scout p1 (favourite) → P(p1 wins 2-0), high
+  const asP2 = theoForProp(hcap, theo, false)!; // label-first == scout p2 (underdog) → P(p2 wins 2-0), low
+  assert.ok(asP1 > asP2 + 0.05, "same handicap label, opposite orientation → mirrored theo (old code ignored firstIsP1)");
+  const sw = parseProp("Set 1 Winner: Kawa vs Waltert")!;
+  assert.ok(theoForProp(sw, theo, true)! > theoForProp(sw, theo, false)!, "set_winner P(label-first wins set) flips with orientation");
+  assert.equal(theoForProp(sw, theo, null), null, "player-specific prop with unresolved orientation → null (don't price)");
+  assert.equal(theoForProp(hcap, theo, null), null, "handicap with unresolved orientation → null");
+});
+
+test("orientation single-source (C): a reversed-order set_winner settles on the PROP's player, not the moneyline's", () => {
+  const db = openDb(":memory:");
+  migrateTennisPmvStrategy(db);
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "pm-atp", sport_id: "tennis", name: "ATP", budget: 0, external_league: null, created_at: "t" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-atp", home: "Carlos Alcaraz", away: "Jannik Sinner", state: "live", lineup_out: true, kickoff_at: "2026-07-14T12:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid } as any);
+  // Finished: Sinner (scout p2 = score_second) won 6-4 6-3 → advancing second.
+  R.insertTennisSnapshot(db, { event_key: "W", provider: "apitennis", batch_at: "2026-07-14T14:00:00Z", p1: "C. Alcaraz", p2: "J. Sinner", tournament: "Wimbledon", event_type: "ATP Singles", live: 0, status: "Finished", sets_p1: 0, sets_p2: 2, set_num: 2, games_p1: 3, games_p2: 6, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "Second Player", scores: [{ score_set: 1, score_first: 4, score_second: 6 }, { score_set: 2, score_first: 3, score_second: 6 }] }) });
+  // Open PMV bet on the REVERSED-order prop: label-first = Sinner = scout p2. Orientation frozen at entry.
+  R.insertBet(db, { id: "pmv1", match_id: mid, strategy_id: "tennis_pmv", risk_profile_id: "medium", market_label: "Wimbledon: Sinner vs Alcaraz Set 1 Winner", status: "open", proposed_price: 45, entry_price: 45, current_price: 45, closing_price: null, ai_prob: 0.55, stake: 50, rationale: "pmv", entered_minute: "предматч", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "prematch", propFirstIsP1: false }), code_version: "e5", created_at: "t" } as any);
+  assert.equal(settleTennisPmvBets(db, { now: () => "2026-07-14T15:00:00Z" }), 1);
+  // Sinner (the prop's first-named) won set 1 6-4 → the bet WON. The moneyline orientation
+  // (Alcaraz=first) — the old code's source — would have wrongly settled this LOST.
+  assert.equal(R.getBet(db, "pmv1")!.status, "settled_won", "reversed-order set_winner settles on the prop's own player");
 });
 
 test("prop settle: total_sets respects the O/U LINE, not a hardcoded 2.5 (bo5 3-0 is UNDER 3.5)", () => {

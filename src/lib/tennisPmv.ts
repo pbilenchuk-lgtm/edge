@@ -125,13 +125,31 @@ export function parseProp(label: string): ParsedProp | null {
 }
 
 /** Theoretical probability of the STORED market's outcome (the side its price refers to), 0..1,
- *  with the Gate-0.2 void haircut applied to the completion-conditional families. */
-export function theoForProp(p: ParsedProp, theo: TennisTheo): number | null {
+ *  with the Gate-0.2 void haircut applied to the completion-conditional families.
+ *
+ *  ORIENTATION (single source): the theo core is anchored to SCOUT p1 (a20/b20/set1WinnerA all name
+ *  scout p1). A prop's price refers to the prop LABEL's first-named player, which may be scout p1 OR
+ *  p2. `firstIsP1` (from propFirstIsP1 on THIS prop's label) reconciles the two for the player-specific
+ *  families (set_winner, set_handicap); when it's needed but null the prop can't be priced → return
+ *  null. Order-symmetric families (total_sets / total_games) ignore it. */
+export function theoForProp(p: ParsedProp, theo: TennisTheo, firstIsP1: boolean | null): number | null {
   const voidAdj = (x: number) => VOID_FAMILIES.has(p.family) ? PMV_COMPLETE_PROB * x + (1 - PMV_COMPLETE_PROB) * 0.5 : x;
+  const a20 = theo.dist.sets.a20, b20 = theo.dist.sets.b20; // P(scout p1 / p2 wins 2-0)
   let base: number | null = null;
   if (p.family === "total_sets") base = p.side === "under" ? theo.dist.pTwoSets : theo.totalSetsOver25;
-  else if (p.family === "set_winner") base = theo.set1WinnerA; // price = P(first-named wins the set)
-  else if (p.family === "set_handicap") base = p.handicapOnFirst ? theo.setHandicapA15 : (1 - theo.dist.sets.b20);
+  else if (p.family === "set_winner") {
+    if (firstIsP1 == null) return null;                     // can't map the priced side to a player → don't price
+    base = firstIsP1 ? theo.set1WinnerA : 1 - theo.set1WinnerA; // P(label-first wins the set)
+  }
+  else if (p.family === "set_handicap") {
+    if (firstIsP1 == null) return null;
+    // Price = P(label-first covers). handicapOnFirst ⇒ label-first carries −1.5 (covers iff wins 2-0);
+    // else label-first carries +1.5 (covers iff label-SECOND does NOT win 2-0). Map label-first/second
+    // onto scout a20/b20 via firstIsP1. (Old code assumed label-first==scout-p1 → wrong on reversed labels.)
+    base = p.handicapOnFirst
+      ? (firstIsP1 ? a20 : b20)
+      : 1 - (firstIsP1 ? b20 : a20);
+  }
   else if (p.family === "total_games" && p.line != null) {
     const over = p.scope === "match" ? theo.matchGamesOver(p.line) : theo.setGamesOver(p.line);
     base = p.side === "under" ? 1 - over : over;
@@ -139,7 +157,7 @@ export function theoForProp(p: ParsedProp, theo: TennisTheo): number | null {
   return base == null ? null : voidAdj(base);
 }
 
-export interface PmvCandidate { label: string; family: PropFamily; side: string; cluster: string; midCents: number; theoCents: number; deviation: number; bookUsd: number; action: "enter" | "provenance_review" | "skip"; reason: string }
+export interface PmvCandidate { label: string; family: PropFamily; side: string; cluster: string; midCents: number; theoCents: number; deviation: number; bookUsd: number; action: "enter" | "provenance_review" | "skip"; reason: string; firstIsP1: boolean | null }
 export interface PmvMatchScan { matchId: string; players: { p1: string; p2: string }; moneylineCents: number | null; delta: number | null; tradeable: boolean; candidates: PmvCandidate[] }
 
 // PMV scope: ATP/WTA SINGLES only (the Gate-0.1 build verdict was measured on pm-atp+pm-wta; base_hold
@@ -169,18 +187,23 @@ export function scanMatchProps(db: Database, matchId: string, players: { p1: str
     if (!parsed) continue; // moneyline or unknown
     const book = Number(mk.liquidity ?? 0) || 0;
     const mid = mk.price;
+    // Orientation resolved ONCE per prop from ITS OWN label vs the scout players — the single source
+    // every downstream reader (theo here, and settlement via the frozen bet meta) shares.
+    const first = propFirstIsP1(mk.label, players);
     const push = (action: PmvCandidate["action"], reason: string, theoCents = 0, dev = 0) =>
-      out.candidates.push({ label: mk.label, family: parsed.family, side: parsed.side, cluster: corrCluster(parsed.family), midCents: mid, theoCents, deviation: dev, bookUsd: Math.round(book), action, reason });
+      out.candidates.push({ label: mk.label, family: parsed.family, side: parsed.side, cluster: corrCluster(parsed.family), midCents: mid, theoCents, deviation: dev, bookUsd: Math.round(book), action, reason, firstIsP1: first });
     // (P4.1) Placeholder: a prop pinned at ~50¢ is an untraded default, not a real price → skip.
     if (Math.abs(mid - 50) <= PMV_PLACEHOLDER_BAND) { push("skip", `плейсхолдер ~50¢ (нет реальной цены)`); continue; }
-    // (P4.3) Contract-side provenance for the collapsed families:
-    //  • Set Handicap with an ambiguous "+/-1.5" (no explicit "(-1.5)" side) → we can't tell which
-    //    player the line favours → block (provenance), don't guess.
-    //  • Set Winner priced on the SECOND-named player → flip the theo to that side.
-    let theoProb = theoForProp(parsed, theo);
+    // (P4.3) Set Handicap with an ambiguous "+/-1.5" (no explicit "(-1.5)" side) → we can't tell which
+    // player the line favours → block (provenance), don't guess.
     if (parsed.family === "set_handicap" && !/\(\s*[-−]\s*1\.5\s*\)/.test(mk.label)) { push("provenance_review", `сторона гандикапа неоднозначна (нет явного «(-1.5)») — провенанс, не торгуем`); continue; }
-    if (parsed.family === "set_winner" && theoProb != null) { const first = propFirstIsP1(mk.label, players); if (first === false) theoProb = 1 - theoProb; else if (first == null) { push("skip", `не удалось сопоставить стороны Set Winner — провенанс`); continue; } }
-    if (theoProb == null) continue;
+    // theoForProp orients set_winner AND set_handicap off `first` (single source); null on a
+    // player-specific family means the sides couldn't be mapped → provenance skip (don't guess).
+    const theoProb = theoForProp(parsed, theo, first);
+    if (theoProb == null) {
+      if (parsed.family === "set_winner" || parsed.family === "set_handicap") { push("skip", `не удалось сопоставить стороны (${parsed.family}) с игроками — провенанс`); }
+      continue;
+    }
     const theoCents = Math.round(theoProb * 1000) / 10;
     const dev = Math.round((theoCents - mid) * 10) / 10;
     if (book < PMV_BOOK_MIN) push("skip", `книга $${Math.round(book)} < $${PMV_BOOK_MIN}`, theoCents, dev);
@@ -257,8 +280,12 @@ export function settleTennisPmvBets(db: Database, deps: EngineDeps = {}): number
     const row = db.prepare(`SELECT raw FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(b.match_id) as { raw?: string } | undefined;
     const fs = finalSetsFromRaw(row?.raw ?? null);
     if (!fs) continue; // final per-set detail not readable → leave open, retry next tick
-    const ml = tennisMoneyline(db, b.match_id, { p1: fin.p1, p2: fin.p2 });
-    const won = resolveTennisProp(b.market_label, fs, { retired: fin.retired, canceled: fin.canceled, firstIsP1: ml ? ml.firstIsP1 : true });
+    // Orientation for settlement comes from the bet's OWN prop label — FROZEN on the bet at entry
+    // (entry_meta.propFirstIsP1), else recomputed from the same resolver on this prop's label. NEVER
+    // the moneyline's orientation (the C bug: a reversed-order prop settled on the wrong player).
+    const metaFirst = parseEntryMeta(b.entry_meta)?.propFirstIsP1;
+    const firstIsP1 = metaFirst != null ? metaFirst : propFirstIsP1(b.market_label, { p1: fin.p1, p2: fin.p2 });
+    const won = resolveTennisProp(b.market_label, fs, { retired: fin.retired, canceled: fin.canceled, firstIsP1: firstIsP1 ?? true });
     const entry = b.entry_price ?? 0;
     if (won == null) {
       R.updateBet(db, b.id, { status: "settled_void", result: null, payout: b.stake ?? 0, closing_price: b.current_price ?? entry ?? null, settled_at: now, settled_by: "void" });
@@ -274,13 +301,13 @@ export function settleTennisPmvBets(db: Database, deps: EngineDeps = {}): number
 }
 
 /** Build the decision-time entry_meta for a PMV prop bet — held to settle, no price stop (thin book). */
-export function pmvEntryMeta(o: { theoCents: number; midCents: number; deviation: number; delta: number; edge: number; kelly: number; stake: number; bookUsd: number; family: PropFamily }): BetEntryMeta {
+export function pmvEntryMeta(o: { theoCents: number; midCents: number; deviation: number; delta: number; edge: number; kelly: number; stake: number; bookUsd: number; family: PropFamily; firstIsP1: boolean | null }): BetEntryMeta {
   return {
     phase: "prematch", minute: null, scoreHome: null, scoreAway: null,
     edge: Math.round(o.edge * 1000) / 1000, aiProb: Math.round((o.theoCents / 100) * 1000) / 1000, derivedProb: Math.round((o.theoCents / 100) * 1000) / 1000,
     marketPrice: o.midCents, impliedProb: Math.round((o.midCents / 100) * 1000) / 1000, liveProbAdjusted: null,
     kellyFraction: Math.round(o.kelly * 1000) / 1000, sizeRequested: Math.round(o.stake * 100) / 100, sizeFilled: null, entrySlipCents: null,
-    calibration: null, branchWeightSum: null, phantomCheck: null, marketThinnessUsd: o.bookUsd,
+    calibration: null, branchWeightSum: null, phantomCheck: null, marketThinnessUsd: o.bookUsd, propFirstIsP1: o.firstIsP1,
     winsOnEvent: false, exitPlan: {
       hold_to_settle: true, deviation_cents: o.deviation, markov_delta: o.delta, prop_family: o.family,
       note: "тонкая книга: держим до сеттла, ценовых стопов нет (главная защита — размер и порог входа)",
@@ -522,7 +549,7 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
           // Thin-book cap: never stake more than 25% of the prop's book depth.
           const stake = Math.min(r.stake, 0.25 * cand.bookUsd);
           if (stake < 1) continue;
-          const meta = pmvEntryMeta({ theoCents: cand.theoCents, midCents: cand.midCents, deviation: cand.deviation, delta: scan.delta ?? 0, edge: r.edge, kelly: r.kellyFraction, stake, bookUsd: cand.bookUsd, family: cand.family });
+          const meta = pmvEntryMeta({ theoCents: cand.theoCents, midCents: cand.midCents, deviation: cand.deviation, delta: scan.delta ?? 0, edge: r.edge, kelly: r.kellyFraction, stake, bookUsd: cand.bookUsd, family: cand.family, firstIsP1: cand.firstIsP1 });
           const betId = R.uid();
           R.insertBet(db, {
             id: betId, match_id: m.id, strategy_id: PMV_STRATEGY, risk_profile_id: profile, market_label: cand.label,

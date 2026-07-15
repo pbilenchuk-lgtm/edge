@@ -45,6 +45,11 @@ export interface BetEntryMeta {
   // analysis + strategist decision. Optional (legacy/minimal paths omit it). The
   // epoch on `code_version` segments coarsely; this records exactly what ran.
   models?: { analysis?: string | null; strategist?: string | null } | null;
+  // Tennis PROP orientation, resolved ONCE at entry against the scout players and FROZEN on the bet:
+  // does this prop market's LABEL first-named player == scout p1? Settlement reads THIS (never
+  // re-derives from the moneyline), so a prop that lists players in the opposite order to the
+  // moneyline settles on the side it was actually bought. null/undefined for non-oriented families.
+  propFirstIsP1?: boolean | null;
 }
 
 /** Serialise an entry-meta snapshot (drops undefineds; stable for CSV/analytics). */
