@@ -1139,8 +1139,9 @@ export async function strategistReassess(
       if (isPeriodic(m.id) && !stratOpen.length) {
         let skipReason: string | null = null;
         if (sid === "prematch_value") {
-          // Live-роль PMV — «защита открытого»; открытой позиции нет → защищать нечего.
-          skipReason = "PMV live: пустой портфель — защищать нечего (детерминированный пропуск, без LLM)";
+          // Live-роль Pre-match Value (футбол) — «защита открытого»; открытой позиции нет → защищать
+          // нечего. (Пишем полное имя, а не «PMV» — чтобы не путать с теннисной стратегией PMV.)
+          skipReason = "Pre-match Value live (футбол): пустой портфель — защищать нечего (детерминированный пропуск, без LLM)";
         } else if (sid === "overreaction" && !overreactionShouldCall(battleSheet ?? null, { totalGoals: (m.score_home ?? 0) + (m.score_away ?? 0), minute: m.minute ?? minuteApprox })) {
           // Вход overreaction возможен ТОЛЬКО через заряженный buyback-триггер; нет ни одного
           // с выполненными детерминированными предусловиями (событие/глубина + окно) → пропуск.
