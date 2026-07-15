@@ -663,6 +663,7 @@ CREATE TABLE IF NOT EXISTS real_fills (
   size_usd         REAL NOT NULL,
   price_cents      REAL NOT NULL,   -- effective incl. slippage
   fee_usd          REAL NOT NULL DEFAULT 0,
+  dry              INTEGER NOT NULL DEFAULT 0,  -- 1 = dry-run (simulated); real-money queries filter dry=0
   at               TEXT NOT NULL,   -- exchange/fill timestamp
   created_at       TEXT NOT NULL
 );
@@ -677,6 +678,7 @@ CREATE TABLE IF NOT EXISTS real_positions (
   avg_price_cents    REAL,
   realized_pnl_usd   REAL NOT NULL DEFAULT 0,
   unrealized_pnl_usd REAL,
+  dry                INTEGER NOT NULL DEFAULT 0,  -- 1 = dry-run position; real reconciliation filters dry=0
   updated_at         TEXT NOT NULL
 );
 
@@ -691,6 +693,7 @@ CREATE TABLE IF NOT EXISTS real_ledger (
   token_id    TEXT,
   order_id    TEXT,            -- REFERENCES real_orders(id) when the movement is order-driven
   ref         TEXT,            -- tx hash / external ref
+  dry         INTEGER NOT NULL DEFAULT 0,  -- 1 = dry-run cash movement; real balance filters dry=0
   at          TEXT NOT NULL,
   created_at  TEXT NOT NULL
 );

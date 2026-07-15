@@ -120,11 +120,11 @@ export function realOrderLatencyMs(db: Database, orderId: string, from: RealOrde
 }
 
 // ── real_fills ───────────────────────────────────────────────────────────────
-export interface RealFillRow { id: string; order_id: string; client_order_id: string; token_id: string; side: "BUY" | "SELL"; size_usd: number; price_cents: number; fee_usd: number; at: string; created_at: string }
-export function insertRealFill(db: Database, f: Omit<RealFillRow, "id">): string {
+export interface RealFillRow { id: string; order_id: string; client_order_id: string; token_id: string; side: "BUY" | "SELL"; size_usd: number; price_cents: number; fee_usd: number; dry: number; at: string; created_at: string }
+export function insertRealFill(db: Database, f: Omit<RealFillRow, "id" | "dry"> & { dry?: number }): string {
   const id = uid();
-  db.prepare(`INSERT INTO real_fills(id,order_id,client_order_id,token_id,side,size_usd,price_cents,fee_usd,at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, f.order_id, f.client_order_id, f.token_id, f.side, f.size_usd, f.price_cents, f.fee_usd, f.at, f.created_at);
+  db.prepare(`INSERT INTO real_fills(id,order_id,client_order_id,token_id,side,size_usd,price_cents,fee_usd,dry,at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, f.order_id, f.client_order_id, f.token_id, f.side, f.size_usd, f.price_cents, f.fee_usd, f.dry ?? 0, f.at, f.created_at);
   return id;
 }
 export function realFillsForOrder(db: Database, orderId: string): RealFillRow[] {
@@ -132,18 +132,22 @@ export function realFillsForOrder(db: Database, orderId: string): RealFillRow[] 
 }
 
 // ── real_positions ───────────────────────────────────────────────────────────
-export interface RealPositionRow { token_id: string; match_id: string | null; strategy_id: string | null; size_shares: number; avg_price_cents: number | null; realized_pnl_usd: number; unrealized_pnl_usd: number | null; updated_at: string }
-export function upsertRealPosition(db: Database, p: RealPositionRow): void {
+export interface RealPositionRow { token_id: string; match_id: string | null; strategy_id: string | null; size_shares: number; avg_price_cents: number | null; realized_pnl_usd: number; unrealized_pnl_usd: number | null; dry: number; updated_at: string }
+export function upsertRealPosition(db: Database, p: Omit<RealPositionRow, "dry"> & { dry?: number }): void {
   db.prepare(
-    `INSERT INTO real_positions(token_id,match_id,strategy_id,size_shares,avg_price_cents,realized_pnl_usd,unrealized_pnl_usd,updated_at)
-     VALUES(?,?,?,?,?,?,?,?)
+    `INSERT INTO real_positions(token_id,match_id,strategy_id,size_shares,avg_price_cents,realized_pnl_usd,unrealized_pnl_usd,dry,updated_at)
+     VALUES(?,?,?,?,?,?,?,?,?)
      ON CONFLICT(token_id) DO UPDATE SET match_id=excluded.match_id, strategy_id=excluded.strategy_id,
        size_shares=excluded.size_shares, avg_price_cents=excluded.avg_price_cents,
-       realized_pnl_usd=excluded.realized_pnl_usd, unrealized_pnl_usd=excluded.unrealized_pnl_usd, updated_at=excluded.updated_at`,
-  ).run(p.token_id, p.match_id, p.strategy_id, p.size_shares, p.avg_price_cents, p.realized_pnl_usd, p.unrealized_pnl_usd, p.updated_at);
+       realized_pnl_usd=excluded.realized_pnl_usd, unrealized_pnl_usd=excluded.unrealized_pnl_usd, dry=excluded.dry, updated_at=excluded.updated_at`,
+  ).run(p.token_id, p.match_id, p.strategy_id, p.size_shares, p.avg_price_cents, p.realized_pnl_usd, p.unrealized_pnl_usd, p.dry ?? 0, p.updated_at);
 }
-export function listRealPositions(db: Database): RealPositionRow[] {
-  return db.prepare(`SELECT * FROM real_positions ORDER BY updated_at DESC`).all() as RealPositionRow[];
+/** Positions. `realOnly` (reconciliation / real balance) excludes dry-run simulated positions so a
+ *  dry rehearsal can't pollute the real books when the owner flips dry_run→on. */
+export function listRealPositions(db: Database, realOnly = false): RealPositionRow[] {
+  return (realOnly
+    ? db.prepare(`SELECT * FROM real_positions WHERE dry=0 ORDER BY updated_at DESC`).all()
+    : db.prepare(`SELECT * FROM real_positions ORDER BY updated_at DESC`).all()) as RealPositionRow[];
 }
 
 /** Count of positions with live size opened by a REAL (sent) order — a real order has an
@@ -151,28 +155,30 @@ export function listRealPositions(db: Database): RealPositionRow[] {
  *  is ZERO in pure dry-run (the orphan sentinel must not false-alarm on simulated positions). */
 export function realOpenPositionCount(db: Database): number {
   return (db.prepare(
-    `SELECT COUNT(*) AS n FROM real_positions p WHERE ABS(p.size_shares) > 1e-9
+    `SELECT COUNT(*) AS n FROM real_positions p WHERE ABS(p.size_shares) > 1e-9 AND p.dry = 0
        AND EXISTS (SELECT 1 FROM real_orders o WHERE o.token_id = p.token_id AND o.exchange_order_id IS NOT NULL)`,
   ).get() as { n: number }).n;
 }
 
 // ── real_ledger ──────────────────────────────────────────────────────────────
-export interface RealLedgerRow { id: string; kind: RealLedgerKind; amount_usd: number; token_id: string | null; order_id: string | null; ref: string | null; at: string; created_at: string }
-export function insertRealLedger(db: Database, e: Omit<RealLedgerRow, "id">): string {
+export interface RealLedgerRow { id: string; kind: RealLedgerKind; amount_usd: number; token_id: string | null; order_id: string | null; ref: string | null; dry: number; at: string; created_at: string }
+export function insertRealLedger(db: Database, e: Omit<RealLedgerRow, "id" | "dry"> & { dry?: number }): string {
   const id = uid();
-  db.prepare(`INSERT INTO real_ledger(id,kind,amount_usd,token_id,order_id,ref,at,created_at) VALUES(?,?,?,?,?,?,?,?)`)
-    .run(id, e.kind, e.amount_usd, e.token_id, e.order_id, e.ref, e.at, e.created_at);
+  db.prepare(`INSERT INTO real_ledger(id,kind,amount_usd,token_id,order_id,ref,dry,at,created_at) VALUES(?,?,?,?,?,?,?,?,?)`)
+    .run(id, e.kind, e.amount_usd, e.token_id, e.order_id, e.ref, e.dry ?? 0, e.at, e.created_at);
   return id;
 }
-/** Net USDC by kind (§4.4 reconciliation reasons by TYPE, not free text). */
-export function realLedgerByKind(db: Database): Record<string, number> {
-  const rows = db.prepare(`SELECT kind, SUM(amount_usd) AS net FROM real_ledger GROUP BY kind`).all() as { kind: string; net: number }[];
+/** Net USDC by kind (§4.4 reconciliation reasons by TYPE, not free text). `realOnly` excludes dry. */
+export function realLedgerByKind(db: Database, realOnly = false): Record<string, number> {
+  const rows = db.prepare(`SELECT kind, SUM(amount_usd) AS net FROM real_ledger ${realOnly ? "WHERE dry=0" : ""} GROUP BY kind`).all() as { kind: string; net: number }[];
   const out: Record<string, number> = {};
   for (const r of rows) out[r.kind] = r.net;
   return out;
 }
-export function realLedgerBalance(db: Database): number {
-  const r = db.prepare(`SELECT COALESCE(SUM(amount_usd),0) AS bal FROM real_ledger`).get() as { bal: number };
+/** Ledger balance. `realOnly` (real reconciliation) excludes dry-run cash so a dry rehearsal
+ *  doesn't show up as a real balance when the owner flips dry_run→on. */
+export function realLedgerBalance(db: Database, realOnly = false): number {
+  const r = db.prepare(`SELECT COALESCE(SUM(amount_usd),0) AS bal FROM real_ledger ${realOnly ? "WHERE dry=0" : ""}`).get() as { bal: number };
   return r.bal ?? 0;
 }
 

@@ -73,11 +73,11 @@ function updatePosition(db: Database, o: OrderRequest, fill: DryFill, nowIso: st
   if (o.side === "BUY") {
     const newShares = prevShares + fill.shares;
     const newAvg = newShares > 0 ? (prevShares * prevAvg + fill.shares * fill.priceCents) / newShares : 0;
-    RR.upsertRealPosition(db, { token_id: o.tokenId, match_id: o.matchId, strategy_id: o.strategyId, size_shares: newShares, avg_price_cents: Math.round(newAvg * 100) / 100, realized_pnl_usd: prevReal, unrealized_pnl_usd: null, updated_at: nowIso });
+    RR.upsertRealPosition(db, { token_id: o.tokenId, match_id: o.matchId, strategy_id: o.strategyId, size_shares: newShares, avg_price_cents: Math.round(newAvg * 100) / 100, realized_pnl_usd: prevReal, unrealized_pnl_usd: null, dry: 1, updated_at: nowIso });
   } else {
     const newShares = prevShares - fill.shares;
     const realized = prevReal + (fill.shares * (fill.priceCents - prevAvg)) / 100;
-    RR.upsertRealPosition(db, { token_id: o.tokenId, match_id: o.matchId, strategy_id: o.strategyId, size_shares: newShares, avg_price_cents: prevAvg, realized_pnl_usd: Math.round(realized * 100) / 100, unrealized_pnl_usd: null, updated_at: nowIso });
+    RR.upsertRealPosition(db, { token_id: o.tokenId, match_id: o.matchId, strategy_id: o.strategyId, size_shares: newShares, avg_price_cents: prevAvg, realized_pnl_usd: Math.round(realized * 100) / 100, unrealized_pnl_usd: null, dry: 1, updated_at: nowIso });
   }
 }
 
@@ -134,9 +134,9 @@ export class DryRunExecutor implements Executor {
       return this.ack(order, "expired", 0, null, fill.note, cap.clamped);
     }
     // accounting: fill row + ledger (fill cash + fee) + position.
-    RR.insertRealFill(db, { order_id: orderId, client_order_id: order.clientOrderId, token_id: order.tokenId, side: order.side, size_usd: fill.filledUsd, price_cents: fill.priceCents, fee_usd: Math.round(fill.feeUsd * 100) / 100, at: nowIso, created_at: nowIso });
-    RR.insertRealLedger(db, { kind: "fill", amount_usd: order.side === "BUY" ? -fill.filledUsd : fill.filledUsd, token_id: order.tokenId, order_id: orderId, ref: null, at: nowIso, created_at: nowIso });
-    if (fill.feeUsd > 0.004) RR.insertRealLedger(db, { kind: "fee", amount_usd: -Math.round(fill.feeUsd * 100) / 100, token_id: order.tokenId, order_id: orderId, ref: null, at: nowIso, created_at: nowIso });
+    RR.insertRealFill(db, { order_id: orderId, client_order_id: order.clientOrderId, token_id: order.tokenId, side: order.side, size_usd: fill.filledUsd, price_cents: fill.priceCents, fee_usd: Math.round(fill.feeUsd * 100) / 100, dry: 1, at: nowIso, created_at: nowIso });
+    RR.insertRealLedger(db, { kind: "fill", amount_usd: order.side === "BUY" ? -fill.filledUsd : fill.filledUsd, token_id: order.tokenId, order_id: orderId, ref: null, dry: 1, at: nowIso, created_at: nowIso });
+    if (fill.feeUsd > 0.004) RR.insertRealLedger(db, { kind: "fee", amount_usd: -Math.round(fill.feeUsd * 100) / 100, token_id: order.tokenId, order_id: orderId, ref: null, dry: 1, at: nowIso, created_at: nowIso });
     updatePosition(db, order, fill, nowIso);
 
     const full = fill.filledUsd >= sizeUsd - 0.5;

@@ -80,6 +80,18 @@ test("DryRunExecutor: mode off → the executor is inert (rejected, nothing book
   assert.equal(RR.listRealOrders(d).length, 0, "off books nothing");
 });
 
+test("dry/real separation: a dry-run session leaves the REAL books EMPTY (no dry tails on dry_run→on)", async () => {
+  const d = db();
+  await exec(d, { bids: [{ price: "0.39", size: "1000" }], asks: [{ price: "0.40", size: "1000" }] }).place(order());
+  // The dry session booked fills/ledger/position — but ALL tagged dry.
+  assert.ok(RR.listRealPositions(d).length >= 1, "dry position exists in the dry view");
+  assert.ok(RR.realLedgerBalance(d) < 0, "dry ledger moved");
+  // The REAL views (what reconciliation + real balance read when the owner flips to 'on') are untouched.
+  assert.equal(RR.listRealPositions(d, true).length, 0, "real-only positions empty — no dry tail inherited");
+  assert.equal(RR.realLedgerBalance(d, true), 0, "real-only balance is $0 — dry cash excluded");
+  assert.equal(RR.realOpenPositionCount(d), 0, "orphan sentinel sees zero REAL positions from a dry session");
+});
+
 // ── orphan-positions sentinel ──────────────────────────────────────────────────
 test("checkOrphanPositions: a REAL open position + a no-exit mode → loud persistent alert", () => {
   const d = db();

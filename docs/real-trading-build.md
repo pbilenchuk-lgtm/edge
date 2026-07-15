@@ -196,6 +196,11 @@ time we VWAP-fill against only the book levels that satisfy the limit (asks ≤ 
 Nothing qualifies → **EXPIRED** at TIF (honest miss, anti-chase). Depth < size → **PARTIAL** to depth,
 remainder expires. We do NOT model the book evolving across the TIF window, so dry-run fill-rate is a
 **lower-bound / snapshot-at-placement estimate**. Multi-tick resting-order model = future work.
+**Reading rule (conservative asymmetry — don't misread §7 later): a LOW dry fill-rate does NOT imply a
+low real fill-rate** (a real resting order can fill as the price approaches within the TIF window, which
+the snapshot never sees) — a catastrophic dry fill-rate is a prompt to estimate "how much resting adds"
+(the multi-tick model), not a verdict. A **HIGH dry fill-rate DOES imply a high real one** (the error
+only ever under-counts fills). Our side of the asymmetry.
 Dry-run is synchronous → intra-order latency ≈ 0 by construction; the per-transition timestamp
 mechanism is real (Phase B tested 250/750ms) and shows true latency once the real executor round-trips.
 
