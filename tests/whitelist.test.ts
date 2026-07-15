@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as RR from "../src/lib/realRepo.js";
-import { addWhitelistRow, setWhitelistEnabled, matchWhitelist, proportionalRealSize, realSizeFromFraction, dryVirtualFreeUsd, realBankUsd, mirrorPaperEntryToReal } from "../src/lib/executor/whitelist.js";
+import * as R from "../src/lib/repo.js";
+import { addWhitelistRow, setWhitelistEnabled, matchWhitelist, proportionalRealSize, realSizeFromFraction, dryVirtualFreeUsd, realBankUsd, mirrorPaperEntryToReal, sweepDryExits } from "../src/lib/executor/whitelist.js";
 import type { Bet } from "../src/lib/types.js";
 
 function db() { const d = openDb(":memory:"); initSchema(d); return d; }
@@ -87,6 +88,30 @@ test("realSizeFromFraction: conviction fraction × real free, row-capped", () =>
   assert.equal(realSizeFromFraction(0.1, 300, 50), 30);
   assert.equal(realSizeFromFraction(0.3, 300, 50), 50, "capped");
   assert.equal(realSizeFromFraction(0, 300, 50), 0);
+});
+
+// ── condition 3: exit mirror (symmetry) — dry position closes when the paper twin settles ─────────
+test("sweepDryExits: an open dry position whose paper twin SETTLED is closed by a mirrored dry sell", async () => {
+  const d = db();
+  // Seed the paper twin (settled) + a football strategy/match so the bet row exists with a decision_id.
+  R.upsertSport(d, "football", "Футбол");
+  R.upsertCompetition(d, { id: "epl", sport_id: "football", name: "EPL", budget: 1000, external_league: null, created_at: "t" });
+  R.insertStrategy(d, { id: "overreaction", sport_id: "football", name: "OR", tag: "or", color: "#fff", version: 1, prompt: "", prompt_live: null, params: {}, model: "m", model_live: null, created_at: "t" } as any);
+  const mid = R.uid();
+  R.insertMatch(d, { id: mid, competition_id: "epl", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t", minute: 90, score_home: 1, score_away: 0, final_score: "1:0", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid } as any);
+  addWhitelistRow(d, { strategyId: "overreaction", categories: ["epl"], maxOrderUsd: 50, enabled: true }, "owner", NOW);
+  // 1) mirror a filled entry → opens a dry position on the token.
+  await mirrorPaperEntryToReal(d, bet({ match_id: mid, decision_id: "dec-rt" }), mirrorCtx({ tokenId: "0xRT", categoryId: "epl" }));
+  assert.equal(RR.listRealPositions(d).filter((p) => p.dry === 1 && p.size_shares > 0).length, 1, "dry position opened by the entry mirror");
+  // 2) the paper twin settles (closed) with a closing price, and there's a live bid book to sell into.
+  R.insertBet(d, { id: "twin", match_id: mid, strategy_id: "overreaction", risk_profile_id: "medium", market_label: "Over 1.5", status: "settled_won", proposed_price: 45, entry_price: 45, current_price: 60, closing_price: 60, ai_prob: 0.6, stake: 30, rationale: "r", entered_minute: "3'", result: "won", payout: 40, settled_by: "early", settled_at: NOW, entry_meta: null, code_version: "e1", decision_id: "dec-rt", created_at: NOW } as any);
+  // 3) sweep → closes the dry position at the bid.
+  const sellBook = { bids: [{ price: "0.59", size: "10000" }], asks: [] };
+  const n = await sweepDryExits(d, { env: { REAL_TRADING: "dry_run" }, poly: POLY, deps: { fetchImpl: bookFetch(sellBook) }, now: () => "2026-07-15T12:05:00.000Z", bookCache: new Map() });
+  assert.equal(n, 1, "the settled twin's dry position was closed");
+  assert.equal(RR.listRealPositions(d).filter((p) => p.dry === 1 && p.size_shares > 0.01).length, 0, "dry position flat — ledger has both halves now");
+  // sweep is idempotent: a second run doesn't re-sell (position already flat).
+  assert.equal(await sweepDryExits(d, { env: { REAL_TRADING: "dry_run" }, poly: POLY, deps: { fetchImpl: bookFetch(sellBook) }, now: () => "2026-07-15T12:06:00.000Z", bookCache: new Map() }), 0);
 });
 
 // ── condition: sport gate ────────────────────────────────────────────────────────

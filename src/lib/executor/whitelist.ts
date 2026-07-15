@@ -13,12 +13,16 @@ import type { EngineDeps } from "../engine.js";
 import type { OrderBookFetch, PolymarketConfig } from "../polymarket.js";
 import type { Bet } from "../types.js";
 import * as RR from "../realRepo.js";
+import { isSettled } from "../repo.js";
 import { loadSafetyCaps, effectiveTradingMode, modeCaps, readTradingMode } from "./safety.js";
 import { DryRunExecutor } from "./dryRun.js";
 import { clientOrderIdFor } from "./types.js";
 import type { Executor, OrderRequest } from "./types.js";
 
 export const WHITELIST_SPORT = "football"; // hard-pinned this stage (tennis can't reach real)
+// A mirrored EXIT sell accepts down to (paper mark − this) so it fills at the going bid (§2.2), rather
+// than resting above the live bid forever. Env-tunable; conservative default.
+const EXIT_SELL_TOLERANCE_CENTS = (() => { const n = Number(process.env.REAL_EXIT_SELL_TOLERANCE_CENTS); return Number.isFinite(n) && n > 0 ? n : 5; })();
 
 // ── whitelist management (versioned from the FIRST row; every change journals) ─────────────────
 export interface AddWhitelistInput { strategyId: string; categories: string[]; maxOrderUsd: number; enabled?: boolean }
@@ -153,4 +157,67 @@ export async function mirrorPaperEntryToReal(db: Database, bet: Bet, ctx: Mirror
     try { (ctx.onError ?? (() => {}))(msg); } catch { /* even the logger must not throw here */ }
     return { mirrored: false, note: msg };
   }
+}
+
+// ── the EXIT mirror (condition 3: symmetry — a dry position must also CLOSE) ─────────────────────
+// The dublér closes by MIRRORING the paper twin's exit, not by its own exit logic: when a decision's
+// paper bet has SETTLED, the dry position it opened is sold at the book bid, same decision_id, leg exit.
+// A robust SWEEP (not wired into each of the 5 paper exit triggers) — decoupled, idempotent, and it
+// catches every exit path. Without it dry positions would balloon forever-open and the slippage metric
+// would only ever see the entry half.
+export interface SweepCtx {
+  env: Record<string, string | undefined>;
+  poly: PolymarketConfig;
+  deps: EngineDeps;
+  now: () => string;
+  bookCache?: Map<string, OrderBookFetch>;
+  executorFor?: (mode: ReturnType<typeof effectiveTradingMode>) => Executor | null;
+  onError?: (msg: string) => void;
+}
+
+/** Close one dry position by mirroring its twin's exit (a dry SELL at the paper closing price). */
+async function mirrorDryExit(db: Database, pos: RR.RealPositionRow, decisionId: string, markCents: number, ctx: SweepCtx): Promise<boolean> {
+  const mode = effectiveTradingMode(db, ctx.env);
+  if (pos.size_shares <= 1e-6 || !(markCents > 0)) return false;
+  // A SELL won't accept below its limit, so the limit must sit BELOW the going bid, not at the paper
+  // mark (§2.2: sell at bid − tolerance) — else a mark above the live bid never fills. The book-VWAP
+  // then fills at the actual (better) bid. Env-tunable.
+  const limitCents = Math.max(1, markCents - EXIT_SELL_TOLERANCE_CENTS);
+  // The executor derives shares = sizeUsd/(limit/100), so size the notional AT THE LIMIT to sell the
+  // EXACT held share count (close the whole position), not a notional-at-avg that leaves a remainder.
+  const sizeUsd = Math.round(pos.size_shares * (limitCents / 100) * 100) / 100;
+  const order: OrderRequest = {
+    clientOrderId: clientOrderIdFor(decisionId, "exit"), leg: "exit", tokenId: pos.token_id, side: "SELL",
+    limitPriceCents: limitCents, sizeUsd, timeInForceSec: 15, decisionId,
+    strategyId: pos.strategy_id ?? "", profileId: "medium", matchId: pos.match_id ?? "", expiryMode: "client-cancel",
+  };
+  const executor = ctx.executorFor
+    ? ctx.executorFor(mode)
+    : modeCaps(mode).simulate
+      ? new DryRunExecutor({ db, env: ctx.env, poly: ctx.poly, deps: ctx.deps, bookCache: ctx.bookCache, now: ctx.now, whitelistVersion: RR.currentWhitelistVersion(db) })
+      : null;
+  if (!executor) return false;
+  const ack = await executor.place(order);
+  return ack.status === "filled" || ack.status === "partial";
+}
+
+/** Sweep: every open DRY position whose paper twin has SETTLED is closed by a mirrored dry sell.
+ *  Gate-first (off → nothing). Isolated per position (one failure never stops the sweep or paper). */
+export async function sweepDryExits(db: Database, ctx: SweepCtx): Promise<number> {
+  if (readTradingMode(ctx.env) === "off") return 0; // hot-path no-op
+  let closed = 0;
+  for (const pos of RR.listRealPositions(db)) {
+    if (pos.dry !== 1 || Math.abs(pos.size_shares) < 1e-6) continue;
+    try {
+      const entry = db.prepare(`SELECT decision_id FROM real_orders WHERE token_id=? AND leg='entry' ORDER BY created_at LIMIT 1`).get(pos.token_id) as { decision_id: string } | undefined;
+      if (!entry?.decision_id) continue;
+      const bet = db.prepare(`SELECT * FROM bets WHERE decision_id=?`).get(entry.decision_id) as { status: string; closing_price: number | null } | undefined;
+      if (!bet || !isSettled(bet.status)) continue; // twin still open → hold the dry position (mirror it later)
+      const limit = bet.closing_price ?? pos.avg_price_cents ?? 0;
+      if (await mirrorDryExit(db, pos, entry.decision_id, limit, ctx)) closed++;
+    } catch (e) {
+      try { (ctx.onError ?? (() => {}))(`dry-exit sweep failed for ${pos.token_id} (paper unaffected): ${e instanceof Error ? e.message : String(e)}`); } catch { /* logger must not throw */ }
+    }
+  }
+  return closed;
 }

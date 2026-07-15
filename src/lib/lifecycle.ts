@@ -21,7 +21,7 @@ import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarket
 import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
 import { classifyOrderBook, paperBuyFill, paperSellFill, scaleCost, ENTRY_PHANTOM_DIVERGENCE, type FillCost, type EntryFillResult, type SellFillResult } from "./executor/paperFill.js";
-import { mirrorPaperEntryToReal, dryVirtualFreeUsd } from "./executor/whitelist.js";
+import { mirrorPaperEntryToReal, dryVirtualFreeUsd, sweepDryExits } from "./executor/whitelist.js";
 import { readTradingMode } from "./executor/safety.js";
 import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
@@ -1401,6 +1401,8 @@ export async function runAutoCycle(
   const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [], llmCalls: 0, llmFail: 0 } as ReassessResult);
   const exited = [...await step("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];
   const entered = await step("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fills both analyze- and reassess-proposed bets
+  // §5 real EXIT mirror: close dry positions whose paper twin has settled (gate-first: off → no-op).
+  if (readTradingMode(deps.env) !== "off") await step("dryExitSweep", () => sweepDryExits(db, { env: deps.env ?? process.env, poly: deps.polymarket ?? loadPolymarketConfig(deps.env), deps, now: () => nowFn(deps)(), bookCache: new Map() }), 0);
   stepSync("prune", () => R.pruneMarketSnapshots(db), 0); // keep the snapshot history bounded (persistent DB)
   stepSync("pruneProviderSnapshots", () => { const cut = new Date((Date.parse(nowFn(deps)()) || Date.now()) - SNAPSHOT_RETENTION_DAYS * 86400_000).toISOString(); R.pruneSnapshots(db, cut); R.pruneTennisSnapshots(db, cut); R.capTennisSnapshots(db); R.capTennisMapLog(db); return 0; }, 0); // snapshot retention + hard row-caps — a burst once bloated tennis_snapshots to 1.2 GB and starved boot
   // Bound the matches table: drop finished/stale matches that carry NO bets (the
@@ -1628,6 +1630,8 @@ export async function runLiveCycle(
   const detExits = await stepLive("exits", () => evaluateExits(db, deps), [] as ExitItem[]); // cheap TP/stop, reacts to price every tick
   const reassess = await stepLive("reassess", () => strategistReassess(db, deps, { newEventMatchIds: reassessIds, triggeredOnly: true, labelFor }), { exits: [], entries: [], llmCalls: 0, llmFail: 0 } as ReassessResult);
   await stepLive("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fill any positions the strategist just opened
+  // §5 real EXIT mirror: close dry positions whose paper twin settled (gate-first: off → no-op).
+  if (readTradingMode(deps.env) !== "off") await stepLive("dryExitSweep", () => sweepDryExits(db, { env: deps.env ?? process.env, poly: deps.polymarket ?? loadPolymarketConfig(deps.env), deps, now: () => nowFn(deps)(), bookCache: new Map() }), 0);
 
   return {
     live: inPlay.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),

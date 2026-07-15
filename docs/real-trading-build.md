@@ -247,9 +247,23 @@ change, over-cap rejected); match by strategy+category (disabled/unlisted → no
 (dry order at proportional size + stamped version + twin link); tennis sport-gate; exception → paper-only
 (no re-throw). 545/545 green.
 
-**Remaining**: the live call-site — invoke `mirrorPaperEntryToReal` right after a football paper entry
-fills in `autoEnter`, threading categoryId / tokenId / paperBank / realFree. It's a thin gated call
-(off/exits_only → early return), a no-op in prod until REAL_TRADING flips.
+**Live wiring (done — the contour now EXISTS):**
+- **Entry** — `autoEnter` mirrors each filled FOOTBALL entry right after the fill. GATE-FIRST: the
+  call-site checks `readTradingMode(env) != off` before building the ctx, and the mirror re-checks with
+  a pure env read before any DB/book access — the prod default (off) pays nothing on the hot path.
+  Sizing uses the shadow allocator's budget-independent conviction FRACTION (intensity) × the virtual
+  dry-bank free (`REAL_BANK_USD` default $400, shrunk by open dry exposure — rehearses real free
+  dynamics). Isolated: `onError` logs a trade-log skip, never re-throws into `autoEnter`.
+- **Exit** — a `sweepDryExits` in the cycle (after `autoEnter`, gate-first) closes any open DRY position
+  whose paper twin has SETTLED, via a mirrored dry SELL at the book bid (limit = paper mark − tolerance
+  so it fills at the going bid; sized so the executor sells the exact held shares). Idempotent
+  (`clientOrderIdFor(decisionId,"exit")` dedups). A decoupled sweep, not wired into the 5 exit triggers
+  — robust to every exit path. Without it dry positions would balloon and slippage would see only the
+  entry half.
+
+Dry/real split keeps all of this off the real books (`dry=1`). Contour is end-to-end in dry-run:
+paper entry → dry order → fill/expire on the live book → paper settle → dry sell → ledger closes both halves.
+Tests (+2): gate-first no-op, virtual-bank shrink, fraction sizing, exit round-trip + idempotency.
 
 ## Invariants (never violated by any phase)
 
