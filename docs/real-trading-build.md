@@ -45,7 +45,7 @@ metrics via the live book, UI, safety belt, tests); F is a thin adapter over a p
 
 | Phase | Deliverable | Status |
 |---|---|---|
-| **A** | `Executor` contract + `PaperExecutor` (unify both fill paths) + `decision_id`/`clientOrderId` | in progress |
+| **A** | `Executor` contract + `PaperExecutor` (unify both fill paths, tennis entry+exit book-fill) + `decision_id`/`clientOrderId` | **done** |
 | **B** | `real_orders/fills/positions/ledger/whitelist` tables + repo | pending |
 | **C** | Safety belt: 4 caps, kill switch (off/dry_run/exits_only/on), idempotent retry, reconciliation, fail-closed prices | pending |
 | **spike** | CLOB capabilities-vs-assumptions doc (before D) | pending |
@@ -84,12 +84,22 @@ On moneylines with **declared liquidity ≥ $10k**, the `no_book_liquidity` skip
 book side, limit price missing the spread) FIRST, the market SECOND. First day post-deploy:
 eyeball this slice on ATP moneylines.
 
-### Still pending in Phase A
+### Exit routing (done — Phase A closed)
 
-- **Exit routing.** Entries now book-fill; **exits still use the snapshot midpoint** (`cur`).
-  Next step: route protective/close exits through `paperSellFill` (sell VWAP), and for the
-  §4.5 no-book case use the last bid + a **stale flag that reaches the exit record** so those
-  P&L can later be filtered as "executed at a stale price".
+Exits now sell into the live BID book (VWAP), symmetric to entries. `tennisExitTick` is async;
+the trigger DETECTION still runs on the midpoint (`cur`), the EXECUTION price comes from the book.
+Exec model off → midpoint (legacy paper). Per trigger → fill-path → flags:
+
+| Trigger | kind | live bid book | thin bid (depth < position) | NO bid book |
+|---|---|---|---|---|
+| take_price | take | sell fillable frac at VWAP | take the fillable part | **skip + retry** (never fabricate a take) |
+| thesis_stop / catastrophic_floor / game_count_stop | protective | full sell at VWAP | **partial sell + remainder `exitAttention` + retry** (never dump below floor) | **full exit at modelled price + `exitStalePrice` flag + alert** (§4.5) |
+
+Flags reach the bet's `entry_meta`: `exitStalePrice` (stale/modelled defensive fill) and
+`exitAttention` (partial protective, remainder awaiting retry). `profileAnalytics` treats a
+stale-priced exit as `void` → OUT of the win-rate/calibration slices (a stale cut isn't a clean fill).
+
+Orientation guard (test): a sell fills into the **38¢ bid**, never the 40¢ ask.
 
 ## Invariants (never violated by any phase)
 

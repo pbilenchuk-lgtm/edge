@@ -544,7 +544,7 @@ async function sellVwapCents(
   poly: PolymarketConfig, deps: EngineDeps, quoteCents: number,
   bookCache?: Map<string, OrderBookFetch>,
 ): Promise<SellFillResult> {
-  if (!poly.enabled) return { cents: quoteCents, fromBook: false };
+  if (!poly.enabled) return { cents: quoteCents, fromBook: false, filledShares: 0, requestedShares: 0 };
   const token = mk?.external_ref ?? null;
   const shares = entryCents > 0 ? basisUsd / (entryCents / 100) : 0;
   // SAME single-source classification as the entry gate, so "no real book" is decided
@@ -1378,7 +1378,7 @@ export async function runAutoCycle(
   // Never touches football/money-path; isolated so a provider blip can't abort the tick.
   await step("tennisScout", () => collectTennisSnapshots(db, deps), 0);
   stepSync("tennisBreakMarks", () => recordTennisBreakMarks(db, deps), 0); // mark completed break windows (≥6min old)
-  stepSync("tennisExit", () => tennisExitTick(db, deps), 0);               // §6 paper: deterministic take_price / thesis_stop close (no LLM, §9.6)
+  await step("tennisExit", () => tennisExitTick(db, deps), 0);             // §6 paper: deterministic take_price / thesis_stop close via the book (no LLM, §9.6)
   await step("tennisFinalPoll", () => pollTennisFinals(db, deps), 0);      // A+B: chase FINAL results via get_fixtures for stranded positions (live feed drops finished matches) → writes the terminal snapshot settle consumes
   stepSync("tennisFinish", () => finishTennisMatches(db, deps), 0);        // drive tennis matches to finished from the scout (else they pile up in live)
   stepSync("tennisSettle", () => settleTennisBets(db, deps), 0);           // safety-net settle for finished tennis matches
@@ -1591,7 +1591,7 @@ export async function runLiveCycle(
   await stepLive("tennisSetValue", () => tennisSetValueTick(db, deps), 0); // §6 paper: lost-set-1 Set-Value entry (cross-strategy one-position rule)
   await stepLive("tennisPmv", () => tennisPmvTick(db, deps), 0);       // PMV: deterministic pre-match prop-consistency entry (no LLM v1)
   stepSyncLive("tennisPmvSettle", () => settleTennisPmvBets(db, deps), 0); // settle PMV props from the scout final (Gate-0.2 void clauses)
-  stepSyncLive("tennisExit", () => tennisExitTick(db, deps), 0);       // §6 paper: deterministic exits for BOTH tennis strategies (no LLM, §9.6)
+  await stepLive("tennisExit", () => tennisExitTick(db, deps), 0);     // §6 paper: deterministic book-VWAP exits for BOTH tennis strategies (no LLM, §9.6)
   stepSyncLive("tennisFinish", () => finishTennisMatches(db, deps), 0); // drive tennis matches to finished from the scout (else they pile up in live)
   stepSyncLive("tennisSettle", () => settleTennisBets(db, deps), 0);   // settle tennis bets from the scout's final result
   // Reassessment fires on TWO conditions, unioned: (1) a high-impact on-pitch

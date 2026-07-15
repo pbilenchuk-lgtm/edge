@@ -50,6 +50,14 @@ export interface BetEntryMeta {
   // re-derives from the moneyline), so a prop that lists players in the opposite order to the
   // moneyline settles on the side it was actually bought. null/undefined for non-oriented families.
   propFirstIsP1?: boolean | null;
+  // ── Exit-execution flags (set when a tennis position is CLOSED against the book, book-fill-m1) ──
+  // exitStalePrice: a protective exit had NO live bid book and executed at the MODELLED/stale price
+  //   (§4.5). Its realized P&L is not a clean book fill — analytics EXCLUDES it from calibration/
+  //   win-rate slices so a stale-priced defensive cut can't pollute the numbers.
+  exitStalePrice?: boolean | null;
+  // exitAttention: a protective exit could only PARTIALLY fill on a thin bid; the remainder is still
+  //   open and awaiting the next tick's retry (never dumped below floor). Visibility flag.
+  exitAttention?: boolean | null;
 }
 
 /** Serialise an entry-meta snapshot (drops undefineds; stable for CSV/analytics). */

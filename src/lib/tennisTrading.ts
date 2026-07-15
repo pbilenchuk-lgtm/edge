@@ -13,12 +13,14 @@ import "./http.js";
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
+import type { Bet } from "./types.js";
 import { settleBet, resolveTennisWinner } from "./settlement.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { chargeTennisTriggers, tennisReassessShouldCall, type TennisCharge } from "./tennisOverreaction.js";
 import { SET_VALUE_STRATEGY, SET_VALUE_ARMED, SET_VALUE_EPOCH, setValueGate } from "./tennisSetValue.js";
 import { detectBreaks, detectTennisEvents, tennisMoneyline, tennisTourOf, fetchTennisFixtures, trimRaw, TENNIS_TERMINAL_RE, loadTennisConfig } from "./tennisScout.js";
-import { loadPolymarketConfig, type OrderBookFetch } from "./polymarket.js";
+import { loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
+import { classifyOrderBook, paperSellFill } from "./executor/paperFill.js";
 import { PaperExecutor } from "./executor/paper.js";
 import { clientOrderIdFor, type OrderAck } from "./executor/types.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
@@ -229,7 +231,7 @@ function favSideForLabel(snap: R.TennisSnapshotRow, label: string): "first" | "s
  *  a trading realize, not a prediction outcome). §9.6: pure arithmetic, no LLM. A5: the log
  *  carries trigger, game score, receiving games played, decision-vs-execution slippage (0 on
  *  paper — decision price IS the fill), and the armed-threshold epoch. */
-function closeTennisBetEarly(db: Database, betId: string, currentCents: number, trigger: string, reason: string, deps: EngineDeps, now: string, extra: { gameScore?: string; recvGames?: number } = {}): number | null {
+function closeTennisBetEarly(db: Database, betId: string, currentCents: number, trigger: string, reason: string, deps: EngineDeps, now: string, extra: { gameScore?: string; recvGames?: number } = {}, opts: { stale?: boolean } = {}): number | null {
   const fresh = R.getBet(db, betId);
   if (!fresh || fresh.status !== "open") return null; // already closed/settled → no double-close
   const stake = fresh.stake ?? 0, entry = fresh.entry_price ?? 0;
@@ -237,10 +239,14 @@ function closeTennisBetEarly(db: Database, betId: string, currentCents: number, 
   const pnl = Math.round((payout - stake) * 100) / 100;
   // A breakeven (pnl==0) is a PUSH — settled_void/result null — never a "win" (mirrors football's
   // closeBetEarly): booking it as won would inflate the strategy's win-rate on flat defensive cuts.
-  R.updateBet(db, betId, { status: pnl > 0 ? "settled_won" : pnl < 0 ? "settled_lost" : "settled_void", result: pnl > 0 ? "won" : pnl < 0 ? "lost" : null, payout, closing_price: currentCents, settled_by: "early", settled_at: now });
+  const patch: any = { status: pnl > 0 ? "settled_won" : pnl < 0 ? "settled_lost" : "settled_void", result: pnl > 0 ? "won" : pnl < 0 ? "lost" : null, payout, closing_price: currentCents, settled_by: "early", settled_at: now };
+  // §4.5 stale exit: executed at a MODELLED price (no live bid) → flag it ON the bet so analytics can
+  // exclude this realization from calibration/win-rate slices (a stale defensive cut isn't a clean fill).
+  if (opts.stale) patch.entry_meta = serializeEntryMeta({ ...(parseEntryMeta(fresh.entry_meta) ?? {}), exitStalePrice: true } as Partial<BetEntryMeta>);
+  R.updateBet(db, betId, patch);
   try { shadowOnExit(db, betId, 1, loadShadowConfig(db, deps.env), now); } catch { /* observe-only */ }
   const epoch = fresh.strategy_id === SET_VALUE_STRATEGY ? SET_VALUE_EPOCH : TENNIS_ARMED_EPOCH;
-  const tail = `геймы ${extra.gameScore ?? "?"}, приёмных ${extra.recvGames ?? 0} · слиппедж 0¢ (paper) · пороги:${epoch}`;
+  const tail = `геймы ${extra.gameScore ?? "?"}, приёмных ${extra.recvGames ?? 0}${opts.stale ? " · ⚠ по несвежей цене (stale)" : ""} · пороги:${epoch}`;
   R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: fresh.strategy_id, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} · ${tail} (${trigger})`, created_at: now });
   return pnl;
 }
@@ -249,7 +255,7 @@ function closeTennisBetEarly(db: Database, betId: string, currentCents: number, 
  *  The closed slice is booked as a settled child (settled_by="partial", rationale carries the %),
  *  the open bet's stake shrinks by that slice, and the remainder rides to settle. §9.6: pure arithmetic.
  *  Returns the realized P&L on the slice, or null if the position is gone / already fully closed. */
-function closeTennisBetPortion(db: Database, betId: string, fraction: number, currentCents: number, reason: string, deps: EngineDeps, now: string): number | null {
+function closeTennisBetPortion(db: Database, betId: string, fraction: number, currentCents: number, reason: string, deps: EngineDeps, now: string, opts: { attentionRemainder?: boolean } = {}): number | null {
   if (fraction >= 1) return closeTennisBetEarly(db, betId, currentCents, "take_price", reason, deps, now);
   const fresh = R.getBet(db, betId);
   if (!fresh || fresh.status !== "open") return null;
@@ -265,11 +271,63 @@ function closeTennisBetPortion(db: Database, betId: string, fraction: number, cu
     rationale: `частичная фиксация ${Math.round(fraction * 100)}%`, entered_minute: fresh.entered_minute,
     result: pnl > 0 ? "won" : pnl < 0 ? "lost" : null, payout, settled_by: "partial", settled_at: now, created_at: now,
   });
-  R.updateBet(db, betId, { stake: Math.round((stake - closed) * 100) / 100 }); // keep the remainder open to settle
+  // Shrink the parent to the remainder. On a PROTECTIVE partial (thin bid), flag the remainder
+  // exitAttention so it's visible that a defensive exit only partially left and the rest awaits the
+  // next tick's retry (never dumped below floor to force a full exit into a dry book).
+  const remPatch: any = { stake: Math.round((stake - closed) * 100) / 100 };
+  if (opts.attentionRemainder) remPatch.entry_meta = serializeEntryMeta({ ...(parseEntryMeta(fresh.entry_meta) ?? {}), exitAttention: true } as Partial<BetEntryMeta>);
+  R.updateBet(db, betId, remPatch);
   try { shadowOnExit(db, betId, fraction, loadShadowConfig(db, deps.env), now); } catch { /* observe-only */ }
   const epoch = fresh.strategy_id === SET_VALUE_STRATEGY ? SET_VALUE_EPOCH : TENNIS_ARMED_EPOCH;
-  R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: fresh.strategy_id, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · фиксация ${Math.round(fraction * 100)}% · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} · остаток до финала · пороги:${epoch} (take_partial)`, created_at: now });
+  const tailNote = opts.attentionRemainder ? `остаток под ⚠attention (retry след. тик)` : `остаток до финала`;
+  R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: fresh.strategy_id, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · фиксация ${Math.round(fraction * 100)}% · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} · ${tailNote} · пороги:${epoch} (${opts.attentionRemainder ? "protective_partial" : "take_partial"})`, created_at: now });
   return pnl;
+}
+
+interface TennisSellCtx { poly: PolymarketConfig; bookCache: Map<string, OrderBookFetch> }
+interface TennisSellQuote { exitCents: number; fromBook: boolean; filledFrac: number; note: string; stale: boolean }
+
+/** Resolve a tennis EXIT price against the live moneyline BID book (sell-VWAP): sell the position's
+ *  shares into bids, never asks. Execution model off → the midpoint (legacy paper, not "stale"). No
+ *  live bid → the modelled/parametric price with stale=true (a defensive exit may use it flagged; a
+ *  take must not). filledFrac<1 → the bid book is thin (partial exit → attention + retry). */
+async function resolveTennisSell(db: Database, ctx: TennisSellCtx, b: Bet, players: { p1: string; p2: string }, midCents: number, deps: EngineDeps): Promise<TennisSellQuote> {
+  if (!ctx.poly.enabled) return { exitCents: midCents, fromBook: false, filledFrac: 1, note: "", stale: false }; // exec model off → midpoint (legacy)
+  const ml = tennisMoneyline(db, b.match_id, players);
+  const entry = b.entry_price ?? 0, stake = b.stake ?? 0;
+  const shares = entry > 0 ? stake / (entry / 100) : 0;
+  const bookRes = await classifyOrderBook(ml?.token ?? null, ctx.poly, deps, ctx.bookCache);
+  const r = paperSellFill(bookRes, shares, stake, midCents, ml?.liquidity ?? 0, ctx.poly.exec);
+  const filledFrac = r.requestedShares > 0 ? r.filledShares / r.requestedShares : 1;
+  return { exitCents: r.cents, fromBook: r.fromBook, filledFrac, note: r.note ?? "", stale: !r.fromBook };
+}
+
+/** Route ONE tennis exit through the book (book-fill-m1). kind="take": a take that can't execute on a
+ *  live bid is NOT fabricated — skip + retry next tick (a missed take is harmless; a fake one draws
+ *  profit that never was). kind="protective": defensive exits MUST leave — full book fill; thin bid →
+ *  sell what filled + remainder attention (retry, never dumped below floor); no bid → last-model price
+ *  flagged stale + alert (§4.5). Returns 1 if it closed (fully or partially) this tick, else 0. */
+async function execTennisExit(
+  db: Database, ctx: TennisSellCtx, b: Bet, midCents: number, players: { p1: string; p2: string },
+  trigger: string, reason: string, extra: { gameScore?: string; recvGames?: number }, deps: EngineDeps, now: string,
+  o: { kind: "take" | "protective"; fraction?: number },
+): Promise<number> {
+  const sell = await resolveTennisSell(db, ctx, b, players, midCents, deps);
+  const logSkip = (text: string) => R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: b.entered_minute ?? "лайв", type: "skip", text, created_at: now });
+  if (o.kind === "take") {
+    if (sell.stale) { logSkip(`тейк отложен: нет живого бида (${sell.note || "стакан на продажу пуст"}) — позиция держится, повтор на след. тике (${trigger})`); return 0; }
+    const eff = Math.min(o.fraction ?? 1, sell.filledFrac);
+    if (eff >= 0.999) return closeTennisBetEarly(db, b.id, sell.exitCents, "take_price", reason, deps, now, extra) != null ? 1 : 0;
+    return closeTennisBetPortion(db, b.id, eff, sell.exitCents, reason, deps, now) != null ? 1 : 0;
+  }
+  // protective
+  if (sell.stale) { // §4.5: no live bid → last-model (stale) price, flagged + alert; the exit MUST leave
+    logSkip(`⚠ ЗАЩИТНЫЙ ВЫХОД по несвежей цене: нет живого бида, ${trigger} исполнен по модели @ ${sell.exitCents}¢ (stale) — ${b.market_label}`);
+    return closeTennisBetEarly(db, b.id, sell.exitCents, trigger, `${reason} · нет бида → по модели`, deps, now, extra, { stale: true }) != null ? 1 : 0;
+  }
+  if (sell.filledFrac >= 0.999) return closeTennisBetEarly(db, b.id, sell.exitCents, trigger, reason, deps, now, extra) != null ? 1 : 0;
+  // thin bid → sell what filled, hold the remainder (attention + retry next tick), never dump below floor
+  return closeTennisBetPortion(db, b.id, sell.filledFrac, sell.exitCents, `${reason} · бид тонкий (${Math.round(sell.filledFrac * 100)}%)`, deps, now, { attentionRemainder: true }) != null ? 1 : 0;
 }
 
 /**
@@ -284,9 +342,12 @@ function closeTennisBetPortion(db: Database, betId: string, fraction: number, cu
  *   #5 take_price         — recovered to ≥ (pre-break − buffer): the buyback worked → realize.
  * Isolated + guarded; never throws into the tick. Returns positions closed.
  */
-export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
+export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promise<number> {
   const now = nowFn(deps)();
   let closed = 0;
+  // book-fill-m1: exits sell into the live BID book (VWAP), symmetric to entries. One book fetch per
+  // token per tick (cached). Exec model off → midpoint (legacy paper, tests). §9.6 all deterministic.
+  const sellCtx: TennisSellCtx = { poly: deps.polymarket ?? loadPolymarketConfig(deps.env ?? process.env), bookCache: new Map<string, OrderBookFetch>() };
   const tennisMatchIds = new Set(R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => m.id)));
   for (const b of R.openBets(db)) {
     if (!TENNIS_STRATEGIES.has(b.strategy_id) || !tennisMatchIds.has(b.match_id)) continue;
@@ -325,6 +386,7 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
     // stop actually fires at 0-4 in set 2). `last` is always defined (snaps.length checked above).
     const gs = `${last.games_p1}-${last.games_p2}`;
     const ext = { gameScore: gs, recvGames };
+    const players = { p1: last.p1 ?? "", p2: last.p2 ?? "" }; // for the book/token resolution on exit
 
     // ── SET-VALUE ladder (horizon = the match): retire → thesis_stop → floor → partial take ──
     // (retire/finish already handled above by the finished-continue.) Defensive exits outrank the
@@ -341,14 +403,14 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
         const brokeBack = after.some((e) => e.type === "break" && e.server === oppSide); // favourite broke opponent back
         const K = Number.isFinite(plan?.thesis_stop?.receiver_games) ? Number(plan.thesis_stop.receiver_games) : SET_VALUE_ARMED.thesisStopReceiverGames;
         if (!brokeBack && recvAfter >= K) {
-          if (closeTennisBetEarly(db, b.id, cur, "thesis_stop", `стоп тезиса: брейк во 2-м сете без возврата за ${recvAfter} приёмных`, deps, now, ext) != null) closed++;
+          closed += await execTennisExit(db, sellCtx, b, cur, players, "thesis_stop", `стоп тезиса: брейк во 2-м сете без возврата за ${recvAfter} приёмных`, ext, deps, now, { kind: "protective" });
           continue;
         }
       }
       // catastrophic_floor — real collapse to ≤ floor, phantom-guarded by persistence (cur AND prev ≤ floor).
       const svFloor = Number.isFinite(plan?.catastrophic_floor?.at_cents) ? Number(plan.catastrophic_floor.at_cents) : null;
       if (svFloor != null && cur <= svFloor && prev != null && prev <= svFloor) {
-        if (closeTennisBetEarly(db, b.id, cur, "catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${svFloor}¢, подтверждён)`, deps, now, ext) != null) closed++;
+        closed += await execTennisExit(db, sellCtx, b, cur, players, "catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${svFloor}¢, подтверждён)`, ext, deps, now, { kind: "protective" });
         continue;
       }
       // take_price — favourite recovered into the take band → fix HALF once, hold the rest to settle.
@@ -356,7 +418,7 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
       const frac = Number.isFinite(plan?.take_price?.fraction) ? Number(plan.take_price.fraction) : SET_VALUE_ARMED.takeFraction;
       const alreadyPartial = R.betsForMatch(db, b.match_id, SET_VALUE_STRATEGY).some((x) => x.settled_by === "partial" && (x.risk_profile_id ?? "medium") === (b.risk_profile_id ?? "medium") && x.market_label === b.market_label);
       if (cur >= svTake && !alreadyPartial) {
-        if (closeTennisBetPortion(db, b.id, frac, cur, `тейк камбэка: фаворит вернулся к ${cur}¢ (цель ≥${svTake}¢)`, deps, now) != null) closed++;
+        closed += await execTennisExit(db, sellCtx, b, cur, players, "take_price", `тейк камбэка: фаворит вернулся к ${cur}¢ (цель ≥${svTake}¢)`, ext, deps, now, { kind: "take", fraction: frac });
         continue;
       }
       continue; // Set-Value handled — never fall through to the Overreaction ladder
@@ -364,7 +426,7 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
 
     // #2 thesis_stop — a NEW break of the FAVOURITE's serve after entry.
     if (evs.some((e) => e.type === "break" && e.server === favSide)) {
-      if (closeTennisBetEarly(db, b.id, cur, "thesis_stop", `стоп тезиса: второй брейк фаворита — выход`, deps, now, ext) != null) closed++;
+      closed += await execTennisExit(db, sellCtx, b, cur, players, "thesis_stop", `стоп тезиса: второй брейк фаворита — выход`, ext, deps, now, { kind: "protective" });
       continue;
     }
     // #3 catastrophic_floor — a real collapse to ≤ floor, phantom-guarded by PERSISTENCE: cur AND the
@@ -373,19 +435,19 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
     // (±5-8¢) never reaches entry−15¢, only an injury/cascade does.
     const floorAt = Number.isFinite(plan?.catastrophic_floor?.at_cents) ? Number(plan.catastrophic_floor.at_cents) : null;
     if (floorAt != null && cur <= floorAt && prev != null && prev <= floorAt) {
-      if (closeTennisBetEarly(db, b.id, cur, "catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${floorAt}¢, подтверждён)`, deps, now, ext) != null) closed++;
+      closed += await execTennisExit(db, sellCtx, b, cur, players, "catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${floorAt}¢, подтверждён)`, ext, deps, now, { kind: "protective" });
       continue;
     }
     // #4 game_count_stop — the favourite has played ≥K receiving games since entry with NO break-back.
     const K = Number.isFinite(plan?.game_count_stop?.receiver_games) ? Number(plan.game_count_stop.receiver_games) : TENNIS_GAME_COUNT_STOP;
     if (recvGames >= K && !counterBreak) {
-      if (closeTennisBetEarly(db, b.id, cur, "game_count_stop", `стоп по геймам: ${recvGames} приёмных без брейка назад`, deps, now, ext) != null) closed++;
+      closed += await execTennisExit(db, sellCtx, b, cur, players, "game_count_stop", `стоп по геймам: ${recvGames} приёмных без брейка назад`, ext, deps, now, { kind: "protective" });
       continue;
     }
     // #5 take_price — recovered to the pre-written take level (pre-break − buffer).
     const takeAt = Number.isFinite(plan?.take_price?.at_cents) ? Number(plan.take_price.at_cents) : null;
     if (takeAt != null && cur >= takeAt) {
-      if (closeTennisBetEarly(db, b.id, cur, "take_price", `тейк выкупа: фаворит вернулся к ${cur}¢ (цель ≥${takeAt}¢)`, deps, now, ext) != null) closed++;
+      closed += await execTennisExit(db, sellCtx, b, cur, players, "take_price", `тейк выкупа: фаворит вернулся к ${cur}¢ (цель ≥${takeAt}¢)`, ext, deps, now, { kind: "take", fraction: 1 });
       continue;
     }
   }

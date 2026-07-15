@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 import { resolveTennisWinner } from "../src/lib/settlement.js";
-import { serializeEntryMeta } from "../src/lib/betMeta.js";
+import { serializeEntryMeta, parseEntryMeta } from "../src/lib/betMeta.js";
 import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick, tennisTradingTick, tennisSetValueTick, tennisEntryMeta, pollTennisFinals } from "../src/lib/tennisTrading.js";
 import { migrateTennisStrategy, migrateTennisSetValueStrategy } from "../src/lib/seed.js";
 import { buildTennisCalibrationReport, tennisTourOf, collectTennisSnapshots, fetchTennisFixtures } from "../src/lib/tennisScout.js";
 import { buildTennisFunnel } from "../src/lib/tennisTrading.js";
 import { advanceClocks } from "../src/lib/lifecycle.js";
 
-test("resolveTennisWinner: advances→YES, loser→NO, canceled→void, retirement→advancing wins", () => {
+test("resolveTennisWinner: advances→YES, loser→NO, canceled→void, retirement→advancing wins", async () => {
   // Vukic advances (won or Broady retired)
   assert.equal(resolveTennisWinner("Aleksandar Vukic", "Aleksandar Vukic", "Liam Broady", "first", false), true);
   assert.equal(resolveTennisWinner("Liam Broady", "Aleksandar Vukic", "Liam Broady", "first", false), false);
@@ -22,7 +22,7 @@ test("resolveTennisWinner: advances→YES, loser→NO, canceled→void, retireme
   assert.equal(resolveTennisWinner("The Draw", "Vukic", "Broady", "first", false), null);
 });
 
-test("migrateTennisStrategy: the tennis_overreaction strategy is seeded on boot (sport=tennis)", () => {
+test("migrateTennisStrategy: the tennis_overreaction strategy is seeded on boot (sport=tennis)", async () => {
   const db = openDb(":memory:");
   migrateTennisStrategy(db); // runs in getDb() on prod boot; tests invoke it directly
   const s = R.getStrategy(db, "tennis_overreaction");
@@ -47,7 +47,7 @@ function seedTennisMatch(db: ReturnType<typeof openDb>, opts: { p1: string; p2: 
   return mid;
 }
 
-test("chargeTennisMatch: identifies the favourite + gates tradeability on winner-book depth", () => {
+test("chargeTennisMatch: identifies the favourite + gates tradeability on winner-book depth", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 78, p2price: 22, p1liq: 5000, p2liq: 5000 });
   const c = chargeTennisMatch(db, mid, { p1: "A. Vukic", p2: "L. Broady" });
@@ -59,7 +59,7 @@ test("chargeTennisMatch: identifies the favourite + gates tradeability on winner
   assert.equal(chargeTennisMatch(db, mid2, { p1: "X Player", p2: "Y Player" }).tradeable, false);
 });
 
-test("chargeTennisMatch: favourite is identified from the PRE-BREAK price even when the current price panicked", () => {
+test("chargeTennisMatch: favourite is identified from the PRE-BREAK price even when the current price panicked", async () => {
   const db = openDb(":memory:");
   // MARKET row now shows a coin-flip (the favourite's price crashed on the break) → no favourite by current price.
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 50, p2price: 50, p1liq: 5000, p2liq: 5000 });
@@ -68,7 +68,7 @@ test("chargeTennisMatch: favourite is identified from the PRE-BREAK price even w
   assert.equal(chargeTennisMatch(db, mid, { p1: "A. Vukic", p2: "L. Broady" }, { p1: 80, p2: 20 }).favSide, "first", "pre-break 80/20 → favourite = first");
 });
 
-test("tennisFinalResult + settleTennisBets: settle a paper bet from the scout's final result", () => {
+test("tennisFinalResult + settleTennisBets: settle a paper bet from the scout's final result", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 60 });
   // scout final: Vukic (first) won, finished.
@@ -84,7 +84,7 @@ test("tennisFinalResult + settleTennisBets: settle a paper bet from the scout's 
   assert.equal(b.payout, Math.round(100 / 0.6 * 100) / 100, "payout = stake / (60/100)");
 });
 
-test("finishTennisMatches: a live app match with a Finished scout snapshot transitions to finished", () => {
+test("finishTennisMatches: a live app match with a Finished scout snapshot transitions to finished", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   // no scout yet → stays live
@@ -98,14 +98,14 @@ test("finishTennisMatches: a live app match with a Finished scout snapshot trans
   assert.equal(finishTennisMatches(db, { now: () => "2026-07-14T13:05:00Z" }), 0);
 });
 
-test("tennisExitTick: take_price realizes the buyback when the favourite recovers to the pre-break level", () => {
+test("tennisExitTick: take_price realizes the buyback when the favourite recovers to the pre-break level", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   // Entered the buyback at the panicked 44¢; the pre-written plan takes profit at 59¢ (pre-break 62 − 3 buffer).
   R.insertBet(db, { id: "tex1", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 1", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: { take_price: { at_cents: 59, note: "возврат минус запас" } } }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
   // Scout: the favourite recovered to 60¢ (≥ the 59¢ take level).
   R.insertTennisSnapshot(db, { event_key: "E9", provider: "apitennis", batch_at: "2026-07-14T10:10:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "Set 3", sets_p1: 1, sets_p2: 1, set_num: 3, games_p1: 2, games_p2: 1, game_points: null, server: "first", pm_match_id: mid, pm_mid_cents: 60, pm_p1_cents: 60, pm_p2_cents: 40, raw: "{}" });
-  const n = tennisExitTick(db, { now: () => "2026-07-14T10:10:05Z" });
+  const n = await tennisExitTick(db, { now: () => "2026-07-14T10:10:05Z" });
   assert.equal(n, 1, "the recovery-take fired");
   const b = R.getBet(db, "tex1")!;
   assert.equal(b.status, "settled_won");
@@ -114,7 +114,7 @@ test("tennisExitTick: take_price realizes the buyback when the favourite recover
   assert.equal(b.payout, Math.round(100 * (60 / 44) * 100) / 100, "payout = stake·current/entry");
 });
 
-test("tennisExitTick: thesis_stop cuts the position on a SECOND break of the favourite (price still low)", () => {
+test("tennisExitTick: thesis_stop cuts the position on a SECOND break of the favourite (price still low)", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   R.insertBet(db, { id: "tex2", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: { take_price: { at_cents: 59 } } }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
@@ -123,7 +123,7 @@ test("tennisExitTick: thesis_stop cuts the position on a SECOND break of the fav
   R.insertTennisSnapshot(db, { ...base, event_key: "E10", batch_at: "2026-07-14T10:05:00Z", games_p1: 3, games_p2: 3, server: "first", pm_p1_cents: 40 });
   R.insertTennisSnapshot(db, { ...base, event_key: "E10", batch_at: "2026-07-14T10:06:00Z", games_p1: 3, games_p2: 4, server: "second", pm_p1_cents: 40 });
   R.insertTennisSnapshot(db, { ...base, event_key: "E10", batch_at: "2026-07-14T10:07:00Z", games_p1: 3, games_p2: 4, server: "second", pm_p1_cents: 40 });
-  const n = tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" });
+  const n = await tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" });
   assert.equal(n, 1, "thesis_stop fired on the second favourite break");
   const b = R.getBet(db, "tex2")!;
   assert.equal(b.status, "settled_lost", "40¢ < 44¢ entry → the cut books a loss");
@@ -131,7 +131,7 @@ test("tennisExitTick: thesis_stop cuts the position on a SECOND break of the fav
   assert.equal(b.closing_price, 40);
 });
 
-test("tennisExitTick: FAIL-CLOSED — no live price never fabricates a $0 exit, warns loudly, holds the position", () => {
+test("tennisExitTick: FAIL-CLOSED — no live price never fabricates a $0 exit, warns loudly, holds the position", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   // Break the moneyline resolution: a SECOND " vs " market → ambiguous → tennisMoneyline returns null,
@@ -143,18 +143,18 @@ test("tennisExitTick: FAIL-CLOSED — no live price never fabricates a $0 exit, 
   R.insertTennisSnapshot(db, { ...base, event_key: "EFC", batch_at: "2026-07-14T10:05:00Z", games_p1: 3, games_p2: 3, server: "first" });
   R.insertTennisSnapshot(db, { ...base, event_key: "EFC", batch_at: "2026-07-14T10:06:00Z", games_p1: 3, games_p2: 4, server: "second" });
   R.insertTennisSnapshot(db, { ...base, event_key: "EFC", batch_at: "2026-07-14T10:07:00Z", games_p1: 3, games_p2: 4, server: "second" });
-  const n = tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" });
+  const n = await tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" });
   assert.equal(n, 0, "no price → NO exit fired (never a phantom $0 close at entry price)");
   const b = R.getBet(db, "texfc")!;
   assert.equal(b.status, "open", "position held to await a real price / settlement, not silently cut to breakeven");
   const warned = R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip" && /цена недоступна/.test(l.text ?? ""));
   assert.equal(warned.length, 1, "price-starvation is LOUD (one warning), not silent");
   // Idempotent: a second tick must not spam a duplicate warning.
-  tennisExitTick(db, { now: () => "2026-07-14T10:07:25Z" });
+  await tennisExitTick(db, { now: () => "2026-07-14T10:07:25Z" });
   assert.equal(R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip" && /цена недоступна/.test(l.text ?? "")).length, 1, "warning throttled to once per match+strategy");
 });
 
-test("tennisExitTick: a BREAKEVEN cut (exit == entry) books settled_void/result null — a PUSH, not a win", () => {
+test("tennisExitTick: a BREAKEVEN cut (exit == entry) books settled_void/result null — a PUSH, not a win", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   R.insertBet(db, { id: "texbe", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: { take_price: { at_cents: 59 } } }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
@@ -164,7 +164,7 @@ test("tennisExitTick: a BREAKEVEN cut (exit == entry) books settled_void/result 
   R.insertTennisSnapshot(db, { ...base, event_key: "EBE", batch_at: "2026-07-14T10:05:00Z", games_p1: 3, games_p2: 3, server: "first", pm_p1_cents: 44 });
   R.insertTennisSnapshot(db, { ...base, event_key: "EBE", batch_at: "2026-07-14T10:06:00Z", games_p1: 3, games_p2: 4, server: "second", pm_p1_cents: 44 });
   R.insertTennisSnapshot(db, { ...base, event_key: "EBE", batch_at: "2026-07-14T10:07:00Z", games_p1: 3, games_p2: 4, server: "second", pm_p1_cents: 44 });
-  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" }), 1, "thesis_stop still fired");
+  assert.equal(await tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" }), 1, "thesis_stop still fired");
   const b = R.getBet(db, "texbe")!;
   assert.equal(b.status, "settled_void", "breakeven → settled_void (push), not settled_won");
   assert.equal(b.result, null, "breakeven → result null, so win-rate bins exclude it");
@@ -178,8 +178,69 @@ function snap(db: ReturnType<typeof openDb>, mid: string, o: { at: string; g1: n
 function buybackBet(db: ReturnType<typeof openDb>, mid: string, id: string, plan: any, profile = "medium") {
   R.insertBet(db, { id, match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: profile, market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: plan }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
 }
+// CLOB /book → the given book; everything else 404 (exits make no LLM call).
+const bookFetch = (book: { bids: { price: string; size: string }[]; asks: { price: string; size: string }[] }) =>
+  (async (url: any) => String(url).includes("/book") ? ({ ok: true, status: 200, json: async () => book } as any) : ({ ok: false, status: 404, json: async () => ({}) } as any)) as unknown as typeof fetch;
+// Favourite (first) broken 3-3 → 3-4 (persists) → thesis_stop. Midpoint p1c stays 42 so `cur` resolves.
+const brokenSeq = (db: ReturnType<typeof openDb>, mid: string) => {
+  snap(db, mid, { at: "2026-07-14T10:05:00Z", g1: 3, g2: 3, server: "first", p1c: 42 });
+  snap(db, mid, { at: "2026-07-14T10:06:00Z", g1: 3, g2: 4, server: "second", p1c: 42 });
+  snap(db, mid, { at: "2026-07-14T10:07:00Z", g1: 3, g2: 4, server: "second", p1c: 42 });
+};
+const EXIT_NOW = { now: () => "2026-07-14T10:07:05Z" };
 
-test("tennis calibration: the entry plan carries the INTERIM defaults (K=3, epoch=book-fill-m1)", () => {
+test("tennisExitTick (book-fill-m1): protective exit SELLS into the BID (38¢), not the ask (40¢)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  buybackBet(db, mid, "sellbid", { take_price: { at_cents: 90 }, catastrophic_floor: { at_cents: 10 }, game_count_stop: { receiver_games: 9 } });
+  brokenSeq(db, mid);
+  const n = await tennisExitTick(db, { ...EXIT_NOW, env: { POLYMARKET_ENABLED: "true" }, fetchImpl: bookFetch({ bids: [{ price: "0.38", size: "1000" }], asks: [{ price: "0.40", size: "1000" }] }) });
+  assert.equal(n, 1, "thesis_stop fired");
+  const b = R.getBet(db, "sellbid")!;
+  assert.ok((b.closing_price ?? 0) >= 37 && (b.closing_price ?? 0) < 39, `sold at the 38¢ BID (−fee), never the 40¢ ask — got ${b.closing_price}`);
+});
+
+test("tennisExitTick (book-fill-m1): protective exit with NO bid book → stale price, flagged exitStalePrice", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  buybackBet(db, mid, "stale1", { take_price: { at_cents: 90 }, catastrophic_floor: { at_cents: 10 }, game_count_stop: { receiver_games: 9 } });
+  brokenSeq(db, mid);
+  const n = await tennisExitTick(db, { ...EXIT_NOW, env: { POLYMARKET_ENABLED: "true" }, fetchImpl: bookFetch({ bids: [], asks: [] }) });
+  assert.equal(n, 1, "defensive exit MUST leave even with no book (§4.5)");
+  const b = R.getBet(db, "stale1")!;
+  assert.ok(R.isSettled(b.status), "position closed");
+  assert.equal(parseEntryMeta(b.entry_meta)?.exitStalePrice, true, "flagged as executed at a stale/modelled price");
+});
+
+test("tennisExitTick (book-fill-m1): a TAKE with no live bid is NOT fabricated — skip + hold (retry next tick)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  buybackBet(db, mid, "notake", { take_price: { at_cents: 50 }, catastrophic_floor: { at_cents: 10 }, game_count_stop: { receiver_games: 9 } });
+  // favourite recovered to 55¢ (≥ take 50) with NO break → take_price would fire; but the bid book is empty.
+  snap(db, mid, { at: "2026-07-14T10:05:00Z", g1: 3, g2: 3, server: "second", p1c: 55 });
+  snap(db, mid, { at: "2026-07-14T10:06:00Z", g1: 4, g2: 3, server: "first", p1c: 55 });
+  const n = await tennisExitTick(db, { now: () => "2026-07-14T10:06:05Z", env: { POLYMARKET_ENABLED: "true" }, fetchImpl: bookFetch({ bids: [], asks: [{ price: "0.55", size: "1000" }] }) });
+  assert.equal(n, 0, "no bid → take not fabricated");
+  assert.equal(R.getBet(db, "notake")!.status, "open", "position rides on, retry next tick");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => /тейк отложен/.test(l.text ?? "")), "deferred-take skip logged");
+});
+
+test("tennisExitTick (book-fill-m1): protective exit on a THIN bid → partial sell + remainder attention", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  buybackBet(db, mid, "thin1", { take_price: { at_cents: 90 }, catastrophic_floor: { at_cents: 10 }, game_count_stop: { receiver_games: 9 } });
+  brokenSeq(db, mid);
+  // Position ≈ 227 shares (stake 100 / entry 44¢). Bid depth only 60 shares → partial fill ≈ 26%.
+  const n = await tennisExitTick(db, { ...EXIT_NOW, env: { POLYMARKET_ENABLED: "true" }, fetchImpl: bookFetch({ bids: [{ price: "0.38", size: "60" }], asks: [] }) });
+  assert.equal(n, 1, "partial protective exit counts as an action");
+  const parent = R.getBet(db, "thin1")!;
+  assert.equal(parent.status, "open", "remainder held open (never dumped below floor)");
+  assert.equal(parseEntryMeta(parent.entry_meta)?.exitAttention, true, "remainder flagged attention (retry next tick)");
+  const partial = R.betsForMatch(db, mid, "tennis_overreaction").find((x) => x.settled_by === "partial");
+  assert.ok(partial, "a partial slice was booked at the bid");
+});
+
+test("tennis calibration: the entry plan carries the INTERIM defaults (K=3, epoch=book-fill-m1)", async () => {
   // The prop-priced 105-mark calibration was discarded (BACKLOG "price layer = the MONEYLINE"):
   // thresholds return to interim (K=3) until ~100 marks re-accumulate on the moneyline. The epoch
   // tag is now book-fill-m1 — the hard break where entries fill against the live book, not 0¢.
@@ -191,7 +252,7 @@ test("tennis calibration: the entry plan carries the INTERIM defaults (K=3, epoc
   assert.equal(plan.catastrophic_floor.at_cents, 30, "entry 45 − 15¢ floor (held structural)");
 });
 
-test("tennisExitTick A1: game_count_stop fires after K receiving games with NO break-back", () => {
+test("tennisExitTick A1: game_count_stop fires after K receiving games with NO break-back", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   buybackBet(db, mid, "a1", { take_price: { at_cents: 59 }, catastrophic_floor: { at_cents: 29 }, game_count_stop: { receiver_games: 2 } });
@@ -201,13 +262,13 @@ test("tennisExitTick A1: game_count_stop fires after K receiving games with NO b
   snap(db, mid, { at: "2026-07-14T10:03:00Z", g1: 4, g2: 4, server: "second", p1c: 45 }); // fav held
   snap(db, mid, { at: "2026-07-14T10:04:00Z", g1: 4, g2: 5, server: "first", p1c: 45 });  // opp held → recv #2
   snap(db, mid, { at: "2026-07-14T10:05:00Z", g1: 4, g2: 5, server: "first", p1c: 45 });  // debounce confirm
-  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:05:05Z" }), 1);
+  assert.equal(await tennisExitTick(db, { now: () => "2026-07-14T10:05:05Z" }), 1);
   const b = R.getBet(db, "a1")!;
   assert.equal(b.status, "settled_won", "closed at 45¢ > 44¢ entry → small win");
   assert.equal(b.closing_price, 45);
 });
 
-test("tennisExitTick A1: a BREAK-BACK (counter-break) suppresses game_count_stop — position holds", () => {
+test("tennisExitTick A1: a BREAK-BACK (counter-break) suppresses game_count_stop — position holds", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   buybackBet(db, mid, "a1b", { take_price: { at_cents: 59 }, catastrophic_floor: { at_cents: 29 }, game_count_stop: { receiver_games: 2 } });
@@ -216,44 +277,44 @@ test("tennisExitTick A1: a BREAK-BACK (counter-break) suppresses game_count_stop
   snap(db, mid, { at: "2026-07-14T10:03:00Z", g1: 5, g2: 3, server: "second", p1c: 45 }); // fav held
   snap(db, mid, { at: "2026-07-14T10:04:00Z", g1: 5, g2: 4, server: "first", p1c: 45 });  // opp held → recv #2
   snap(db, mid, { at: "2026-07-14T10:05:00Z", g1: 5, g2: 4, server: "first", p1c: 45 });  // debounce
-  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:05:05Z" }), 0, "recovery underway (break-back) → don't stop");
+  assert.equal(await tennisExitTick(db, { now: () => "2026-07-14T10:05:05Z" }), 0, "recovery underway (break-back) → don't stop");
   assert.equal(R.getBet(db, "a1b")!.status, "open");
 });
 
-test("tennisExitTick A2: catastrophic_floor fires only on a PERSISTENT collapse (phantom-guarded)", () => {
+test("tennisExitTick A2: catastrophic_floor fires only on a PERSISTENT collapse (phantom-guarded)", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   // floor at 29¢ (entry 44 − 15). Two consecutive snapshots ≤ 29 → confirmed collapse.
   buybackBet(db, mid, "a2", { take_price: { at_cents: 59 }, catastrophic_floor: { at_cents: 29 } });
   snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "second", p1c: 27 });
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 3, server: "second", p1c: 26 });
-  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:02:05Z" }), 1);
+  assert.equal(await tennisExitTick(db, { now: () => "2026-07-14T10:02:05Z" }), 1);
   const b = R.getBet(db, "a2")!;
   assert.equal(b.status, "settled_lost");
   assert.equal(b.closing_price, 26);
 });
 
-test("tennisExitTick A2: a SINGLE spike below floor (then recovers) does NOT trigger — phantom guard", () => {
+test("tennisExitTick A2: a SINGLE spike below floor (then recovers) does NOT trigger — phantom guard", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   buybackBet(db, mid, "a2b", { take_price: { at_cents: 59 }, catastrophic_floor: { at_cents: 29 } });
   snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "second", p1c: 45 }); // prev above floor
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 3, server: "second", p1c: 24 }); // one print below — a phantom
-  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:02:05Z" }), 0, "single print ≤ floor is not confirmed → hold");
+  assert.equal(await tennisExitTick(db, { now: () => "2026-07-14T10:02:05Z" }), 0, "single print ≤ floor is not confirmed → hold");
   assert.equal(R.getBet(db, "a2b")!.status, "open");
 });
 
-test("tennisExitTick A2: game jitter ABOVE the floor never triggers the backstop", () => {
+test("tennisExitTick A2: game jitter ABOVE the floor never triggers the backstop", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   buybackBet(db, mid, "a2c", { take_price: { at_cents: 59 }, catastrophic_floor: { at_cents: 29 } });
   snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "second", p1c: 36 }); // −8¢ deuce jitter
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 3, server: "second", p1c: 36 });
-  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:02:05Z" }), 0, "±8¢ never reaches entry−15 → hold");
+  assert.equal(await tennisExitTick(db, { now: () => "2026-07-14T10:02:05Z" }), 0, "±8¢ never reaches entry−15 → hold");
   assert.equal(R.getBet(db, "a2c")!.status, "open");
 });
 
-test("tennisExitTick A4: on simultaneous thesis_stop + catastrophic_floor, the THESIS (defensive, higher) wins", () => {
+test("tennisExitTick A4: on simultaneous thesis_stop + catastrophic_floor, the THESIS (defensive, higher) wins", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   buybackBet(db, mid, "a4", { take_price: { at_cents: 59 }, catastrophic_floor: { at_cents: 29 } });
@@ -261,7 +322,7 @@ test("tennisExitTick A4: on simultaneous thesis_stop + catastrophic_floor, the T
   snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 26 });
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 24 }); // fav's serve broken
   snap(db, mid, { at: "2026-07-14T10:03:00Z", g1: 3, g2: 4, server: "second", p1c: 24 }); // debounce
-  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:03:05Z" }), 1);
+  assert.equal(await tennisExitTick(db, { now: () => "2026-07-14T10:03:05Z" }), 1);
   const logs = R.tradeLogForMatch(db, mid).filter((l) => l.type === "exit");
   assert.ok(logs.some((l) => /thesis_stop/.test(l.text)), "thesis_stop fired");
   assert.ok(!logs.some((l) => /catastrophic_floor/.test(l.text)), "floor did NOT also fire (single close, defensive priority)");
@@ -329,7 +390,7 @@ test("tennisSetValueTick F: a transient strategist failure does NOT burn the mat
   assert.ok(opened2 >= 1, "the match's Set-Value shot survived the transient failure — retry entered");
 });
 
-test("Part B buildTennisCalibrationReport: splits marks into recovery vs no-recovery", () => {
+test("Part B buildTennisCalibrationReport: splits marks into recovery vs no-recovery", async () => {
   const db = openDb(":memory:");
   const mk = (id: string, pre: number, floor: number, rec5: number, early: number) => R.insertTennisBreakMark(db, {
     event_key: id, match_id: null, players: "A vs B", tournament: "ATP Granby", event_type: "Atp Singles", set_num: 1,
@@ -350,7 +411,7 @@ test("Part B buildTennisCalibrationReport: splits marks into recovery vs no-reco
   assert.ok(rep.byContext.some((c) => /ATP/.test(c.context)), "context split present");
 });
 
-test("advanceClocks tennis: kickoff passed but NO scout data → stays upcoming (no clock-phantom live)", () => {
+test("advanceClocks tennis: kickoff passed but NO scout data → stays upcoming (no clock-phantom live)", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   R.updateMatch(db, mid, { state: "upcoming", lineup_out: false }); // reset from seed's "live"
@@ -359,7 +420,7 @@ test("advanceClocks tennis: kickoff passed but NO scout data → stays upcoming 
   assert.equal(R.getMatch(db, mid)!.state, "upcoming", "the clock never fabricates tennis live");
 });
 
-test("advanceClocks tennis: a FRESH in-play scout snapshot flips the match to live", () => {
+test("advanceClocks tennis: a FRESH in-play scout snapshot flips the match to live", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   R.updateMatch(db, mid, { state: "upcoming", lineup_out: false });
@@ -368,7 +429,7 @@ test("advanceClocks tennis: a FRESH in-play scout snapshot flips the match to li
   assert.equal(R.getMatch(db, mid)!.state, "live", "scout confirms in-play → live");
 });
 
-test("advanceClocks tennis: a clock-phantom live match (scout silent, no position) is un-lived", () => {
+test("advanceClocks tennis: a clock-phantom live match (scout silent, no position) is un-lived", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // seeded state "live"
   // no scout snapshots at all → not in-play. No open bet. kickoff in the past.
@@ -376,7 +437,7 @@ test("advanceClocks tennis: a clock-phantom live match (scout silent, no positio
   assert.equal(R.getMatch(db, mid)!.state, "upcoming", "phantom dropped out of live");
 });
 
-test("advanceClocks tennis: an open position keeps a stale-scout match LIVE (never strand a bet)", () => {
+test("advanceClocks tennis: an open position keeps a stale-scout match LIVE (never strand a bet)", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // state "live"
   R.insertBet(db, { id: "keep", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "сет 1", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: null, code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
@@ -384,7 +445,7 @@ test("advanceClocks tennis: an open position keeps a stale-scout match LIVE (nev
   assert.equal(R.getMatch(db, mid)!.state, "live", "position is babysat, not stranded");
 });
 
-test("advanceClocks tennis: a scout FINAL finishes a live match (no open position)", () => {
+test("advanceClocks tennis: a scout FINAL finishes a live match (no open position)", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // state "live"
   R.insertTennisSnapshot(db, { event_key: "EF", provider: "apitennis", batch_at: "2026-07-14T11:58:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Finished", sets_p1: 2, sets_p2: 0, set_num: 2, games_p1: 6, games_p2: 3, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "First Player" }) });
@@ -392,7 +453,7 @@ test("advanceClocks tennis: a scout FINAL finishes a live match (no open positio
   assert.equal(R.getMatch(db, mid)!.state, "finished", "scout final → finished, not un-lived to upcoming");
 });
 
-test("buildTennisFunnel: reconstructs the funnel + names each live match's drop-out stage", () => {
+test("buildTennisFunnel: reconstructs the funnel + names each live match's drop-out stage", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20 });
   // A favourite (first) broken in set 1 with the price in the buyback zone → passes the gate.
@@ -410,7 +471,7 @@ test("buildTennisFunnel: reconstructs the funnel + names each live match's drop-
   assert.equal(f.entriesAllTime, 0);
 });
 
-test("buildTennisFunnel: a live match with no linked scout snapshots is surfaced (no_scout_link), not dropped", () => {
+test("buildTennisFunnel: a live match with no linked scout snapshots is surfaced (no_scout_link), not dropped", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // live match, but NO tennis_snapshots for it
   const f = buildTennisFunnel(db);
@@ -419,7 +480,7 @@ test("buildTennisFunnel: a live match with no linked scout snapshots is surfaced
   assert.equal(f.perMatch[0].stage, "no_scout_link", "the coverage blocker is named, not silent");
 });
 
-test("buildTennisFunnel: an underdog break is named a non-setup, not a silent skip", () => {
+test("buildTennisFunnel: an underdog break is named a non-setup, not a silent skip", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20 });
   // The UNDERDOG (second) is broken → not our setup.
@@ -432,17 +493,17 @@ test("buildTennisFunnel: an underdog break is named a non-setup, not a silent sk
   assert.equal(f.perMatch[0].stage, "underdog_broken");
 });
 
-test("tennisExitTick: a position with neither trigger stays OPEN (rides on)", () => {
+test("tennisExitTick: a position with neither trigger stays OPEN (rides on)", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   R.insertBet(db, { id: "tex3", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: { take_price: { at_cents: 59 } } }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
   // Price at 50¢ — above entry but below the 59 take; no new break. Hold.
   R.insertTennisSnapshot(db, { event_key: "E11", provider: "apitennis", batch_at: "2026-07-14T10:08:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "Set 2", sets_p1: 1, sets_p2: 0, set_num: 2, games_p1: 4, games_p2: 3, game_points: null, server: "first", pm_match_id: mid, pm_mid_cents: 50, pm_p1_cents: 50, pm_p2_cents: 50, raw: "{}" });
-  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:08:05Z" }), 0);
+  assert.equal(await tennisExitTick(db, { now: () => "2026-07-14T10:08:05Z" }), 0);
   assert.equal(R.getBet(db, "tex3")!.status, "open", "held — buyback not yet recovered, thesis intact");
 });
 
-test("tennisFinalResult: a mid-match DEFAULT/disqualification resolves to the advancer (not void) — matches Polymarket", () => {
+test("tennisFinalResult: a mid-match DEFAULT/disqualification resolves to the advancer (not void) — matches Polymarket", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   R.insertTennisSnapshot(db, { event_key: "ED", provider: "apitennis", batch_at: "2026-07-14T11:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Default", sets_p1: 1, sets_p2: 0, set_num: 2, games_p1: 3, games_p2: 1, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "First Player" }) });
@@ -453,7 +514,7 @@ test("tennisFinalResult: a mid-match DEFAULT/disqualification resolves to the ad
   assert.equal(fin.advancing, "first", "Vukic advances on the opponent's default");
 });
 
-test("tennisFinalResult: a WALKOVER (pre-start withdrawal) is VOID, not an advancer win — matches Polymarket", () => {
+test("tennisFinalResult: a WALKOVER (pre-start withdrawal) is VOID, not an advancer win — matches Polymarket", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   R.insertTennisSnapshot(db, { event_key: "EW", provider: "apitennis", batch_at: "2026-07-14T11:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Walkover", sets_p1: 0, sets_p2: 0, set_num: 1, games_p1: 0, games_p2: 0, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "First Player" }) });
@@ -463,7 +524,7 @@ test("tennisFinalResult: a WALKOVER (pre-start withdrawal) is VOID, not an advan
   assert.equal(fin.advancing, null);
 });
 
-test("tennisTourOf: ATP/WTA singles in scope; ITF / Challenger / doubles out (shared by every tennis strategy)", () => {
+test("tennisTourOf: ATP/WTA singles in scope; ITF / Challenger / doubles out (shared by every tennis strategy)", async () => {
   assert.equal(tennisTourOf({ id: "pm-atp", name: "ATP" }), "atp");
   assert.equal(tennisTourOf({ id: "pm-wta", name: "WTA" }), "wta");
   assert.equal(tennisTourOf({ id: "pm-itf", name: "ITF Sao Paulo" }), null, "ITF out of scope");
@@ -498,7 +559,7 @@ test("tennisTradingTick: an ITF match is NOT traded (tour scope — favourite-re
   assert.equal(buildTennisFunnel(db).perMatch[0].stage, "out_of_scope");
 });
 
-test("tennisTradingTick BUG-1 flip: after the pre-match favourite loses set 1, the opponent's set-2 break is an UNDERDOG break (no favourite flip)", () => {
+test("tennisTradingTick BUG-1 flip: after the pre-match favourite loses set 1, the opponent's set-2 break is an UNDERDOG break (no favourite flip)", async () => {
   const db = openDb(":memory:");
   // Pre-match favourite = FIRST (67¢). First then LOSES set 1; the market flips SECOND to 69¢.
   const mid = seedTennisMatch(db, { p1: "I. Barrera", p2: "M. Reasco", p1price: 67, p2price: 33 });
@@ -532,7 +593,7 @@ test("tennisTradingTick BUG-3: cross-strategy block is symmetric — Overreactio
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /blocked_second_buyback/.test(l.text)), "the cross-strategy block is logged");
 });
 
-test("tennisFinalResult B: a retirement with NO event_winner is MANUAL — never guess the advancer from set count", () => {
+test("tennisFinalResult B: a retirement with NO event_winner is MANUAL — never guess the advancer from set count", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   // Vukic LEADS 1-0 in sets, then retires (injury while ahead). No event_winner in raw.
@@ -543,7 +604,7 @@ test("tennisFinalResult B: a retirement with NO event_winner is MANUAL — never
   assert.equal(fin.advancing, null, "never a set-count guess for a retirement");
 });
 
-test("tennisFinalResult B: leader retires but event_winner names the ADVANCER → correct, not inverted", () => {
+test("tennisFinalResult B: leader retires but event_winner names the ADVANCER → correct, not inverted", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   // Vukic leads 1-0 but retires; Broady (Second Player) advances — event_winner is authoritative.
@@ -553,7 +614,7 @@ test("tennisFinalResult B: leader retires but event_winner names the ADVANCER �
   assert.equal(fin.manual, false);
 });
 
-test("tennisFinalResult B: event_winner that DISAGREES with a decisive set score → MANUAL (trust neither)", () => {
+test("tennisFinalResult B: event_winner that DISAGREES with a decisive set score → MANUAL (trust neither)", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   R.insertTennisSnapshot(db, { event_key: "R3", provider: "apitennis", batch_at: "2026-07-14T11:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Finished", sets_p1: 0, sets_p2: 2, set_num: 2, games_p1: 3, games_p2: 6, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "First Player" }) });
@@ -561,7 +622,7 @@ test("tennisFinalResult B: event_winner that DISAGREES with a decisive set score
   assert.equal(fin.manual, true, "winner=first but sets 0-2 → contradiction → manual");
 });
 
-test("settleTennisBets B: a manual (winner-unknown) match flags the bet and leaves it OPEN — no guess", () => {
+test("settleTennisBets B: a manual (winner-unknown) match flags the bet and leaves it OPEN — no guess", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   R.insertTennisSnapshot(db, { event_key: "R4", provider: "apitennis", batch_at: "2026-07-14T11:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Retired", sets_p1: 1, sets_p2: 0, set_num: 2, games_p1: 3, games_p2: 1, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: "{}" });
@@ -629,7 +690,7 @@ test("fetchTennisFixtures OOM guard: an over-cap payload is skipped (never parse
   assert.equal(res.length, 1); assert.equal(res[0].eventKey, "A");
 });
 
-test("advanceClocks tennis: a no-bet match stuck live past the ceiling is FINISHED (bounds the phantom 300')", () => {
+test("advanceClocks tennis: a no-bet match stuck live past the ceiling is FINISHED (bounds the phantom 300')", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // kickoff 09:00, state 'live'
   snap(db, mid, { at: "2026-07-14T14:25:00Z", g1: 5, g2: 4, server: "first", p1c: 60 }); // fresh live=1 (scout stuck)
@@ -637,7 +698,7 @@ test("advanceClocks tennis: a no-bet match stuck live past the ceiling is FINISH
   assert.equal(R.getMatch(db, mid)!.state, "finished", "stuck-live no-bet match force-finished");
 });
 
-test("advanceClocks tennis: a match with an OPEN bet stuck live past the ceiling is NOT force-finished (poller owns money)", () => {
+test("advanceClocks tennis: a match with an OPEN bet stuck live past the ceiling is NOT force-finished (poller owns money)", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   snap(db, mid, { at: "2026-07-14T14:25:00Z", g1: 5, g2: 4, server: "first", p1c: 60 });
@@ -657,7 +718,7 @@ test("collectTennisSnapshots #3: a terminal transition row (live=0 Finished) is 
   assert.equal(written, 1, "the terminal Finished row (T1) is kept; the non-terminal live=0 row (T2) is still dropped");
 });
 
-test("capTennisSnapshots: hard row-cap keeps the newest N (prevents the 1.2GB bloat)", () => {
+test("capTennisSnapshots: hard row-cap keeps the newest N (prevents the 1.2GB bloat)", async () => {
   const db = openDb(":memory:");
   R.upsertSport(db, "tennis", "Теннис");
   for (let i = 0; i < 25; i++) R.insertTennisSnapshot(db, { event_key: "E", provider: "p", batch_at: `2026-07-14T00:${String(i).padStart(2, "0")}:00Z`, p1: "a", p2: "b", tournament: null, event_type: null, live: 1, status: null, sets_p1: 0, sets_p2: 0, set_num: 1, games_p1: 0, games_p2: 0, game_points: null, server: null, pm_match_id: "m", pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: "{}" });
@@ -666,7 +727,7 @@ test("capTennisSnapshots: hard row-cap keeps the newest N (prevents the 1.2GB bl
   assert.equal(R.capTennisSnapshots(db, 10), 0, "idempotent — already at cap");
 });
 
-test("settleTennisBets: a retirement resolves to the advancing (non-retiring) player", () => {
+test("settleTennisBets: a retirement resolves to the advancing (non-retiring) player", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
   // Broady retired → Vukic (First Player) advances.

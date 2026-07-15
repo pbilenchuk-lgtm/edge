@@ -25,14 +25,14 @@ const okLLM = (label: string) => (async () => ({ ok: true, status: 200, json: as
 const abstainLLM = () => (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [] }) }] }) })) as unknown as typeof fetch;
 
 // ── Pure gate + format ────────────────────────────────────────────────────
-test("isBestOfFive: Grand Slam men's singles = bo5; WTA / non-slam = bo3", () => {
+test("isBestOfFive: Grand Slam men's singles = bo5; WTA / non-slam = bo3", async () => {
   assert.equal(isBestOfFive("ATP Singles", "Wimbledon"), true);
   assert.equal(isBestOfFive("Grand Slam", "US Open"), true);
   assert.equal(isBestOfFive("WTA Singles", "Wimbledon"), false, "women play bo3 even at slams");
   assert.equal(isBestOfFive("ATP Singles", "Granby"), false, "not a slam");
 });
 
-test("setValueGate: armed only when favourite lost set 1 AND price is in the band", () => {
+test("setValueGate: armed only when favourite lost set 1 AND price is in the band", async () => {
   const base = { favSide: "first" as const, tradeable: true, favSetsWon: 0, favSetsLost: 1, setNum: 2, eventType: "ATP Singles", tournament: "Granby" };
   assert.equal(setValueGate({ ...base, favPriceCents: 38 }).armed, true);
   assert.equal(setValueGate({ ...base, favPriceCents: 22 }).skip, "market_knows", "<25¢ → market knows more, never enter");
@@ -131,13 +131,13 @@ function seedOpenSV(db: ReturnType<typeof openDb>, mid: string, entryCents: numb
   R.insertBet(db, { id: "sv1", match_id: mid, strategy_id: "tennis_set_value", risk_profile_id: profile, market_label: "Vitoria Zuccon", status: "open", proposed_price: entryCents, entry_price: entryCents, current_price: entryCents, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "set-value", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta(meta), code_version: "e·interim", created_at: "2026-07-14T10:05:00Z" } as any);
 }
 
-test("Set-Value exit: partial 50% take on the comeback, remainder held to settle", () => {
+test("Set-Value exit: partial 50% take on the comeback, remainder held to settle", async () => {
   const db = openDb(":memory:");
   const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins" });
   seedOpenSV(db, mid, 38);
   svSnap(db, mid, { at: "2026-07-14T10:05:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 1, setNum: 2, g1: 0, g2: 0, server: "first", p1c: 38 });
   svSnap(db, mid, { at: "2026-07-14T10:08:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 1, setNum: 2, g1: 1, g2: 0, server: "second", p1c: 58 }); // recovered ≥55 (favourite held)
-  const closed = tennisExitTick(db, { now: () => "2026-07-14T10:08:05Z" });
+  const closed = await tennisExitTick(db, { now: () => "2026-07-14T10:08:05Z" });
   assert.equal(closed, 1);
   const open = R.getBet(db, "sv1")!;
   assert.equal(open.status, "open", "the remainder stays open to settle");
@@ -146,7 +146,7 @@ test("Set-Value exit: partial 50% take on the comeback, remainder held to settle
   assert.ok(partial && partial.stake === 50, "a 50% slice was booked as a partial fixation");
 });
 
-test("Set-Value exit: thesis_stop on a set-2 break with NO break-back (K=2 receiving games)", () => {
+test("Set-Value exit: thesis_stop on a set-2 break with NO break-back (K=2 receiving games)", async () => {
   const db = openDb(":memory:");
   const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins" });
   seedOpenSV(db, mid, 38);
@@ -156,13 +156,13 @@ test("Set-Value exit: thesis_stop on a set-2 break with NO break-back (K=2 recei
   svSnap(db, mid, { ...P, at: "2026-07-14T10:07:00Z", g1: 0, g2: 2, server: "first", p1c: 34 }); // opponent holds → recv #1
   svSnap(db, mid, { ...P, at: "2026-07-14T10:08:00Z", g1: 1, g2: 2, server: "second", p1c: 36 }); // favourite holds own serve
   svSnap(db, mid, { ...P, at: "2026-07-14T10:09:00Z", g1: 1, g2: 3, server: "first", p1c: 33 }); // opponent holds → recv #2, no break-back
-  const closed = tennisExitTick(db, { now: () => "2026-07-14T10:09:05Z" });
+  const closed = await tennisExitTick(db, { now: () => "2026-07-14T10:09:05Z" });
   assert.equal(closed, 1);
   assert.equal(R.getBet(db, "sv1")!.status !== "open", true, "position cut");
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /thesis_stop/.test(l.text)), "thesis_stop logged");
 });
 
-test("Set-Value exit: a set-2 break that IS broken back does NOT thesis_stop (break with return)", () => {
+test("Set-Value exit: a set-2 break that IS broken back does NOT thesis_stop (break with return)", async () => {
   const db = openDb(":memory:");
   const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins" });
   seedOpenSV(db, mid, 38);
@@ -170,12 +170,12 @@ test("Set-Value exit: a set-2 break that IS broken back does NOT thesis_stop (br
   svSnap(db, mid, { ...P, at: "2026-07-14T10:05:00Z", g1: 0, g2: 0, server: "first", p1c: 38 });
   svSnap(db, mid, { ...P, at: "2026-07-14T10:06:00Z", g1: 0, g2: 1, server: "second", p1c: 35 }); // favourite broken
   svSnap(db, mid, { ...P, at: "2026-07-14T10:07:00Z", g1: 1, g2: 1, server: "first", p1c: 44 }); // favourite BREAKS BACK
-  const closed = tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" });
+  const closed = await tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" });
   assert.equal(closed, 0, "break-back → thesis intact, position rides on");
   assert.equal(R.getBet(db, "sv1")!.status, "open");
 });
 
-test("Set-Value exit ORDER: thesis_stop outranks the take even when price ≥ take", () => {
+test("Set-Value exit ORDER: thesis_stop outranks the take even when price ≥ take", async () => {
   const db = openDb(":memory:");
   const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins" });
   seedOpenSV(db, mid, 38);
@@ -185,7 +185,7 @@ test("Set-Value exit ORDER: thesis_stop outranks the take even when price ≥ ta
   svSnap(db, mid, { ...P, at: "2026-07-14T10:07:00Z", g1: 0, g2: 2, server: "first", p1c: 34 }); // recv #1
   svSnap(db, mid, { ...P, at: "2026-07-14T10:08:00Z", g1: 1, g2: 2, server: "second", p1c: 50 }); // fav holds
   svSnap(db, mid, { ...P, at: "2026-07-14T10:09:00Z", g1: 1, g2: 3, server: "first", p1c: 60 }); // recv #2 + price ≥ take(55)
-  tennisExitTick(db, { now: () => "2026-07-14T10:09:05Z" });
+  await tennisExitTick(db, { now: () => "2026-07-14T10:09:05Z" });
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /thesis_stop/.test(l.text)), "defensive thesis_stop wins over the take");
   assert.ok(!R.betsForMatch(db, mid, "tennis_set_value").some((b) => b.settled_by === "partial"), "no partial fixation happened");
 });

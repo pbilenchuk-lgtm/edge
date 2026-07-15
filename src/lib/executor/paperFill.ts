@@ -49,8 +49,10 @@ export type FillRejectReason = "untradeable_market" | "orderbook_unavailable" | 
 
 /** The result of an entry fill (was `EntryExec` in lifecycle). */
 export interface EntryFillResult { skip: boolean; priceCents: number; stake: number; note?: string; retry?: boolean; cost?: FillCost; reason?: FillRejectReason; clamped?: boolean }
-/** The result of an exit fill (was the return of `sellVwapCents`). */
-export interface SellFillResult { cents: number; note?: string; fromBook: boolean; bestBidCents?: number; cost?: FillCost }
+/** The result of an exit fill (was the return of `sellVwapCents`). `filledShares` < `requestedShares`
+ *  on a THIN bid book → the caller sells what filled and holds the remainder (attention + retry, §2.2).
+ *  `fromBook=false` is a MODELLED (stale) price — a defensive exit may use it flagged; a take must not. */
+export interface SellFillResult { cents: number; note?: string; fromBook: boolean; bestBidCents?: number; cost?: FillCost; filledShares: number; requestedShares: number }
 
 /** Fetch + cache a token's order book, classified (empty / ok / unavailable). The
  *  book is per-TOKEN, so two risk profiles on one market fetch it once per cycle. */
@@ -128,17 +130,19 @@ export function paperSellFill(
 ): SellFillResult {
   const book = bookRes.status === "ok" ? bookRes.book : null;
   if (shares > 0 && book && book.bids.length) {
-    const f = simulateSell(book.bids, shares);
+    const f = simulateSell(book.bids, shares); // sells into BIDS (best/highest first) — never asks
     const bestBid = book.bids[0].priceCents;
     const fee = takerFeeCents(f.avgPriceCents, exec.takerFeeRate);
     const eff = Math.round((f.avgPriceCents - fee) * 10) / 10;
     const slip = Math.round((bestBid - f.avgPriceCents) * 10) / 10;
     const slipAdverse = Math.max(0, slip);
+    const filled = f.filledShares; // < shares when the bid book is thin (partial exit → attention + retry)
     const cost: FillCost = {
-      side: "sell", shares, notionalUsd: basisUsd, quoteCents: bestBid, vwapCents: f.avgPriceCents,
-      feeCents: fee, feeUsd: (shares * fee) / 100, slipCents: slipAdverse, slipUsd: (shares * slipAdverse) / 100, fromBook: true,
+      side: "sell", shares: filled, notionalUsd: basisUsd * (shares > 0 ? filled / shares : 1), quoteCents: bestBid, vwapCents: f.avgPriceCents,
+      feeCents: fee, feeUsd: (filled * fee) / 100, slipCents: slipAdverse, slipUsd: (filled * slipAdverse) / 100, fromBook: true,
     };
-    return { cents: eff, fromBook: true, bestBidCents: bestBid, cost, note: `выход VWAP ${f.avgPriceCents}¢ (бид ${bestBid}¢${slip > 0 ? `, слип −${slip}¢` : ""}) − комиссия ${fee}¢` };
+    const partialNote = f.unfilledShares > 1e-6 ? ` · бид тонкий: исполнено ${Math.round((filled / shares) * 100)}%` : "";
+    return { cents: eff, fromBook: true, bestBidCents: bestBid, cost, filledShares: filled, requestedShares: shares, note: `выход VWAP ${f.avgPriceCents}¢ (бид ${bestBid}¢${slip > 0 ? `, слип −${slip}¢` : ""}) − комиссия ${fee}¢${partialNote}` };
   }
   const avg = parametricSellAvgCents(quoteCents, basisUsd, mkLiquidity, exec.fallbackK);
   const fee = takerFeeCents(avg, exec.takerFeeRate);
@@ -148,5 +152,6 @@ export function paperSellFill(
     side: "sell", shares, notionalUsd: basisUsd, quoteCents, vwapCents: avg,
     feeCents: fee, feeUsd: (shares * fee) / 100, slipCents: slipModel, slipUsd: (shares * slipModel) / 100, fromBook: false,
   };
-  return { cents: eff, fromBook: false, cost, note: `≈выход ${avg}¢ − комиссия ${fee}¢ (модель по ликвидности)` };
+  // fromBook=false: MODELLED/stale price (no live bids). A defensive exit may use it (flagged); a take must skip.
+  return { cents: eff, fromBook: false, cost, filledShares: shares, requestedShares: shares, note: `≈выход ${avg}¢ − комиссия ${fee}¢ (модель по ликвидности — нет живого бида)` };
 }
