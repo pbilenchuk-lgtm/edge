@@ -9,8 +9,9 @@ export const dynamic = "force-dynamic";
  * of (env, operator override, sticky pause). The UI can only tighten. Body: { action, ...args }.
  *
  * actions:
- *   stop                         — hard stop: mode→off + cancel working orders + orphan alert
- *   set_mode   { mode, confirm } — operator-mode ceiling; loosening needs confirm:true
+ *   stop                         — hard stop: mode→off + cancel working orders + orphan alert (INSTANT)
+ *   set_mode   { mode, confirm, phrase } — operator-mode ceiling; loosening→dry_run/exits_only needs
+ *                                  confirm:true; loosening→on needs the TYPED phrase (not a click)
  *   clear_pause                  — clear the sticky auto-pause
  *   whitelist_add { row }        — add a whitelist row (versioned + logged)
  *   whitelist_toggle { id, enabled }
@@ -33,7 +34,7 @@ export async function POST(req: Request) {
         result = C.operatorStop(db, actor, now);
         break;
       case "set_mode":
-        result = C.setOperatorModeControl(db, String(body.mode ?? ""), body.confirm === true, actor, now);
+        result = C.setOperatorModeControl(db, String(body.mode ?? ""), body.confirm === true, actor, now, typeof body.phrase === "string" ? body.phrase : undefined);
         break;
       case "clear_pause":
         result = C.clearAutoPauseControl(db, actor, now);

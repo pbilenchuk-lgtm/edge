@@ -2113,6 +2113,9 @@ function PortfolioScreen({ open, closed, onGoMatches }: any) {
 // of these can loosen past the env ceiling; the server takes the most restrictive of
 // (env, operator, pause). Loosening the mode requires a confirm round-trip.
 // ─────────────────────────────────────────────────────────────────────────────
+// Kept in sync with ON_CONFIRM_PHRASE in realControl.ts (server validates; a mismatch just gets
+// rejected with the expected phrase echoed back). Client can't import the server module (node:sqlite).
+const ON_CONFIRM_PHRASE = "ВКЛЮЧИТЬ РЕАЛ";
 function RealControls({ data, onRefresh }: { data: any; onRefresh: () => void }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -2142,8 +2145,16 @@ function RealControls({ data, onRefresh }: { data: any; onRefresh: () => void })
     finally { setBusy(false); }
   };
 
-  const doStop = async () => { if (window.confirm("[STOP] — режим станет off, все висящие ордера будут отменены. Открытые позиции останутся под exits-only управлением (не сбрасываются). Продолжить?")) await post({ action: "stop" }); };
+  // STOP is INSTANT — one click, no dialog. The panic button must never ask.
+  const doStop = async () => { await post({ action: "stop" }); };
   const setMode = async (mode: string) => {
+    if (mode === "on") {
+      // The strongest barrier: enabling REAL money is a typed phrase, never a click.
+      const phrase = window.prompt(`Включение РЕАЛЬНЫХ денег.\nВведи фразу «${ON_CONFIRM_PHRASE}» для подтверждения (не кнопку):`);
+      if (phrase == null) return; // cancelled — no request sent
+      await post({ action: "set_mode", mode, phrase });
+      return;
+    }
     const j = await post({ action: "set_mode", mode });
     if (j.needConfirm && window.confirm(`${j.note}\n\nПовышение режима даёт больше РЕАЛЬНЫХ действий. Подтвердить?`)) await post({ action: "set_mode", mode, confirm: true });
   };
@@ -2171,12 +2182,13 @@ function RealControls({ data, onRefresh }: { data: any; onRefresh: () => void })
 
       {/* STOP + режим */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
-        {btn("■ STOP", doStop, "danger", { fontWeight: 700, fontSize: 13 })}
+        <span title="мгновенно — без подтверждения">{btn("■ STOP", doStop, "danger", { fontWeight: 700, fontSize: 13 })}</span>
         <div style={{ width: 1, height: 22, background: "#ffffff18" }} />
         <span style={{ fontSize: 11, color: "#888" }}>режим оператора:</span>
         {MODES.map((m) => {
           const active = (op ?? "—") === m;
-          return <button key={m} disabled={busy} onClick={() => setMode(m)} style={{ padding: "5px 10px", fontSize: 11, borderRadius: 5, cursor: busy ? "wait" : "pointer", background: active ? (m === "on" ? "#ff6b6b33" : m === "off" ? "#ffffff20" : "#7fb4e833") : "transparent", color: active ? (m === "on" ? "#ff6b6b" : "#eee") : "#888", border: `1px solid ${active ? "#ffffff30" : "#ffffff12"}`, fontWeight: active ? 700 : 400 }}>{m}</button>;
+          const title = m === "on" ? "РЕАЛЬНЫЕ деньги — требует ввода фразы (не клик)" : m === "off" ? "мгновенно" : "повышение — одно подтверждение";
+          return <button key={m} title={title} disabled={busy} onClick={() => setMode(m)} style={{ padding: "5px 10px", fontSize: 11, borderRadius: 5, cursor: busy ? "wait" : "pointer", background: active ? (m === "on" ? "#ff6b6b33" : m === "off" ? "#ffffff20" : "#7fb4e833") : "transparent", color: active ? (m === "on" ? "#ff6b6b" : "#eee") : "#888", border: `1px solid ${active ? "#ffffff30" : "#ffffff12"}`, fontWeight: active ? 700 : 400 }}>{m === "on" ? "🔒 on" : m}</button>;
         })}
         <span style={{ fontSize: 10, color: "#666" }}>env={envM} (потолок) · действует <b style={{ color: "#bbb" }}>{data.mode}</b>{op == null && " · оператор не задан"}</span>
       </div>

@@ -273,10 +273,16 @@ export function listControlLog(db: Database, limit = 50): { action: string; deta
 }
 
 /** STOP: cancel every working (placed/partial) real order → status cancelled + a transition event.
- *  Open POSITIONS are NOT force-closed (a panic dump into a thin book is worse than a pause; they
- *  ride under exits-only management, §4.2). Returns how many orders were cancelled. */
-export function cancelWorkingRealOrders(db: Database, at: string): number {
+ *  GREEDY + idempotent: a failure on one order does NOT abort the sweep — we try each, count what
+ *  actually cancelled, and report {attempted, cancelled, failed} ("N of M"). The panic button must
+ *  never die on the first bad order and leave the rest working. Open POSITIONS are NOT force-closed
+ *  (a panic dump into a thin book is worse than a pause; they ride under exits-only, §4.2). */
+export function cancelWorkingRealOrders(db: Database, at: string): { attempted: number; cancelled: number; failed: number } {
   const working = db.prepare(`SELECT id FROM real_orders WHERE status IN ('placed','partial')`).all() as { id: string }[];
-  for (const o of working) transitionRealOrder(db, o.id, "cancelled", at, { note: "STOP — все висящие ордера отменены" });
-  return working.length;
+  let cancelled = 0, failed = 0;
+  for (const o of working) {
+    try { transitionRealOrder(db, o.id, "cancelled", at, { note: "STOP — все висящие ордера отменены" }); cancelled++; }
+    catch { failed++; }
+  }
+  return { attempted: working.length, cancelled, failed };
 }

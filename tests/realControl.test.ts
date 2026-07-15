@@ -4,7 +4,7 @@ import { openDb, initSchema } from "../src/lib/db.js";
 import * as RR from "../src/lib/realRepo.js";
 import {
   operatorStop, setOperatorModeControl, clearAutoPauseControl,
-  whitelistAddControl, whitelistToggleControl, setCapsControl,
+  whitelistAddControl, whitelistToggleControl, setCapsControl, ON_CONFIRM_PHRASE,
 } from "../src/lib/executor/realControl.js";
 
 const NOW = "2026-07-15T12:00:00.000Z";
@@ -32,10 +32,25 @@ test("operatorStop: mode→off, cancels every working order, raises orphan alert
   const statuses = ["o1", "o2"].map((id) => (d.prepare(`SELECT status FROM real_orders WHERE id=?`).get(id) as any).status);
   assert.deepEqual(statuses, ["cancelled", "cancelled"], "both working orders cancelled");
   assert.ok(RR.getRealOrphanAlert(d), "orphan alert set (positions ride under exits-only)");
+  assert.match(r.note, /отменено висящих ордеров: 2 из 2/, "reports N of M, not just attempted");
   const log = RR.listControlLog(d, 10);
   assert.equal(log[0].action, "stop");
   assert.equal(log[0].actor, "owner");
-  assert.ok(String(log[0].detail).includes("2"), "logged 2 cancelled");
+  const det = JSON.parse(String(log[0].detail));
+  assert.deepEqual(det, { attempted: 2, cancelled: 2, failed: 0 }, "logs the greedy tally");
+});
+
+test("operatorStop: greedy — transitions that throw do NOT abort the sweep; STOP still returns ok + a tally", () => {
+  const d = db();
+  workingOrder(d, "o1"); workingOrder(d, "o2"); workingOrder(d, "o3");
+  // Force every transition to throw at the event-append step (drop its table). The sweep must swallow
+  // each failure, keep going, and report {attempted:3, failed:3} — never propagate and never half-stop.
+  d.prepare(`DROP TABLE real_order_events`).run();
+  const r = operatorStop(d, "owner", NOW);
+  assert.equal(r.ok, true, "STOP never throws, even when the whole sweep fails");
+  assert.match(r.note, /отменено висящих ордеров: 0 из 3, 3 не удалось/, "honest N-of-M with failures surfaced");
+  const det = JSON.parse(String(RR.listControlLog(d, 5)[0].detail));
+  assert.deepEqual(det, { attempted: 3, cancelled: 0, failed: 3 });
 });
 
 test("operatorStop: idempotent — a second press cancels nothing new and still logs", () => {
@@ -48,23 +63,46 @@ test("operatorStop: idempotent — a second press cancels nothing new and still 
 });
 
 // ── mode switch: loosening needs confirm; env is the ceiling ────────────────────
-test("setOperatorModeControl: loosening requires confirm; a confirmed loosen writes", () => {
+test("setOperatorModeControl: a non-'on' loosening needs a single confirm; a confirmed loosen writes", () => {
   withEnv("on", () => {
     const d = db();
     // tighten first (no confirm needed) so the effective/before mode is off.
     const t = setOperatorModeControl(d, "off", false, "owner", NOW);
     assert.equal(t.ok, true);
     assert.equal(RR.getOperatorMode(d), "off");
-    // now loosen off→on WITHOUT confirm → refused, nothing written.
-    const refuse = setOperatorModeControl(d, "on", false, "owner", NOW);
+    // now loosen off→dry_run WITHOUT confirm → refused, nothing written.
+    const refuse = setOperatorModeControl(d, "dry_run", false, "owner", NOW);
     assert.equal(refuse.ok, false);
     assert.equal(refuse.needConfirm, true);
     assert.equal(RR.getOperatorMode(d), "off", "still off — loosen not applied without confirm");
     // with confirm → applied.
-    const ok = setOperatorModeControl(d, "on", true, "owner", NOW);
+    const ok = setOperatorModeControl(d, "dry_run", true, "owner", NOW);
     assert.equal(ok.ok, true);
+    assert.equal(RR.getOperatorMode(d), "dry_run");
+    assert.match(ok.note, /режим→dry_run/);
+  });
+});
+
+test("setOperatorModeControl: 'on' is the STRONG barrier — a bare confirm is NOT enough, only the typed phrase arms it", () => {
+  withEnv("on", () => {
+    const d = db();
+    // a click (even confirm:true) is refused for on — needPhrase, nothing written.
+    const click = setOperatorModeControl(d, "on", true, "owner", NOW);
+    assert.equal(click.ok, false);
+    assert.equal(click.needConfirm, undefined, "not a plain confirm — it's a phrase gate");
+    assert.equal(click.needPhrase, true);
+    assert.equal(RR.getOperatorMode(d), null, "real money NOT armed by a click");
+    // a wrong phrase is refused too.
+    const wrong = setOperatorModeControl(d, "on", true, "owner", NOW, "on");
+    assert.equal(wrong.ok, false);
+    assert.equal(wrong.needPhrase, true);
+    assert.equal(RR.getOperatorMode(d), null);
+    // the exact phrase (case/space-insensitive) arms it — confirm irrelevant.
+    const armed = setOperatorModeControl(d, "on", false, "owner", NOW, `  ${ON_CONFIRM_PHRASE.toLowerCase()} `);
+    assert.equal(armed.ok, true);
     assert.equal(RR.getOperatorMode(d), "on");
-    assert.match(ok.note, /режим→on/);
+    const det = JSON.parse(String(RR.listControlLog(d, 5).find((e) => e.action === "set_mode")!.detail));
+    assert.equal(det.phrase, "✓ typed", "log records the phrase gate was cleared");
   });
 });
 
@@ -80,7 +118,7 @@ test("setOperatorModeControl: tightening never needs confirm", () => {
 test("setOperatorModeControl: env caps the request — asking for 'on' under env=dry_run only reaches dry_run", () => {
   withEnv("dry_run", () => {
     const d = db();
-    const r = setOperatorModeControl(d, "on", true, "owner", NOW);
+    const r = setOperatorModeControl(d, "on", false, "owner", NOW, ON_CONFIRM_PHRASE);
     assert.equal(r.ok, true);
     assert.equal(RR.getOperatorMode(d), "on", "operator override stored as requested…");
     assert.match(r.note, /действует dry_run/, "…but the effective note reflects the env ceiling");
