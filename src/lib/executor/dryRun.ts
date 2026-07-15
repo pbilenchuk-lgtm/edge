@@ -40,6 +40,10 @@ export interface DryRunCtx {
   now: () => string;             // ISO clock
   caps?: SafetyCaps;
   whitelistVersion?: number | null;
+  // Per-market tick + min size for the conform cap (doc-spike #5). Supplied by the whitelist layer
+  // (Phase E) so conform is NOT hardcoded in the executor; the VALUES are still defaults until Phase F
+  // wires live getTickSize / minimum_order_size. Absent → the finest tick (1¢) + $1 floor.
+  marketConstraints?: (tokenId: string) => { tickCents: number; minOrderUsd: number };
 }
 
 interface DryFill { filledUsd: number; priceCents: number; feeUsd: number; shares: number; note: string }
@@ -104,8 +108,10 @@ export class DryRunExecutor implements Executor {
     const cap = enforceCaps(db, { sizeUsd: order.sizeUsd, isEntry }, nowMs, caps);
     if (cap.action !== "allow") return this.ack(order, "rejected", 0, null, `кэп (${cap.action}): ${cap.reason}`);
 
-    // §4.1 fifth cap: conform to tick + min (default tick/min for now — Phase E/F feeds per-market).
-    const conf = conformOrderToMarket({ side: order.side, limitPriceCents: order.limitPriceCents, sizeUsd: cap.sizeUsd }, { tickCents: DEFAULT_TICK_CENTS, minOrderUsd: DEFAULT_MIN_ORDER_USD, tolCents: 1 });
+    // §4.1 fifth cap: conform to the market tick + min. The whitelist layer feeds per-market values
+    // (Phase E plumbing); still defaults until Phase F wires live getTickSize / minimum_order_size.
+    const mc = this.ctx.marketConstraints?.(order.tokenId) ?? { tickCents: DEFAULT_TICK_CENTS, minOrderUsd: DEFAULT_MIN_ORDER_USD };
+    const conf = conformOrderToMarket({ side: order.side, limitPriceCents: order.limitPriceCents, sizeUsd: cap.sizeUsd }, { tickCents: mc.tickCents, minOrderUsd: mc.minOrderUsd, tolCents: 1 });
     if (!conf.ok) return this.ack(order, "rejected", 0, null, `conform: ${conf.reason}`);
     const limit = conf.limitPriceCents, sizeUsd = cap.sizeUsd;
 

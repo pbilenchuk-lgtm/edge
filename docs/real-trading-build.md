@@ -50,7 +50,7 @@ metrics via the live book, UI, safety belt, tests); F is a thin adapter over a p
 | **C** | Safety belt: 4 caps + tick/min conform, kill switch, idempotent-retry protocol, reconciliation, persistent expiry sweep | **done** |
 | **spike** | CLOB capabilities-vs-assumptions doc (before D) | pending |
 | **D** | `DryRunExecutor` (real path, fills vs live book, no send) + orphan-positions sentinel | **done** |
-| **E** | Whitelist filter (single sim→real gate, `sport=football` hardcoded) | pending |
+| **E** | Whitelist filter (single sim→real gate, `sport=football` hardcoded) — proportional sizing, isolated mirror, versioning | **done** (live call-site wiring pending) |
 | **F** | `RealExecutor` (live CLOB) — **deferred**, separate review | deferred |
 | **G/H/I** | UI (Sim/Real, twin-link, [STOP]) · `real_vs_paper` metrics · §9 tests | pending |
 
@@ -221,6 +221,35 @@ decision_id + whitelist_version carried; exchange_id NULL; client_cancel_deadlin
 Tests (7): end-to-end trail + twin/whitelist/expiry fields; expired (limit < ask); idempotent re-place
 (one fill); over-cap clamp; mode-off inert; orphan alert on a real position; no false-alarm on a dry
 position. 538/538 green.
+
+## Phase E — whitelist filter (`src/lib/executor/whitelist.ts`)
+
+The ONLY gate from sim into real. Starts empty. Management (`addWhitelistRow` / `setWhitelistEnabled`):
+validates `maxOrderUsd ≤ REAL_MAX_ORDER_USD`, sport hard-pinned `football` (+ DB CHECK), and **bumps
+the version + journals every change from the FIRST row** — so the first dry-run order carries an honest
+`whitelist_version` and "what config traded this" is reconstructable from the start (UI editor is Phase G;
+versioning works now, even for hand-SQL edits). `matchWhitelist(strategy, category)` returns the enabled row.
+
+- **Proportional sizing** (condition 1): `proportionalRealSize = min((paperStake / paperBank) × realFree,
+  rowMax)`. Real size is the paper decision's FRACTION of its budget applied to the real free bank —
+  NOT the absolute paper stake. Absolute would flatten every real order to the $50 cap (paper banks are
+  orders of magnitude larger) and make slippage/fill-rate incomparable across edge zones — the
+  real-vs-paper metric would die. Proportion keeps it edge-proportional.
+- **Isolated mirror** (condition 2): `mirrorPaperEntryToReal(db, bet, ctx)` runs AFTER a paper entry
+  fills; the entire body is wrapped so ANY failure (whitelist read, order build, book timeout, executor
+  throw) degrades to "no real order, paper untouched" + a log — it never re-throws into the paper path
+  (§0.2, applied to the most fragile seam). Sport gate: non-football is never mirrored. Selects the
+  executor by mode (DryRunExecutor in dry_run; real is Phase F). Feeds per-market tick/min into the
+  executor's conform (plumbing; values default until Phase F's live getTickSize — closes the D TODO seam).
+
+Tests (6): proportional (30 vs the wrong flat-50) + row-cap + zero-bank; versioning (v1 first, bump on
+change, over-cap rejected); match by strategy+category (disabled/unlisted → no match); end-to-end mirror
+(dry order at proportional size + stamped version + twin link); tennis sport-gate; exception → paper-only
+(no re-throw). 545/545 green.
+
+**Remaining**: the live call-site — invoke `mirrorPaperEntryToReal` right after a football paper entry
+fills in `autoEnter`, threading categoryId / tokenId / paperBank / realFree. It's a thin gated call
+(off/exits_only → early return), a no-op in prod until REAL_TRADING flips.
 
 ## Invariants (never violated by any phase)
 
