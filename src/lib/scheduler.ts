@@ -226,8 +226,14 @@ export function startScheduler(env: Record<string, string | undefined> = process
   console.log(`[scheduler] on — live ${liveSec}s, tick ${tickMin}m, discover ${discoverHr}h, boot-grace ${Math.round(graceMs / 1000)}s`);
   // First full pass fires just AFTER the quiet boot window (so health goes green
   // first); the intervals below also self-gate via inBootGrace() as a backstop.
-  setTimeout(run, graceMs + 5_000); // first full pass once the deploy is live (discovers)
-  setInterval(run, tickMin * 60_000);   // then every tickMin
-  setInterval(liveRun, liveSec * 1000); // fast real-time loop for in-play matches
-  setInterval(() => void heartbeat(env), 60_000); // catch-up watchdog — recover a stalled cron within a minute of the process being alive
+  const bootT = setTimeout(run, graceMs + 5_000); // first full pass once the deploy is live (discovers)
+  const tickT = setInterval(run, tickMin * 60_000);   // then every tickMin
+  const liveT = setInterval(liveRun, liveSec * 1000); // fast real-time loop for in-play matches
+  const beatT = setInterval(() => void heartbeat(env), 60_000); // catch-up watchdog — recover a stalled cron within a minute of the process being alive
+  // On a graceful stop (Render redeploy sends SIGTERM), STOP the timers so no tick fires against the
+  // DB that closeDb() is about to (or already has) closed — that was the "[liveCycle:*] database is
+  // not open" spam during teardown — and so the process can exit promptly instead of blocking SIGTERM.
+  const stop = () => { clearTimeout(bootT); clearInterval(tickT); clearInterval(liveT); clearInterval(beatT); };
+  process.once("SIGTERM", stop);
+  process.once("SIGINT", stop);
 }
