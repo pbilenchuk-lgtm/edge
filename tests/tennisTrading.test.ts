@@ -6,7 +6,7 @@ import { resolveTennisWinner } from "../src/lib/settlement.js";
 import { serializeEntryMeta } from "../src/lib/betMeta.js";
 import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick, tennisTradingTick, tennisSetValueTick, tennisEntryMeta, pollTennisFinals } from "../src/lib/tennisTrading.js";
 import { migrateTennisStrategy, migrateTennisSetValueStrategy } from "../src/lib/seed.js";
-import { buildTennisCalibrationReport, tennisTourOf, collectTennisSnapshots } from "../src/lib/tennisScout.js";
+import { buildTennisCalibrationReport, tennisTourOf, collectTennisSnapshots, fetchTennisFixtures } from "../src/lib/tennisScout.js";
 import { buildTennisFunnel } from "../src/lib/tennisTrading.js";
 import { advanceClocks } from "../src/lib/lifecycle.js";
 
@@ -539,7 +539,7 @@ test("pollTennisFinals A: a stranded open position is settled from get_fixtures 
   assert.ok(tennisFinalResult(db, mid) == null || !tennisFinalResult(db, mid)!.finished, "not finished before the poll");
   // Mock get_fixtures: EV99 finished, Vukic (First Player) won 6-4 6-3.
   const fixturesBody = { result: [{ event_key: "EV99", event_first_player: "A. Vukic", event_second_player: "L. Broady", tournament_name: "Granby", event_type_type: "ATP Singles", event_live: "0", event_status: "Finished", event_final_result: "2 - 0", event_winner: "First Player", scores: [{ score_set: 1, score_first: 6, score_second: 4 }, { score_set: 2, score_first: 6, score_second: 3 }], event_serve: null, event_game_result: null }] };
-  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => fixturesBody })) as unknown as typeof fetch;
+  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => fixturesBody, text: async () => JSON.stringify(fixturesBody) })) as unknown as typeof fetch;
   const now = () => "2026-07-14T12:00:00Z";
   const written = await pollTennisFinals(db, { now, env: { API_TENNIS_KEY: "k" }, fetchImpl });
   assert.equal(written, 1, "terminal snapshot written from fixtures for the stranded match");
@@ -566,10 +566,26 @@ test("pollTennisFinals: a match STUCK live past the ceiling (FRESH feed) is stil
   // A FRESH live snapshot (5min old) but 235min since kickoff — a stuck/looping feed, not a real match.
   snap(db, mid, { at: "2026-07-14T12:55:00Z", g1: 5, g2: 4, server: "first", p1c: 60 });
   const fixturesBody = { result: [{ event_key: "EX", event_first_player: "A. Vukic", event_second_player: "L. Broady", tournament_name: "Granby", event_type_type: "ATP Singles", event_live: "0", event_status: "Finished", event_final_result: "2 - 0", event_winner: "First Player", scores: [{ score_set: 1, score_first: 6, score_second: 4 }, { score_set: 2, score_first: 7, score_second: 5 }], event_serve: null, event_game_result: null }] };
-  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => fixturesBody })) as unknown as typeof fetch;
+  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => fixturesBody, text: async () => JSON.stringify(fixturesBody) })) as unknown as typeof fetch;
   const written = await pollTennisFinals(db, { now: () => "2026-07-14T13:00:00Z", env: { API_TENNIS_KEY: "k" }, fetchImpl });
   assert.equal(written, 1, "past the 200min ceiling → get_fixtures polled despite a fresh snapshot");
   assert.equal(tennisFinalResult(db, mid)!.finished, true, "resolved to finished from the fixtures result");
+});
+
+test("fetchTennisFixtures OOM guard: an over-cap payload is skipped (never parsed) + wantedKeys bounds retention", async () => {
+  const cfg = { enabled: true, key: "k", base: "https://x/", timeoutMs: 8000 } as any;
+  // A body larger than the 6MB cap must be dropped WITHOUT JSON.parse (the OOM cause on a 512MB box).
+  const huge = "x".repeat(6_000_001);
+  const hugeFetch = (async () => ({ ok: true, status: 200, text: async () => huge })) as unknown as typeof fetch;
+  assert.deepEqual(await fetchTennisFixtures(cfg, "2026-07-14", "2026-07-14", { fetchImpl: hugeFetch }), [], "over-cap payload skipped, not parsed");
+  // wantedKeys returns ONLY the requested event_key (retention bounded to what we asked for).
+  const body = { result: [
+    { event_key: "A", event_first_player: "a", event_second_player: "b", event_live: "0", event_status: "Finished", scores: [] },
+    { event_key: "B", event_first_player: "c", event_second_player: "d", event_live: "0", event_status: "Finished", scores: [] },
+  ] };
+  const okFetch = (async () => ({ ok: true, status: 200, text: async () => JSON.stringify(body) })) as unknown as typeof fetch;
+  const res = await fetchTennisFixtures(cfg, "2026-07-14", "2026-07-14", { fetchImpl: okFetch }, new Set(["A"]));
+  assert.equal(res.length, 1); assert.equal(res[0].eventKey, "A");
 });
 
 test("advanceClocks tennis: a no-bet match stuck live past the ceiling is FINISHED (bounds the phantom 300')", () => {

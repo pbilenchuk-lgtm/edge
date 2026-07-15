@@ -115,16 +115,19 @@ const TENNIS_LIVE_CEILING_MIN = (() => { const n = Number(process.env.TENNIS_LIV
  */
 export async function pollTennisFinals(db: Database, deps: EngineDeps = {}): Promise<number> {
   const env = deps.env ?? process.env;
+  if ((env.TENNIS_FINAL_POLL ?? "on") === "off") return 0; // kill-switch: disable the fixtures poll without a redeploy
   const cfg = loadTennisConfig(env);
   if (!cfg.enabled) return 0;
   const now = nowFn(deps)();
   const nowMs = Date.parse(now) || Date.now();
-  const today = now.slice(0, 10);
   // 1. Collect stranded matches (scout-linked, not finished, stale, with a reason to settle).
   const byStart = new Map<string, { matchId: string; eventKey: string }[]>();
-  for (const c of R.listCompetitions(db)) {
+  const MAX_POLL = 40; // hard cap: never let one poll fan out to an unbounded number of fixtures fetches
+  let collected = 0;
+  outer: for (const c of R.listCompetitions(db)) {
     if (c.sport_id !== "tennis") continue;
     for (const m of R.listMatches(db, c.id)) {
+      if (collected >= MAX_POLL) break outer;
       if (m.state === "finished") continue;
       const last = db.prepare(`SELECT event_key, batch_at FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(m.id) as { event_key?: string; batch_at?: string } | undefined;
       if (!last?.event_key) continue; // never scout-linked → nothing to poll
@@ -142,14 +145,17 @@ export async function pollTennisFinals(db: Database, deps: EngineDeps = {}): Pro
       if (tennisFinalResult(db, m.id)?.finished) continue; // a terminal snapshot already exists → settle handles it
       const start = (m.kickoff_at ?? last.batch_at ?? now).slice(0, 10);
       (byStart.get(start) ?? byStart.set(start, []).get(start)!).push({ matchId: m.id, eventKey: last.event_key });
+      collected++;
     }
   }
   if (!byStart.size) return 0;
-  // 2. Per start-date, fetch fixtures over [start, today] (absorbs a match that spilled past midnight),
-  //    index by event_key, and write the terminal snapshot for each stranded match that has finished.
+  // 2. Per start-date, fetch fixtures for THAT SINGLE DAY (date_start=date_stop), filtered to just the
+  //    event_keys we need (bounded memory — the response is the whole worldwide schedule), and write
+  //    the terminal snapshot for each stranded match that has finished.
   let written = 0;
   for (const [start, cands] of byStart) {
-    const fixtures = await fetchTennisFixtures(cfg, start, today, deps).catch(() => [] as Awaited<ReturnType<typeof fetchTennisFixtures>>);
+    const wanted = new Set(cands.map((x) => x.eventKey));
+    const fixtures = await fetchTennisFixtures(cfg, start, start, deps, wanted).catch(() => [] as Awaited<ReturnType<typeof fetchTennisFixtures>>);
     if (!fixtures.length) continue;
     const byKey = new Map(fixtures.map((f) => [f.eventKey, f]));
     for (const cand of cands) {

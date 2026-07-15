@@ -110,13 +110,20 @@ export async function fetchTennisLivescores(cfg: TennisConfig, deps: EngineDeps 
 // authoritative terminal signal comes from get_fixtures/get_results (fetchTennisFixtures + the poller).
 export const TENNIS_TERMINAL_RE = /finish|retir|\bret\.?\b|walkover|w[\/.]?o|cancel|abandon|default|disqualif|\bdsq\b/i;
 
+// OOM guard: get_fixtures returns the WHOLE worldwide tennis schedule for the date range — several MB
+// of JSON. On a 512MB box, JSON.parse of a multi-MB payload (×2-5 in live objects) can OOM the whole
+// process. Read the body as TEXT, bail if it's over this cap BEFORE parsing, and retain only the rows
+// we actually asked for. Env-tunable.
+const TENNIS_FIXTURES_MAX_BYTES = (() => { const n = Number(process.env.TENNIS_FIXTURES_MAX_BYTES); return Number.isFinite(n) && n > 0 ? n : 6_000_000; })();
 /**
  * Fetch fixtures (finished + scheduled) for a date range from API-Tennis get_fixtures. Unlike
  * get_livescore, this returns COMPLETED matches carrying `event_winner` + final `scores` — the
  * only authoritative way to settle a tennis match that ended normally (and just vanished from the
- * live feed). Never throws — returns [] on failure. date* are YYYY-MM-DD.
+ * live feed). `wantedKeys` (if given) filters to just those event_keys BEFORE building any objects,
+ * so retained memory is bounded to the handful of matches we care about. Never throws — returns []
+ * on failure or an over-cap payload. date* are YYYY-MM-DD.
  */
-export async function fetchTennisFixtures(cfg: TennisConfig, dateStart: string, dateStop: string, deps: EngineDeps = {}): Promise<TennisLive[]> {
+export async function fetchTennisFixtures(cfg: TennisConfig, dateStart: string, dateStop: string, deps: EngineDeps = {}, wantedKeys?: Set<string>): Promise<TennisLive[]> {
   if (!cfg.enabled) return [];
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
@@ -125,9 +132,12 @@ export async function fetchTennisFixtures(cfg: TennisConfig, dateStart: string, 
     const url = `${cfg.base}?method=get_fixtures&date_start=${encodeURIComponent(dateStart)}&date_stop=${encodeURIComponent(dateStop)}&APIkey=${encodeURIComponent(cfg.key)}`;
     const res = await doFetch(url, { signal: ctrl.signal });
     if (!res.ok) return [];
-    const j = (await res.json()) as { success?: number; result?: unknown };
+    const text = await res.text();
+    if (text.length > TENNIS_FIXTURES_MAX_BYTES) return []; // too big to parse safely → skip (availability over settlement)
+    const j = JSON.parse(text) as { success?: number; result?: unknown };
     const rows = Array.isArray(j?.result) ? j.result : [];
-    return rows.map(normalizeLive).filter((x): x is TennisLive => x != null);
+    const wanted = wantedKeys ? rows.filter((r: any) => wantedKeys.has(String(r?.event_key))) : rows;
+    return wanted.map(normalizeLive).filter((x): x is TennisLive => x != null);
   } catch { return []; }
   finally { clearTimeout(timer); }
 }
