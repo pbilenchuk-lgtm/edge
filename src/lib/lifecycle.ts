@@ -21,6 +21,8 @@ import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarket
 import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
 import { classifyOrderBook, paperBuyFill, paperSellFill, scaleCost, ENTRY_PHANTOM_DIVERGENCE, type FillCost, type EntryFillResult, type SellFillResult } from "./executor/paperFill.js";
+import { mirrorPaperEntryToReal, dryVirtualFreeUsd } from "./executor/whitelist.js";
+import { readTradingMode } from "./executor/safety.js";
 import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
@@ -641,6 +643,19 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
         profileId: b.risk_profile_id ?? "medium", size: ex.stake, edge: round2((b.ai_prob ?? 0) - ex.priceCents / 100),
         isLive: m.state === "live", intensity: Math.round(intensity * 10000) / 10000,
       });
+      // §5 REAL MIRROR (build != enable): mirror this FILLED football entry into the real contour.
+      // GATE-FIRST — the pure env read below skips ALL of it (no ctx build, no DB, no book) in the prod
+      // default (off), keeping autoEnter's hot path free. Isolated inside mirrorPaperEntryToReal: any
+      // failure degrades to paper-only. Only football reaches here (sport gate is also enforced inside).
+      if (readTradingMode(deps.env) !== "off" && sport === "football") {
+        const fresh = R.getBet(db, b.id);
+        if (fresh) await mirrorPaperEntryToReal(db, fresh, {
+          env: deps.env ?? process.env, poly, deps, now: () => now, bookCache,
+          sport, categoryId: m.competition_id, tokenId: mk?.external_ref ?? "",
+          sizeFraction: Math.round(intensity * 10000) / 10000, realFreeUsd: dryVirtualFreeUsd(db, deps.env ?? process.env),
+          onError: (msg) => { try { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `real-mirror: ${msg}`, created_at: now }); } catch { /* logger must not throw */ } },
+        });
+      }
     }
   }
   try { if (shadowReqs.length) shadowOnEntries(db, shadowReqs, loadShadowConfig(db, deps.env), now); } catch { /* observe-only, never break real entries */ }

@@ -13,7 +13,7 @@ import type { EngineDeps } from "../engine.js";
 import type { OrderBookFetch, PolymarketConfig } from "../polymarket.js";
 import type { Bet } from "../types.js";
 import * as RR from "../realRepo.js";
-import { loadSafetyCaps, effectiveTradingMode, modeCaps } from "./safety.js";
+import { loadSafetyCaps, effectiveTradingMode, modeCaps, readTradingMode } from "./safety.js";
 import { DryRunExecutor } from "./dryRun.js";
 import { clientOrderIdFor } from "./types.js";
 import type { Executor, OrderRequest } from "./types.js";
@@ -65,8 +65,25 @@ export function matchWhitelist(db: Database, q: { strategyId: string; categoryId
  */
 export function proportionalRealSize(paperStakeUsd: number, paperBankUsd: number, realFreeUsd: number, rowMaxUsd: number): number {
   if (!(paperBankUsd > 0) || !(realFreeUsd > 0)) return 0;
-  const frac = paperStakeUsd / paperBankUsd;            // the paper decision's share of its bank
-  return Math.max(0, Math.min(frac * realFreeUsd, rowMaxUsd));
+  return realSizeFromFraction(paperStakeUsd / paperBankUsd, realFreeUsd, rowMaxUsd);
+}
+/** The same, when the caller already holds the decision's conviction FRACTION (e.g. the shadow
+ *  allocator's budget-independent Kelly×edge intensity) — real size = min(fraction × real free, row cap). */
+export function realSizeFromFraction(fraction: number, realFreeUsd: number, rowMaxUsd: number): number {
+  if (!(fraction > 0) || !(realFreeUsd > 0)) return 0;
+  return Math.max(0, Math.min(fraction * realFreeUsd, rowMaxUsd));
+}
+
+// ── virtual dry-bank (condition 2: real free from a VIRTUAL bank, reserved by open dry positions) ──
+/** The virtual real bank for dry-run sizing (env REAL_BANK_USD, default $400 = the future micro-real
+ *  size). It is NOT real money — it exists so dry orders rehearse the size dynamics real sizing will
+ *  have. Its FREE portion shrinks as dry positions open (like a real free), so large-order fill-rate
+ *  is rehearsed against a realistic remaining bank, not a flat constant. */
+export function realBankUsd(env: Record<string, string | undefined>): number {
+  const n = Number(env.REAL_BANK_USD); return Number.isFinite(n) && n > 0 ? n : 400;
+}
+export function dryVirtualFreeUsd(db: Database, env: Record<string, string | undefined>): number {
+  return Math.max(0, realBankUsd(env) - RR.openDryExposureUsd(db));
 }
 
 // ── the mirror hook (condition 2: ASYNC to paper, never delays/crashes it) ──────────────────────
@@ -79,8 +96,12 @@ export interface MirrorCtx {
   sport: string;                 // the bet's sport (only football is mirrored)
   categoryId: string;            // the match's category id (for whitelist matching)
   tokenId: string;               // CLOB token of the market being entered
-  paperBankUsd: number;          // the (strategy, profile) paper budget the stake was sized within
-  realFreeUsd: number;           // real USDC available to scale into
+  // Sizing: the decision's conviction FRACTION (budget-independent — the shadow allocator's
+  // intensity), applied to realFreeUsd. Preferred; else paperStake/paperBankUsd.
+  sizeFraction?: number;
+  paperStakeUsd?: number;
+  paperBankUsd?: number;
+  realFreeUsd: number;           // real (virtual, in dry) USDC free to scale into
   tifSec?: number;
   onError?: (msg: string) => void;
   // Test seam: override the executor (default: DryRunExecutor in dry_run; real not wired until Phase F).
@@ -94,6 +115,10 @@ export interface MirrorCtx {
  * when nothing was mirrored). This is the most fragile seam in the system, so it fails soft by design.
  */
 export async function mirrorPaperEntryToReal(db: Database, bet: Bet, ctx: MirrorCtx): Promise<{ mirrored: boolean; note: string }> {
+  // GATE-FIRST (condition 1): a pure env read, BEFORE any DB read or book fetch. In the prod default
+  // (REAL_TRADING=off) this returns instantly with zero cost — autoEnter is the hot path; a no-op must
+  // be a no-op in COST, not just effect. (The call-site also skips before building the ctx.)
+  if (readTradingMode(ctx.env) === "off") return { mirrored: false, note: "off — no-op" };
   try {
     // Hard sport gate — tennis (or anything non-football) can NEVER reach real this stage.
     if (ctx.sport !== WHITELIST_SPORT) return { mirrored: false, note: `sport ${ctx.sport} не допускается в реал` };
@@ -102,7 +127,9 @@ export async function mirrorPaperEntryToReal(db: Database, bet: Bet, ctx: Mirror
     if (!caps.simulate && !caps.realEntry) return { mirrored: false, note: `режим «${mode}» — реал не строится` };
     const row = matchWhitelist(db, { strategyId: bet.strategy_id, categoryId: ctx.categoryId });
     if (!row) return { mirrored: false, note: "не в whitelist — только paper" };
-    const size = proportionalRealSize(bet.stake ?? 0, ctx.paperBankUsd, ctx.realFreeUsd, row.max_order_usd);
+    const size = ctx.sizeFraction != null
+      ? realSizeFromFraction(ctx.sizeFraction, ctx.realFreeUsd, row.max_order_usd)
+      : proportionalRealSize(ctx.paperStakeUsd ?? bet.stake ?? 0, ctx.paperBankUsd ?? 0, ctx.realFreeUsd, row.max_order_usd);
     if (size <= 0) return { mirrored: false, note: "реальный размер 0 (пропорция/банк)" };
     if (!bet.decision_id || !bet.entry_price) return { mirrored: false, note: "нет decision_id/цены входа" };
 

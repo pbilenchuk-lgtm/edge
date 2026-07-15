@@ -74,6 +74,13 @@ export function openRealExposureUsd(db: Database): number {
   return r.x ?? 0;
 }
 
+/** Open DRY exposure ($) — notional of open dry positions (size × avg). The virtual dry-bank's free is
+ *  bank − this, so dry-order sizing rehearses real free dynamics (free shrinks as positions open). */
+export function openDryExposureUsd(db: Database): number {
+  const r = db.prepare(`SELECT COALESCE(SUM(size_shares * avg_price_cents / 100.0),0) AS x FROM real_positions WHERE dry=1 AND size_shares > 0`).get() as { x: number };
+  return r.x ?? 0;
+}
+
 /** Orders placed in the last hour (the berserk-loop guard reads this). */
 export function realOrdersLastHour(db: Database, nowMs: number): number {
   const rows = db.prepare(`SELECT created_at FROM real_orders`).all() as { created_at: string }[];

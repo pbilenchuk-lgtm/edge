@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as RR from "../src/lib/realRepo.js";
-import { addWhitelistRow, setWhitelistEnabled, matchWhitelist, proportionalRealSize, mirrorPaperEntryToReal } from "../src/lib/executor/whitelist.js";
+import { addWhitelistRow, setWhitelistEnabled, matchWhitelist, proportionalRealSize, realSizeFromFraction, dryVirtualFreeUsd, realBankUsd, mirrorPaperEntryToReal } from "../src/lib/executor/whitelist.js";
 import type { Bet } from "../src/lib/types.js";
 
 function db() { const d = openDb(":memory:"); initSchema(d); return d; }
@@ -60,6 +60,33 @@ test("mirror: a whitelisted football entry builds a dry order at the PROPORTIONA
   assert.equal(ord.size_usd, 30, "proportional size, not the $100 paper stake");
   assert.equal(ord.whitelist_version, 1, "carries the whitelist version in force");
   assert.equal(ord.exchange_order_id, null, "dry");
+});
+
+// ── condition 1: gate-first (no-op by COST, not just effect) ─────────────────────
+test("mirror: REAL_TRADING=off returns BEFORE any work — no book read, no rows (hot-path no-op)", async () => {
+  const d = db();
+  addWhitelistRow(d, { strategyId: "overreaction", categories: ["epl"], maxOrderUsd: 50, enabled: true }, "owner", NOW);
+  // A fetch that THROWS if the book is ever read — proves the gate returns before any book access.
+  const throwingFetch = (async () => { throw new Error("book must NOT be read when off"); }) as unknown as typeof fetch;
+  const r = await mirrorPaperEntryToReal(d, bet(), mirrorCtx({ env: { REAL_TRADING: "off" }, deps: { fetchImpl: throwingFetch } }));
+  assert.equal(r.mirrored, false);
+  assert.match(r.note, /off/);
+  assert.equal(RR.listRealOrders(d).length, 0, "off writes nothing");
+});
+
+// ── condition 2: virtual dry-bank, reserved by open dry positions ────────────────
+test("dryVirtualFreeUsd: virtual bank (default $400) shrinks by open dry exposure", () => {
+  const d = db();
+  assert.equal(realBankUsd({}), 400, "default bank");
+  assert.equal(realBankUsd({ REAL_BANK_USD: "500" }), 500);
+  assert.equal(dryVirtualFreeUsd(d, {}), 400, "no positions → full bank free");
+  RR.upsertRealPosition(d, { token_id: "t1", match_id: "m", strategy_id: "s", size_shares: 200, avg_price_cents: 45, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 1, updated_at: NOW }); // $90 notional
+  assert.equal(dryVirtualFreeUsd(d, {}), 310, "free = 400 − $90 dry exposure (rehearses real free dynamics)");
+});
+test("realSizeFromFraction: conviction fraction × real free, row-capped", () => {
+  assert.equal(realSizeFromFraction(0.1, 300, 50), 30);
+  assert.equal(realSizeFromFraction(0.3, 300, 50), 50, "capped");
+  assert.equal(realSizeFromFraction(0, 300, 50), 0);
 });
 
 // ── condition: sport gate ────────────────────────────────────────────────────────
