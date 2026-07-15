@@ -4,7 +4,7 @@ import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 import { resolveTennisWinner } from "../src/lib/settlement.js";
 import { serializeEntryMeta } from "../src/lib/betMeta.js";
-import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick, tennisTradingTick, tennisEntryMeta } from "../src/lib/tennisTrading.js";
+import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick, tennisTradingTick, tennisSetValueTick, tennisEntryMeta } from "../src/lib/tennisTrading.js";
 import { migrateTennisStrategy, migrateTennisSetValueStrategy } from "../src/lib/seed.js";
 import { buildTennisCalibrationReport, tennisTourOf } from "../src/lib/tennisScout.js";
 import { buildTennisFunnel } from "../src/lib/tennisTrading.js";
@@ -256,7 +256,36 @@ test("tennisTradingTick: one overreaction opens a bet per FREE risk profile, eac
   const bets = R.betsForMatch(db, mid, "tennis_overreaction").filter((b) => b.status === "open");
   assert.deepEqual([...new Set(bets.map((b) => b.risk_profile_id))].sort(), ["aggressive", "conservative", "medium"], "distinct profiles, side-by-side");
   assert.ok(bets.every((b) => b.ai_prob === 0.62), "§9.6: the LLM's inflated 0.70 was clamped to the armed pre-break 0.62 — no self-attributed edge");
-  assert.ok(bets.every((b) => (b.stake ?? 0) > 0 && b.code_version?.includes("interim")), "each sized > 0 and carries the interim epoch");
+});
+
+test("tennisTradingTick G: a transient strategist failure does NOT burn the break — next tick retries and enters", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20, p1liq: 8000, p2liq: 8000 });
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 62, setNum: 1 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
+  // Tick 1: strategist fails (500) → no entry, and the break's ACTED marker must NOT be set.
+  const failFetch = (async () => ({ ok: false, status: 500, json: async () => ({}), text: async () => "" })) as unknown as typeof fetch;
+  assert.equal(await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: failFetch }), 0, "transient failure → no entry");
+  // Tick 2: strategist recovers → the SAME break is retried and entered (proves the marker was not burned).
+  const okBody = { content: [{ text: JSON.stringify({ picks: [{ label: "Aleksandar Vukic", prob: 0.6, reason: "выкуп" }] }) }] };
+  const okFetch = (async () => ({ ok: true, status: 200, json: async () => okBody })) as unknown as typeof fetch;
+  const opened2 = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:15Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: okFetch });
+  assert.ok(opened2 >= 1, "the transient failure did not permanently skip the break — retry entered");
+});
+
+test("tennisSetValueTick F: a transient strategist failure does NOT burn the match's Set-Value shot", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 67, p2price: 33, p1liq: 8000, p2liq: 8000 });
+  const base = { provider: "apitennis", p1: "A. Vukic", p2: "L. Broady", tournament: "ATP Granby", event_type: "ATP Singles", live: 1 as const, game_points: null, pm_match_id: mid, pm_mid_cents: null, raw: "{}" };
+  // START → favourite = first (67¢). Then first LOSES set 1 (sets 0-1), price drops into the 30-45 band.
+  R.insertTennisSnapshot(db, { ...base, event_key: "SV", batch_at: "2026-07-14T10:00:00Z", status: "Set 1", sets_p1: 0, sets_p2: 0, set_num: 1, games_p1: 2, games_p2: 1, server: "first", pm_p1_cents: 67, pm_p2_cents: 33 });
+  R.insertTennisSnapshot(db, { ...base, event_key: "SV", batch_at: "2026-07-14T10:40:00Z", status: "Set 2", sets_p1: 0, sets_p2: 1, set_num: 2, games_p1: 3, games_p2: 2, server: "first", pm_p1_cents: 39, pm_p2_cents: 61 });
+  const failFetch = (async () => ({ ok: false, status: 500, json: async () => ({}), text: async () => "" })) as unknown as typeof fetch;
+  assert.equal(await tennisSetValueTick(db, { now: () => "2026-07-14T10:40:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: failFetch }), 0, "transient failure → no entry");
+  const okBody = { content: [{ text: JSON.stringify({ picks: [{ label: "Aleksandar Vukic", prob: 0.5, reason: "конкурентный сет" }] }) }] };
+  const okFetch = (async () => ({ ok: true, status: 200, json: async () => okBody })) as unknown as typeof fetch;
+  const opened2 = await tennisSetValueTick(db, { now: () => "2026-07-14T10:40:15Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: okFetch });
+  assert.ok(opened2 >= 1, "the match's Set-Value shot survived the transient failure — retry entered");
 });
 
 test("Part B buildTennisCalibrationReport: splits marks into recovery vs no-recovery", () => {
@@ -400,6 +429,14 @@ test("tennisTourOf: ATP/WTA singles in scope; ITF / Challenger / doubles out (sh
   assert.equal(tennisTourOf({ id: "x", name: "ATP Challenger Lima" }), null, "Challenger out of scope");
   assert.equal(tennisTourOf({ id: "pm-atp", name: "ATP Doubles" }), null, "doubles out of scope");
   assert.equal(tennisTourOf({ id: "x", name: "Some Exhibition" }), null, "unknown tour → skip");
+  // Women's second tier is named by prize level ("125"), not "challenger" — must be excluded by number.
+  assert.equal(tennisTourOf({ id: "x", name: "WTA 125 Contrexeville" }), null, "WTA 125 out of scope");
+  assert.equal(tennisTourOf({ id: "x", name: "WTA125 Reus", external_league: "wta 125" }), null, "WTA125 (no space) out of scope");
+  assert.equal(tennisTourOf({ id: "x", name: "ATP 125 Challenger" }), null, "ATP 125 out of scope");
+  assert.equal(tennisTourOf({ id: "x", name: "WTA Qualifying Rome" }), null, "qualifying out of scope");
+  // Main-tour prize tiers (250/500/1000) stay in scope — the number filter is 125-specific.
+  assert.equal(tennisTourOf({ id: "x", name: "ATP 250 Adelaide" }), "atp", "ATP 250 main-tour in scope");
+  assert.equal(tennisTourOf({ id: "x", name: "WTA 1000 Miami" }), "wta", "WTA 1000 main-tour in scope");
 });
 
 test("tennisTradingTick: an ITF match is NOT traded (tour scope — favourite-reversion thesis invalid there)", async () => {

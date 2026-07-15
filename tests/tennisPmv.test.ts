@@ -158,6 +158,16 @@ test("prop settle: a completed match resolves every family", () => {
   assert.equal(resolveTennisProp(Q + "Set 1 Over 8.5", fsFull, opt), true, "set 1 had 10 games");
 });
 
+test("prop settle: total_sets respects the O/U LINE, not a hardcoded 2.5 (bo5 3-0 is UNDER 3.5)", () => {
+  // A bo5 3-0 (3 sets). The old code hardcoded `total >= 3` → an Over-3.5 bet wrongly settled WON.
+  const fsBo5_30: FinalSets = { sets: [{ p1: 6, p2: 4 }, { p1: 6, p2: 3 }, { p1: 6, p2: 2 }], setsWonP1: 3, setsWonP2: 0, matchGames: 33 };
+  assert.equal(resolveTennisProp(Q + "Total Sets: Over 3.5", fsBo5_30, opt), false, "3 sets is NOT over 3.5 (bo5 straight-sets) — must LOSE");
+  assert.equal(resolveTennisProp(Q + "Total Sets: Under 3.5", fsBo5_30, opt), true, "3 sets < 3.5 → under wins");
+  // bo3 2.5 line unchanged: 3 sets is over 2.5.
+  const fsBo3_21: FinalSets = { sets: [{ p1: 6, p2: 4 }, { p1: 3, p2: 6 }, { p1: 6, p2: 2 }], setsWonP1: 2, setsWonP2: 1, matchGames: 33 };
+  assert.equal(resolveTennisProp(Q + "Total Sets: Over 2.5", fsBo3_21, opt), true, "3 sets > 2.5 → over wins (bo3 line unaffected)");
+});
+
 test("prop settle: RETIREMENT voids match-scope props but resolves a COMPLETED set (Gate 0.2)", () => {
   const ret = { retired: true, canceled: false, firstIsP1: true };
   assert.equal(resolveTennisProp(Q + "Total Sets: Under 2.5", fsRetiredS1only, ret), null, "Total Sets → VOID on retire");

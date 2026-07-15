@@ -29,7 +29,13 @@ const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 // without an import cycle.
 export function tennisTourOf(c: { id: string; name: string; external_league?: string | null }): "atp" | "wta" | null {
   const hay = `${c.id} ${c.name} ${c.external_league ?? ""}`.toLowerCase();
-  if (/doubles|itf|challenger/.test(hay)) return null;
+  // Out-of-scope, lower-tier / non-main-draw events. NOTE the asymmetry that a name-literal filter
+  // MUST cover explicitly: the men's second tier carries the word "challenger", but the WOMEN's
+  // equivalent is named by prize level — "WTA 125" — with no such token, so it must be listed by
+  // number (\b125\b) or it leaks in as "wta". Qualifying draws are thinner/jumpier → out too.
+  // (A string filter breaks on every new tour naming; if the provider ever exposes a tier LEVEL
+  // field on the comp, gate on that and keep this regex as the fallback.)
+  if (/doubles|itf|challenger|wta ?125|atp ?125|\b125\b|\bqualif/.test(hay)) return null;
   if (/\bwta\b/.test(hay)) return "wta";
   if (/\batp\b/.test(hay)) return "atp";
   return null;

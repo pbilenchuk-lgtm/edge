@@ -550,10 +550,12 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       openPositions: [],
       context: `БРЕЙК: сломали ${br.server === charge.favSide ? "ФАВОРИТА" : "андердога"} в сете ${br.setNum}, фаворит проиграл сетов: ${favSetsLost}. Цена фаворита ${favPrice}¢ (до брейка ~${prePrice}¢). Заряжен триггер early_break (ранний брейк, снапбек за минуты — «проигранный сет 1» это уже Set-Value, не сюда). Реши: overreaction (выкупаем) или real_shift (воздерживаемся).`,
     }, strat.model_live ?? strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
-    R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "decided", now); // one shot per break
-
-    const pick = dec.ok ? dec.picks.find((p) => norm(p.label) === norm(favName) || surnames(favName).some((t) => norm(p.label).includes(t))) : null;
-    if (!dec.ok) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `стратег недоступен (${dec.error || "нет ответа"}) — входа нет`, created_at: now }); continue; }
+    // A transient strategist failure ({ok:false} — timeout / 429 / repair-exhausted) is the ABSENCE of a
+    // decision, NOT a decision. Do NOT burn the break's one shot on it — leave the marker unset so the next
+    // tick retries (the snapback horizon is minutes). Only a real verdict below marks the break decided.
+    if (!dec.ok) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `стратег недоступен (${dec.error || "нет ответа"}) — входа нет (маркер не ставим, повтор на след. тике)`, created_at: now }); continue; }
+    R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "decided", now); // real decision obtained → one shot per break burned
+    const pick = dec.picks.find((p) => norm(p.label) === norm(favName) || surnames(favName).some((t) => norm(p.label).includes(t)));
     if (!pick) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `real_shift: стратег воздержался (не overreaction) — ${dec.note?.slice(0, 120) ?? ""}`, created_at: now }); continue; }
 
     // Entry prices off the LIVE scout price (the panicked favourite), NOT the market ROW — that row
@@ -687,9 +689,11 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
       openPositions: [],
       context: `ФАВОРИТ ПРОИГРАЛ 1-Й СЕТ (bo3). Счёт по сетам фаворита: выиграно ${favSetsWon}, проиграно ${favSetsLost}; сейчас сет ${last.set_num}, геймы ${last.games_p1}-${last.games_p2}. Цена фаворита ${favPrice}¢ (полоса входа 30-45¢). Реши: конкурентный сет (покупаем камбэк) или разгром / ретайр-риск (воздерживаемся).`,
     }, strat.model_live ?? strat.model ?? "Claude Opus 4.8", { fetchImpl: deps.fetchImpl, env });
-    R.metaSet(db, SV_ACTED + m.id, "decided", now); // one shot per match
-
-    if (!dec.ok) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `стратег недоступен (${dec.error || "нет ответа"}) — входа нет`, created_at: now }); continue; }
+    // A transient {ok:false} (timeout / 429 / repair-exhausted) is the ABSENCE of a decision, not a
+    // decision. Do NOT burn this match's single Set-Value shot on infra failure — leave SV_ACTED unset so
+    // the next tick retries (the gate stays armed all through set 2). Only a real verdict below marks acted.
+    if (!dec.ok) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `стратег недоступен (${dec.error || "нет ответа"}) — входа нет (маркер не ставим, повтор на след. тике)`, created_at: now }); continue; }
+    R.metaSet(db, SV_ACTED + m.id, "decided", now); // real decision obtained → one shot per match burned
     const pick = dec.picks.find((p) => norm(p.label) === norm(favName) || surnames(favName).some((t) => norm(p.label).includes(t)));
     if (!pick) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `не конкурентный сет / ретайр-риск: стратег воздержался — ${dec.note?.slice(0, 120) ?? ""}`, created_at: now }); continue; }
 

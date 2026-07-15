@@ -22,6 +22,7 @@ import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta
 import { sizePrematch } from "./strategist.js";
 import { getProfileConfig, RISK_PROFILE_DEFS } from "./riskConfig.js";
 import { tennisMoneyline, propFamily, detectTennisEvents, tennisTourOf, type PropFamily } from "./tennisScout.js";
+import { isBestOfFive } from "./tennisSetValue.js";
 import { tennisTheo, baseHoldFor, matchDistribution, BASE_HOLD, type TennisTheo } from "./tennisMarkov.js";
 
 export const STRAT_PMV_DESC = `# ТЕННИС — PMV (консистентность пропов, v1, БЕЗ LLM)
@@ -230,7 +231,7 @@ export function resolveTennisProp(label: string, fs: FinalSets, opts: { retired:
   }
   if (p.family === "set_winner") { const firstGames = opts.firstIsP1 ? setN!.p1 : setN!.p2, oppGames = opts.firstIsP1 ? setN!.p2 : setN!.p1; return firstGames > oppGames; }
   if (p.family === "set_handicap") { const by2 = first.won - first.lost >= 2; return p.handicapOnFirst ? by2 : (first.lost - first.won < 2); }
-  if (p.family === "total_sets") { const total = fs.setsWonP1 + fs.setsWonP2; return p.side === "over" ? total >= 3 : total < 3; }
+  if (p.family === "total_sets") { const total = fs.setsWonP1 + fs.setsWonP2; const line = p.line ?? 2.5; return p.side === "over" ? total > line : total < line; } // respect the O/U line (2.5 bo3, 3.5 bo5) — a bo5 3-0 is UNDER 3.5, not over
   if (p.family === "total_games") {
     const games = p.scope === "match" ? fs.matchGames : (setN!.p1 + setN!.p2);
     if (p.line == null) return null;
@@ -460,6 +461,10 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
     for (const m of R.listMatches(db, c.id)) {
       if (m.state === "finished" || m.state === "live") continue; // PMV is PRE-MATCH only (v1)
       if (R.metaGet(db, PMV_ACTED + m.id)) continue;              // scan once per match
+      // The Markov core is bo3-ONLY (matchDistribution enumerates 2-0/2-1). A Grand Slam men's singles
+      // is bo5 → the theo (Total Sets / Set Handicap / totals) is structurally wrong; skip it exactly as
+      // Set-Value does. (Idempotent marker so it isn't re-scanned every tick.)
+      if (isBestOfFive(null, c.name)) { R.metaSet(db, PMV_ACTED + m.id, "bo5_skip", now); continue; }
       const scan = scanMatchProps(db, m.id, { p1: m.home, p2: m.away }, tour, c.name);
       if (!scan.tradeable) continue;
       pending.push({ comp: c.id, matchId: m.id, players: { p1: m.home, p2: m.away }, scan });
