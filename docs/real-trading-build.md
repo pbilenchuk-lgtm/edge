@@ -53,7 +53,8 @@ metrics via the live book, UI, safety belt, tests); F is a thin adapter over a p
 | **E** | Whitelist filter (single sim→real gate, `sport=football` hardcoded) — proportional sizing, isolated mirror, versioning | **done** (live call-site wiring pending) |
 | **F** | `RealExecutor` (live CLOB) — **deferred**, separate review | deferred |
 | **H** | `real_vs_paper` metrics (fill-rate/slippage/latency/missed/costs/pnl-delta) + CSV | **done** |
-| **G** | UI (Sim/Real toggle, real-only views, twin-link, [STOP]) | pending |
+| **G1** | UI read-only: Sim/Real toggle + effective-mode badge, bank/orders/positions/report, twin-link | **done** |
+| **G2** | UI controls: [STOP], mode switch, whitelist editor, limits, clear-pause — each an audited endpoint | pending |
 | owner scripts | `enable-dry-whitelist.ts` (broad dry whitelist) · `dry-status.ts` (24-48h checklist) | **done** |
 
 ## Tennis epoch break — `book-fill-m1` (recorded before the data)

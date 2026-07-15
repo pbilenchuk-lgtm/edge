@@ -317,6 +317,19 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [matchDb, setMatchDb] = useState(initial.matchDb);
   const [providers, setProviders] = useState(initial.providers);
   const PROVIDERS = providers;
+  // Real-trading contour (Phase G, read-only): loaded on demand from /api/real.
+  const [realData, setRealData] = useState<any>(null);
+  const [realLoading, setRealLoading] = useState(false);
+  const loadReal = async () => { setRealLoading(true); try { const r = await fetch("/api/real"); const j = await r.json(); if (j.ok) setRealData(j.view); } catch { /* read-only glance; ignore */ } setRealLoading(false); };
+  const goReal = () => { setScreen("real"); loadReal(); };
+  // Load the contour mode once on mount so the header badge is always present (cheap read).
+  useEffect(() => { loadReal(); }, []);
+  const MODE_BADGE: Record<string, { txt: string; bg: string; fg: string }> = {
+    on: { txt: "РЕАЛЬНЫЕ ДЕНЬГИ", bg: "#ff6b6b22", fg: "#ff6b6b" },
+    exits_only: { txt: "ТОЛЬКО ВЫХОДЫ", bg: "#e8a83822", fg: "#e8a838" },
+    dry_run: { txt: "DRY-RUN", bg: "#7fb4e822", fg: "#7fb4e8" },
+    off: { txt: "OFF", bg: "#8882", fg: "#999" },
+  };
   // Per-match odds-refresh failure signal: a monotonically-bumped counter the
   // MatchCard watches to flash a RED dot (vs the green "prices changed" flash)
   // when a refresh didn't go through (network / server error).
@@ -619,6 +632,20 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
             </React.Fragment>
           ));
         })()}
+        {/* Global Simulation / Real toggle + effective-mode badge (Phase G). Mode is the EFFECTIVE
+            one (env ∧ sticky pause), so a daily-loss / reconciliation pause shows here, not just env. */}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+          {realData?.mode && (() => { const b = MODE_BADGE[realData.mode] ?? MODE_BADGE.off; return (
+            <span title={realData.paused ? `авто-пауза: ${realData.paused.reason}` : realData.mode !== realData.envMode ? `env=${realData.envMode}, но действует ${realData.mode}` : `режим контура: ${realData.mode}`}
+              style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.5, padding: "3px 8px", borderRadius: 4, background: b.bg, color: b.fg, border: `1px solid ${b.fg}55` }}>
+              {b.txt}{realData.paused ? " ⏸" : ""}{realData.orphan ? " ⚠" : ""}
+            </span>
+          ); })()}
+          <div style={{ display: "flex", border: "1px solid #ffffff18", borderRadius: 6, overflow: "hidden" }}>
+            <button onClick={() => setScreen("matches")} style={{ padding: "5px 10px", fontSize: 11, background: screen !== "real" ? "#ffffff10" : "transparent", color: screen !== "real" ? "#e8e8e8" : "#888", border: "none", cursor: "pointer" }}>Симуляция</button>
+            <button onClick={goReal} style={{ padding: "5px 10px", fontSize: 11, background: screen === "real" ? (realData?.mode === "on" ? "#ff6b6b22" : "#7fb4e822") : "transparent", color: screen === "real" ? (realData?.mode === "on" ? "#ff6b6b" : "#7fb4e8") : "#888", border: "none", cursor: "pointer" }}>Реал</button>
+          </div>
+        </div>
       </div>
 
       <div style={S.screenSwitch} className="el-screen-switch">
@@ -764,6 +791,8 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
             return r;
           }}
           onReplay={async (config: any) => mutate({ type: "shadowReplay", config })} />
+      ) : screen === "real" ? (
+        <RealScreen data={realData} loading={realLoading} onRefresh={loadReal} />
       ) : (
         <ModelsScreen providers={providers} setProviders={setProviders} total={TOTAL_BALANCE} allocated={allocatedSum} cron={initial.cron}
           onDiscover={doDiscover} discovering={discovering}
@@ -2072,6 +2101,98 @@ function PortfolioScreen({ open, closed, onGoMatches }: any) {
           ))}
         </>
       )}
+    </main>
+  );
+}
+
+// ── Phase G iteration 1: the READ-ONLY real-trading contour view. No control here
+//    (STOP / mode / whitelist edits are iteration 2). Simulation view is untouched. ──
+function RealScreen({ data, loading, onRefresh }: { data: any; loading: boolean; onRefresh: () => void }) {
+  const cardS: React.CSSProperties = { background: "#ffffff06", border: "1px solid #ffffff12", borderRadius: 8, padding: 14, marginBottom: 14 };
+  const hS: React.CSSProperties = { fontSize: 12, fontWeight: 700, color: "#bbb", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 };
+  const thS: React.CSSProperties = { textAlign: "left", fontSize: 10, color: "#888", fontWeight: 600, padding: "4px 8px", borderBottom: "1px solid #ffffff10" };
+  const tdS: React.CSSProperties = { fontSize: 11, color: "#ddd", padding: "4px 8px", borderBottom: "1px solid #ffffff08" };
+  const statusColor = (s: string) => s === "filled" ? "#5fd08a" : s === "partial" ? "#7fb4e8" : s === "expired" ? "#e8a838" : s === "rejected" ? "#ff6b6b" : "#999";
+  const cents = (n: number | null) => (n == null ? "—" : `${n}¢`);
+  if (!data) return <main style={S.main}><div style={{ padding: 40, textAlign: "center", color: "#888" }}>{loading ? "загрузка реал-контура…" : "нет данных"}</div></main>;
+  const r = data.report;
+  return (
+    <main style={S.main}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <div style={{ fontSize: 18, fontWeight: 700, color: "#e8e8e8" }}>Реальный контур <span style={{ fontSize: 12, color: "#888" }}>(read-only)</span></div>
+        <div style={{ fontSize: 11, color: "#888" }}>режим: <b style={{ color: data.mode === "on" ? "#ff6b6b" : "#7fb4e8" }}>{data.mode}</b>{data.mode !== data.envMode && <span style={{ color: "#e8a838" }}> (env={data.envMode}, действует авто-пауза)</span>}</div>
+        <button onClick={onRefresh} style={{ marginLeft: "auto", padding: "5px 12px", fontSize: 11, background: "#ffffff10", color: "#ddd", border: "1px solid #ffffff18", borderRadius: 6, cursor: "pointer" }}>{loading ? "…" : "↻ обновить"}</button>
+      </div>
+
+      {data.paused && <div style={{ ...cardS, borderColor: "#e8a83855", background: "#e8a83812" }}><b style={{ color: "#e8a838" }}>⏸ АВТО-ПАУЗА (sticky):</b> <span style={{ color: "#ddd", fontSize: 12 }}>{data.paused.reason} · сброс — действие владельца (итерация 2)</span></div>}
+      {data.orphan && <div style={{ ...cardS, borderColor: "#ff6b6b55", background: "#ff6b6b12" }}><b style={{ color: "#ff6b6b" }}>⚠ ПОЗИЦИИ БЕЗ EXIT-УПРАВЛЕНИЯ:</b> <span style={{ color: "#ddd", fontSize: 12 }}>{data.orphan.message}</span></div>}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+        <div style={cardS}>
+          <div style={hS}>Банк / ledger</div>
+          <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+            <div><div style={{ fontSize: 10, color: "#888" }}>РЕАЛЬНЫЙ баланс</div><div style={{ fontSize: 18, fontWeight: 700, color: data.bank.realBalanceUsd === 0 ? "#5fd08a" : "#ddd" }}>{fmtMoney(data.bank.realBalanceUsd)}</div><div style={{ fontSize: 9, color: "#666" }}>{data.bank.realBalanceUsd === 0 ? "пусто (dry-тег держит)" : ""}</div></div>
+            <div><div style={{ fontSize: 10, color: "#888" }}>DRY баланс</div><div style={{ fontSize: 18, fontWeight: 700, color: "#7fb4e8" }}>{fmtMoney(data.bank.dryBalanceUsd)}</div></div>
+          </div>
+          <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {Object.entries(data.bank.byKind || {}).map(([k, v]: any) => <span key={k} style={{ fontSize: 10, color: "#aaa", background: "#ffffff08", padding: "2px 7px", borderRadius: 4 }}>{k}: {fmtMoney(v)}</span>)}
+          </div>
+        </div>
+        <div style={cardS}>
+          <div style={hS}>Сверка / whitelist</div>
+          <div style={{ fontSize: 12, color: "#ddd" }}>whitelist версия: <b>{data.whitelistVersion}</b> · строк: {data.whitelist.length} (enabled: {data.whitelist.filter((w: any) => w.enabled).length})</div>
+          <div style={{ fontSize: 11, color: data.orphan || data.paused ? "#e8a838" : "#5fd08a", marginTop: 6 }}>{data.orphan || data.paused ? "есть активные алерты (см. выше)" : "✓ алертов нет"}</div>
+        </div>
+      </div>
+
+      <div style={cardS}>
+        <div style={hS}>real_vs_paper — fill-rate по категориям</div>
+        <div style={{ fontSize: 10, color: "#e8a838", marginBottom: 8 }}>⚠ dry fill-rate — нижняя граница (placement-snapshot); высокий dry ⇒ высокий реальный, низкий dry ≠ низкий реальный.</div>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr><th style={thS}>категория</th><th style={thS}>ордеров</th><th style={thS}>fill%</th><th style={thS}>filled</th><th style={thS}>partial</th><th style={thS}>expired</th><th style={thS}>rejected</th></tr></thead>
+          <tbody>{r.fillRateByCategory.map((c: any) => (
+            <tr key={c.category}><td style={tdS}>{c.category}</td><td style={tdS}>{c.total}</td><td style={{ ...tdS, color: c.fillPct >= 50 ? "#5fd08a" : "#e8a838", fontWeight: 700 }}>{c.fillPct}%</td><td style={tdS}>{c.filled}</td><td style={tdS}>{c.partial}</td><td style={tdS}>{c.expired}</td><td style={tdS}>{c.rejected}</td></tr>
+          ))}{!r.fillRateByCategory.length && <tr><td style={tdS} colSpan={7}>пока нет входов</td></tr>}</tbody>
+        </table>
+        <div style={{ display: "flex", gap: 24, marginTop: 12, flexWrap: "wrap", fontSize: 12, color: "#ddd" }}>
+          <div>слиппедж входа (медиана): <b>{cents(r.slippage.entryMedianCents)}</b> <span style={{ color: "#666" }}>(n={r.slippage.n})</span></div>
+          <div>missed_fills: <b>{r.missedFills.count}</b> · edge потерян <b>{fmtMoney(r.missedFills.edgeLostUsd)}</b></div>
+          <div>издержки: fee <b>{fmtMoney(r.costs.feeUsd)}</b>{r.costs.per100TurnoverUsd != null && <span> · {fmtMoney(r.costs.per100TurnoverUsd)}/$100 оборота</span>}</div>
+          <div>P&L: dry <b>{fmtMoney(r.pnlDelta.realRealizedUsd)}</b> vs близнецы <b>{fmtMoney(r.pnlDelta.paperTwinPnlUsd)}</b> (Δ {fmtMoney(r.pnlDelta.deltaUsd)})</div>
+        </div>
+      </div>
+
+      <div style={cardS}>
+        <div style={hS}>Лента ордеров ({data.orders.length}) — lifecycle + twin-дельта</div>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr><th style={thS}>время</th><th style={thS}>категория</th><th style={thS}>стратегия</th><th style={thS}>сторона</th><th style={thS}>статус</th><th style={thS}>лимит→филл</th><th style={thS}>размер</th><th style={thS}>wl_v</th><th style={thS}>переходы</th><th style={thS}>twin: реш→филл</th><th style={thS}>paper P&L</th></tr></thead>
+          <tbody>{data.orders.map((o: any) => (
+            <tr key={o.id}>
+              <td style={tdS}>{(o.createdAt || "").slice(11, 19)}</td>
+              <td style={tdS}>{o.category ?? "—"}</td>
+              <td style={tdS}>{o.strategyId}<span style={{ color: "#666" }}>/{o.profileId}</span></td>
+              <td style={tdS}>{o.side} {o.leg}{o.dry && <span style={{ color: "#7fb4e8", fontSize: 9 }}> dry</span>}</td>
+              <td style={{ ...tdS, color: statusColor(o.status), fontWeight: 700 }}>{o.status}</td>
+              <td style={tdS}>{o.limitCents}¢→{cents(o.avgFillCents)}</td>
+              <td style={tdS}>{fmtMoney(o.filledUsd)}/{fmtMoney(o.sizeUsd)}</td>
+              <td style={tdS}>{o.whitelistVersion ?? "—"}</td>
+              <td style={{ ...tdS, fontSize: 9, color: "#999" }} title={o.events.map((e: any) => `${e.status} @ ${e.at}`).join("\n")}>{o.events.map((e: any) => e.status[0]).join("→")}</td>
+              <td style={{ ...tdS, color: o.entrySlipCents == null ? "#666" : o.entrySlipCents > 0 ? "#ff6b6b" : "#5fd08a" }}>{o.paperEntryCents == null ? "—" : `${o.paperEntryCents}¢→${cents(o.avgFillCents)} (${o.entrySlipCents != null && o.entrySlipCents >= 0 ? "+" : ""}${o.entrySlipCents ?? "?"}¢)`}</td>
+              <td style={{ ...tdS, color: (o.paperPnlUsd ?? 0) >= 0 ? "#5fd08a" : "#ff6b6b" }}>{o.paperPnlUsd == null ? "—" : fmtMoney(o.paperPnlUsd)}</td>
+            </tr>
+          ))}{!data.orders.length && <tr><td style={tdS} colSpan={11}>ордеров пока нет — ждём футбольный вход (см. dry-status.ts)</td></tr>}</tbody>
+        </table>
+      </div>
+
+      <div style={cardS}>
+        <div style={hS}>Открытые позиции ({data.positions.filter((p: any) => Math.abs(p.size_shares) > 0.01).length})</div>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr><th style={thS}>токен</th><th style={thS}>стратегия</th><th style={thS}>шары</th><th style={thS}>ср. цена</th><th style={thS}>realized</th><th style={thS}></th></tr></thead>
+          <tbody>{data.positions.filter((p: any) => Math.abs(p.size_shares) > 0.01).map((p: any) => (
+            <tr key={p.token_id}><td style={{ ...tdS, fontFamily: "monospace", fontSize: 10 }}>{String(p.token_id).slice(0, 14)}…</td><td style={tdS}>{p.strategy_id ?? "—"}</td><td style={tdS}>{Math.round(p.size_shares)}</td><td style={tdS}>{cents(p.avg_price_cents)}</td><td style={{ ...tdS, color: (p.realized_pnl_usd ?? 0) >= 0 ? "#5fd08a" : "#ff6b6b" }}>{fmtMoney(p.realized_pnl_usd ?? 0)}</td><td style={tdS}>{p.dry ? <span style={{ color: "#7fb4e8", fontSize: 9 }}>dry</span> : <span style={{ color: "#ff6b6b", fontSize: 9 }}>REAL</span>}</td></tr>
+          ))}{!data.positions.filter((p: any) => Math.abs(p.size_shares) > 0.01).length && <tr><td style={tdS} colSpan={6}>открытых позиций нет</td></tr>}</tbody>
+        </table>
+      </div>
     </main>
   );
 }
