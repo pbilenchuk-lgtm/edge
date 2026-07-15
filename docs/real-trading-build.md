@@ -52,7 +52,9 @@ metrics via the live book, UI, safety belt, tests); F is a thin adapter over a p
 | **D** | `DryRunExecutor` (real path, fills vs live book, no send) + orphan-positions sentinel | **done** |
 | **E** | Whitelist filter (single sim→real gate, `sport=football` hardcoded) — proportional sizing, isolated mirror, versioning | **done** (live call-site wiring pending) |
 | **F** | `RealExecutor` (live CLOB) — **deferred**, separate review | deferred |
-| **G/H/I** | UI (Sim/Real, twin-link, [STOP]) · `real_vs_paper` metrics · §9 tests | pending |
+| **H** | `real_vs_paper` metrics (fill-rate/slippage/latency/missed/costs/pnl-delta) + CSV | **done** |
+| **G** | UI (Sim/Real toggle, real-only views, twin-link, [STOP]) | pending |
+| owner scripts | `enable-dry-whitelist.ts` (broad dry whitelist) · `dry-status.ts` (24-48h checklist) | **done** |
 
 ## Tennis epoch break — `book-fill-m1` (recorded before the data)
 
