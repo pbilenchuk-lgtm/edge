@@ -1630,8 +1630,9 @@ export async function runLiveCycle(
   const detExits = await stepLive("exits", () => evaluateExits(db, deps), [] as ExitItem[]); // cheap TP/stop, reacts to price every tick
   const reassess = await stepLive("reassess", () => strategistReassess(db, deps, { newEventMatchIds: reassessIds, triggeredOnly: true, labelFor }), { exits: [], entries: [], llmCalls: 0, llmFail: 0 } as ReassessResult);
   await stepLive("autoEnter", () => autoEnter(db, deps), [] as AutoEnterItem[]); // fill any positions the strategist just opened
-  // §5 real EXIT mirror: close dry positions whose paper twin settled (gate-first: off → no-op).
-  if (readTradingMode(deps.env) !== "off") await stepLive("dryExitSweep", () => sweepDryExits(db, { env: deps.env ?? process.env, poly: deps.polymarket ?? loadPolymarketConfig(deps.env), deps, now: () => nowFn(deps)(), bookCache: new Map() }), 0);
+  // (dry-exit sweep runs ONLY in the slow auto cycle — see runAutoCycle. Fetching a book per open dry
+  //  position every fast tick, in BOTH cycles, was the OOM that downed the box; once/slow-tick is enough:
+  //  a settled twin's position isn't going anywhere.)
 
   return {
     live: inPlay.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),

@@ -205,9 +205,15 @@ async function mirrorDryExit(db: Database, pos: RR.RealPositionRow, decisionId: 
  *  Gate-first (off → nothing). Isolated per position (one failure never stops the sweep or paper). */
 export async function sweepDryExits(db: Database, ctx: SweepCtx): Promise<number> {
   if (readTradingMode(ctx.env) === "off") return 0; // hot-path no-op
-  let closed = 0;
+  let closed = 0, fetched = 0;
+  // OOM guard (the incident): each swept position fetches its book, so an unbounded scan × per-tick
+  // is the get_fixtures OOM class. Cap the WORK per tick — the rest are swept next tick (the twins are
+  // already settled and going nowhere). Env-tunable.
+  const MAX = (() => { const n = Number(ctx.env.MAX_DRY_SWEEP); return Number.isFinite(n) && n > 0 ? n : 25; })();
   for (const pos of RR.listRealPositions(db)) {
     if (pos.dry !== 1 || Math.abs(pos.size_shares) < 1e-6) continue;
+    if (fetched >= MAX) break; // bound the book fetches this tick
+    fetched++;
     try {
       const entry = db.prepare(`SELECT decision_id FROM real_orders WHERE token_id=? AND leg='entry' ORDER BY created_at LIMIT 1`).get(pos.token_id) as { decision_id: string } | undefined;
       if (!entry?.decision_id) continue;

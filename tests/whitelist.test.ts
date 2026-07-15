@@ -114,6 +114,26 @@ test("sweepDryExits: an open dry position whose paper twin SETTLED is closed by 
   assert.equal(await sweepDryExits(d, { env: { REAL_TRADING: "dry_run" }, poly: POLY, deps: { fetchImpl: bookFetch(sellBook) }, now: () => "2026-07-15T12:06:00.000Z", bookCache: new Map() }), 0);
 });
 
+test("sweepDryExits: MAX_DRY_SWEEP bounds the per-tick book fetches (the OOM fix)", async () => {
+  const d = db();
+  R.upsertSport(d, "football", "Ф");
+  R.upsertCompetition(d, { id: "epl", sport_id: "football", name: "EPL", budget: 1000, external_league: null, created_at: "t" });
+  R.insertStrategy(d, { id: "overreaction", sport_id: "football", name: "OR", tag: "o", color: "#fff", version: 1, prompt: "", prompt_live: null, params: {}, model: "m", model_live: null, created_at: "t" } as any);
+  const mid = R.uid();
+  R.insertMatch(d, { id: mid, competition_id: "epl", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t", minute: 90, score_home: 1, score_away: 0, final_score: "1:0", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid } as any);
+  // 3 closeable dry positions (each: entry order + settled twin + open dry position).
+  for (let i = 0; i < 3; i++) {
+    const dec = `d${i}`, tok = `tok${i}`;
+    RR.insertRealOrder(d, { id: `o${i}`, client_order_id: `c${i}`, exchange_order_id: null, decision_id: dec, strategy_id: "overreaction", profile_id: "medium", match_id: mid, token_id: tok, side: "BUY", leg: "entry", limit_price_cents: 45, size_usd: 30, tif_sec: 45, code_version: "e", whitelist_version: 1, note: null, created_at: NOW });
+    RR.upsertRealPosition(d, { token_id: tok, match_id: mid, strategy_id: "overreaction", size_shares: 60, avg_price_cents: 45, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 1, updated_at: NOW });
+    R.insertBet(d, { id: `b${i}`, match_id: mid, strategy_id: "overreaction", risk_profile_id: "medium", market_label: "O", status: "settled_won", proposed_price: 45, entry_price: 45, current_price: 60, closing_price: 60, ai_prob: 0.6, stake: 30, rationale: "r", entered_minute: "3'", result: "won", payout: 40, settled_by: "early", settled_at: NOW, entry_meta: null, code_version: "e", decision_id: dec, created_at: NOW } as any);
+  }
+  const book = { bids: [{ price: "0.58", size: "10000" }], asks: [] };
+  const n = await sweepDryExits(d, { env: { REAL_TRADING: "dry_run", MAX_DRY_SWEEP: "2" }, poly: POLY, deps: { fetchImpl: bookFetch(book) }, now: () => NOW, bookCache: new Map() });
+  assert.equal(n, 2, "capped at MAX_DRY_SWEEP=2 this tick; the 3rd is swept next tick");
+  assert.equal(RR.listRealPositions(d).filter((p) => p.dry === 1 && p.size_shares > 0.01).length, 1, "one still open, closes next sweep");
+});
+
 // ── condition: sport gate ────────────────────────────────────────────────────────
 test("mirror: a non-football (tennis) bet is NEVER mirrored — hard gate", async () => {
   const d = db();

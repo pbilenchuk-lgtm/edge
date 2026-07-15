@@ -194,6 +194,16 @@ export function initSchema(db: Database): void {
     "ALTER TABLE tennis_snapshots ADD COLUMN pm_p2_cents REAL",
     "ALTER TABLE tennis_break_marks ADD COLUMN post_entry_min_cents REAL",
     "ALTER TABLE tennis_break_marks ADD COLUMN post_entry_min_sec INTEGER",
+    // real-trading columns added AFTER the real_* tables' first creation — self-heal a prod DB whose
+    // real_orders/fills/positions/ledger were created at an earlier phase (CREATE IF NOT EXISTS won't
+    // add columns to an existing table). Each is idempotent (duplicate-column throw is caught below).
+    "ALTER TABLE real_orders ADD COLUMN salt TEXT",
+    "ALTER TABLE real_orders ADD COLUMN order_hash TEXT",
+    "ALTER TABLE real_orders ADD COLUMN expiry_mode TEXT",
+    "ALTER TABLE real_orders ADD COLUMN client_cancel_deadline TEXT",
+    "ALTER TABLE real_fills ADD COLUMN dry INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE real_positions ADD COLUMN dry INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE real_ledger ADD COLUMN dry INTEGER NOT NULL DEFAULT 0",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }

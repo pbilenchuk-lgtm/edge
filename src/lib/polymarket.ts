@@ -168,6 +168,9 @@ export type OrderBookFetch =
 /** Live order book for one CLOB token, classified. Prices in cents and levels sorted
  *  best-first (bids desc, asks asc). Never throws — a failed fetch resolves to
  *  `{status:"unavailable"}` and an empty/dead book to `{status:"empty"}`. */
+// Byte cap for a single /book response before JSON.parse — a real book is a few KB; anything far
+// larger is degenerate and, multiplied by the dry-run sweep's per-position fetches, an OOM risk.
+const ORDERBOOK_MAX_BYTES = (() => { const n = Number(process.env.ORDERBOOK_MAX_BYTES); return Number.isFinite(n) && n > 0 ? n : 2_000_000; })();
 export async function fetchOrderBookResult(
   tokenId: string,
   cfg: PolymarketConfig,
@@ -178,7 +181,12 @@ export async function fetchOrderBookResult(
     const url = `${cfg.clobBase}/book?token_id=${encodeURIComponent(tokenId)}`;
     const res = await withTimeout(cfg.timeoutMs, (signal) => doFetch(url, { signal }));
     if (!res.ok) return { status: "unavailable" }; // transport-level failure → retry
-    const json = (await res.json()) as { error?: string; bids?: { price: string; size: string }[]; asks?: { price: string; size: string }[] };
+    // OOM guard (512MB box): read as TEXT and bail BEFORE parsing an over-cap body. A degenerate/huge
+    // book response × many per-tick fetches (the dry-run sweep) is exactly the get_fixtures OOM class.
+    // Fall back to res.json() when a caller's fetch impl has no text() (test mocks) — real fetch has both.
+    const text = typeof (res as any).text === "function" ? await res.text() : null;
+    if (text != null && text.length > ORDERBOOK_MAX_BYTES) return { status: "unavailable" }; // too big to parse safely → skip
+    const json = (text != null ? JSON.parse(text) : await res.json()) as { error?: string; bids?: { price: string; size: string }[]; asks?: { price: string; size: string }[] };
     // A structured {error} from a 200 means the server has no book for this token — the
     // fetch WORKED, the market simply isn't initialized. That's a placeholder, not a
     // transient outage: classify it "empty" so the entry gate blocks rather than retries.
