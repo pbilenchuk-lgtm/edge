@@ -29,6 +29,7 @@ export type OrderLeg = "entry" | "exit" | "exit_partial" | "settle";
  */
 export interface OrderRequest {
   clientOrderId: string;
+  leg: OrderLeg;              // entry | exit | exit_partial | settle — gates entry-vs-exit belt logic
   tokenId: string;            // CLOB token_id = markets.external_ref
   side: OrderSide;
   limitPriceCents: Cents;     // decision price ± execution tolerance (limit ONLY — no market orders)

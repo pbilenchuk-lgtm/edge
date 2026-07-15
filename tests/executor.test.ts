@@ -41,7 +41,7 @@ test("insertBet: a caller-supplied decision_id is preserved (shared-decision gro
 // Minimal poly config with the execution model ON (so place() fills vs the book).
 const POLY: any = { enabled: true, exec: { edgeFloorCents: 1, maxImpactCents: 10, fallbackK: 20, takerFeeRate: 0.03 } };
 const order = (over: Partial<OrderRequest> = {}): OrderRequest => ({
-  clientOrderId: clientOrderIdFor("dec-1", "entry"), tokenId: "tok-1", side: "BUY",
+  clientOrderId: clientOrderIdFor("dec-1", "entry"), leg: "entry", tokenId: "tok-1", side: "BUY",
   limitPriceCents: 45, sizeUsd: 100, timeInForceSec: 45, decisionId: "dec-1",
   strategyId: "overreaction", profileId: "medium", matchId: "m1", fairValueCents: 60, ...over,
 });

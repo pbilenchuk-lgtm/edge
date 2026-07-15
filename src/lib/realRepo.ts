@@ -146,6 +146,16 @@ export function listRealPositions(db: Database): RealPositionRow[] {
   return db.prepare(`SELECT * FROM real_positions ORDER BY updated_at DESC`).all() as RealPositionRow[];
 }
 
+/** Count of positions with live size opened by a REAL (sent) order — a real order has an
+ *  exchange_order_id; DRY-run orders never do. So this counts genuine on-exchange exposure and
+ *  is ZERO in pure dry-run (the orphan sentinel must not false-alarm on simulated positions). */
+export function realOpenPositionCount(db: Database): number {
+  return (db.prepare(
+    `SELECT COUNT(*) AS n FROM real_positions p WHERE ABS(p.size_shares) > 1e-9
+       AND EXISTS (SELECT 1 FROM real_orders o WHERE o.token_id = p.token_id AND o.exchange_order_id IS NOT NULL)`,
+  ).get() as { n: number }).n;
+}
+
 // ── real_ledger ──────────────────────────────────────────────────────────────
 export interface RealLedgerRow { id: string; kind: RealLedgerKind; amount_usd: number; token_id: string | null; order_id: string | null; ref: string | null; at: string; created_at: string }
 export function insertRealLedger(db: Database, e: Omit<RealLedgerRow, "id">): string {
@@ -200,4 +210,19 @@ export function getRealAutoPause(db: Database): RealAutoPause | null {
 /** Owner-only reset — clears the sticky pause so the env mode governs again. */
 export function clearRealAutoPause(db: Database): void {
   db.prepare(`DELETE FROM app_meta WHERE key=?`).run(AUTO_PAUSE_KEY);
+}
+
+// ── orphan-positions alert (open real positions the effective mode can't exit) ───────────────
+const ORPHAN_ALERT_KEY = "real_orphan_alert";
+export interface RealOrphanAlert { message: string; at: string }
+export function setRealOrphanAlert(db: Database, message: string, at: string): void {
+  db.prepare(`INSERT INTO app_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).run(ORPHAN_ALERT_KEY, JSON.stringify({ message, at } as RealOrphanAlert), at);
+}
+export function getRealOrphanAlert(db: Database): RealOrphanAlert | null {
+  const row = db.prepare(`SELECT value FROM app_meta WHERE key=?`).get(ORPHAN_ALERT_KEY) as { value: string } | undefined;
+  if (!row) return null;
+  try { return JSON.parse(row.value) as RealOrphanAlert; } catch { return null; }
+}
+export function clearRealOrphanAlert(db: Database): void {
+  db.prepare(`DELETE FROM app_meta WHERE key=?`).run(ORPHAN_ALERT_KEY);
 }

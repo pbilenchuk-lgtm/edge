@@ -174,3 +174,23 @@ export function runReconciliation(db: Database, local: { ledgerBalanceUsd: numbe
   if (!r.ok) RR.setRealAutoPause(db, `сверка §4.4: ${r.discrepancies.join("; ")}`, nowIso);
   return r;
 }
+
+// ── Orphan-positions sentinel — the covert mode combo (found in review) ───────
+// The rank (dry_run > exits_only) is monotone in "reality" but NOT in "safety of OPEN positions":
+// real positions open + auto-pause=exits_only + owner flips env→dry_run/off ⇒ effective realExit=false
+// ⇒ live positions with NO exit management. off is a DELIBERATE freeze (e.g. suspected bug in exit
+// logic itself); the danger is reaching this UNKNOWINGLY. So: a loud, persistent alert whenever open
+// real positions exist and the effective mode can't exit them. Runs in the reconciliation cycle.
+export interface OrphanCheck { alert: boolean; openPositions: number; message?: string }
+export function checkOrphanPositions(db: Database, mode: TradingMode, nowIso: string): OrphanCheck {
+  // Only REAL positions (opened by a sent order) count — a dry-run open position is simulated and
+  // carries no real risk, so the sentinel stays silent through normal dry-run operation.
+  const open = RR.realOpenPositionCount(db);
+  if (open > 0 && !modeCaps(mode).realExit) {
+    const message = `⚠ ${open} РЕАЛЬНЫХ позиций БЕЗ exit-управления: режим «${mode}» не разрешает выходы. Флип в on/exits_only чтобы управлять, либо это осознанная заморозка.`;
+    RR.setRealOrphanAlert(db, message, nowIso); // persistent → UI + logs; cleared when the combo resolves
+    return { alert: true, openPositions: open, message };
+  }
+  RR.clearRealOrphanAlert(db); // condition resolved (no open positions or exits are possible again)
+  return { alert: false, openPositions: open };
+}

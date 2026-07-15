@@ -682,7 +682,7 @@ const TENNIS_SKIP_KIND: Record<string, string> = {
  *  real order (so two profiles never share a clientOrderId). */
 async function fillTennisEntry(executor: PaperExecutor, decisionId: string, o: { token: string | null; entryCents: number; sizeUsd: number; fairProbPct: number; strategyId: string; profileId: string; matchId: string }): Promise<OrderAck> {
   return executor.place({
-    clientOrderId: clientOrderIdFor(decisionId, "entry"), tokenId: o.token ?? "", side: "BUY",
+    clientOrderId: clientOrderIdFor(decisionId, "entry"), leg: "entry", tokenId: o.token ?? "", side: "BUY",
     limitPriceCents: o.entryCents, sizeUsd: o.sizeUsd, timeInForceSec: TENNIS_ENTRY_TIF_SEC,
     decisionId, strategyId: o.strategyId, profileId: o.profileId, matchId: o.matchId, fairValueCents: o.fairProbPct,
   });

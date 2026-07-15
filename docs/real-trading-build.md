@@ -49,7 +49,7 @@ metrics via the live book, UI, safety belt, tests); F is a thin adapter over a p
 | **B** | `real_orders/fills/positions/ledger/whitelist` tables + repo | pending |
 | **C** | Safety belt: 4 caps + tick/min conform, kill switch, idempotent-retry protocol, reconciliation, persistent expiry sweep | **done** |
 | **spike** | CLOB capabilities-vs-assumptions doc (before D) | pending |
-| **D** | `DryRunExecutor` (real path, fills vs live book, no send) | pending |
+| **D** | `DryRunExecutor` (real path, fills vs live book, no send) + orphan-positions sentinel | **done** |
 | **E** | Whitelist filter (single sim→real gate, `sport=football` hardcoded) | pending |
 | **F** | `RealExecutor` (live CLOB) — **deferred**, separate review | deferred |
 | **G/H/I** | UI (Sim/Real, twin-link, [STOP]) · `real_vs_paper` metrics · §9 tests | pending |
@@ -181,6 +181,41 @@ Nothing is wired to place orders yet; this is the ready-to-call belt + its tests
 Tests (13): mode fresh-read + fail-safe; each of the 4 caps + exit-bypass; tick BUY-floor/SELL-ceil +
 sub-tick skip + below-min skip; retry all six branches; reconcile clean/balance/position/ghost;
 expiry sweep. 527/527 green.
+
+## Phase D — DryRunExecutor (`src/lib/executor/dryRun.ts`)
+
+The full real path — belt → build → idempotency → accounting to `real_*` — but fills against the LIVE
+book instead of sending. Zero real send, zero money. `place(order)`:
+mode gate (`effectiveTradingMode`, must permit simulate) → `enforceCaps` (clamp/reject/pause) →
+`conformOrderToMarket` → idempotent persist (`real_orders` created, dedup on `client_order_id`) →
+transition `placed` → dry-fill → record `real_fills` + `real_ledger` (fill cash + fee) + `real_positions`
+→ transition `filled`/`partial`/`expired`. Every transition is its own `real_order_events` row.
+
+**Dry-fill model (the footnote to every §7 metric): PLACEMENT-SNAPSHOT, LIMIT-RESPECTING.** At place
+time we VWAP-fill against only the book levels that satisfy the limit (asks ≤ limit / bids ≥ limit).
+Nothing qualifies → **EXPIRED** at TIF (honest miss, anti-chase). Depth < size → **PARTIAL** to depth,
+remainder expires. We do NOT model the book evolving across the TIF window, so dry-run fill-rate is a
+**lower-bound / snapshot-at-placement estimate**. Multi-tick resting-order model = future work.
+Dry-run is synchronous → intra-order latency ≈ 0 by construction; the per-transition timestamp
+mechanism is real (Phase B tested 250/750ms) and shows true latency once the real executor round-trips.
+
+Dry vs real is told apart by `exchange_order_id` (dry = NULL; a real order gets the exchange hash).
+Default conform tick = 0.01 (1¢) + $1 min — **TODO Phase E/F feeds per-market tick/min** (doc-spike #5).
+
+**Orphan-positions sentinel** `checkOrphanPositions(db, mode)` (found in review): the rank is monotone
+in "reality" but not in "safety of open positions" — real positions open + owner flips env→dry_run/off ⇒
+effective `realExit=false` ⇒ live positions with no exit management. So a loud PERSISTENT alert
+(`app_meta:real_orphan_alert`, UI + logs) whenever REAL open positions (opened by a SENT order —
+`exchange_order_id != null`, so a dry position never false-alarms) exist and the effective mode can't
+exit them. Runs in the reconciliation cycle; clears when the combo resolves.
+
+End-to-end acceptance trace (real run): BUY entry, req $500 → clamped $50 → filled 40.2¢ (VWAP 40¢ ask
++ fee) ≤ 45¢ limit; events created→placed→filled; ledger fill −$50 / fee −$0.23; position 125 sh @ 40.2¢;
+decision_id + whitelist_version carried; exchange_id NULL; client_cancel_deadline = now+45s.
+
+Tests (7): end-to-end trail + twin/whitelist/expiry fields; expired (limit < ask); idempotent re-place
+(one fill); over-cap clamp; mode-off inert; orphan alert on a real position; no false-alarm on a dry
+position. 538/538 green.
 
 ## Invariants (never violated by any phase)
 
