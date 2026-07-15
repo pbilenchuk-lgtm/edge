@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 import type { Bet } from "../src/lib/types.js";
-import { clientOrderIdFor } from "../src/lib/executor/types.js";
+import { clientOrderIdFor, type OrderRequest } from "../src/lib/executor/types.js";
+import { PaperExecutor } from "../src/lib/executor/paper.js";
+import { paperBuyFill } from "../src/lib/executor/paperFill.js";
+import type { OrderBookFetch } from "../src/lib/polymarket.js";
 
 function seedBet(db: ReturnType<typeof openDb>, over: Partial<Bet> = {}): string {
   R.upsertSport(db, "football", "Футбол");
@@ -33,6 +36,36 @@ test("insertBet: a caller-supplied decision_id is preserved (shared-decision gro
   const b = seedBet(db, { decision_id: shared } as any);
   assert.equal(R.getBet(db, a)!.decision_id, shared);
   assert.equal(R.getBet(db, b)!.decision_id, shared, "two bets can share one decision_id (twin group)");
+});
+
+// Minimal poly config with the execution model ON (so place() fills vs the book).
+const POLY: any = { enabled: true, exec: { edgeFloorCents: 1, maxImpactCents: 10, fallbackK: 20, takerFeeRate: 0.03 } };
+const order = (over: Partial<OrderRequest> = {}): OrderRequest => ({
+  clientOrderId: clientOrderIdFor("dec-1", "entry"), tokenId: "tok-1", side: "BUY",
+  limitPriceCents: 45, sizeUsd: 100, timeInForceSec: 45, decisionId: "dec-1",
+  strategyId: "overreaction", profileId: "medium", matchId: "m1", fairValueCents: 60, ...over,
+});
+
+test("PaperExecutor.place: BUY fills against the live book identically to the shared engine", async () => {
+  const book: OrderBookFetch = { status: "ok", book: { bids: [], asks: [{ priceCents: 44, size: 500 }, { priceCents: 46, size: 500 }] } };
+  const cache = new Map<string, OrderBookFetch>([["tok-1", book]]);
+  const px = new PaperExecutor({ poly: POLY, deps: {}, bookCache: cache, nowMs: () => 0 });
+  const ack = await px.place(order());
+  // Same inputs through the pure engine — the wrapper must not diverge.
+  const direct = paperBuyFill(book, 100, 60, 45, 45, POLY.exec, 25);
+  assert.equal(ack.status, "filled");
+  assert.equal(ack.avgFillPriceCents, direct.priceCents, "place() price == paperBuyFill() price (faithful wrapper)");
+  assert.equal(ack.filledSizeUsd, direct.stake, "place() size == paperBuyFill() size");
+  assert.equal(ack.exchangeOrderId, null, "paper has no exchange id");
+});
+
+test("PaperExecutor.place: no tradeable book → honest reject, never a fabricated fill", async () => {
+  const cache = new Map<string, OrderBookFetch>([["tok-1", { status: "empty" }]]);
+  const px = new PaperExecutor({ poly: POLY, deps: {}, bookCache: cache, nowMs: () => 0 });
+  const ack = await px.place(order());
+  assert.equal(ack.status, "rejected", "empty book → rejected, not filled");
+  assert.equal(ack.filledSizeUsd, 0, "zero fill on no book");
+  assert.equal(ack.avgFillPriceCents, null, "no price invented from an empty book");
 });
 
 test("clientOrderIdFor: deterministic, and distinct per leg — the idempotency key", () => {

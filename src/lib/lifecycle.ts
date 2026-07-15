@@ -19,8 +19,8 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries } from "./engine.js";
 import { reconcileFootballCategories } from "./seed.js";
-import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, fetchOrderBookResult, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
-import { simulateBuy, simulateSell, maxExecutableBuyUsd, parametricSellAvgCents, takerFeeCents } from "./execution.js";
+import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
+import { classifyOrderBook, paperBuyFill, paperSellFill, scaleCost, ENTRY_PHANTOM_DIVERGENCE, type FillCost, type EntryFillResult, type SellFillResult } from "./executor/paperFill.js";
 import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
@@ -173,7 +173,7 @@ export const PARTIAL_TP_THROTTLE_MIN = (() => { const n = Number(process.env.PAR
 // resolved) or this far from the evaluated price, the market we sized is gone — the
 // fill is a phantom/stale book (BTTS-No evaluated at 74.5¢, filled at 1.2¢), not the
 // bet the strategist decided. Don't open it. Env-tunable.
-export const ENTRY_PHANTOM_DIVERGENCE = (() => { const n = Number(process.env.ENTRY_PHANTOM_DIVERGENCE); return Number.isFinite(n) && n > 0 ? n : 25; })();
+// ENTRY_PHANTOM_DIVERGENCE moved to the shared fill engine (./executor/paperFill.js).
 // Re-entry cooldown (ms): after a pair CLOSES a market at a LOSS, don't let the live
 // reassessment re-enter that same market for this long. Stops the falling-knife churn
 // — exit −$5, re-enter lower, exit −$8, repeat — on a noisy/thin book (the Mjallby-Yes
@@ -495,31 +495,11 @@ export function liveDelivering(db: Database, m: Match, sport: string): boolean {
  *                   must never read as a permanently untradeable market)
  *  A missing CLOB token is treated as `empty`: there is no real market to trade.
  *  Per-token result is cached for the cycle so two profiles on one market fetch once. */
-async function classifyOrderBook(
-  token: string | null, poly: PolymarketConfig, deps: EngineDeps,
-  bookCache?: Map<string, OrderBookFetch>,
-): Promise<OrderBookFetch> {
-  if (!token) return { status: "empty" };
-  if (bookCache && bookCache.has(token)) return bookCache.get(token)!;
-  const r = await fetchOrderBookResult(token, poly, deps);
-  if (bookCache) bookCache.set(token, r);
-  return r;
-}
+// The fill ENGINE (classifyOrderBook / paperBuyFill / paperSellFill / FillCost /
+// scaleCost) lives in ./executor/paperFill.js so football and tennis share ONE model.
+// executeEntry / sellVwapCents below are thin football-facing wrappers over it.
+type EntryExec = EntryFillResult;
 
-/** Structured execution-cost of one fill — the fee + slippage that were folded into
- *  the effective price, kept separable so they can be aggregated (real-money leak). */
-interface FillCost {
-  side: "buy" | "sell"; shares: number; notionalUsd: number;
-  quoteCents: number; vwapCents: number;
-  feeCents: number; feeUsd: number; slipCents: number; slipUsd: number; fromBook: boolean;
-}
-interface EntryExec { skip: boolean; priceCents: number; stake: number; note?: string; retry?: boolean; cost?: FillCost }
-
-/** Scale a fill cost to a closed FRACTION (per-share cents/prices stay; totals scale). */
-function scaleCost(cost: FillCost, frac: number): FillCost {
-  const f = Math.max(0, Math.min(1, frac));
-  return { ...cost, shares: cost.shares * f, notionalUsd: cost.notionalUsd * f, feeUsd: cost.feeUsd * f, slipUsd: cost.slipUsd * f };
-}
 /** Persist a fill's cost breakdown to the ledger. Observe-only; never throws into a fill. */
 function recordFill(db: Database, ids: { betId: string | null; matchId: string; competitionId: string; strategyId: string; profileId: string }, cost: FillCost, now: string): void {
   try {
@@ -535,9 +515,9 @@ function recordFill(db: Database, ids: { betId: string | null; matchId: string; 
   } catch { /* cost ledger is observe-only, never break a real fill */ }
 }
 
-/** Model an entry fill against the real order book: VWAP price (slippage), size
- *  capped to what the book absorbs while keeping edge and bounding price impact.
- *  Falls back to a parametric model, or (execution off / no CLOB) the raw quote. */
+/** Football entry fill — thin wrapper over the shared paper fill engine. Reads the
+ *  decision context off the Bet/Market (fair = ai_prob, phantom ref = proposed_price)
+ *  and delegates the book-VWAP + edge-floor + phantom logic to paperBuyFill. */
 async function executeEntry(
   b: Bet, mk: Market | undefined, quoteCents: number, proposedUsd: number,
   poly: PolymarketConfig, deps: EngineDeps,
@@ -545,52 +525,10 @@ async function executeEntry(
 ): Promise<EntryExec> {
   if (!poly.enabled) return { skip: false, priceCents: quoteCents, stake: proposedUsd }; // execution model off → quote fill
   const fairCents = (b.ai_prob ?? 0) * 100;
-  const exec = poly.exec;
   const token = mk?.external_ref ?? null;
-  // Entry-phantom guard: a fill at a rail, or one that has drifted far from the price
-  // the strategist evaluated (b.proposed_price), is not the bet that was sized — the
-  // book moved / the offer is a phantom. Reject the fill (see ENTRY_PHANTOM_DIVERGENCE).
-  const ref = b.proposed_price ?? quoteCents;
-  const phantomFill = (eff: number): string | null =>
-    eff <= 2 || eff >= 98 ? `цена исполнения ${eff}¢ у планки — рынок решён, вход отклонён (entry_phantom_block)`
-    : ref > 0 && Math.abs(eff - ref) >= ENTRY_PHANTOM_DIVERGENCE ? `цена исполнения ${eff}¢ ушла от оценённой ${ref}¢ на ${Math.abs(eff - ref).toFixed(0)}¢ — рынок сместился, вход отклонён (entry_phantom_block)` : null;
+  const ref = b.proposed_price ?? quoteCents; // strategist-evaluated price → phantom reference
   const bookRes = await classifyOrderBook(token, poly, deps, bookCache);
-  const book = bookRes.status === "ok" ? bookRes.book : null;
-  if (book && book.asks.length) {
-    const bestAsk = book.asks[0].priceCents;
-    const capUsd = maxExecutableBuyUsd(book.asks, fairCents, { edgeFloorCents: exec.edgeFloorCents, maxImpactCents: exec.maxImpactCents, feeRate: exec.takerFeeRate });
-    if (capUsd <= 0) return { skip: true, priceCents: quoteCents, stake: 0, note: `нет объёма с эджем (аск ${bestAsk}¢ vs справ. ${fairCents.toFixed(0)}¢, слиппедж съедает край)` };
-    const stake = Math.min(proposedUsd, capUsd);
-    const fill = simulateBuy(book.asks, stake);
-    const fee = takerFeeCents(fill.avgPriceCents, exec.takerFeeRate); // taker fee on entry, per share
-    const eff = Math.round((fill.avgPriceCents + fee) * 10) / 10;      // effective cost/share
-    const slip = Math.round((fill.avgPriceCents - bestAsk) * 10) / 10;
-    const ph = phantomFill(eff);
-    if (ph) return { skip: true, priceCents: eff, stake: 0, note: ph };
-    const capped = stake < proposedUsd - 0.5;
-    const note = `VWAP ${fill.avgPriceCents}¢ (котир. ${bestAsk}¢${slip > 0 ? `, слип +${slip}¢` : ""}) + комиссия ${fee}¢ · сдвиг→${fill.newTopCents}¢${capped ? ` · урезан по глубине $${Math.round(proposedUsd)}→$${Math.round(stake)}` : ""}`;
-    const slipAdverse = Math.max(0, slip);
-    const cost: FillCost = {
-      side: "buy", shares: fill.shares, notionalUsd: fill.filledUsd || stake,
-      quoteCents: bestAsk, vwapCents: fill.avgPriceCents,
-      feeCents: fee, feeUsd: (fill.shares * fee) / 100,
-      slipCents: slipAdverse, slipUsd: (fill.shares * slipAdverse) / 100, fromBook: true,
-    };
-    return { skip: false, priceCents: eff, stake: Math.round(stake), note, cost };
-  }
-  // Untradeable-market gate (option 1, symmetric to the exit-side phantom guard): with
-  // no real, tradeable ask book we do NOT enter on the parametric model — we never open
-  // a position on a market we couldn't actually price against a live book. This is what
-  // stopped a placeholder ~50¢ Poisson market (empty book) from being filled parametrically.
-  // Split the reason so a transient outage isn't mistaken for a permanent placeholder:
-  //   empty       → market uninitialized (placeholder) — block, never trade it
-  //   ok w/o asks → book exists but no offers to buy right now — skip, retry next cycle
-  //   unavailable → the book fetch failed — skip THIS cycle, next cycle may price it
-  if (bookRes.status === "empty") // placeholder: uninitialized market — terminal block (not a retry)
-    return { skip: true, priceCents: quoteCents, stake: 0, note: `стакан пуст — рынок не инициализирован, вход отклонён (untradeable_market_block)` };
-  if (bookRes.status === "ok") // initialized book but no ask-side offers to buy right now — retry next cycle
-    return { skip: true, retry: true, priceCents: quoteCents, stake: 0, note: `нет предложений на продажу в стакане — вход отложен до след. цикла (orderbook_unavailable)` };
-  return { skip: true, retry: true, priceCents: quoteCents, stake: 0, note: `стакан недоступен — книга не получена, вход отложен до след. цикла (orderbook_unavailable)` };
+  return paperBuyFill(bookRes, proposedUsd, fairCents, ref, quoteCents, poly.exec, ENTRY_PHANTOM_DIVERGENCE);
 }
 
 const appendReason = (existing: string | null, note?: string): string =>
@@ -605,42 +543,15 @@ async function sellVwapCents(
   mk: Market | undefined, entryCents: number, basisUsd: number,
   poly: PolymarketConfig, deps: EngineDeps, quoteCents: number,
   bookCache?: Map<string, OrderBookFetch>,
-): Promise<{ cents: number; note?: string; fromBook: boolean; bestBidCents?: number; cost?: FillCost }> {
+): Promise<SellFillResult> {
   if (!poly.enabled) return { cents: quoteCents, fromBook: false };
   const token = mk?.external_ref ?? null;
   const shares = entryCents > 0 ? basisUsd / (entryCents / 100) : 0;
-  // SAME single-source classification as the entry gate (classifyOrderBook), so "no real
-  // book" is decided identically on both sides of a position. The book is per-TOKEN, not
-  // per-position — the cache lets two risk profiles on one market fetch it once per cycle.
-  // A placeholder/empty or unavailable book yields no real bids: the exit is modelled
-  // (fromBook=false) and the phantom-bid guard stays off a merely-illiquid haircut.
+  // SAME single-source classification as the entry gate, so "no real book" is decided
+  // identically on both sides of a position (the book is per-TOKEN — cache shared).
   const bookRes: OrderBookFetch = shares > 0 ? await classifyOrderBook(token, poly, deps, bookCache) : { status: "empty" };
-  const book = bookRes.status === "ok" ? bookRes.book : null;
-  if (book && book.bids.length) {
-    const f = simulateSell(book.bids, shares);
-    const bestBid = book.bids[0].priceCents;
-    const fee = takerFeeCents(f.avgPriceCents, poly.exec.takerFeeRate); // taker fee on exit
-    const eff = Math.round((f.avgPriceCents - fee) * 10) / 10;           // proceeds/share after fee
-    const slip = Math.round((bestBid - f.avgPriceCents) * 10) / 10;
-    const slipAdverse = Math.max(0, slip);
-    const cost: FillCost = {
-      side: "sell", shares, notionalUsd: basisUsd, quoteCents: bestBid, vwapCents: f.avgPriceCents,
-      feeCents: fee, feeUsd: (shares * fee) / 100, slipCents: slipAdverse, slipUsd: (shares * slipAdverse) / 100, fromBook: true,
-    };
-    return { cents: eff, fromBook: true, bestBidCents: bestBid, cost, note: `выход VWAP ${f.avgPriceCents}¢ (бид ${bestBid}¢${slip > 0 ? `, слип −${slip}¢` : ""}) − комиссия ${fee}¢` };
-  }
   const liq = Number(mk?.liquidity ?? 0) || 0;
-  const avg = parametricSellAvgCents(quoteCents, basisUsd, liq, poly.exec.fallbackK);
-  const fee = takerFeeCents(avg, poly.exec.takerFeeRate);
-  const eff = Math.round((avg - fee) * 10) / 10;
-  // fromBook=false: this is a MODELLED price (no real book), so the phantom-bid guard
-  // must NOT treat a large-stake illiquidity haircut here as a phantom to hold on.
-  const slipModel = Math.max(0, Math.round((quoteCents - avg) * 10) / 10);
-  const cost: FillCost = {
-    side: "sell", shares, notionalUsd: basisUsd, quoteCents, vwapCents: avg,
-    feeCents: fee, feeUsd: (shares * fee) / 100, slipCents: slipModel, slipUsd: (shares * slipModel) / 100, fromBook: false,
-  };
-  return { cents: eff, fromBook: false, cost, note: `≈выход ${avg}¢ − комиссия ${fee}¢ (модель по ликвидности)` };
+  return paperSellFill(bookRes, shares, basisUsd, quoteCents, liq, poly.exec);
 }
 
 export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<AutoEnterItem[]> {

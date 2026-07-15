@@ -38,6 +38,10 @@ export interface OrderRequest {
   strategyId: string;
   profileId: string;
   matchId: string;
+  /** Decision fair value (¢) — a PAPER-MODEL input driving the edge-floor cap. The
+   *  real/dry executors ignore it: on a live exchange the limit price governs. Optional
+   *  so a pure limit order need not carry it. */
+  fairValueCents?: Cents;
 }
 
 /** Lifecycle status of a real/dry-run order (mirrors the real_orders table). */
@@ -103,9 +107,16 @@ export interface Executor {
 }
 
 // ── Idempotency: deterministic clientOrderId ─────────────────────────────────
-// clientOrderId = f(decisionId, leg) — stable across process restarts, so a
+// clientOrderId = f(decisionId, leg, seq) — stable across process restarts, so a
 // crash-retry re-derives the SAME id and the exchange lookup (§4.3) dedupes it.
 // A decision's entry and exit get DISTINCT ids via the leg suffix.
+//
+// CRITICAL — `seq` is NOT a retry counter. Idempotency lives or dies on a retry of
+// the SAME action producing the SAME id: a retry MUST reuse the id (same decisionId,
+// leg, seq), never bump seq. `seq` indexes a LEGITIMATELY SEPARATE order within one
+// decision — the only sanctioned case being a protective-exit re-quote (§2.2: the
+// single allowed second order on a leg). If you ever find yourself incrementing seq
+// on a network retry, you have reintroduced the ETIMEDOUT double-order bug.
 export function clientOrderIdFor(decisionId: string, leg: OrderLeg, seq = 0): string {
   const h = createHash("sha256").update(`${decisionId}|${leg}|${seq}`).digest("hex");
   // format as a uuid-shaped string (stable, collision-safe for our volume)
