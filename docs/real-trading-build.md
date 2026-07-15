@@ -47,7 +47,7 @@ metrics via the live book, UI, safety belt, tests); F is a thin adapter over a p
 |---|---|---|
 | **A** | `Executor` contract + `PaperExecutor` (unify both fill paths, tennis entry+exit book-fill) + `decision_id`/`clientOrderId` | **done** |
 | **B** | `real_orders/fills/positions/ledger/whitelist` tables + repo | pending |
-| **C** | Safety belt: 4 caps, kill switch (off/dry_run/exits_only/on), idempotent retry, reconciliation, fail-closed prices | pending |
+| **C** | Safety belt: 4 caps + tick/min conform, kill switch, idempotent-retry protocol, reconciliation, persistent expiry sweep | **done** |
 | **spike** | CLOB capabilities-vs-assumptions doc (before D) | pending |
 | **D** | `DryRunExecutor` (real path, fills vs live book, no send) | pending |
 | **E** | Whitelist filter (single sim→real gate, `sport=football` hardcoded) | pending |
@@ -136,6 +136,39 @@ the rest are Phase-F build constraints recorded so F doesn't reopen the contract
   gas paid in **POL**; separate from the CLOB client.
 - **Auth CONFIRMED**; our spec's `signatureType` numbering was stale → proxy=1, Safe=2, deposit=3.
 - **Rate limits**: non-issue (thousands/10s vs our 20/hr cap).
+
+## Phase C — safety belt (pure, exchange-independent; `src/lib/executor/safety.ts`)
+
+The second belt: every check runs IN the executor AFTER all upstream gates, trusting no upper layer.
+All logic is pure — Phase D/E/F only FEEDS it live inputs (market tick/min, exchange lookup/view).
+Nothing is wired to place orders yet; this is the ready-to-call belt + its tests.
+
+- **Kill switch** `readTradingMode(env)` — read FRESH per operation (no boot cache): `off` | `dry_run`
+  | `exits_only` | `on`; unknown/blank → `off` (fail-safe). `entriesAllowed` only in `on`;
+  `sendsRealOrders` only in `on`.
+- **Four hard caps** `enforceCaps` (env, conservative defaults), gating ENTRIES only — a defensive
+  EXIT is never blocked (a stop must always leave):
+  - `REAL_MAX_ORDER_USD=50` → clamp down.
+  - `REAL_MAX_EXPOSURE_USD=200` → reject over-cap entry (reads open BUY exposure).
+  - `REAL_MAX_DAILY_LOSS_USD=60` → `pause` (caller flips `exits_only`); reads ledger loss-of-day.
+  - `REAL_MAX_ORDERS_PER_HOUR=20` → reject (berserk-loop guard; bug hits the cap, not the bank).
+- **Fifth cap** `conformOrderToMarket(order, {tickCents, minOrderUsd, tolCents})` — BUY floors / SELL
+  ceils to the market tick; skip when ±tol < 1 tick (coarse-tick market) or notional < market min.
+  Phase E/F feeds real per-market tick/min (never hardcoded).
+- **Idempotent-retry protocol** `resolveRetry({orderHash}, lookup)` — blob held → `resend_same`
+  (never re-sign; re-sign = new salt = new hash = a 2nd order), `wait` only if already `exists`; blob
+  lost → `new_intent` ONLY on confirmed `absent`, else `wait`. Signed blob (salt/hash) persisted in
+  `real_orders` before send.
+- **Reconciliation** `reconcile(local, exchangeView, tol)` — balance/position diff beyond $1 / 1 token
+  → `exits_only` + discrepancy list (return to `on` is a manual owner call).
+- **Persistent expiry** `expiredClientCancelOrders(db, now)` — a `client-cancel` order past its
+  PERSISTED `client_cancel_deadline` is swept by the reconciliation cycle, so a crashed in-memory
+  timer / Render restart can't leave a GTC order hanging (the "process slept with an open position"
+  class, for orders). GTD orders are the exchange's job, not swept.
+
+Tests (13): mode fresh-read + fail-safe; each of the 4 caps + exit-bypass; tick BUY-floor/SELL-ceil +
+sub-tick skip + below-min skip; retry all six branches; reconcile clean/balance/position/ghost;
+expiry sweep. 527/527 green.
 
 ## Invariants (never violated by any phase)
 

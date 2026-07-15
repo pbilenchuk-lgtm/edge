@@ -17,6 +17,7 @@ export interface RealOrderRow {
   id: string; client_order_id: string; salt: string | null; order_hash: string | null; exchange_order_id: string | null; decision_id: string;
   strategy_id: string; profile_id: string; match_id: string; token_id: string;
   side: "BUY" | "SELL"; leg: string; limit_price_cents: number; size_usd: number; tif_sec: number;
+  expiry_mode: string | null; client_cancel_deadline: string | null;
   status: RealOrderStatus; filled_size_usd: number; avg_fill_cents: number | null;
   code_version: string | null; whitelist_version: number | null; note: string | null; created_at: string;
 }
@@ -26,16 +27,16 @@ export interface RealOrderRow {
 /** Insert a freshly-built order in status "created" and stamp the first transition event.
  *  Idempotent on client_order_id: a re-insert with the same id is a no-op that returns the
  *  existing row (the §4.3 crash-retry contract — never a second order). */
-export function insertRealOrder(db: Database, o: Omit<RealOrderRow, "status" | "filled_size_usd" | "avg_fill_cents" | "salt" | "order_hash"> & { status?: RealOrderStatus; salt?: string | null; order_hash?: string | null }): RealOrderRow {
+export function insertRealOrder(db: Database, o: Omit<RealOrderRow, "status" | "filled_size_usd" | "avg_fill_cents" | "salt" | "order_hash" | "expiry_mode" | "client_cancel_deadline"> & { status?: RealOrderStatus; salt?: string | null; order_hash?: string | null; expiry_mode?: string | null; client_cancel_deadline?: string | null }): RealOrderRow {
   const existing = getRealOrderByClientId(db, o.client_order_id);
   if (existing) return existing; // idempotency: same client_order_id → the same order
   const status: RealOrderStatus = o.status ?? "created";
   db.prepare(
     `INSERT INTO real_orders(id,client_order_id,salt,order_hash,exchange_order_id,decision_id,strategy_id,profile_id,match_id,
-       token_id,side,leg,limit_price_cents,size_usd,tif_sec,status,filled_size_usd,avg_fill_cents,code_version,whitelist_version,note,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,?,?,?,?)`,
+       token_id,side,leg,limit_price_cents,size_usd,tif_sec,expiry_mode,client_cancel_deadline,status,filled_size_usd,avg_fill_cents,code_version,whitelist_version,note,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,?,?,?,?)`,
   ).run(o.id, o.client_order_id, o.salt ?? null, o.order_hash ?? null, o.exchange_order_id, o.decision_id, o.strategy_id, o.profile_id, o.match_id,
-    o.token_id, o.side, o.leg, o.limit_price_cents, o.size_usd, o.tif_sec, status, o.code_version, o.whitelist_version, o.note, o.created_at);
+    o.token_id, o.side, o.leg, o.limit_price_cents, o.size_usd, o.tif_sec, o.expiry_mode ?? null, o.client_cancel_deadline ?? null, status, o.code_version, o.whitelist_version, o.note, o.created_at);
   appendRealOrderEvent(db, o.id, status, o.created_at, "order created");
   return getRealOrderByClientId(db, o.client_order_id)!;
 }
@@ -50,6 +51,43 @@ export function listRealOrders(db: Database, status?: RealOrderStatus): RealOrde
   return (status
     ? db.prepare(`SELECT * FROM real_orders WHERE status=? ORDER BY created_at`).all(status)
     : db.prepare(`SELECT * FROM real_orders ORDER BY created_at`).all()) as RealOrderRow[];
+}
+
+/** client-cancel orders still working (placed/partial) whose deadline has passed — the belt's
+ *  reconciliation sweep cancels these, so a crashed in-memory timer / process restart can NEVER
+ *  leave a GTC order hanging forever (the "process slept with an open position" class, for orders). */
+export function expiredClientCancelOrders(db: Database, nowIso: string): RealOrderRow[] {
+  return db.prepare(
+    `SELECT * FROM real_orders WHERE expiry_mode='client-cancel' AND status IN ('placed','partial')
+       AND client_cancel_deadline IS NOT NULL AND client_cancel_deadline < ? ORDER BY client_cancel_deadline`,
+  ).all(nowIso) as RealOrderRow[];
+}
+
+/** Live open real exposure ($) = notional still working or filled and not yet exited. Approximated as
+ *  the sum of filled_size_usd on non-terminal + filled orders minus what's been sold — for the cap we
+ *  use the conservative sum of BUY fills' notional on open positions (real_positions is the truth once
+ *  wired; this is the order-side estimate the cap trusts as the last belt). */
+export function openRealExposureUsd(db: Database): number {
+  const r = db.prepare(
+    `SELECT COALESCE(SUM(filled_size_usd),0) AS x FROM real_orders WHERE side='BUY' AND status IN ('placed','partial','filled')`,
+  ).get() as { x: number };
+  return r.x ?? 0;
+}
+
+/** Orders placed in the last hour (the berserk-loop guard reads this). */
+export function realOrdersLastHour(db: Database, nowMs: number): number {
+  const rows = db.prepare(`SELECT created_at FROM real_orders`).all() as { created_at: string }[];
+  return rows.filter((o) => nowMs - (Date.parse(o.created_at) || 0) <= 3_600_000).length;
+}
+
+/** Realized loss ($, positive number) booked to the ledger since local midnight of `dayIso` — the
+ *  daily-loss auto-pause reads this. Sums negative fill/fee/gas net for the day. */
+export function realRealizedLossTodayUsd(db: Database, dayPrefix: string): number {
+  const r = db.prepare(
+    `SELECT COALESCE(SUM(amount_usd),0) AS net FROM real_ledger WHERE kind IN ('fill','fee','gas','redemption') AND substr(at,1,10)=?`,
+  ).get(dayPrefix) as { net: number };
+  const net = r.net ?? 0;
+  return net < 0 ? -net : 0; // loss = the magnitude of a negative day
 }
 
 /** Append ONE status-transition event (its own timestamp) — the §7 latency source. */

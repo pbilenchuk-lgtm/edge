@@ -623,6 +623,12 @@ CREATE TABLE IF NOT EXISTS real_orders (
   limit_price_cents  REAL NOT NULL,
   size_usd           REAL NOT NULL,          -- requested notional (may fill less; may be clamped)
   tif_sec            INTEGER NOT NULL,       -- time-in-force; on expiry → cancel + order_expired
+  -- Expiry enforcement (doc-spike): native GTD (~10min pre-match) vs client-cancel (45s/15s windows
+  -- the exchange's ~60s GTD buffer can't express). client_cancel_deadline is PERSISTED (not an
+  -- in-memory setTimeout) so a process restart can't leave a GTC order hanging forever: the
+  -- reconciliation sweep cancels any placed/partial client-cancel order past its deadline (§4.4).
+  expiry_mode        TEXT CHECK (expiry_mode IN ('native-GTD','client-cancel')),
+  client_cancel_deadline TEXT,               -- ISO; when the belt must cancel a client-cancel order
   status             TEXT NOT NULL CHECK (status IN
                        ('created','placed','partial','filled','expired','cancelled','rejected','dry_run')),
   filled_size_usd    REAL NOT NULL DEFAULT 0,-- actually filled so far (partial-aware, §2.2)
