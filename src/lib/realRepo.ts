@@ -239,3 +239,44 @@ export function getRealOrphanAlert(db: Database): RealOrphanAlert | null {
 export function clearRealOrphanAlert(db: Database): void {
   db.prepare(`DELETE FROM app_meta WHERE key=?`).run(ORPHAN_ALERT_KEY);
 }
+
+// ── operator controls (§6) — persistent, in app_meta, since the app can't write env on Render ──────
+// The operator mode is a CEILING the owner sets from the UI; effectiveTradingMode takes the MOST
+// RESTRICTIVE of (env, this, auto-pause) — so the UI can only ever tighten, never exceed the env.
+const OPERATOR_MODE_KEY = "real_operator_mode";
+export function setOperatorMode(db: Database, mode: string, at: string): void {
+  db.prepare(`INSERT INTO app_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).run(OPERATOR_MODE_KEY, mode, at);
+}
+export function getOperatorMode(db: Database): string | null {
+  const row = db.prepare(`SELECT value FROM app_meta WHERE key=?`).get(OPERATOR_MODE_KEY) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+// Caps override — a partial {maxOrderUsd?,...} the owner edits in the UI; loadSafetyCaps merges it
+// over env/defaults. Also DB-persisted (env is read-only from the app).
+const CAPS_OVERRIDE_KEY = "real_caps_override";
+export function setCapsOverride(db: Database, partial: Record<string, number>, at: string): void {
+  db.prepare(`INSERT INTO app_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).run(CAPS_OVERRIDE_KEY, JSON.stringify(partial), at);
+}
+export function getCapsOverride(db: Database): Record<string, number> {
+  const row = db.prepare(`SELECT value FROM app_meta WHERE key=?`).get(CAPS_OVERRIDE_KEY) as { value: string } | undefined;
+  if (!row) return {};
+  try { return JSON.parse(row.value) as Record<string, number>; } catch { return {}; }
+}
+
+// §6 control audit log — every owner money-state move (who/when/what).
+export function logControl(db: Database, action: string, detail: string | null, actor: string, at: string): void {
+  db.prepare(`INSERT INTO real_control_log(id,action,detail,actor,at) VALUES(?,?,?,?,?)`).run(uid(), action, detail, actor, at);
+}
+export function listControlLog(db: Database, limit = 50): { action: string; detail: string | null; actor: string | null; at: string }[] {
+  return db.prepare(`SELECT action,detail,actor,at FROM real_control_log ORDER BY at DESC LIMIT ?`).all(limit) as any;
+}
+
+/** STOP: cancel every working (placed/partial) real order → status cancelled + a transition event.
+ *  Open POSITIONS are NOT force-closed (a panic dump into a thin book is worse than a pause; they
+ *  ride under exits-only management, §4.2). Returns how many orders were cancelled. */
+export function cancelWorkingRealOrders(db: Database, at: string): number {
+  const working = db.prepare(`SELECT id FROM real_orders WHERE status IN ('placed','partial')`).all() as { id: string }[];
+  for (const o of working) transitionRealOrder(db, o.id, "cancelled", at, { note: "STOP — все висящие ордера отменены" });
+  return working.length;
+}

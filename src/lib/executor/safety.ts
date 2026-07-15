@@ -25,7 +25,9 @@ export const sendsRealOrders = (m: TradingMode) => m === "on";
 
 // Restrictiveness rank (higher = fewer real-money actions). dry_run outranks exits_only because it
 // sends NO real orders at all, whereas exits_only still lets a real exit through.
-const MODE_RANK: Record<TradingMode, number> = { off: 3, dry_run: 2, exits_only: 1, on: 0 };
+export const MODE_RANK: Record<TradingMode, number> = { off: 3, dry_run: 2, exits_only: 1, on: 0 };
+/** A move is LOOSENING (needs owner confirmation, §6) when the target grants MORE real-money actions. */
+export const isLoosening = (from: TradingMode, to: TradingMode) => MODE_RANK[to] < MODE_RANK[from];
 const moreRestrictive = (a: TradingMode, b: TradingMode): TradingMode => (MODE_RANK[a] >= MODE_RANK[b] ? a : b);
 
 /**
@@ -36,8 +38,23 @@ const moreRestrictive = (a: TradingMode, b: TradingMode): TradingMode => (MODE_R
  * silently un-pause. This is the seam where "fresh read" and "sticky pause" could annihilate.
  */
 export function effectiveTradingMode(db: Database, env: Record<string, string | undefined> = process.env): TradingMode {
-  const base = readTradingMode(env);
-  return RR.getRealAutoPause(db) ? moreRestrictive(base, "exits_only") : base;
+  let m = readTradingMode(env);
+  // Operator ceiling (UI, §6): the owner can only TIGHTEN — most-restrictive wins, never exceeds env.
+  const op = RR.getOperatorMode(db);
+  if (op) { const opm: TradingMode = op === "on" || op === "dry_run" || op === "exits_only" ? op : "off"; m = moreRestrictive(m, opm); }
+  // Sticky auto-pause floors at exits_only.
+  if (RR.getRealAutoPause(db)) m = moreRestrictive(m, "exits_only");
+  return m;
+}
+
+/** Safety caps = env/defaults, with the owner's UI caps-override merged over the top (env is read-only
+ *  from the app, so an edited cap lives in the DB). Never LOOSENS past the env-or-default via a bad value
+ *  — the override is trusted (owner-set), but each is still a positive number. */
+export function resolveSafetyCaps(db: Database, env: Record<string, string | undefined> = process.env): SafetyCaps {
+  const base = loadSafetyCaps(env);
+  const o = RR.getCapsOverride(db);
+  const pick = (k: keyof SafetyCaps) => (Number.isFinite(o[k]) && (o[k] as number) > 0 ? (o[k] as number) : base[k]);
+  return { maxOrderUsd: pick("maxOrderUsd"), maxExposureUsd: pick("maxExposureUsd"), maxDailyLossUsd: pick("maxDailyLossUsd"), maxOrdersPerHour: pick("maxOrdersPerHour") };
 }
 
 // ── §4.2 mode → executor matrix (CODE, not convention) ────────────────────────

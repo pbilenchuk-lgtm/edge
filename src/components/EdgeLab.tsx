@@ -2107,6 +2107,133 @@ function PortfolioScreen({ open, closed, onGoMatches }: any) {
 
 // ── Phase G iteration 1: the READ-ONLY real-trading contour view. No control here
 //    (STOP / mode / whitelist edits are iteration 2). Simulation view is untouched. ──
+// ─────────────────────────────────────────────────────────────────────────────
+// RealControls (Phase G, iteration 2) — the owner knob panel. Every button POSTs a
+// SINGLE audited action to /api/real-control (who/when/what → real_control_log). None
+// of these can loosen past the env ceiling; the server takes the most restrictive of
+// (env, operator, pause). Loosening the mode requires a confirm round-trip.
+// ─────────────────────────────────────────────────────────────────────────────
+function RealControls({ data, onRefresh }: { data: any; onRefresh: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [wl, setWl] = useState({ strategyId: "", categories: "", maxOrderUsd: "" });
+  const eff = data.caps?.effective ?? {};
+  const [caps, setCaps] = useState<Record<string, string>>({
+    maxOrderUsd: String(eff.maxOrderUsd ?? ""), maxExposureUsd: String(eff.maxExposureUsd ?? ""),
+    maxDailyLossUsd: String(eff.maxDailyLossUsd ?? ""), maxOrdersPerHour: String(eff.maxOrdersPerHour ?? ""),
+  });
+
+  const cardS: React.CSSProperties = { background: "#ffffff06", border: "1px solid #ffffff12", borderRadius: 8, padding: 14, marginBottom: 14 };
+  const hS: React.CSSProperties = { fontSize: 12, fontWeight: 700, color: "#bbb", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 };
+  const inS: React.CSSProperties = { background: "#00000030", border: "1px solid #ffffff18", borderRadius: 5, color: "#eee", padding: "5px 8px", fontSize: 12, width: "100%" };
+  const btn = (label: string, onClick: () => void, tone: "danger" | "warn" | "ok" | "plain" = "plain", extra: React.CSSProperties = {}) => {
+    const c = tone === "danger" ? { bg: "#ff6b6b22", fg: "#ff6b6b", bd: "#ff6b6b55" } : tone === "warn" ? { bg: "#e8a83822", fg: "#e8a838", bd: "#e8a83855" } : tone === "ok" ? { bg: "#5fd08a22", fg: "#5fd08a", bd: "#5fd08a55" } : { bg: "#ffffff10", fg: "#ddd", bd: "#ffffff18" };
+    return <button disabled={busy} onClick={onClick} style={{ padding: "6px 12px", fontSize: 12, background: c.bg, color: c.fg, border: `1px solid ${c.bd}`, borderRadius: 6, cursor: busy ? "wait" : "pointer", opacity: busy ? 0.5 : 1, ...extra }}>{label}</button>;
+  };
+
+  const post = async (payload: any): Promise<any> => {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/real-control", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+      const j = await res.json();
+      if (!j.needConfirm) { setMsg({ ok: !!j.ok, text: j.note || j.error || (j.ok ? "готово" : "ошибка") }); if (j.ok) onRefresh(); }
+      return j;
+    } catch (e) { setMsg({ ok: false, text: String(e) }); return { ok: false }; }
+    finally { setBusy(false); }
+  };
+
+  const doStop = async () => { if (window.confirm("[STOP] — режим станет off, все висящие ордера будут отменены. Открытые позиции останутся под exits-only управлением (не сбрасываются). Продолжить?")) await post({ action: "stop" }); };
+  const setMode = async (mode: string) => {
+    const j = await post({ action: "set_mode", mode });
+    if (j.needConfirm && window.confirm(`${j.note}\n\nПовышение режима даёт больше РЕАЛЬНЫХ действий. Подтвердить?`)) await post({ action: "set_mode", mode, confirm: true });
+  };
+  const clearPause = async () => { if (window.confirm("Снять sticky авто-паузу? Режим снова будет управляться env/оператором.")) await post({ action: "clear_pause" }); };
+  const addWl = async () => {
+    const cats = wl.categories.split(",").map((s) => s.trim()).filter(Boolean);
+    const j = await post({ action: "whitelist_add", row: { strategyId: wl.strategyId.trim(), categories: cats, maxOrderUsd: Number(wl.maxOrderUsd), enabled: false } });
+    if (j.ok) setWl({ strategyId: "", categories: "", maxOrderUsd: "" });
+  };
+  const saveCaps = async () => {
+    const out: Record<string, number> = {};
+    for (const k of ["maxOrderUsd", "maxExposureUsd", "maxDailyLossUsd", "maxOrdersPerHour"]) { const v = Number(caps[k]); if (Number.isFinite(v) && v > 0) out[k] = v; }
+    await post({ action: "set_caps", caps: out });
+  };
+
+  const MODES = ["off", "exits_only", "dry_run", "on"];
+  const op = data.operatorMode as string | null;
+  const envM = data.envMode as string;
+  return (
+    <div style={{ ...cardS, borderColor: "#ffffff20" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+        <div style={hS}>Управление (owner)</div>
+        {msg && <div style={{ fontSize: 11, color: msg.ok ? "#5fd08a" : "#ff6b6b", marginLeft: "auto" }}>{msg.ok ? "✓ " : "✗ "}{msg.text}</div>}
+      </div>
+
+      {/* STOP + режим */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+        {btn("■ STOP", doStop, "danger", { fontWeight: 700, fontSize: 13 })}
+        <div style={{ width: 1, height: 22, background: "#ffffff18" }} />
+        <span style={{ fontSize: 11, color: "#888" }}>режим оператора:</span>
+        {MODES.map((m) => {
+          const active = (op ?? "—") === m;
+          return <button key={m} disabled={busy} onClick={() => setMode(m)} style={{ padding: "5px 10px", fontSize: 11, borderRadius: 5, cursor: busy ? "wait" : "pointer", background: active ? (m === "on" ? "#ff6b6b33" : m === "off" ? "#ffffff20" : "#7fb4e833") : "transparent", color: active ? (m === "on" ? "#ff6b6b" : "#eee") : "#888", border: `1px solid ${active ? "#ffffff30" : "#ffffff12"}`, fontWeight: active ? 700 : 400 }}>{m}</button>;
+        })}
+        <span style={{ fontSize: 10, color: "#666" }}>env={envM} (потолок) · действует <b style={{ color: "#bbb" }}>{data.mode}</b>{op == null && " · оператор не задан"}</span>
+      </div>
+
+      {data.paused && <div style={{ marginBottom: 14 }}>{btn("⏸ снять авто-паузу", clearPause, "warn")} <span style={{ fontSize: 10, color: "#888", marginLeft: 8 }}>{data.paused.reason}</span></div>}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+        {/* Лимиты (4 кэпа) */}
+        <div>
+          <div style={{ fontSize: 11, color: "#999", marginBottom: 6 }}>Лимиты (override; env — пол): {data.caps?.override && Object.keys(data.caps.override).length ? <span style={{ color: "#e8a838" }}>переопределены {Object.keys(data.caps.override).join(", ")}</span> : <span style={{ color: "#666" }}>из env</span>}</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            {[["maxOrderUsd", "ордер $"], ["maxExposureUsd", "экспозиция $"], ["maxDailyLossUsd", "дневной убыток $"], ["maxOrdersPerHour", "ордеров/час"]].map(([k, lbl]) => (
+              <label key={k} style={{ fontSize: 10, color: "#888" }}>{lbl}<input style={inS} type="number" value={caps[k] ?? ""} onChange={(e) => setCaps((c) => ({ ...c, [k]: e.target.value }))} /></label>
+            ))}
+          </div>
+          <div style={{ marginTop: 8 }}>{btn("сохранить лимиты", saveCaps, "ok")}</div>
+        </div>
+
+        {/* Whitelist-редактор */}
+        <div>
+          <div style={{ fontSize: 11, color: "#999", marginBottom: 6 }}>Whitelist (v{data.whitelistVersion}) — {data.whitelist.length} строк</div>
+          <div style={{ maxHeight: 96, overflowY: "auto", marginBottom: 8 }}>
+            {data.whitelist.map((w: any) => (
+              <div key={w.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0", fontSize: 11, color: "#ccc" }}>
+                <span style={{ width: 8, height: 8, borderRadius: 4, background: w.enabled ? "#5fd08a" : "#666", flexShrink: 0 }} />
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.strategy_id} <span style={{ color: "#666" }}>${w.max_order_usd}</span></span>
+                <button disabled={busy} onClick={() => post({ action: "whitelist_toggle", id: w.id, enabled: !w.enabled })} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 4, cursor: "pointer", background: "transparent", color: w.enabled ? "#e8a838" : "#5fd08a", border: `1px solid ${w.enabled ? "#e8a83855" : "#5fd08a55"}` }}>{w.enabled ? "выкл" : "вкл"}</button>
+              </div>
+            ))}
+            {!data.whitelist.length && <div style={{ fontSize: 10, color: "#666" }}>пусто — реал ничего не торгует</div>}
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <label style={{ fontSize: 10, color: "#888", flex: 1 }}>стратегия<input style={inS} value={wl.strategyId} onChange={(e) => setWl((s) => ({ ...s, strategyId: e.target.value }))} /></label>
+            <label style={{ fontSize: 10, color: "#888", flex: 1 }}>категории (через запятую)<input style={inS} value={wl.categories} onChange={(e) => setWl((s) => ({ ...s, categories: e.target.value }))} /></label>
+            <label style={{ fontSize: 10, color: "#888", width: 70 }}>$/ордер<input style={inS} type="number" value={wl.maxOrderUsd} onChange={(e) => setWl((s) => ({ ...s, maxOrderUsd: e.target.value }))} /></label>
+            {btn("+ строка", addWl, "plain")}
+          </div>
+          <div style={{ fontSize: 9, color: "#666", marginTop: 4 }}>добавляется <b>выключенной</b> — включи явно после проверки</div>
+        </div>
+      </div>
+
+      {/* Аудит: кто/когда/что */}
+      <div style={{ marginTop: 14 }}>
+        <div style={{ fontSize: 11, color: "#999", marginBottom: 6 }}>Журнал управления (кто/когда/что)</div>
+        <div style={{ maxHeight: 120, overflowY: "auto", fontSize: 10, fontFamily: "monospace" }}>
+          {(data.controlLog ?? []).map((e: any, i: number) => (
+            <div key={i} style={{ color: "#999", padding: "2px 0", borderBottom: "1px solid #ffffff06" }}>
+              <span style={{ color: "#666" }}>{(e.at || "").slice(0, 19).replace("T", " ")}</span> <span style={{ color: "#7fb4e8" }}>{e.action}</span> <span style={{ color: "#888" }}>{e.actor ?? "—"}</span> {e.detail && <span style={{ color: "#666" }}>{e.detail.length > 90 ? e.detail.slice(0, 90) + "…" : e.detail}</span>}
+            </div>
+          ))}
+          {!(data.controlLog ?? []).length && <div style={{ color: "#666" }}>действий ещё не было</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RealScreen({ data, loading, onRefresh }: { data: any; loading: boolean; onRefresh: () => void }) {
   const cardS: React.CSSProperties = { background: "#ffffff06", border: "1px solid #ffffff12", borderRadius: 8, padding: 14, marginBottom: 14 };
   const hS: React.CSSProperties = { fontSize: 12, fontWeight: 700, color: "#bbb", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 };
@@ -2119,13 +2246,15 @@ function RealScreen({ data, loading, onRefresh }: { data: any; loading: boolean;
   return (
     <main style={S.main}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: "#e8e8e8" }}>Реальный контур <span style={{ fontSize: 12, color: "#888" }}>(read-only)</span></div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: "#e8e8e8" }}>Реальный контур</div>
         <div style={{ fontSize: 11, color: "#888" }}>режим: <b style={{ color: data.mode === "on" ? "#ff6b6b" : "#7fb4e8" }}>{data.mode}</b>{data.mode !== data.envMode && <span style={{ color: "#e8a838" }}> (env={data.envMode}, действует авто-пауза)</span>}</div>
         <button onClick={onRefresh} style={{ marginLeft: "auto", padding: "5px 12px", fontSize: 11, background: "#ffffff10", color: "#ddd", border: "1px solid #ffffff18", borderRadius: 6, cursor: "pointer" }}>{loading ? "…" : "↻ обновить"}</button>
       </div>
 
-      {data.paused && <div style={{ ...cardS, borderColor: "#e8a83855", background: "#e8a83812" }}><b style={{ color: "#e8a838" }}>⏸ АВТО-ПАУЗА (sticky):</b> <span style={{ color: "#ddd", fontSize: 12 }}>{data.paused.reason} · сброс — действие владельца (итерация 2)</span></div>}
+      {data.paused && <div style={{ ...cardS, borderColor: "#e8a83855", background: "#e8a83812" }}><b style={{ color: "#e8a838" }}>⏸ АВТО-ПАУЗА (sticky):</b> <span style={{ color: "#ddd", fontSize: 12 }}>{data.paused.reason} · сброс — кнопкой ниже</span></div>}
       {data.orphan && <div style={{ ...cardS, borderColor: "#ff6b6b55", background: "#ff6b6b12" }}><b style={{ color: "#ff6b6b" }}>⚠ ПОЗИЦИИ БЕЗ EXIT-УПРАВЛЕНИЯ:</b> <span style={{ color: "#ddd", fontSize: 12 }}>{data.orphan.message}</span></div>}
+
+      <RealControls data={data} onRefresh={onRefresh} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
         <div style={cardS}>

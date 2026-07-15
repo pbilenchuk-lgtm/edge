@@ -23,7 +23,7 @@ import { simulateBuy, simulateSell, takerFeeCents } from "../execution.js";
 import { classifyOrderBook } from "./paperFill.js";
 import * as RR from "../realRepo.js";
 import type { Database } from "../db.js";
-import { effectiveTradingMode, modeCaps, enforceCaps, conformOrderToMarket, loadSafetyCaps, type SafetyCaps } from "./safety.js";
+import { effectiveTradingMode, modeCaps, enforceCaps, conformOrderToMarket, resolveSafetyCaps, type SafetyCaps } from "./safety.js";
 import type { Executor, OrderRequest, OrderAck, CancelAck, Fill, Position, Balance, ExecutorHealth } from "./types.js";
 
 // TODO(Phase E/F): tick + min are PER-MARKET (doc-spike #5) — fetch getTickSize / minimum_order_size
@@ -94,7 +94,7 @@ export class DryRunExecutor implements Executor {
 
   async place(order: OrderRequest): Promise<OrderAck> {
     const { db, env, poly, deps, bookCache } = this.ctx;
-    const caps = this.ctx.caps ?? loadSafetyCaps(env);
+    const caps = this.ctx.caps ?? resolveSafetyCaps(db, env);
     const nowIso = this.ctx.now();
     const nowMs = Date.parse(nowIso) || 0;
 

@@ -7,7 +7,7 @@
 
 import type { Database } from "../db.js";
 import * as RR from "../realRepo.js";
-import { effectiveTradingMode, type TradingMode } from "./safety.js";
+import { effectiveTradingMode, loadSafetyCaps, resolveSafetyCaps, type SafetyCaps, type TradingMode } from "./safety.js";
 import { realVsPaperReport, type RealVsPaperReport } from "./realVsPaper.js";
 
 export interface RealOrderView {
@@ -20,8 +20,9 @@ export interface RealOrderView {
 }
 
 export interface RealView {
-  mode: TradingMode;                 // effective (env ∧ sticky pause)
+  mode: TradingMode;                 // effective (env ∧ operator ∧ sticky pause)
   envMode: TradingMode;              // raw env, so the UI can show "paused despite env=on"
+  operatorMode: TradingMode | null;  // the operator override ceiling (iteration-2 mode switch), or null
   paused: RR.RealAutoPause | null;
   orphan: RR.RealOrphanAlert | null;
   bank: { realBalanceUsd: number; dryBalanceUsd: number; byKind: Record<string, number> };
@@ -29,6 +30,10 @@ export interface RealView {
   orders: RealOrderView[];
   whitelist: RR.RealWhitelistRow[];
   whitelistVersion: number;
+  // Safety caps: the effective (resolved) numbers, the env floor, and the owner's override — so the
+  // limits editor shows what's live, what env fixes, and what the owner changed.
+  caps: { effective: SafetyCaps; env: SafetyCaps; override: Record<string, number> };
+  controlLog: { action: string; detail: string | null; actor: string | null; at: string }[];
   report: RealVsPaperReport;
 }
 
@@ -54,9 +59,13 @@ export function realView(db: Database, env: Record<string, string | undefined> =
     paperPnlUsd: o.paper_payout != null && o.paper_stake != null ? Math.round((o.paper_payout - o.paper_stake) * 100) / 100 : null,
   }));
 
+  const opRaw = RR.getOperatorMode(db);
+  const operatorMode = opRaw && ["on", "dry_run", "exits_only", "off"].includes(opRaw) ? (opRaw as TradingMode) : null;
+
   return {
     mode: effective,
     envMode,
+    operatorMode,
     paused: RR.getRealAutoPause(db),
     orphan: RR.getRealOrphanAlert(db),
     bank: { realBalanceUsd: RR.realLedgerBalance(db, true), dryBalanceUsd: RR.realLedgerBalance(db, false), byKind: RR.realLedgerByKind(db) },
@@ -64,6 +73,8 @@ export function realView(db: Database, env: Record<string, string | undefined> =
     orders,
     whitelist: RR.listWhitelist(db),
     whitelistVersion: RR.currentWhitelistVersion(db),
+    caps: { effective: resolveSafetyCaps(db, env), env: loadSafetyCaps(env), override: RR.getCapsOverride(db) },
+    controlLog: RR.listControlLog(db, 50),
     report: realVsPaperReport(db),
   };
 }

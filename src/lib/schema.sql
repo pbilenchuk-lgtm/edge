@@ -724,3 +724,14 @@ CREATE TABLE IF NOT EXISTS real_whitelist_log (
   actor     TEXT,            -- who made it (owner)
   at        TEXT NOT NULL
 );
+
+-- §6 real_control_log — who/when/what for every OWNER control action (STOP, mode change, clear-pause,
+-- whitelist edit, limit change). The five knobs' full history — an audit trail for money-state moves.
+CREATE TABLE IF NOT EXISTS real_control_log (
+  id      TEXT PRIMARY KEY,
+  action  TEXT NOT NULL,   -- stop | set_mode | clear_pause | whitelist_add | whitelist_toggle | set_caps
+  detail  TEXT,            -- JSON of the change (before/after where relevant)
+  actor   TEXT,            -- owner
+  at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_real_control_log_at ON real_control_log(at);
