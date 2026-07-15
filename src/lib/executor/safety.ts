@@ -23,6 +23,35 @@ export const entriesAllowed = (m: TradingMode) => m === "on";
 /** Real order SEND happens only in "on" (exits included) or "dry_run" (simulated). off/exits_only send nothing new. */
 export const sendsRealOrders = (m: TradingMode) => m === "on";
 
+// Restrictiveness rank (higher = fewer real-money actions). dry_run outranks exits_only because it
+// sends NO real orders at all, whereas exits_only still lets a real exit through.
+const MODE_RANK: Record<TradingMode, number> = { off: 3, dry_run: 2, exits_only: 1, on: 0 };
+const moreRestrictive = (a: TradingMode, b: TradingMode): TradingMode => (MODE_RANK[a] >= MODE_RANK[b] ? a : b);
+
+/**
+ * The mode that ACTUALLY governs = the MOST RESTRICTIVE of the fresh env read and the PERSISTED
+ * auto-pause (§4.1/§4.4). The env kill switch is read fresh (a flip acts next op), but a daily-loss /
+ * reconciliation pause is a computed transition that must STICK — so it lives in the DB and floors the
+ * effective mode at exits_only until the owner clears it. Without this, a fresh env=`on` read would
+ * silently un-pause. This is the seam where "fresh read" and "sticky pause" could annihilate.
+ */
+export function effectiveTradingMode(db: Database, env: Record<string, string | undefined> = process.env): TradingMode {
+  const base = readTradingMode(env);
+  return RR.getRealAutoPause(db) ? moreRestrictive(base, "exits_only") : base;
+}
+
+// ── §4.2 mode → executor matrix (CODE, not convention) ────────────────────────
+// Which contour is active is a FUNCTION of the mode, one belt underneath. Phase D/E/F branch on this.
+export interface ModeCaps { simulate: boolean; realEntry: boolean; realExit: boolean }
+export function modeCaps(m: TradingMode): ModeCaps {
+  switch (m) {
+    case "on": return { simulate: false, realEntry: true, realExit: true };          // real entries + exits
+    case "exits_only": return { simulate: false, realEntry: false, realExit: true }; // real exits only (paused entries)
+    case "dry_run": return { simulate: true, realEntry: false, realExit: false };    // full path SIMULATED (entries+exits), zero real send
+    case "off": default: return { simulate: false, realEntry: false, realExit: false }; // real contour dormant
+  }
+}
+
 // ── §4.1 hard caps (env, conservative defaults) ──────────────────────────────
 export interface SafetyCaps { maxOrderUsd: number; maxExposureUsd: number; maxDailyLossUsd: number; maxOrdersPerHour: number }
 const num = (v: string | undefined, d: number) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : d; };
@@ -51,12 +80,20 @@ export function enforceCaps(db: Database, o: { sizeUsd: number; isEntry: boolean
   // still size-clamped only if truly absurd — but a position exit sells what's held, so we pass it through.
   if (!o.isEntry) return { action: "allow", sizeUsd: o.sizeUsd, clamped: false };
 
-  // Daily-loss auto-pause (§4.4): realized loss today ≥ cap → PAUSE new entries (caller flips exits_only).
-  const dayPrefix = new Date(nowMs).toISOString().slice(0, 10);
+  // Daily-loss auto-pause (§4.4): realized loss today ≥ cap → PERSIST the pause (it must STICK past a
+  // fresh env=on read / a restart) and return pause. "Day" = UTC calendar day (substr of the ISO `at`,
+  // so the boundary is UTC-midnight — recorded, not sliding-24h).
+  const dayPrefix = new Date(nowMs).toISOString().slice(0, 10); // UTC yyyy-mm-dd
   const lossToday = RR.realRealizedLossTodayUsd(db, dayPrefix);
-  if (lossToday >= caps.maxDailyLossUsd) return { action: "pause", sizeUsd: 0, clamped: false, reason: `дневной убыток $${lossToday.toFixed(0)} ≥ лимит $${caps.maxDailyLossUsd} → авто-пауза (exits_only)` };
+  if (lossToday >= caps.maxDailyLossUsd) {
+    const reason = `дневной убыток $${lossToday.toFixed(0)} ≥ лимит $${caps.maxDailyLossUsd} → авто-пауза (exits_only)`;
+    RR.setRealAutoPause(db, reason, new Date(nowMs).toISOString()); // sticky until owner clears
+    return { action: "pause", sizeUsd: 0, clamped: false, reason };
+  }
 
-  // Berserk-loop guard: too many orders this hour → reject (a bug spamming orders hits the cap, not the bank).
+  // Berserk-loop guard: too many orders this hour → reject (a bug spamming orders hits the cap, not the
+  // bank). Reads the PERSISTENT real_orders table, so the count survives a process restart (not an
+  // in-memory counter) — a restart mid-berserk doesn't reset the guard to zero.
   if (RR.realOrdersLastHour(db, nowMs) >= caps.maxOrdersPerHour) return { action: "reject", sizeUsd: 0, clamped: false, reason: `${caps.maxOrdersPerHour} ордеров/час достигнут — предохранитель от цикла-берсерка` };
 
   // Order-size clamp: whatever the sizer asked, never exceed the per-order ceiling.
@@ -128,4 +165,12 @@ export function reconcile(local: { ledgerBalanceUsd: number; positions: { tokenI
   }
   for (const p of exchange.positions) if (!seen.has(p.tokenId) && Math.abs(p.sizeShares) > tol.tokens) d.push(`позиция ${p.tokenId}: у нас нет, биржа ${p.sizeShares}`);
   return d.length ? { ok: false, action: "exits_only", discrepancies: d } : { ok: true, action: "ok", discrepancies: [] };
+}
+
+/** Reconciliation with the side effect: on a discrepancy, PERSIST the auto-pause (sticky exits_only
+ *  until the owner clears it) — the reconciliation-cycle entry point Phase F calls every 5 min. */
+export function runReconciliation(db: Database, local: { ledgerBalanceUsd: number; positions: { tokenId: string; sizeShares: number }[] }, exchange: ExchangeView, nowIso: string, tol = { usd: 1, tokens: 1 }): ReconResult {
+  const r = reconcile(local, exchange, tol);
+  if (!r.ok) RR.setRealAutoPause(db, `сверка §4.4: ${r.discrepancies.join("; ")}`, nowIso);
+  return r;
 }

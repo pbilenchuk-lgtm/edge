@@ -180,3 +180,24 @@ export function currentWhitelistVersion(db: Database): number {
 export function appendWhitelistLog(db: Database, version: number, action: string, detail: string | null, actor: string | null, at: string): void {
   db.prepare(`INSERT INTO real_whitelist_log(id,version,action,detail,actor,at) VALUES(?,?,?,?,?,?)`).run(uid(), version, action, detail, actor, at);
 }
+
+// ── auto-pause (§4.1/§4.4) — a PERSISTENT operational state, stored in app_meta ──────────────
+// The kill switch is read fresh from env, but the daily-loss / reconciliation PAUSE is a computed
+// TRANSITION that must STICK across operations (and restarts) — else the next fresh env read (`on`)
+// would silently un-pause it. So it lives in the DB, and the effective mode is the MOST RESTRICTIVE
+// of (env, this). "Return to on" = clearRealAutoPause (owner action), NOT an env edit.
+const AUTO_PAUSE_KEY = "real_auto_pause";
+export interface RealAutoPause { state: "exits_only"; reason: string; at: string }
+export function setRealAutoPause(db: Database, reason: string, at: string): void {
+  const v = JSON.stringify({ state: "exits_only", reason, at } as RealAutoPause);
+  db.prepare(`INSERT INTO app_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).run(AUTO_PAUSE_KEY, v, at);
+}
+export function getRealAutoPause(db: Database): RealAutoPause | null {
+  const row = db.prepare(`SELECT value FROM app_meta WHERE key=?`).get(AUTO_PAUSE_KEY) as { value: string } | undefined;
+  if (!row) return null;
+  try { return JSON.parse(row.value) as RealAutoPause; } catch { return null; }
+}
+/** Owner-only reset — clears the sticky pause so the env mode governs again. */
+export function clearRealAutoPause(db: Database): void {
+  db.prepare(`DELETE FROM app_meta WHERE key=?`).run(AUTO_PAUSE_KEY);
+}

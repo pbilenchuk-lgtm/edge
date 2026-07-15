@@ -4,7 +4,7 @@ import { openDb, initSchema } from "../src/lib/db.js";
 import * as RR from "../src/lib/realRepo.js";
 import {
   readTradingMode, entriesAllowed, sendsRealOrders, loadSafetyCaps, enforceCaps,
-  conformOrderToMarket, resolveRetry, reconcile,
+  conformOrderToMarket, resolveRetry, reconcile, effectiveTradingMode, runReconciliation, modeCaps,
 } from "../src/lib/executor/safety.js";
 
 function db() { const d = openDb(":memory:"); initSchema(d); return d; }
@@ -64,6 +64,41 @@ test("enforceCaps: a defensive EXIT is never blocked by the caps", () => {
   RR.insertRealLedger(d, { kind: "fill", amount_usd: -100, token_id: "t", order_id: "o", ref: null, at: "2026-07-15T09:00:00Z", created_at: "t" }); // loss over cap
   const r = enforceCaps(d, { sizeUsd: 200, isEntry: false }, NOW, CAPS);
   assert.equal(r.action, "allow", "a stop must always be able to leave");
+});
+
+// ── §4.1/§4.4 STICKY auto-pause vs fresh env read — the most covert seam ────────
+test("auto-pause STICKS: daily loss trips → env=on → next op is STILL exits_only until owner clears", () => {
+  const d = db();
+  RR.insertRealLedger(d, { kind: "fill", amount_usd: -70, token_id: "t", order_id: "o", ref: null, at: "2026-07-15T09:00:00Z", created_at: "t" });
+  const onEnv = { REAL_TRADING: "on" };
+  assert.equal(effectiveTradingMode(d, onEnv), "on", "before the trip, env governs");
+  const r = enforceCaps(d, { sizeUsd: 10, isEntry: true }, NOW, CAPS);
+  assert.equal(r.action, "pause");
+  // The fresh env still says "on" — but the persisted pause must WIN, else the pause silently evaporates.
+  assert.equal(readTradingMode(onEnv), "on", "env read is unchanged (fresh)");
+  assert.equal(effectiveTradingMode(d, onEnv), "exits_only", "persisted pause floors the effective mode");
+  assert.equal(entriesAllowed(effectiveTradingMode(d, onEnv)), false, "no new real entries while paused");
+  RR.clearRealAutoPause(d); // owner action (not an env edit)
+  assert.equal(effectiveTradingMode(d, onEnv), "on", "manual clear → env governs again");
+});
+test("effectiveTradingMode: pause never makes things LESS restrictive (dry_run/off win over exits_only)", () => {
+  const d = db();
+  RR.setRealAutoPause(d, "test", "2026-07-15T00:00:00Z");
+  assert.equal(effectiveTradingMode(d, { REAL_TRADING: "dry_run" }), "dry_run", "dry_run (no real send) outranks the exits_only pause");
+  assert.equal(effectiveTradingMode(d, { REAL_TRADING: "off" }), "off", "off always wins");
+  assert.equal(effectiveTradingMode(d, { REAL_TRADING: "on" }), "exits_only", "on → floored to exits_only");
+});
+test("runReconciliation: a discrepancy persists the sticky pause (survives a fresh env=on)", () => {
+  const d = db();
+  const r = runReconciliation(d, { ledgerBalanceUsd: 300, positions: [] }, { balanceUsd: 250, positions: [] }, "2026-07-15T12:00:00Z");
+  assert.equal(r.action, "exits_only");
+  assert.equal(effectiveTradingMode(d, { REAL_TRADING: "on" }), "exits_only", "reconciliation pause is sticky too");
+});
+test("modeCaps: the mode→executor matrix is code — dry_run simulates, exits_only allows only real exits", () => {
+  assert.deepEqual(modeCaps("off"), { simulate: false, realEntry: false, realExit: false });
+  assert.deepEqual(modeCaps("dry_run"), { simulate: true, realEntry: false, realExit: false });
+  assert.deepEqual(modeCaps("exits_only"), { simulate: false, realEntry: false, realExit: true });
+  assert.deepEqual(modeCaps("on"), { simulate: false, realEntry: true, realExit: true });
 });
 
 // ── §4.1 fifth cap: conform to market tick + min size ──────────────────────────

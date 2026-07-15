@@ -144,14 +144,26 @@ All logic is pure — Phase D/E/F only FEEDS it live inputs (market tick/min, ex
 Nothing is wired to place orders yet; this is the ready-to-call belt + its tests.
 
 - **Kill switch** `readTradingMode(env)` — read FRESH per operation (no boot cache): `off` | `dry_run`
-  | `exits_only` | `on`; unknown/blank → `off` (fail-safe). `entriesAllowed` only in `on`;
-  `sendsRealOrders` only in `on`.
+  | `exits_only` | `on`; unknown/blank → `off` (fail-safe). `entriesAllowed` only in `on`.
+- **Sticky auto-pause vs fresh read** (the covert seam). The env switch is read fresh, but the
+  daily-loss / reconciliation PAUSE is a computed transition that must STICK — so it's PERSISTED in the
+  DB (`app_meta:real_auto_pause`), and `effectiveTradingMode(db, env)` = the MOST RESTRICTIVE of the
+  fresh env read and the persisted pause (rank: off > dry_run > exits_only > on — dry_run outranks
+  exits_only because it sends nothing real). Without this, a fresh `env=on` read would silently
+  un-pause. `enforceCaps`/`runReconciliation` PERSIST the pause themselves (not left to the caller);
+  "return to on" = `clearRealAutoPause` (owner action, not an env edit). Test: daily loss trips → env
+  stays `on` → next op is STILL `exits_only` until manual clear.
+- **Mode → executor matrix** `modeCaps(mode)` (CODE, not convention): `off` = dormant; `dry_run` =
+  full path SIMULATED (entries+exits), zero real send; `exits_only` = real exits only; `on` = real
+  entries + exits. One belt underneath; which contour runs is a function of the mode.
 - **Four hard caps** `enforceCaps` (env, conservative defaults), gating ENTRIES only — a defensive
   EXIT is never blocked (a stop must always leave):
   - `REAL_MAX_ORDER_USD=50` → clamp down.
   - `REAL_MAX_EXPOSURE_USD=200` → reject over-cap entry (reads open BUY exposure).
-  - `REAL_MAX_DAILY_LOSS_USD=60` → `pause` (caller flips `exits_only`); reads ledger loss-of-day.
-  - `REAL_MAX_ORDERS_PER_HOUR=20` → reject (berserk-loop guard; bug hits the cap, not the bank).
+  - `REAL_MAX_DAILY_LOSS_USD=60` → persists the sticky pause; "day" = **UTC calendar day** (ISO-prefix,
+    not sliding-24h — the boundary is recorded).
+  - `REAL_MAX_ORDERS_PER_HOUR=20` → reject (berserk-loop guard). Reads the PERSISTENT `real_orders`
+    table, so the count **survives a process restart** — a restart mid-berserk doesn't reset it to zero.
 - **Fifth cap** `conformOrderToMarket(order, {tickCents, minOrderUsd, tolCents})` — BUY floors / SELL
   ceils to the market tick; skip when ±tol < 1 tick (coarse-tick market) or notional < market min.
   Phase E/F feeds real per-market tick/min (never hardcoded).
