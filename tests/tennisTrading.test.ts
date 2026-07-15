@@ -4,9 +4,9 @@ import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 import { resolveTennisWinner } from "../src/lib/settlement.js";
 import { serializeEntryMeta } from "../src/lib/betMeta.js";
-import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick, tennisTradingTick, tennisSetValueTick, tennisEntryMeta } from "../src/lib/tennisTrading.js";
+import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick, tennisTradingTick, tennisSetValueTick, tennisEntryMeta, pollTennisFinals } from "../src/lib/tennisTrading.js";
 import { migrateTennisStrategy, migrateTennisSetValueStrategy } from "../src/lib/seed.js";
-import { buildTennisCalibrationReport, tennisTourOf } from "../src/lib/tennisScout.js";
+import { buildTennisCalibrationReport, tennisTourOf, collectTennisSnapshots } from "../src/lib/tennisScout.js";
 import { buildTennisFunnel } from "../src/lib/tennisTrading.js";
 import { advanceClocks } from "../src/lib/lifecycle.js";
 
@@ -489,6 +489,86 @@ test("tennisTradingTick BUG-3: cross-strategy block is symmetric — Overreactio
   const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl });
   assert.equal(opened, 0, "every profile holds a Set-Value position → Overreaction is blocked (no opposite-side double exposure)");
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /blocked_second_buyback/.test(l.text)), "the cross-strategy block is logged");
+});
+
+test("tennisFinalResult B: a retirement with NO event_winner is MANUAL — never guess the advancer from set count", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  // Vukic LEADS 1-0 in sets, then retires (injury while ahead). No event_winner in raw.
+  R.insertTennisSnapshot(db, { event_key: "R", provider: "apitennis", batch_at: "2026-07-14T11:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Retired", sets_p1: 1, sets_p2: 0, set_num: 2, games_p1: 3, games_p2: 1, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: "{}" });
+  const fin = tennisFinalResult(db, mid)!;
+  assert.equal(fin.finished, true); assert.equal(fin.retired, true);
+  assert.equal(fin.manual, true, "no event_winner on a retirement → manual (the leader often IS the retiree)");
+  assert.equal(fin.advancing, null, "never a set-count guess for a retirement");
+});
+
+test("tennisFinalResult B: leader retires but event_winner names the ADVANCER → correct, not inverted", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  // Vukic leads 1-0 but retires; Broady (Second Player) advances — event_winner is authoritative.
+  R.insertTennisSnapshot(db, { event_key: "R2", provider: "apitennis", batch_at: "2026-07-14T11:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Retired", sets_p1: 1, sets_p2: 0, set_num: 2, games_p1: 3, games_p2: 1, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "Second Player" }) });
+  const fin = tennisFinalResult(db, mid)!;
+  assert.equal(fin.advancing, "second", "Broady advances though Vukic led on sets — event_winner rules");
+  assert.equal(fin.manual, false);
+});
+
+test("tennisFinalResult B: event_winner that DISAGREES with a decisive set score → MANUAL (trust neither)", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  R.insertTennisSnapshot(db, { event_key: "R3", provider: "apitennis", batch_at: "2026-07-14T11:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Finished", sets_p1: 0, sets_p2: 2, set_num: 2, games_p1: 3, games_p2: 6, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "First Player" }) });
+  const fin = tennisFinalResult(db, mid)!;
+  assert.equal(fin.manual, true, "winner=first but sets 0-2 → contradiction → manual");
+});
+
+test("settleTennisBets B: a manual (winner-unknown) match flags the bet and leaves it OPEN — no guess", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  R.insertTennisSnapshot(db, { event_key: "R4", provider: "apitennis", batch_at: "2026-07-14T11:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Retired", sets_p1: 1, sets_p2: 0, set_num: 2, games_p1: 3, games_p2: 1, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: "{}" });
+  R.insertBet(db, { id: "mb", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: null, code_version: "e5", created_at: "t" } as any);
+  assert.equal(settleTennisBets(db, { now: () => "2026-07-14T13:00:00Z" }), 0, "manual → nothing settled");
+  assert.equal(R.getBet(db, "mb")!.status, "open", "left open for manual review (capital honestly still committed)");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => /РУЧНОЙ РАЗБОР/.test(l.text)), "loud manual-review log emitted");
+});
+
+test("pollTennisFinals A: a stranded open position is settled from get_fixtures (finished match dropped from the live feed)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // state 'live'
+  // Last LIVE snapshot is ~2h stale; match never got a terminal row (it just vanished from live).
+  R.insertTennisSnapshot(db, { event_key: "EV99", provider: "apitennis", batch_at: "2026-07-14T10:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "Set 2", sets_p1: 1, sets_p2: 0, set_num: 2, games_p1: 4, games_p2: 3, game_points: null, server: "first", pm_match_id: mid, pm_mid_cents: 60, pm_p1_cents: 60, pm_p2_cents: 40, raw: "{}" });
+  buybackBet(db, mid, "sb", { take_price: { at_cents: 59 } }); // open Overreaction bet on Vukic
+  assert.ok(tennisFinalResult(db, mid) == null || !tennisFinalResult(db, mid)!.finished, "not finished before the poll");
+  // Mock get_fixtures: EV99 finished, Vukic (First Player) won 6-4 6-3.
+  const fixturesBody = { result: [{ event_key: "EV99", event_first_player: "A. Vukic", event_second_player: "L. Broady", tournament_name: "Granby", event_type_type: "ATP Singles", event_live: "0", event_status: "Finished", event_final_result: "2 - 0", event_winner: "First Player", scores: [{ score_set: 1, score_first: 6, score_second: 4 }, { score_set: 2, score_first: 6, score_second: 3 }], event_serve: null, event_game_result: null }] };
+  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => fixturesBody })) as unknown as typeof fetch;
+  const now = () => "2026-07-14T12:00:00Z";
+  const written = await pollTennisFinals(db, { now, env: { API_TENNIS_KEY: "k" }, fetchImpl });
+  assert.equal(written, 1, "terminal snapshot written from fixtures for the stranded match");
+  assert.equal(tennisFinalResult(db, mid)!.finished, true, "now finished (advancer = first)");
+  assert.equal(settleTennisBets(db, { now }), 1, "the settle path picks up the fixtures-written terminal snapshot");
+  assert.equal(R.getBet(db, "sb")!.status, "settled_won", "Vukic (bet side) won 2-0 → settled won end-to-end");
+});
+
+test("pollTennisFinals A: a fresh (recently-live) match is NOT chased — only stale strays trigger the poll", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  R.insertTennisSnapshot(db, { event_key: "EVf", provider: "apitennis", batch_at: "2026-07-14T11:58:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "Set 2", sets_p1: 1, sets_p2: 0, set_num: 2, games_p1: 4, games_p2: 3, game_points: null, server: "first", pm_match_id: mid, pm_mid_cents: 60, pm_p1_cents: 60, pm_p2_cents: 40, raw: "{}" });
+  buybackBet(db, mid, "fb", { take_price: { at_cents: 59 } });
+  let called = 0;
+  const fetchImpl = (async () => { called++; return { ok: true, status: 200, json: async () => ({ result: [] }) }; }) as unknown as typeof fetch;
+  const written = await pollTennisFinals(db, { now: () => "2026-07-14T12:00:00Z", env: { API_TENNIS_KEY: "k" }, fetchImpl }); // only 2min stale
+  assert.equal(written, 0);
+  assert.equal(called, 0, "a fresh snapshot (2min) is not stranded → no fixtures call");
+});
+
+test("collectTennisSnapshots #3: a terminal transition row (live=0 Finished) is KEPT, not dropped by the live filter", async () => {
+  const db = openDb(":memory:");
+  const body = { result: [
+    { event_key: "T1", event_first_player: "A One", event_second_player: "B Two", tournament_name: "ATP X", event_type_type: "ATP Singles", event_live: "0", event_status: "Finished", event_final_result: "2 - 0", scores: [{ score_set: 1, score_first: 6, score_second: 4 }], event_serve: null, event_game_result: null },
+    { event_key: "T2", event_first_player: "C Three", event_second_player: "D Four", tournament_name: "ATP X", event_type_type: "ATP Singles", event_live: "0", event_status: "Set 2", scores: [{ score_set: 2, score_first: 3, score_second: 2 }], event_serve: "First Player", event_game_result: null },
+  ] };
+  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => body })) as unknown as typeof fetch;
+  const written = await collectTennisSnapshots(db, { now: () => "2026-07-14T12:00:00Z", env: { API_TENNIS_KEY: "k" }, fetchImpl });
+  assert.equal(written, 1, "the terminal Finished row (T1) is kept; the non-terminal live=0 row (T2) is still dropped");
 });
 
 test("settleTennisBets: a retirement resolves to the advancing (non-retiring) player", () => {

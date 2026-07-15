@@ -16,7 +16,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit } from "./shadow.js";
-import { tennisFinalResult } from "./tennisTrading.js";
+import { tennisFinalResult, flagTennisManual } from "./tennisTrading.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { sizePrematch } from "./strategist.js";
@@ -277,6 +277,7 @@ export function settleTennisPmvBets(db: Database, deps: EngineDeps = {}): number
     if (b.strategy_id !== PMV_STRATEGY || !tennisMatchIds.has(b.match_id)) continue;
     const fin = tennisFinalResult(db, b.match_id);
     if (!fin || !fin.finished) continue;
+    if (fin.manual) { flagTennisManual(db, b.id, b.match_id, PMV_STRATEGY, b.market_label, now); continue; } // winner unknown → flag, never guess
     const row = db.prepare(`SELECT raw FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(b.match_id) as { raw?: string } | undefined;
     const fs = finalSetsFromRaw(row?.raw ?? null);
     if (!fs) continue; // final per-set detail not readable → leave open, retry next tick

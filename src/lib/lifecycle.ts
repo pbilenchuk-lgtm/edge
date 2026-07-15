@@ -35,7 +35,7 @@ import { hoursUntil, finishStamp } from "./time.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit, type ShadowEntryRequest } from "./shadow.js";
 import { collectSnapshots } from "./snapshots.js";
 import { collectTennisSnapshots, recordTennisBreakMarks } from "./tennisScout.js";
-import { tennisTradingTick, tennisSetValueTick, tennisExitTick, settleTennisBets, finishTennisMatches, tennisScoutInPlay, tennisFinalResult } from "./tennisTrading.js";
+import { tennisTradingTick, tennisSetValueTick, tennisExitTick, settleTennisBets, finishTennisMatches, tennisScoutInPlay, tennisFinalResult, pollTennisFinals } from "./tennisTrading.js";
 import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
 import { overreactionShouldCall } from "./reassessGate.js";
 import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
@@ -1457,6 +1457,7 @@ export async function runAutoCycle(
   await step("tennisScout", () => collectTennisSnapshots(db, deps), 0);
   stepSync("tennisBreakMarks", () => recordTennisBreakMarks(db, deps), 0); // mark completed break windows (≥6min old)
   stepSync("tennisExit", () => tennisExitTick(db, deps), 0);               // §6 paper: deterministic take_price / thesis_stop close (no LLM, §9.6)
+  await step("tennisFinalPoll", () => pollTennisFinals(db, deps), 0);      // A+B: chase FINAL results via get_fixtures for stranded positions (live feed drops finished matches) → writes the terminal snapshot settle consumes
   stepSync("tennisFinish", () => finishTennisMatches(db, deps), 0);        // drive tennis matches to finished from the scout (else they pile up in live)
   stepSync("tennisSettle", () => settleTennisBets(db, deps), 0);           // safety-net settle for finished tennis matches
   stepSync("tennisPmvSettle", () => settleTennisPmvBets(db, deps), 0);     // safety-net settle for PMV props (Gate-0.2 void clauses)

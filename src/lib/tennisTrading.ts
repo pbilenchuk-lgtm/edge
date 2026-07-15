@@ -17,7 +17,7 @@ import { settleBet, resolveTennisWinner } from "./settlement.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { chargeTennisTriggers, tennisReassessShouldCall, type TennisCharge } from "./tennisOverreaction.js";
 import { SET_VALUE_STRATEGY, SET_VALUE_ARMED, SET_VALUE_EPOCH, setValueGate } from "./tennisSetValue.js";
-import { detectBreaks, detectTennisEvents, tennisMoneyline, tennisTourOf } from "./tennisScout.js";
+import { detectBreaks, detectTennisEvents, tennisMoneyline, tennisTourOf, fetchTennisFixtures, trimRaw, TENNIS_TERMINAL_RE, loadTennisConfig } from "./tennisScout.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -37,8 +37,10 @@ const TENNIS_STRATEGY = "tennis_overreaction";
 // moneyline). Set-Value adds the "lost set 1" horizon-of-a-match entry with a partial-take exit.
 const TENNIS_STRATEGIES = new Set([TENNIS_STRATEGY, SET_VALUE_STRATEGY]);
 
-/** Latest scout state for a Polymarket-linked match: the final result if it's over. */
-export interface TennisFinal { finished: boolean; canceled: boolean; retired: boolean; advancing: "first" | "second" | null; p1: string; p2: string }
+/** Latest scout state for a Polymarket-linked match: the final result if it's over.
+ *  `manual` = finished but we cannot safely name the winner (no event_winner and the set score can't
+ *  disambiguate — e.g. a retirement) → settle NOTHING, flag for a human. Honest "don't know". */
+export interface TennisFinal { finished: boolean; canceled: boolean; retired: boolean; advancing: "first" | "second" | null; manual: boolean; p1: string; p2: string }
 export function tennisFinalResult(db: Database, matchId: string): TennisFinal | null {
   // Newest snapshot whose pm_match_id == this match.
   const rows = db.prepare(`SELECT p1,p2,sets_p1,sets_p2,live,status,raw FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).all(matchId) as any[];
@@ -53,11 +55,109 @@ export function tennisFinalResult(db: Database, matchId: string): TennisFinal | 
   const retired = /retir|\bret\.?\b|default|disqualif|\bdsq\b/i.test(status);
   const finished = retired || canceled || r.live === 0 || /finish/i.test(status);
   if (!finished) return null;
-  // Advancing = event_winner from raw if present, else the side with more sets.
+  // event_winner is the PRIMARY (authoritative) source of the advancer.
+  let fromWinner: "first" | "second" | null = null;
+  try { const raw = r.raw ? JSON.parse(r.raw) : null; const w = String(raw?.event_winner ?? "").toLowerCase(); if (w.includes("first")) fromWinner = "first"; else if (w.includes("second")) fromWinner = "second"; } catch { /* fall through */ }
+  const bySets: "first" | "second" | null = (r.sets_p1 != null && r.sets_p2 != null && r.sets_p1 !== r.sets_p2) ? (r.sets_p1 > r.sets_p2 ? "first" : "second") : null;
   let advancing: "first" | "second" | null = null;
-  try { const raw = r.raw ? JSON.parse(r.raw) : null; const w = String(raw?.event_winner ?? "").toLowerCase(); if (w.includes("first")) advancing = "first"; else if (w.includes("second")) advancing = "second"; } catch { /* fall through */ }
-  if (advancing == null && r.sets_p1 != null && r.sets_p2 != null) advancing = r.sets_p1 > r.sets_p2 ? "first" : r.sets_p2 > r.sets_p1 ? "second" : null;
-  return { finished: true, canceled, retired, advancing: canceled ? null : advancing, p1: String(r.p1 ?? ""), p2: String(r.p2 ?? "") };
+  let manual = false;
+  if (canceled) {
+    advancing = null; // void family — no advancer, settle refunds
+  } else if (fromWinner != null) {
+    advancing = fromWinner;
+    // Cross-check ONLY a clean (non-retired) finish: a decisive set score that disagrees with
+    // event_winner means we can't trust either → manual. A RETIREMENT's set score is mid-match and
+    // naturally disagrees with the advancer (the leader often retires), so it must NOT cross-check.
+    if (!retired && bySets != null && bySets !== fromWinner) { advancing = null; manual = true; }
+  } else if (retired) {
+    // Retirement WITHOUT event_winner: the set-count leader is OFTEN the one who retired (injury while
+    // ahead), so the leader is NOT the advancer. We cannot know the advancer → manual, never guess (bug B).
+    manual = true;
+  } else if (bySets != null) {
+    advancing = bySets; // a clean, decisive finish (2-0 / 2-1) with no event_winner → the set winner advanced
+  } else {
+    manual = true; // finished, no event_winner, no decisive score → honest don't-know
+  }
+  return { finished: true, canceled, retired, advancing, manual, p1: String(r.p1 ?? ""), p2: String(r.p2 ?? "") };
+}
+
+// Per-bet "finished but winner unknown" flag: leave the bet OPEN (capital honestly still committed),
+// emit ONE loud log, and never guess. A later poll that returns event_winner resolves it; otherwise a
+// human does. Idempotent via the marker so we don't spam every tick.
+const MANUAL_MARK = "tennis_manual:";
+export function flagTennisManual(db: Database, betId: string, matchId: string, strategyId: string, label: string, now: string): void {
+  if (R.metaGet(db, MANUAL_MARK + betId)) return; // already flagged
+  R.metaSet(db, MANUAL_MARK + betId, "pending", now);
+  R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strategyId, minute: "финал", type: "skip", text: `⚠ РУЧНОЙ РАЗБОР: «${label}» — матч завершён, но победитель не определён (нет event_winner / счёт неоднозначен, вероятно ретайр). Ставка ОСТАВЛЕНА открытой, НЕ угадываем — settlement_pending_manual`, created_at: now });
+}
+
+// Any open tennis position (all three strategies) is a reason to chase a final result. PMV lives in
+// tennisPmv (importing it here would cycle), so its id is a string literal.
+const TENNIS_ALL_STRATEGIES = new Set<string>([...TENNIS_STRATEGIES, "tennis_pmv"]);
+// Stranded-match settlement: how long the newest scout snapshot may be stale before we chase the final
+// result via get_fixtures. 15min absorbs normal live-feed gaps; below ~10 risks false-positives on a
+// paused feed. Env-tunable. (The match usually just VANISHES from get_livescore when it ends, so the
+// live path can never see the terminal row — this poller is the authoritative finish signal.)
+const TENNIS_FINAL_POLL_STALE_MIN = (() => { const n = Number(process.env.TENNIS_FINAL_POLL_STALE_MIN); return Number.isFinite(n) && n > 0 ? n : 15; })();
+
+/**
+ * A+B: chase the FINAL result of a tennis match that has an open position (or was live) but has
+ * dropped out of the live feed for > TENNIS_FINAL_POLL_STALE_MIN. get_livescore only carries in-play
+ * matches, so a normally-finished match never yields a terminal live row and would strand its
+ * position forever. We fetch get_fixtures for the match's date window, find it by event_key, and —
+ * if it's terminal — WRITE the terminal snapshot the existing settle path already consumes (newest
+ * snapshot → tennisFinalResult). If fixtures still says LIVE (a schedule shift), we leave it in
+ * observation. Async, guarded; never throws into the tick. Returns terminal snapshots written.
+ */
+export async function pollTennisFinals(db: Database, deps: EngineDeps = {}): Promise<number> {
+  const env = deps.env ?? process.env;
+  const cfg = loadTennisConfig(env);
+  if (!cfg.enabled) return 0;
+  const now = nowFn(deps)();
+  const nowMs = Date.parse(now) || Date.now();
+  const today = now.slice(0, 10);
+  // 1. Collect stranded matches (scout-linked, not finished, stale, with a reason to settle).
+  const byStart = new Map<string, { matchId: string; eventKey: string }[]>();
+  for (const c of R.listCompetitions(db)) {
+    if (c.sport_id !== "tennis") continue;
+    for (const m of R.listMatches(db, c.id)) {
+      if (m.state === "finished") continue;
+      const last = db.prepare(`SELECT event_key, batch_at FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(m.id) as { event_key?: string; batch_at?: string } | undefined;
+      if (!last?.event_key) continue; // never scout-linked → nothing to poll
+      const ageMin = (nowMs - (Date.parse(last.batch_at ?? "") || 0)) / 60000;
+      if (ageMin <= TENNIS_FINAL_POLL_STALE_MIN) continue; // still fresh / recently live → not stranded
+      const hasOpen = R.betsForMatch(db, m.id).some((b) => TENNIS_ALL_STRATEGIES.has(b.strategy_id) && b.status === "open");
+      if (!hasOpen && m.state !== "live") continue; // no open position and not live → no reason to chase
+      if (tennisFinalResult(db, m.id)?.finished) continue; // a terminal snapshot already exists → settle handles it
+      const start = (m.kickoff_at ?? last.batch_at ?? now).slice(0, 10);
+      (byStart.get(start) ?? byStart.set(start, []).get(start)!).push({ matchId: m.id, eventKey: last.event_key });
+    }
+  }
+  if (!byStart.size) return 0;
+  // 2. Per start-date, fetch fixtures over [start, today] (absorbs a match that spilled past midnight),
+  //    index by event_key, and write the terminal snapshot for each stranded match that has finished.
+  let written = 0;
+  for (const [start, cands] of byStart) {
+    const fixtures = await fetchTennisFixtures(cfg, start, today, deps).catch(() => [] as Awaited<ReturnType<typeof fetchTennisFixtures>>);
+    if (!fixtures.length) continue;
+    const byKey = new Map(fixtures.map((f) => [f.eventKey, f]));
+    for (const cand of cands) {
+      const fx = byKey.get(cand.eventKey);
+      if (!fx) continue; // not indexed for this window → leave stranded, retry next tick
+      const terminal = fx.live !== 1 || TENNIS_TERMINAL_RE.test(fx.status ?? "");
+      if (!terminal) continue; // schedule shift — still live → back to observation, do NOT settle
+      R.insertTennisSnapshot(db, {
+        event_key: fx.eventKey, provider: "apitennis-fixtures", batch_at: now, p1: fx.p1, p2: fx.p2,
+        tournament: fx.tournament, event_type: fx.eventType, live: 0, status: fx.status ?? "Finished",
+        sets_p1: fx.setsP1, sets_p2: fx.setsP2, set_num: fx.setNum, games_p1: fx.gamesP1, games_p2: fx.gamesP2,
+        game_points: fx.gamePoints, server: fx.server, pm_match_id: cand.matchId, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null,
+        raw: trimRaw(fx.raw),
+      });
+      R.insertTradeLog(db, { id: R.uid(), match_id: cand.matchId, strategy_id: TENNIS_STRATEGY, minute: "финал", type: "settle", text: `ре-сеттл: терминальный результат из fixtures (${fx.status ?? "Finished"}, сеты ${fx.setsP1 ?? "?"}-${fx.setsP2 ?? "?"}) — расчёт на след. шаге`, created_at: now });
+      written++;
+    }
+  }
+  return written;
 }
 
 /**
@@ -74,6 +174,7 @@ export function settleTennisBets(db: Database, deps: EngineDeps = {}): number {
     if (!TENNIS_STRATEGIES.has(b.strategy_id) || !tennisMatchIds.has(b.match_id)) continue;
     const fin = tennisFinalResult(db, b.match_id);
     if (!fin || !fin.finished) continue; // still live → leave open
+    if (fin.manual) { flagTennisManual(db, b.id, b.match_id, b.strategy_id, b.market_label, now); continue; } // finished but winner unknown → flag, never guess
     const won = resolveTennisWinner(b.market_label, fin.p1, fin.p2, fin.advancing, fin.canceled);
     if (won == null) {
       // Void: canceled/ambiguous → refund the stake, zero P&L (excluded from accuracy).
@@ -371,7 +472,7 @@ export function finishTennisMatches(db: Database, deps: EngineDeps = {}): number
     for (const m of R.listMatches(db, c.id)) {
       if (m.state === "finished") continue;
       const fin = tennisFinalResult(db, m.id);
-      if (fin?.finished) { try { R.updateMatch(db, m.id, { state: "finished", end_time: now }); n++; } catch { /* best-effort */ } }
+      if (fin?.finished && !fin.manual) { try { R.updateMatch(db, m.id, { state: "finished", end_time: now }); n++; } catch { /* best-effort */ } } // a manual (winner-unknown) match stays live + visible until resolved
     }
   }
   return n;

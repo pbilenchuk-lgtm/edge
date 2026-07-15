@@ -105,9 +105,36 @@ export async function fetchTennisLivescores(cfg: TennisConfig, deps: EngineDeps 
   finally { clearTimeout(timer); }
 }
 
+// A terminal API-Tennis status — the match is OVER (any resolution family). The live feed drops a
+// match once it ends, so a match that completes NORMALLY never yields a terminal live-feed row; the
+// authoritative terminal signal comes from get_fixtures/get_results (fetchTennisFixtures + the poller).
+export const TENNIS_TERMINAL_RE = /finish|retir|\bret\.?\b|walkover|w[\/.]?o|cancel|abandon|default|disqualif|\bdsq\b/i;
+
+/**
+ * Fetch fixtures (finished + scheduled) for a date range from API-Tennis get_fixtures. Unlike
+ * get_livescore, this returns COMPLETED matches carrying `event_winner` + final `scores` — the
+ * only authoritative way to settle a tennis match that ended normally (and just vanished from the
+ * live feed). Never throws — returns [] on failure. date* are YYYY-MM-DD.
+ */
+export async function fetchTennisFixtures(cfg: TennisConfig, dateStart: string, dateStop: string, deps: EngineDeps = {}): Promise<TennisLive[]> {
+  if (!cfg.enabled) return [];
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
+  try {
+    const doFetch = deps.fetchImpl ?? fetch;
+    const url = `${cfg.base}?method=get_fixtures&date_start=${encodeURIComponent(dateStart)}&date_stop=${encodeURIComponent(dateStop)}&APIkey=${encodeURIComponent(cfg.key)}`;
+    const res = await doFetch(url, { signal: ctrl.signal });
+    if (!res.ok) return [];
+    const j = (await res.json()) as { success?: number; result?: unknown };
+    const rows = Array.isArray(j?.result) ? j.result : [];
+    return rows.map(normalizeLive).filter((x): x is TennisLive => x != null);
+  } catch { return []; }
+  finally { clearTimeout(timer); }
+}
+
 /** Strip the heavy arrays (pointbypoint / statistics) from a stored raw row — not needed for
  *  Stage-1 break detection, and they blow up the persistent disk at 20s cadence. */
-function trimRaw(raw: any): string | null {
+export function trimRaw(raw: any): string | null {
   if (!raw || typeof raw !== "object") return null;
   const { pointbypoint, statistics, ...rest } = raw;
   try { return JSON.stringify(rest); } catch { return null; }
@@ -240,7 +267,11 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
   const cfg = loadTennisConfig(env);
   if (!cfg.enabled) return 0;
   const batchAt = nowFn(deps)();
-  const live = (await fetchTennisLivescores(cfg, deps)).filter((m) => m.live === 1);
+  // Keep in-play rows AND any TERMINAL transition row the feed happens to emit (live=0 + "Finished"/
+  // "Retired"): that row carries the final result and MUST be persisted — dropping it was why a
+  // normally-finished match never settled. (The primary terminal path is the get_fixtures poller,
+  // since a match usually just vanishes from the live feed; this keeps the row when the feed does send it.)
+  const live = (await fetchTennisLivescores(cfg, deps)).filter((m) => m.live === 1 || TENNIS_TERMINAL_RE.test(m.status ?? ""));
   const poly = deps.polymarket ?? loadPolymarketConfig(env);
   let written = 0;
   const seenLog = new Set<string>(); // log a match's mapping verdict once per collection pass
