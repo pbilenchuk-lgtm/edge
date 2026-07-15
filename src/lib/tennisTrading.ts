@@ -99,6 +99,10 @@ const TENNIS_ALL_STRATEGIES = new Set<string>([...TENNIS_STRATEGIES, "tennis_pmv
 // paused feed. Env-tunable. (The match usually just VANISHES from get_livescore when it ends, so the
 // live path can never see the terminal row — this poller is the authoritative finish signal.)
 const TENNIS_FINAL_POLL_STALE_MIN = (() => { const n = Number(process.env.TENNIS_FINAL_POLL_STALE_MIN); return Number.isFinite(n) && n > 0 ? n : 15; })();
+// A match "live" longer than this (min from kickoff) is almost certainly a stuck feed, not a real
+// match — poll get_fixtures for its true result even if the snapshot is fresh. 200min clears a normal
+// bo3; a genuine bo5 marathon is protected because get_fixtures cross-checks (still-live → left alone). Env-tunable.
+const TENNIS_LIVE_CEILING_MIN = (() => { const n = Number(process.env.TENNIS_LIVE_CEILING_MIN); return Number.isFinite(n) && n > 0 ? n : 200; })();
 
 /**
  * A+B: chase the FINAL result of a tennis match that has an open position (or was live) but has
@@ -125,7 +129,14 @@ export async function pollTennisFinals(db: Database, deps: EngineDeps = {}): Pro
       const last = db.prepare(`SELECT event_key, batch_at FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(m.id) as { event_key?: string; batch_at?: string } | undefined;
       if (!last?.event_key) continue; // never scout-linked → nothing to poll
       const ageMin = (nowMs - (Date.parse(last.batch_at ?? "") || 0)) / 60000;
-      if (ageMin <= TENNIS_FINAL_POLL_STALE_MIN) continue; // still fresh / recently live → not stranded
+      const liveMin = m.state === "live" ? (nowMs - (Date.parse(m.kickoff_at ?? "") || nowMs)) / 60000 : 0;
+      // Chase the final when the feed went STALE (>15min), OR when a match has been "live" implausibly
+      // long (past the ceiling) even with a FRESH snapshot — API-Tennis sometimes leaves a finished
+      // match stuck at live=1 for hours (the "300'" phantom). get_fixtures is authoritative: if it too
+      // says live (a genuine bo5 marathon), the terminal check below just leaves it in observation.
+      const stale = ageMin > TENNIS_FINAL_POLL_STALE_MIN;
+      const liveTooLong = liveMin > TENNIS_LIVE_CEILING_MIN;
+      if (!stale && !liveTooLong) continue;
       const hasOpen = R.betsForMatch(db, m.id).some((b) => TENNIS_ALL_STRATEGIES.has(b.strategy_id) && b.status === "open");
       if (!hasOpen && m.state !== "live") continue; // no open position and not live → no reason to chase
       if (tennisFinalResult(db, m.id)?.finished) continue; // a terminal snapshot already exists → settle handles it

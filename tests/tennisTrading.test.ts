@@ -560,6 +560,35 @@ test("pollTennisFinals A: a fresh (recently-live) match is NOT chased — only s
   assert.equal(called, 0, "a fresh snapshot (2min) is not stranded → no fixtures call");
 });
 
+test("pollTennisFinals: a match STUCK live past the ceiling (FRESH feed) is still resolved from get_fixtures (the 300' phantom)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // kickoff 09:00, state 'live'
+  // A FRESH live snapshot (5min old) but 235min since kickoff — a stuck/looping feed, not a real match.
+  snap(db, mid, { at: "2026-07-14T12:55:00Z", g1: 5, g2: 4, server: "first", p1c: 60 });
+  const fixturesBody = { result: [{ event_key: "EX", event_first_player: "A. Vukic", event_second_player: "L. Broady", tournament_name: "Granby", event_type_type: "ATP Singles", event_live: "0", event_status: "Finished", event_final_result: "2 - 0", event_winner: "First Player", scores: [{ score_set: 1, score_first: 6, score_second: 4 }, { score_set: 2, score_first: 7, score_second: 5 }], event_serve: null, event_game_result: null }] };
+  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => fixturesBody })) as unknown as typeof fetch;
+  const written = await pollTennisFinals(db, { now: () => "2026-07-14T13:00:00Z", env: { API_TENNIS_KEY: "k" }, fetchImpl });
+  assert.equal(written, 1, "past the 200min ceiling → get_fixtures polled despite a fresh snapshot");
+  assert.equal(tennisFinalResult(db, mid)!.finished, true, "resolved to finished from the fixtures result");
+});
+
+test("advanceClocks tennis: a no-bet match stuck live past the ceiling is FINISHED (bounds the phantom 300')", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // kickoff 09:00, state 'live'
+  snap(db, mid, { at: "2026-07-14T14:25:00Z", g1: 5, g2: 4, server: "first", p1c: 60 }); // fresh live=1 (scout stuck)
+  advanceClocks(db, { now: () => "2026-07-14T14:30:00Z" }); // 330min since kickoff > 300 ceiling, no open bet
+  assert.equal(R.getMatch(db, mid)!.state, "finished", "stuck-live no-bet match force-finished");
+});
+
+test("advanceClocks tennis: a match with an OPEN bet stuck live past the ceiling is NOT force-finished (poller owns money)", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  snap(db, mid, { at: "2026-07-14T14:25:00Z", g1: 5, g2: 4, server: "first", p1c: 60 });
+  buybackBet(db, mid, "hold", { take_price: { at_cents: 59 } }); // open position
+  advanceClocks(db, { now: () => "2026-07-14T14:30:00Z" });
+  assert.equal(R.getMatch(db, mid)!.state, "live", "a position is never mis-finished on a feed glitch — the fixtures poller resolves it");
+});
+
 test("collectTennisSnapshots #3: a terminal transition row (live=0 Finished) is KEPT, not dropped by the live filter", async () => {
   const db = openDb(":memory:");
   const body = { result: [

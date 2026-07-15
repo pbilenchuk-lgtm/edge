@@ -268,7 +268,16 @@ export function advanceClocks(db: Database, deps: EngineDeps = {}): void {
     if (sport === "tennis") {
       const inPlay = tennisScoutInPlay(db, m.id, nowMs);
       if (inPlay) {
-        if (m.state !== "live") R.updateMatch(db, m.id, { state: "live", lineup_out: true });
+        // Backstop: a tennis match "live" past the sport ceiling is a STUCK feed (API-Tennis leaves a
+        // finished match at live=1 for hours → the phantom "300'"), not a real match. With NO open
+        // position, finish it so it can't sit live forever. A match WITH money on it is left to the
+        // get_fixtures poller (authoritative — never mis-finish a real position on a feed glitch).
+        const elapsedMin = m.kickoff_at ? (nowMs - (Date.parse(m.kickoff_at) || nowMs)) / 60000 : null;
+        if (elapsedMin != null && elapsedMin > maxLiveMinutes("tennis") && !R.betsForMatch(db, m.id).some((b) => b.status === "open")) {
+          R.updateMatch(db, m.id, { state: "finished", ...(!m.end_time ? { end_time: nowIso } : {}) });
+        } else if (m.state !== "live") {
+          R.updateMatch(db, m.id, { state: "live", lineup_out: true });
+        }
       } else if (m.state === "live") {
         // Not in-play per the scout. Keep following an OPEN position (settle/exit own it); otherwise
         // a scout FINAL → finished, else a clock-phantom (never started / ended-and-missed) → un-live
