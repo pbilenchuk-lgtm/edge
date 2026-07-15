@@ -302,13 +302,23 @@ export function tennisExitTick(db: Database, deps: EngineDeps = {}): number {
     const last = snaps[snaps.length - 1];
     const mlNow = (curRow ? priceOn(curRow) : null) == null ? tennisMoneyline(db, b.match_id, { p1: last.p1 ?? "", p2: last.p2 ?? "" }) : null;
     const cur = (curRow ? priceOn(curRow) : null) ?? (mlNow ? (favSide === "first" ? mlNow.p1Cents : mlNow.p2Cents) : null);
-    if (cur == null) continue;
+    if (cur == null) {
+      // FAIL-CLOSED: a live stop with NO price must NOT execute at a phantom (entry) price — that
+      // fabricates a "$0 breakeven" for what is really an in-the-red position. Skip the exit and make
+      // the price-starvation LOUD (once per match+strategy) instead of closing silently in the dark.
+      const warned = R.tradeLogForMatch(db, b.match_id).some((l) => l.strategy_id === b.strategy_id && l.type === "skip" && /цена недоступна/.test(l.text ?? ""));
+      if (!warned) R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: b.entered_minute ?? "лайв", type: "skip", text: `цена недоступна: живой манилайн не резолвится — стоп заморожен, выход отложен (позиция держится до появления цены/финала) — ${b.market_label}`, created_at: now });
+      continue;
+    }
     const prev = priced.length >= 2 ? priceOn(priced[priced.length - 2]) : null;
     // Post-entry events: receiving-game count (server = opponent) + break-back + a new favourite break.
     const evs = detectTennisEvents(snaps).filter((e) => (Date.parse(e.batchAt) || 0) > entryMs);
     const recvGames = evs.filter((e) => (e.type === "hold" || e.type === "break") && e.server === oppSide).length;
     const counterBreak = evs.some((e) => e.type === "break" && e.server === oppSide); // favourite broke opponent back
-    const gs = curRow ? `${curRow.games_p1}-${curRow.games_p2}` : "?";
+    // Game score for the exit log = the FRESHEST snapshot (current set/games), not the freshest
+    // PRICED one — else a stale priced row prints the wrong set (e.g. "6-4" from set 1 while the
+    // stop actually fires at 0-4 in set 2). `last` is always defined (snaps.length checked above).
+    const gs = `${last.games_p1}-${last.games_p2}`;
     const ext = { gameScore: gs, recvGames };
 
     // ── SET-VALUE ladder (horizon = the match): retire → thesis_stop → floor → partial take ──

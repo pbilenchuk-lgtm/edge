@@ -131,6 +131,29 @@ test("tennisExitTick: thesis_stop cuts the position on a SECOND break of the fav
   assert.equal(b.closing_price, 40);
 });
 
+test("tennisExitTick: FAIL-CLOSED — no live price never fabricates a $0 exit, warns loudly, holds the position", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  // Break the moneyline resolution: a SECOND " vs " market → ambiguous → tennisMoneyline returns null,
+  // so with NO priced snapshot the exit tick has no live price to act on (the Travaglia–Navone shape).
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "ATP: Aleksandar Vukic vs Liam Broady (alt)", price: 44, ai_prob: null, liquidity: "5000", external_ref: "t2", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "texfc", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: { take_price: { at_cents: 59 } } }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+  // Favourite (first) gets broken in set 2 — thesis_stop WOULD fire — but every snapshot is price-blind.
+  const base = { provider: "apitennis", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1 as const, status: "Set 2", sets_p1: 1, sets_p2: 1, set_num: 2, game_points: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: "{}" };
+  R.insertTennisSnapshot(db, { ...base, event_key: "EFC", batch_at: "2026-07-14T10:05:00Z", games_p1: 3, games_p2: 3, server: "first" });
+  R.insertTennisSnapshot(db, { ...base, event_key: "EFC", batch_at: "2026-07-14T10:06:00Z", games_p1: 3, games_p2: 4, server: "second" });
+  R.insertTennisSnapshot(db, { ...base, event_key: "EFC", batch_at: "2026-07-14T10:07:00Z", games_p1: 3, games_p2: 4, server: "second" });
+  const n = tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" });
+  assert.equal(n, 0, "no price → NO exit fired (never a phantom $0 close at entry price)");
+  const b = R.getBet(db, "texfc")!;
+  assert.equal(b.status, "open", "position held to await a real price / settlement, not silently cut to breakeven");
+  const warned = R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip" && /цена недоступна/.test(l.text ?? ""));
+  assert.equal(warned.length, 1, "price-starvation is LOUD (one warning), not silent");
+  // Idempotent: a second tick must not spam a duplicate warning.
+  tennisExitTick(db, { now: () => "2026-07-14T10:07:25Z" });
+  assert.equal(R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip" && /цена недоступна/.test(l.text ?? "")).length, 1, "warning throttled to once per match+strategy");
+});
+
 // Compact snapshot helper for the exit-order tests (one event, ATP singles, live).
 function snap(db: ReturnType<typeof openDb>, mid: string, o: { at: string; g1: number; g2: number; server: "first" | "second" | null; p1c: number | null; setNum?: number }) {
   R.insertTennisSnapshot(db, { event_key: "EX", provider: "apitennis", batch_at: o.at, p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "live", sets_p1: 1, sets_p2: 0, set_num: o.setNum ?? 2, games_p1: o.g1, games_p2: o.g2, game_points: null, server: o.server, pm_match_id: mid, pm_mid_cents: o.p1c, pm_p1_cents: o.p1c, pm_p2_cents: o.p1c == null ? null : 100 - o.p1c, raw: "{}" });
