@@ -232,7 +232,9 @@ function closeTennisBetEarly(db: Database, betId: string, currentCents: number, 
   const stake = fresh.stake ?? 0, entry = fresh.entry_price ?? 0;
   const payout = entry > 0 ? Math.round(stake * (currentCents / entry) * 100) / 100 : 0;
   const pnl = Math.round((payout - stake) * 100) / 100;
-  R.updateBet(db, betId, { status: pnl >= 0 ? "settled_won" : "settled_lost", result: pnl >= 0 ? "won" : "lost", payout, closing_price: currentCents, settled_by: "early", settled_at: now });
+  // A breakeven (pnl==0) is a PUSH — settled_void/result null — never a "win" (mirrors football's
+  // closeBetEarly): booking it as won would inflate the strategy's win-rate on flat defensive cuts.
+  R.updateBet(db, betId, { status: pnl > 0 ? "settled_won" : pnl < 0 ? "settled_lost" : "settled_void", result: pnl > 0 ? "won" : pnl < 0 ? "lost" : null, payout, closing_price: currentCents, settled_by: "early", settled_at: now });
   try { shadowOnExit(db, betId, 1, loadShadowConfig(db, deps.env), now); } catch { /* observe-only */ }
   const epoch = fresh.strategy_id === SET_VALUE_STRATEGY ? SET_VALUE_EPOCH : TENNIS_ARMED_EPOCH;
   const tail = `геймы ${extra.gameScore ?? "?"}, приёмных ${extra.recvGames ?? 0} · слиппедж 0¢ (paper) · пороги:${epoch}`;
@@ -255,10 +257,10 @@ function closeTennisBetPortion(db: Database, betId: string, fraction: number, cu
   const pnl = Math.round((payout - closed) * 100) / 100;
   R.insertBet(db, {
     id: R.uid(), match_id: fresh.match_id, strategy_id: fresh.strategy_id, risk_profile_id: fresh.risk_profile_id ?? "medium",
-    market_label: fresh.market_label, status: pnl >= 0 ? "settled_won" : "settled_lost", proposed_price: fresh.proposed_price,
+    market_label: fresh.market_label, status: pnl > 0 ? "settled_won" : pnl < 0 ? "settled_lost" : "settled_void", proposed_price: fresh.proposed_price,
     entry_price: entry, current_price: currentCents, closing_price: currentCents, ai_prob: fresh.ai_prob, stake: closed,
     rationale: `частичная фиксация ${Math.round(fraction * 100)}%`, entered_minute: fresh.entered_minute,
-    result: pnl >= 0 ? "won" : "lost", payout, settled_by: "partial", settled_at: now, created_at: now,
+    result: pnl > 0 ? "won" : pnl < 0 ? "lost" : null, payout, settled_by: "partial", settled_at: now, created_at: now,
   });
   R.updateBet(db, betId, { stake: Math.round((stake - closed) * 100) / 100 }); // keep the remainder open to settle
   try { shadowOnExit(db, betId, fraction, loadShadowConfig(db, deps.env), now); } catch { /* observe-only */ }

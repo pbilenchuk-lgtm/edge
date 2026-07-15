@@ -44,6 +44,22 @@ test("CLV is close − entry for a Yes-side AND a No-side market (audit: both di
   assert.equal(no.clvCents, -8, "No side: 52−60 = −8¢ (same-side by construction)");
 });
 
+test("breakeven realize (settled_void + result null) classifies as void — never a win in hitRate", () => {
+  const { db, comp, strat } = setup();
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: null, minute: 90, score_home: 1, score_away: 1, final_score: "1:1", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  // A real win, a real loss, and a BREAKEVEN early cash-out (payout == stake → settled_void/result null).
+  R.insertBet(db, bet({ id: R.uid(), match_id: mid, strategy_id: strat.id, market_label: "W", status: "settled_won", entry_price: 40, closing_price: 55, ai_prob: 0.6, stake: 100, result: "won", payout: 250, settled_by: "early", settled_at: "t", entry_meta: meta({}) }));
+  R.insertBet(db, bet({ id: R.uid(), match_id: mid, strategy_id: strat.id, market_label: "L", status: "settled_lost", entry_price: 60, closing_price: 52, ai_prob: 0.55, stake: 100, result: "lost", payout: 0, settled_by: "early", settled_at: "t", entry_meta: meta({}) }));
+  R.insertBet(db, bet({ id: R.uid(), match_id: mid, strategy_id: strat.id, market_label: "PUSH", status: "settled_void", entry_price: 44, closing_price: 44, ai_prob: 0.5, stake: 100, result: null, payout: 100, settled_by: "early", settled_at: "t", entry_meta: meta({}) }));
+  const recs = betRecords(db);
+  assert.equal(recs.find((r) => r.market === "PUSH")!.outcome, "void", "breakeven → void, not lost");
+  // Every hit-rate consumer bins on outcome won/lost and drops "void" — so the push is out of both.
+  const wl = recs.filter((r) => r.outcome === "won" || r.outcome === "lost");
+  assert.equal(wl.length, 2, "only the real win + real loss enter the win/lost bins");
+  assert.equal((wl.filter((r) => r.outcome === "won").length / wl.length) * 100, 50, "hitRate = 1/2 = 50%, push excluded");
+});
+
 test("edge zones don't lose bets: Σ zone N = total with an edge", () => {
   const { db, comp, strat } = setup();
   const mid = R.uid();

@@ -154,6 +154,23 @@ test("tennisExitTick: FAIL-CLOSED — no live price never fabricates a $0 exit, 
   assert.equal(R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip" && /цена недоступна/.test(l.text ?? "")).length, 1, "warning throttled to once per match+strategy");
 });
 
+test("tennisExitTick: a BREAKEVEN cut (exit == entry) books settled_void/result null — a PUSH, not a win", () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  R.insertBet(db, { id: "texbe", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: { take_price: { at_cents: 59 } } }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+  // Favourite (first) broken 3-3 → 3-4 (persists) → thesis_stop fires, but the price sits EXACTLY at
+  // the 44¢ entry → realized P&L is $0.00: a breakeven, which must NOT be recorded as a win.
+  const base = { provider: "apitennis", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1 as const, status: "Set 2", sets_p1: 1, sets_p2: 1, set_num: 2, game_points: null, pm_match_id: mid, pm_mid_cents: 44, pm_p2_cents: 56, raw: "{}" };
+  R.insertTennisSnapshot(db, { ...base, event_key: "EBE", batch_at: "2026-07-14T10:05:00Z", games_p1: 3, games_p2: 3, server: "first", pm_p1_cents: 44 });
+  R.insertTennisSnapshot(db, { ...base, event_key: "EBE", batch_at: "2026-07-14T10:06:00Z", games_p1: 3, games_p2: 4, server: "second", pm_p1_cents: 44 });
+  R.insertTennisSnapshot(db, { ...base, event_key: "EBE", batch_at: "2026-07-14T10:07:00Z", games_p1: 3, games_p2: 4, server: "second", pm_p1_cents: 44 });
+  assert.equal(tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" }), 1, "thesis_stop still fired");
+  const b = R.getBet(db, "texbe")!;
+  assert.equal(b.status, "settled_void", "breakeven → settled_void (push), not settled_won");
+  assert.equal(b.result, null, "breakeven → result null, so win-rate bins exclude it");
+  assert.equal(b.payout, 100, "payout == stake (money-flat)");
+});
+
 // Compact snapshot helper for the exit-order tests (one event, ATP singles, live).
 function snap(db: ReturnType<typeof openDb>, mid: string, o: { at: string; g1: number; g2: number; server: "first" | "second" | null; p1c: number | null; setNum?: number }) {
   R.insertTennisSnapshot(db, { event_key: "EX", provider: "apitennis", batch_at: o.at, p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "live", sets_p1: 1, sets_p2: 0, set_num: o.setNum ?? 2, games_p1: o.g1, games_p2: o.g2, game_points: null, server: o.server, pm_match_id: mid, pm_mid_cents: o.p1c, pm_p1_cents: o.p1c, pm_p2_cents: o.p1c == null ? null : 100 - o.p1c, raw: "{}" });

@@ -82,7 +82,10 @@ export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
     const phase: "prematch" | "live" = em?.phase ?? (b.entered_minute && /\d/.test(b.entered_minute) ? "live" : "prematch");
     if (filter.phase && phase !== filter.phase) continue;
     const settled = R.isSettled(b.status);
-    const outcome: BetRec["outcome"] = !settled ? "open" : b.settled_by === "void" ? "void" : b.result === "won" ? "won" : "lost";
+    // A settled bet with result null is a PUSH/void (a market void OR a breakeven cash-out) — it is
+    // neither a win nor a loss, so it must stay OUT of the won/lost win-rate bins (single source of
+    // truth = result; settled_void breakeven realizes carry result null just like market voids).
+    const outcome: BetRec["outcome"] = !settled ? "open" : b.result === "won" ? "won" : b.result === "lost" ? "lost" : "void";
     const stake = b.stake ?? 0;
     const pnl = settled && b.payout != null ? Math.round((b.payout - stake) * 100) / 100 : null;
     const entryCents = num(b.entry_price), closingCents = num(b.closing_price);

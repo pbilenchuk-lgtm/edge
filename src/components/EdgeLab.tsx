@@ -1976,7 +1976,7 @@ function PortfolioScreen({ open, closed, onGoMatches }: any) {
     const g = (groups[key] = groups[key] || { items: [], color: p.stratColor, stake: 0, live: 0, pnl: 0 });
     g.items.push(p); g.stake += p.stake || 0; g.live += p.live || 0; g.pnl += p.pnl || 0;
   }
-  const closedLabel = (p: any) => p.settledBy === "void" ? "возврат ставки" : p.result === "won" ? "✓ выигрыш" : "✕ проигрыш";
+  const closedLabel = (p: any) => p.settledBy === "void" ? "возврат ставки" : p.result === "void" ? "= в ноль" : p.result === "won" ? "✓ выигрыш" : "✕ проигрыш";
 
   return (
     <main style={S.main}>

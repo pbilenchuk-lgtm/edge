@@ -756,8 +756,9 @@ function closeBetEarly(db: Database, bet: { id: string; stake: number | null; en
   const pnl = round2(payout - stake);
   // "early" cash-out: booked by P&L sign, NOT by real outcome — excluded from
   // the predictive metrics (Brier/CLV) so trading P&L doesn't masquerade as
-  // prediction accuracy.
-  R.updateBet(db, bet.id, { status: pnl >= 0 ? "settled_won" : "settled_lost", result: pnl >= 0 ? "won" : "lost", payout, closing_price: currentPriceCents, settled_by: "early", settled_at: now });
+  // prediction accuracy. A breakeven (pnl==0) is a PUSH — settled_void/result
+  // null — not a "win": counting it as won inflates the strategy's win-rate.
+  R.updateBet(db, bet.id, { status: pnl > 0 ? "settled_won" : pnl < 0 ? "settled_lost" : "settled_void", result: pnl > 0 ? "won" : pnl < 0 ? "lost" : null, payout, closing_price: currentPriceCents, settled_by: "early", settled_at: now });
   try { shadowOnExit(db, bet.id, 1, loadShadowConfig(db), now); } catch { /* shadow is observe-only, never break a real close */ }
   return pnl;
 }
@@ -783,10 +784,10 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
   R.insertBet(db, {
     id: R.uid(), match_id: bet.match_id, strategy_id: bet.strategy_id, risk_profile_id: bet.risk_profile_id ?? "medium",
     market_label: bet.market_label,
-    status: pnl >= 0 ? "settled_won" : "settled_lost", proposed_price: bet.proposed_price, entry_price: entry,
+    status: pnl > 0 ? "settled_won" : pnl < 0 ? "settled_lost" : "settled_void", proposed_price: bet.proposed_price, entry_price: entry,
     current_price: currentPriceCents, closing_price: currentPriceCents, ai_prob: bet.ai_prob, stake: closed,
     rationale: `частичная фиксация ${Math.round(fraction * 100)}%`, entered_minute: bet.entered_minute,
-    result: pnl >= 0 ? "won" : "lost", payout, settled_by: "partial", settled_at: now, created_at: now,
+    result: pnl > 0 ? "won" : pnl < 0 ? "lost" : null, payout, settled_by: "partial", settled_at: now, created_at: now,
   });
   R.updateBet(db, bet.id, { stake: round2(stake - closed) }); // keep the remainder open
   try { shadowOnExit(db, bet.id, fraction, loadShadowConfig(db), now); } catch { /* observe-only */ }
