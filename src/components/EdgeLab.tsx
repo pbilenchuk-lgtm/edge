@@ -428,7 +428,12 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     let j: any;
     try {
       const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "reassess", matchId, strategyId }) });
-      j = await r.json();
+      // Read as text and parse defensively: a slow reassess (LLM call while the server is busy with a
+      // catch-up backlog) can exceed the gateway timeout, and Render returns an HTML 502/504 page —
+      // `r.json()` on that throws the cryptic «Unexpected token '<'». Turn it into a clear message.
+      const text = await r.text();
+      try { j = JSON.parse(text); }
+      catch { throw new Error(r.status === 502 || r.status === 504 ? "сервер занят (переоценка дольше таймаута) — попробуй через минуту" : `сервер вернул не-JSON (${r.status})`); }
       if (!r.ok || j?.ok === false) throw new Error(j?.error || `ошибка ${r.status}`);
     } catch (e: any) {
       toast("err", e?.message || "переоценка не удалась");
