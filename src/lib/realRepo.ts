@@ -14,7 +14,7 @@ export type RealOrderStatus = "created" | "placed" | "partial" | "filled" | "exp
 export type RealLedgerKind = "deposit" | "fill" | "fee" | "redemption" | "gas" | "withdrawal";
 
 export interface RealOrderRow {
-  id: string; client_order_id: string; exchange_order_id: string | null; decision_id: string;
+  id: string; client_order_id: string; salt: string | null; order_hash: string | null; exchange_order_id: string | null; decision_id: string;
   strategy_id: string; profile_id: string; match_id: string; token_id: string;
   side: "BUY" | "SELL"; leg: string; limit_price_cents: number; size_usd: number; tif_sec: number;
   status: RealOrderStatus; filled_size_usd: number; avg_fill_cents: number | null;
@@ -26,15 +26,15 @@ export interface RealOrderRow {
 /** Insert a freshly-built order in status "created" and stamp the first transition event.
  *  Idempotent on client_order_id: a re-insert with the same id is a no-op that returns the
  *  existing row (the §4.3 crash-retry contract — never a second order). */
-export function insertRealOrder(db: Database, o: Omit<RealOrderRow, "status" | "filled_size_usd" | "avg_fill_cents"> & { status?: RealOrderStatus }): RealOrderRow {
+export function insertRealOrder(db: Database, o: Omit<RealOrderRow, "status" | "filled_size_usd" | "avg_fill_cents" | "salt" | "order_hash"> & { status?: RealOrderStatus; salt?: string | null; order_hash?: string | null }): RealOrderRow {
   const existing = getRealOrderByClientId(db, o.client_order_id);
   if (existing) return existing; // idempotency: same client_order_id → the same order
   const status: RealOrderStatus = o.status ?? "created";
   db.prepare(
-    `INSERT INTO real_orders(id,client_order_id,exchange_order_id,decision_id,strategy_id,profile_id,match_id,
+    `INSERT INTO real_orders(id,client_order_id,salt,order_hash,exchange_order_id,decision_id,strategy_id,profile_id,match_id,
        token_id,side,leg,limit_price_cents,size_usd,tif_sec,status,filled_size_usd,avg_fill_cents,code_version,whitelist_version,note,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,?,?,?,?)`,
-  ).run(o.id, o.client_order_id, o.exchange_order_id, o.decision_id, o.strategy_id, o.profile_id, o.match_id,
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,?,?,?,?)`,
+  ).run(o.id, o.client_order_id, o.salt ?? null, o.order_hash ?? null, o.exchange_order_id, o.decision_id, o.strategy_id, o.profile_id, o.match_id,
     o.token_id, o.side, o.leg, o.limit_price_cents, o.size_usd, o.tif_sec, status, o.code_version, o.whitelist_version, o.note, o.created_at);
   appendRealOrderEvent(db, o.id, status, o.created_at, "order created");
   return getRealOrderByClientId(db, o.client_order_id)!;

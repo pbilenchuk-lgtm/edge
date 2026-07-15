@@ -113,6 +113,30 @@ Four numbers to eyeball on day one, plus one full cycle:
    calibration slices, so a HIGH share (>10–15%, realistic on thin tennis bid books) means the stop
    slices UNDER-count — not a reason to change the void logic, but a known caveat for calibration.
 
+## CLOB doc-spike verdicts (fold into Phase F; details in clob-capabilities-vs-assumptions.md)
+
+The spike checked our spec's assumptions against the real API. Applied to the paper contract NOW;
+the rest are Phase-F build constraints recorded so F doesn't reopen the contract.
+
+- **SDK**: `@polymarket/clob-client` is **archived/dead** → target **`@polymarket/clob-client-v2`** (v1.0.8).
+- **TIF (MATCHES w/ caveat)**: native GTD has a ~60s security buffer → usable for the ~10min pre-match
+  window only; 45s entries / 15s exits need **GTC + client-side timer + cancel**. → `OrderRequest.expiryMode`
+  (`native-GTD` | `client-cancel`) added to the contract now.
+- **Idempotency (MISMATCH)**: the CLOB has **no client-supplied order id**; server dedup is by the
+  **order hash** of a signed struct with a random **salt**. Our `client_order_id` stays as OUR local
+  key; added `salt` + `order_hash` columns to `real_orders` so a retry re-derives the byte-identical
+  order and looks it up by hash before any resend (§4.3).
+- **Partial fills (MATCHES)**: `size_matched`/`original_size`; compute avg price from `getTrades`
+  (size_matched can slightly overstate). Our partial model holds.
+- **Min size + tick (MISMATCH, risk)**: both are **per-market** (`getTickSize` / `minimum_order_size`).
+  A fixed ±1¢ tolerance = 1 tick at 0.01 but is **sub-tick/meaningless on coarse (0.025/0.1) ticks**.
+  Phase E/F MUST fetch tick + min-size per market, clamp the limit to tick, skip when ±1¢ < 1 tick or
+  notional < market min, and keep the depth-clamp above the min-size floor. **Do not hardcode.**
+- **Redemption (MATCHES, under-specified)**: on-chain CTF `redeemPositions` (branch neg-risk adapter),
+  gas paid in **POL**; separate from the CLOB client.
+- **Auth CONFIRMED**; our spec's `signatureType` numbering was stale → proxy=1, Safe=2, deposit=3.
+- **Rate limits**: non-issue (thousands/10s vs our 20/hr cap).
+
 ## Invariants (never violated by any phase)
 
 1. Simulation → whitelist → real is the ONLY direction. Real never writes back to sim

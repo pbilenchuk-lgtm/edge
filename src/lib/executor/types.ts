@@ -34,6 +34,11 @@ export interface OrderRequest {
   limitPriceCents: Cents;     // decision price ± execution tolerance (limit ONLY — no market orders)
   sizeUsd: number;            // notional; the executor may fill LESS (partial) or clamp (caps)
   timeInForceSec: number;     // order lifetime; on expiry → cancel + `order_expired` (no eternal orders)
+  // How the lifetime is enforced on the real CLOB (doc-spike finding): the exchange's GTD carries a
+  // ~60s security buffer, so sub-60s windows can't use native expiry. "native-GTD" for the ~10min
+  // pre-match window; "client-cancel" (GTC + our timer + explicit cancel) for 45s entries / 15s exits.
+  // Paper/dry-run ignore it (immediate fill/skip); it exists so the real executor need not reopen the contract.
+  expiryMode?: "native-GTD" | "client-cancel";
   decisionId: string;         // twin link to the paper bet (spec §0.1)
   strategyId: string;
   profileId: string;

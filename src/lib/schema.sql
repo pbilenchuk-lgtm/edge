@@ -605,7 +605,13 @@ CREATE INDEX IF NOT EXISTS idx_tennis_break_event ON tennis_break_marks(event_ke
 -- this row alone.
 CREATE TABLE IF NOT EXISTS real_orders (
   id                 TEXT PRIMARY KEY,
-  client_order_id    TEXT NOT NULL UNIQUE,   -- deterministic idempotency key (decisionId+leg+seq)
+  client_order_id    TEXT NOT NULL UNIQUE,   -- OUR local idempotency/tracking key (decisionId+leg+seq)
+  -- The real CLOB has NO client-supplied order id (doc-spike): server idempotency is by the order
+  -- HASH of a signed struct that includes a random salt. We persist the salt so a crash-retry can
+  -- re-derive the BYTE-IDENTICAL order (server duplicate-detection then backstops us, §4.3), and
+  -- store the resulting hash as the exchange-side key. Both NULL until the real executor signs.
+  salt               TEXT,                   -- persisted salt → byte-identical re-derivation on retry
+  order_hash         TEXT,                   -- Polymarket order hash (the server-side idempotency key)
   exchange_order_id  TEXT,                   -- set once the exchange acks (NULL for dry_run)
   decision_id        TEXT NOT NULL,          -- twin link to the paper bet (§0.1)
   strategy_id        TEXT NOT NULL,
