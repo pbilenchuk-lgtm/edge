@@ -1103,14 +1103,14 @@ export function pruneTennisSnapshots(db: Database, olderThanIso: string): number
 export function capTennisSnapshots(db: Database, keep = 20000): number {
   const n = tennisSnapshotCount(db);
   if (n <= keep) return 0;
-  return db.prepare(`DELETE FROM tennis_snapshots WHERE batch_at < (SELECT batch_at FROM tennis_snapshots ORDER BY batch_at DESC LIMIT 1 OFFSET ?)`).run(keep).changes ?? 0;
+  return db.prepare(`DELETE FROM tennis_snapshots WHERE batch_at < (SELECT MIN(batch_at) FROM (SELECT batch_at FROM tennis_snapshots ORDER BY batch_at DESC LIMIT ?))`).run(keep).changes ?? 0;
 }
 // tennis_map_log is pure observability (mapping decisions) and is written every collection pass —
 // it accumulated 47k rows. Keep only the newest `keep`.
 export function capTennisMapLog(db: Database, keep = 3000): number {
   const n = (db.prepare(`SELECT COUNT(*) n FROM tennis_map_log`).get() as { n: number }).n;
   if (n <= keep) return 0;
-  return db.prepare(`DELETE FROM tennis_map_log WHERE created_at < (SELECT created_at FROM tennis_map_log ORDER BY created_at DESC LIMIT 1 OFFSET ?)`).run(keep).changes ?? 0;
+  return db.prepare(`DELETE FROM tennis_map_log WHERE created_at < (SELECT MIN(created_at) FROM (SELECT created_at FROM tennis_map_log ORDER BY created_at DESC LIMIT ?))`).run(keep).changes ?? 0;
 }
 
 export interface TennisMapLogRow { id?: string; event_key: string; players: string | null; verdict: string; match_id: string | null; score: number | null; candidates: string | null; created_at: string }
