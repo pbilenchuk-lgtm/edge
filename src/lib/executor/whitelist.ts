@@ -130,12 +130,15 @@ export async function mirrorPaperEntryToReal(db: Database, bet: Bet, ctx: Mirror
     const caps = modeCaps(mode);
     if (!caps.simulate && !caps.realEntry) return { mirrored: false, note: `режим «${mode}» — реал не строится` };
     const row = matchWhitelist(db, { strategyId: bet.strategy_id, categoryId: ctx.categoryId });
-    if (!row) return { mirrored: false, note: "не в whitelist — только paper" };
+    if (!row) return { mirrored: false, note: "не в whitelist — только paper" }; // expected, high-volume — stays silent
+    // Past the whitelist = this entry was INTENDED for the real contour. ANY skip from here is a
+    // "wanted to mirror, couldn't" — make it LOUD via onError (a silent skip once hid 280 no-op entries).
+    const skip = (note: string) => { try { (ctx.onError ?? (() => {}))(`skip: ${note}`); } catch { /* logger must not throw */ } return { mirrored: false, note }; };
     const size = ctx.sizeFraction != null
       ? realSizeFromFraction(ctx.sizeFraction, ctx.realFreeUsd, row.max_order_usd)
       : proportionalRealSize(ctx.paperStakeUsd ?? bet.stake ?? 0, ctx.paperBankUsd ?? 0, ctx.realFreeUsd, row.max_order_usd);
-    if (size <= 0) return { mirrored: false, note: "реальный размер 0 (пропорция/банк)" };
-    if (!bet.decision_id || !bet.entry_price) return { mirrored: false, note: "нет decision_id/цены входа" };
+    if (size <= 0) return skip("реальный размер 0 (доля входа ≤0 / банк)");
+    if (!bet.decision_id || !bet.entry_price) return skip("нет decision_id/цены входа (ставка до Phase A?)");
 
     const order: OrderRequest = {
       clientOrderId: clientOrderIdFor(bet.decision_id, "entry"), leg: "entry", tokenId: ctx.tokenId, side: "BUY",

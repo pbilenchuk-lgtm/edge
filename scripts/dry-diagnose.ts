@@ -21,12 +21,24 @@ console.log(`REAL_TRADING=${env.REAL_TRADING ?? "(off)"} · dry virtual free=$${
 
 // Every filled football paper entry (same population dry-status counts under (а)).
 const bets = db.prepare(
-  `SELECT b.id, b.strategy_id, b.risk_profile_id, b.ai_prob, b.entry_price, b.decision_id,
+  `SELECT b.id, b.strategy_id, b.risk_profile_id, b.ai_prob, b.entry_price, b.decision_id, b.created_at,
           m.competition_id AS cat, c.name AS cat_name
    FROM bets b JOIN matches m ON m.id=b.match_id JOIN competitions c ON c.id=m.competition_id
    WHERE c.sport_id='football' AND b.status IN ('open','settled_won','settled_lost','settled_void')
      AND b.entry_price IS NOT NULL`,
 ).all() as any[];
+
+// decision_id health — Phase A (16:04 UTC 2026-07-15) added the column with NO backfill, so bets born
+// earlier are null forever. This split tells historical-artifact (self-heals on new entries) from a
+// live bug (new bets STILL null → the deployed insert path isn't minting).
+const withId = bets.filter((b) => b.decision_id);
+const nullId = bets.filter((b) => !b.decision_id);
+const range = (rows: any[]) => rows.length ? `${(rows.map((r) => r.created_at).sort()[0] || "").slice(0, 16)} … ${(rows.map((r) => r.created_at).sort().slice(-1)[0] || "").slice(0, 16)}` : "—";
+console.log(`decision_id: есть у ${withId.length} · NULL у ${nullId.length}`);
+console.log(`  NULL (до Phase A): ${range(nullId)}`);
+console.log(`  есть (после):      ${range(withId)}`);
+console.log(withId.length === 0 ? `  → все входы дозеркальной эпохи. Новый вход после 16:04 UTC 15.07 → появится decision_id → зеркалит.\n`
+  : `  → есть входы с decision_id — happy-path должен работать; если ордеров 0, копаем place()/tokenId.\n`);
 
 const tally: Record<string, number> = { strategy_miss: 0, category_miss: 0, size_zero: 0, no_decision: 0, would_mirror: 0 };
 const missCats = new Map<string, { name: string; n: number }>();
