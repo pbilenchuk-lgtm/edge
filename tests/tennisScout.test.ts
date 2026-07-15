@@ -61,6 +61,24 @@ test("tennisMoneyline: HONEST SKIP when two non-prop markets are ambiguous", () 
   assert.equal(tennisMoneyline(db, mid, { p1: "Kaichi Uchida", p2: "Alexis Galarneau" }), null, "two candidates → ambiguous → skip");
 });
 
+// Travaglia–Navone (Båstad ATP, prod): the market set carried "Completed Match — Yes/No" alongside
+// the moneyline. Those labels have no prop keyword but ARE non-prop → old filter counted 3 non-prop
+// markets → nonProp.length !== 1 → null → dead PM price feed the whole match. The moneyline is the
+// ONLY " vs " title AND "completed" is now a prop keyword, so it must resolve cleanly.
+test("tennisMoneyline: resolves through 'Completed Match — Yes/No' side markets (Travaglia–Navone)", () => {
+  const db = openDb(":memory:");
+  const mid = seedUchida(db, [
+    ["Båstad: Stefano Travaglia vs Mariano Navone", 43.5], // ← the moneyline
+    ["Båstad: Stefano Travaglia vs Mariano Navone Total Sets: Under 2.5", 60],
+    ["Completed Match — Yes", 88],
+    ["Completed Match — No", 12],
+  ]);
+  const ml = tennisMoneyline(db, mid, { p1: "Stefano Travaglia", p2: "Mariano Navone" });
+  assert.ok(ml, "resolved despite the two Completed-Match side markets");
+  assert.equal(ml!.label, "Båstad: Stefano Travaglia vs Mariano Navone", "the bare moneyline, not a Completed-Match line");
+  assert.equal(ml!.p1Cents, 43.5, "P(Travaglia) = stored first-outcome price");
+});
+
 // A real API-Tennis livescore row shape (from the live probe).
 const apiRow = (over: any = {}) => ({
   event_key: "E1", event_first_player: "N. Arseneault", event_second_player: "A. Martin",

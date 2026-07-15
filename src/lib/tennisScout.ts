@@ -153,7 +153,7 @@ export function trimRaw(raw: any): string | null {
 // Prop-market keywords. A tennis MONEYLINE is the ONLY market carrying NONE of these; every prop
 // (Match/Set totals O/U, handicaps, Set-N winners) does. Do NOT surname-match — every tennis label
 // is "Tournament: A vs B <suffix>" and contains BOTH surnames (BACKLOG: tennis price layer).
-const TENNIS_PROP_RE = /\b(over|under|handicap|winner|games?|odd|even|tie\s*break|total\s*sets?|set\s*\d)\b|[+-]\s*\d/i;
+const TENNIS_PROP_RE = /\b(over|under|handicap|winner|games?|odd|even|tie\s*break|total\s*sets?|set\s*\d|completed)\b|[+-]\s*\d/i;
 const nameToks = (s: string) => normName(s).replace(/\./g, " ").split(/\s+/).filter((t) => t.length > 1);
 const surnamesOverlap = (a: string, b: string) => { const A = new Set(nameToks(a)); return nameToks(b).some((t) => A.has(t)); };
 
@@ -166,7 +166,10 @@ export interface TennisMoneyline { p1Cents: number; p2Cents: number; label: stri
  * closest prop (that garbage-in bug is exactly what this replaces). Same discipline as player mapping.
  */
 export function tennisMoneyline(db: Database, matchId: string, players: { p1: string; p2: string }): TennisMoneyline | null {
-  const nonProp = R.latestMarkets(db, matchId).filter((m) => m.label && !TENNIS_PROP_RE.test(m.label));
+  // A moneyline is structurally "Tournament: A vs B". Require the " vs " title BEFORE counting, so
+  // stray non-prop markets that carry no prop keyword yet aren't head-to-head titles ("Completed
+  // Match — Yes/No", "Will the match finish?") can't inflate the count and force an honest-skip null.
+  const nonProp = R.latestMarkets(db, matchId).filter((m) => m.label && !TENNIS_PROP_RE.test(m.label) && /\bvs\.?\s/i.test(m.label));
   if (nonProp.length !== 1) return null; // 0 = no moneyline listed; >1 = ambiguous → skip loudly (caller logs)
   const mk = nonProp[0];
   const pFirst = mk.price; // stored = P(first-named player = gamma outcomes[0])
