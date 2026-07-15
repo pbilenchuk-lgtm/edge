@@ -161,14 +161,15 @@ export function initSchema(db: Database): void {
   // live-match snapshots (recent) are never touched. Guarded — tables may not exist on a fresh DB.
   try {
     const cutoff = new Date(Date.now() - SNAPSHOT_RETENTION_DAYS * 86_400_000).toISOString();
+    // BOUNDED (≤N rows/table/boot). getDb() runs initSchema on its FIRST call — and /api/health (the
+    // Render health check) calls getDb() — so this MUST stay cheap. An UNBOUNDED delete over an
+    // OOM-bloated snapshots table hung the health response for minutes and failed Render's port scan
+    // (the whole "no open HTTP ports" saga). The tick's prune + row-caps do the full cleanup OFF the
+    // boot critical path; this only relieves a full disk cheaply. rowid-subquery LIMIT avoids needing
+    // SQLITE_ENABLE_UPDATE_DELETE_LIMIT.
     for (const t of ["provider_snapshots", "tennis_snapshots"]) {
-      try { db.exec(`DELETE FROM ${t} WHERE batch_at < '${cutoff}'`); } catch { /* table absent on a fresh DB */ }
+      try { db.exec(`DELETE FROM ${t} WHERE rowid IN (SELECT rowid FROM ${t} WHERE batch_at < '${cutoff}' LIMIT 4000)`); } catch { /* table absent on a fresh DB */ }
     }
-    // Row-cap backstop: a burst (catch-up storm) can write far more than time-retention keeps within
-    // the window — that once bloated tennis_snapshots to 1.2 GB (big raw blobs) and starved boot.
-    // Drop the oldest beyond the cap. tennis_map_log is pure logging → keep a small tail.
-    try { db.exec(`DELETE FROM tennis_snapshots WHERE batch_at < (SELECT MIN(batch_at) FROM (SELECT batch_at FROM tennis_snapshots ORDER BY batch_at DESC LIMIT 20000))`); } catch { /* absent / under cap */ }
-    try { db.exec(`DELETE FROM tennis_map_log WHERE created_at < (SELECT MIN(created_at) FROM (SELECT created_at FROM tennis_map_log ORDER BY created_at DESC LIMIT 3000))`); } catch { /* absent / under cap */ }
   } catch { /* best-effort recovery */ }
   const sql = readFileSync(join(here, "schema.sql"), "utf8");
   db.exec(sql);
