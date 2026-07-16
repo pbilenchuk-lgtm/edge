@@ -67,6 +67,13 @@ const PMV_BUDGET = (() => { const n = Number(process.env.TENNIS_PAPER_BUDGET_USD
 // Evaluated at call time so it can be flipped without a restart (and set per-test).
 export const pmvFlagOnly = (): boolean => process.env.TENNIS_PMV_FLAG_ONLY !== "false";
 const VOID_FAMILIES = new Set<PropFamily>(["total_sets", "set_handicap"]);
+// B7 — a prop that VOIDS (refunds) if the match doesn't complete (retire/cancel). This is the SINGLE
+// source shared by the theo void-haircut (theoForProp) AND settlement (MATCH_SCOPE_VOID); the two
+// having drifted apart WAS the bug — a match-scope Total Games voids on retire in settlement, but the
+// theo priced it as if it always resolved (no haircut) → a systematic phantom edge on match totals.
+// Note it is a SUPERSET of VOID_FAMILIES: those families are always match-completion-scoped, and a
+// Total Games prop is too ONLY when its scope is the whole match (a set-scoped total resolves on its set).
+const isMatchScopeVoid = (p: ParsedProp): boolean => VOID_FAMILIES.has(p.family) || (p.family === "total_games" && p.scope === "match");
 const PMV_ACTED = "tennis_pmv_acted:"; // per-match idempotency (pre-match scan runs once)
 
 /**
@@ -147,7 +154,9 @@ export function parseProp(label: string): ParsedProp | null {
  *  families (set_winner, set_handicap); when it's needed but null the prop can't be priced → return
  *  null. Order-symmetric families (total_sets / total_games) ignore it. */
 export function theoForProp(p: ParsedProp, theo: TennisTheo, firstIsP1: boolean | null): number | null {
-  const voidAdj = (x: number) => VOID_FAMILIES.has(p.family) ? PMV_COMPLETE_PROB * x + (1 - PMV_COMPLETE_PROB) * 0.5 : x;
+  // B7: haircut toward a void (refund ≈ 0.5) by the retire probability for EVERY prop settlement would
+  // void — including a match-scope Total Games (was omitted → theo overvalued match totals vs settlement).
+  const voidAdj = (x: number) => isMatchScopeVoid(p) ? PMV_COMPLETE_PROB * x + (1 - PMV_COMPLETE_PROB) * 0.5 : x;
   const a20 = theo.dist.sets.a20, b20 = theo.dist.sets.b20; // P(scout p1 / p2 wins 2-0)
   let base: number | null = null;
   if (p.family === "total_sets") base = p.side === "under" ? theo.dist.pTwoSets : theo.totalSetsOver25;
@@ -248,7 +257,9 @@ const setCompleted = (s: { p1: number; p2: number } | undefined): boolean => !!s
 
 // A completed set N resolves its own props even after a later retire (Gate 0.2). These families need
 // only their UNIT to complete; Total Sets / Set Handicap / match-total-games need the whole MATCH.
-const MATCH_SCOPE_VOID = (p: ParsedProp) => p.family === "total_sets" || p.family === "set_handicap" || (p.family === "total_games" && p.scope === "match");
+// SAME predicate the theo void-haircut uses (isMatchScopeVoid) — one source so settlement and pricing
+// can never disagree on what voids (the B7 asymmetry).
+const MATCH_SCOPE_VOID = isMatchScopeVoid;
 
 /**
  * Resolve a PMV prop bet from the final match detail per the Gate-0.2 clauses. Returns true (won),

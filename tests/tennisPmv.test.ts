@@ -177,6 +177,20 @@ test("prop settle: a completed match resolves every family", () => {
   assert.equal(resolveTennisProp(Q + "Set 1 Over 8.5", fsFull, opt), true, "set 1 had 10 games");
 });
 
+test("B7: theoForProp haircuts a MATCH-scope total_games for the retire-void (settlement voids it); a SET total does NOT", () => {
+  const theo = tennisTheo(0.65, BASE_HOLD.wta);
+  const matchProp = parseProp("WTA: Kawa vs Waltert Match Over 21.5")!; // total_games, scope=match → voidable on retire
+  const setProp = parseProp("WTA: Kawa vs Waltert Set 1 Over 8.5")!;    // total_games, scope=set   → resolves on its own set
+  assert.equal(matchProp.family, "total_games"); assert.equal(matchProp.scope, "match");
+  assert.equal(setProp.scope, "set");
+  const rawMatchOver = theo.matchGamesOver(21.5), rawSetOver = theo.setGamesOver(8.5);
+  const matchTheo = theoForProp(matchProp, theo, null)!, setTheo = theoForProp(setProp, theo, null)!;
+  // Match total: pulled TOWARD 0.5 by the void-haircut (same side of 0.5, strictly closer to it).
+  assert.ok((matchTheo - 0.5) * (rawMatchOver - 0.5) > 0 && Math.abs(matchTheo - 0.5) < Math.abs(rawMatchOver - 0.5), "match total haircut toward the void");
+  // Set total: unchanged (a set resolves even after a later retire — settlement doesn't void it).
+  assert.ok(Math.abs(setTheo - rawSetOver) < 1e-9, "set total NOT haircut — matches settlement scope");
+});
+
 test("orientation (D): theoForProp orients set_winner AND set_handicap by firstIsP1 (single source)", () => {
   const theo = tennisTheo(0.65, BASE_HOLD.wta); // scout p1 is the favourite
   const hcap = parseProp("Set Handicap: Kawa (-1.5) vs Waltert (+1.5)")!; // handicapOnFirst=true (label-first carries -1.5)
