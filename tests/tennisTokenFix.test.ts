@@ -142,6 +142,23 @@ test("tennisExitTick: favourite = FIRST → sells outcomes[0] token at its bid (
   assert.ok((R.getBet(db, "first")!.closing_price ?? 0) >= 70, "sold the favourite's own outcomes[0] token at 72¢");
 });
 
+// ── B8. Exit slippage cap: a TAKE into a dust bid is NOT realized (held + retry), protective still leaves ─
+test("tennisExitTick: a TAKE into a dust bid (slip > cap, within orientation tol) is HELD + retried, not realized", async () => {
+  const db = openDb(":memory:");
+  const mid = seedMatch(db, { p1: "Marco Favvi", p2: "Diego Doggi", p1price: 60, token1: "t-fav", token2: "t-dog" });
+  R.insertBet(db, { id: "dust", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Marco Favvi", status: "open", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", favSide: "first", firstIsP1: true, exitPlan: { take_price: { at_cents: 59 } } }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+  // Favourite (first) recovered to 72¢ on the scout → take fires. But the live bid is DUST at 57¢:
+  // slip = 72−57 ≈ 15¢ > the 10¢ cap, yet < the 28¢ orientation tolerance (so it's dust, not a flip).
+  snap(db, mid, { at: "2026-07-14T10:10:00Z", p1: "Marco Favvi", p2: "Diego Doggi", g1: 4, g2: 2, server: "second", p1c: 72, setNum: 2 });
+  const fetchImpl = tokenBookAndLLM({ "t-fav": { bids: [[0.57, 3000]], asks: [[0.59, 3000]] } }, "x");
+  const n = await tennisExitTick(db, { now: () => "2026-07-14T10:10:05Z", env: { POLYMARKET_ENABLED: "true" }, fetchImpl });
+  assert.equal(n, 0, "the take is NOT realized into a dust bid");
+  assert.equal(R.getBet(db, "dust")!.status, "open", "position held for a real bid");
+  const skips = R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip");
+  assert.ok(skips.some((l) => /dust-бид|тейк отложен/.test(l.text ?? "")), "slippage skip logged");
+  assert.ok(!skips.some((l) => /token_orientation_mismatch/.test(l.text ?? "")), "NOT mislabelled as an orientation flip (15¢ < 28¢ tol)");
+});
+
 // ── B3. Dust real book is CUT at entry even when Gamma declared it healthy (Mrva $44 class) ────────
 test("tennisTradingTick: a DUST real book (Gamma-declared healthy) is skipped thin_real_book, not clamped", async () => {
   const db = openDb(":memory:");

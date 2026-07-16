@@ -342,6 +342,14 @@ interface TennisSellQuote { exitCents: number; fromBook: boolean; filledFrac: nu
 // This single check would have caught Mrva–Roncadelli on day one. Env-tunable, ~28¢ default.
 const TOKEN_ORIENTATION_TOLERANCE_C = (() => { const n = Number(process.env.TOKEN_ORIENTATION_TOLERANCE_C); return Number.isFinite(n) && n > 0 ? n : 28; })();
 
+// B8 exit slippage cap for a TAKE (Örgryte / dust-bid guard — a DIFFERENT mechanism from orientation).
+// A take is OPTIONAL: never realize it into a bid that has slipped more than this below the (scout) price
+// that triggered it — a dust/thin bid fills at a false-low price and books a phantom "profit" that never
+// existed. Skip + retry; the recovery window is minutes and the take re-fires once a real bid returns.
+// PROTECTIVE exits are NOT capped — a broken thesis must leave (thin bid → partial + attention). A normal
+// bid/ask spread is a few cents (well under the cap); only a dust bid trips it. Env-tunable.
+const TENNIS_EXIT_MAX_SLIP_C = (() => { const n = Number(process.env.TENNIS_EXIT_MAX_SLIP_CENTS); return Number.isFinite(n) && n > 0 ? n : 10; })();
+
 /** The mismatch (token's top-of-book cents + gap) when the book is PRESENT and diverges beyond
  *  tolerance from the side we intend to transact — i.e. we're about to trade the wrong outcome.
  *  null when coherent, or when there's no live top-of-book to compare (left to the fill engine's own
@@ -401,6 +409,11 @@ async function execTennisExit(
   }
   if (o.kind === "take") {
     if (sell.stale) { logSkip(`тейк отложен: нет живого бида (${sell.note || "стакан на продажу пуст"}) — позиция держится, повтор на след. тике (${trigger})`); return 0; }
+    // B8 dust-bid guard: the take fired on the SCOUT price (midCents). If the live bid VWAP has slipped
+    // far below it, the bid is dust — realizing here books a false-low take. Hold + retry (a take is
+    // optional; the recovery window is minutes). Distinct from stale (no bid) and orientation (wrong token).
+    const slipC = midCents - sell.exitCents;
+    if (slipC > TENNIS_EXIT_MAX_SLIP_C) { logSkip(`тейк отложен: бид даёт ${sell.exitCents}¢, на ${Math.round(slipC)}¢ ниже цены триггера ${Math.round(midCents)}¢ (dust-бид > ${TENNIS_EXIT_MAX_SLIP_C}¢) — держим, повтор на след. тике (${trigger})`); return 0; }
     const eff = Math.min(o.fraction ?? 1, sell.filledFrac);
     if (eff >= 0.999) return closeTennisBetEarly(db, b.id, sell.exitCents, "take_price", reason, deps, now, extra) != null ? 1 : 0;
     return closeTennisBetPortion(db, b.id, eff, sell.exitCents, reason, deps, now) != null ? 1 : 0;
