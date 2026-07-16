@@ -9,6 +9,7 @@ import type { Database } from "../db.js";
 import * as RR from "../realRepo.js";
 import { effectiveTradingMode, loadSafetyCaps, resolveSafetyCaps, type SafetyCaps, type TradingMode } from "./safety.js";
 import { realVsPaperReport, type RealVsPaperReport } from "./realVsPaper.js";
+import { realBankUsd } from "./whitelist.js";
 
 export interface RealOrderView {
   id: string; clientOrderId: string; decisionId: string; strategyId: string; profileId: string; category: string | null;
@@ -25,7 +26,10 @@ export interface RealView {
   operatorMode: TradingMode | null;  // the operator override ceiling (iteration-2 mode switch), or null
   paused: RR.RealAutoPause | null;
   orphan: RR.RealOrphanAlert | null;
-  bank: { realBalanceUsd: number; dryBalanceUsd: number; byKind: Record<string, number> };
+  // realBalanceUsd/dryBalanceUsd = ledger CASH sums (0 until a fill moves money). dryBankUsd is the
+  // configured virtual bank (env REAL_BANK_USD — the "budget" the owner sets); dryOpenUsd is what's
+  // tied up in open dry positions/working orders; dryFreeUsd = bank − open. The UI leads with the bank.
+  bank: { realBalanceUsd: number; dryBalanceUsd: number; dryBankUsd: number; dryOpenUsd: number; dryFreeUsd: number; byKind: Record<string, number> };
   positions: RR.RealPositionRow[];
   orders: RealOrderView[];
   whitelist: RR.RealWhitelistRow[];
@@ -68,7 +72,11 @@ export function realView(db: Database, env: Record<string, string | undefined> =
     operatorMode,
     paused: RR.getRealAutoPause(db),
     orphan: RR.getRealOrphanAlert(db),
-    bank: { realBalanceUsd: RR.realLedgerBalance(db, true), dryBalanceUsd: RR.realDryBalanceUsd(db), byKind: RR.realLedgerByKind(db) },
+    bank: (() => {
+      const dryBankUsd = realBankUsd(env);
+      const dryOpenUsd = Math.round(RR.openDryExposureUsd(db) * 100) / 100;
+      return { realBalanceUsd: RR.realLedgerBalance(db, true), dryBalanceUsd: RR.realDryBalanceUsd(db), dryBankUsd, dryOpenUsd, dryFreeUsd: Math.max(0, Math.round((dryBankUsd - dryOpenUsd) * 100) / 100), byKind: RR.realLedgerByKind(db) };
+    })(),
     positions: RR.listRealPositions(db),
     orders,
     whitelist: RR.listWhitelist(db),

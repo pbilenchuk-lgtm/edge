@@ -2125,6 +2125,28 @@ function PortfolioScreen({ open, closed, onGoMatches }: any) {
 // Kept in sync with ON_CONFIRM_PHRASE in realControl.ts (server validates; a mismatch just gets
 // rejected with the expected phrase echoed back). Client can't import the server module (node:sqlite).
 const ON_CONFIRM_PHRASE = "ВКЛЮЧИТЬ РЕАЛ";
+// ── Real-contour design tokens (shared by RealControls + RealScreen) ──────────────
+const RC_GREEN = "#5fd08a", RC_RED = "#ff6b6b", RC_AMBER = "#e8a838", RC_BLUE = "#7fb4e8", RC_FAINT = "#6b7280";
+const MODE_META: Record<string, { c: string; bg: string; label: string }> = {
+  on:         { c: RC_RED,   bg: "#ff6b6b1f", label: "реальные деньги двигаются" },
+  exits_only: { c: RC_AMBER, bg: "#e8a8381f", label: "только выходы — новые входы закрыты" },
+  dry_run:    { c: RC_BLUE,  bg: "#7fb4e81f", label: "симуляция — реальные деньги не двигаются" },
+  off:        { c: MUTE,     bg: "#8b95a51f", label: "выключено" },
+};
+const RS = {
+  card: { background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, padding: 18, marginBottom: 14 } as React.CSSProperties,
+  h: { fontSize: 11, fontWeight: 700, color: MUTE, textTransform: "uppercase", letterSpacing: 0.7 } as React.CSSProperties,
+  label: { fontSize: 11, color: MUTE, display: "block" } as React.CSSProperties,
+  input: { background: INK, border: `1px solid ${LINE}`, borderRadius: 8, color: TEXT, padding: "8px 10px", fontSize: 13, width: "100%" } as React.CSSProperties,
+  th: { textAlign: "left", fontSize: 10, color: RC_FAINT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, padding: "7px 10px", borderBottom: `1px solid ${LINE}`, whiteSpace: "nowrap" } as React.CSSProperties,
+  td: { fontSize: 12, color: TEXT, padding: "9px 10px", borderBottom: `1px solid ${LINE}77` } as React.CSSProperties,
+  tag: { fontSize: 11, color: MUTE, background: INK, border: `1px solid ${LINE}`, padding: "3px 8px", borderRadius: 6 } as React.CSSProperties,
+};
+const modePill = (mode: string, big = false): React.CSSProperties => {
+  const m = MODE_META[mode] ?? MODE_META.off;
+  return { display: "inline-flex", alignItems: "center", gap: 6, background: m.bg, color: m.c, border: `1px solid ${m.c}55`, borderRadius: 999, padding: big ? "5px 14px" : "3px 10px", fontSize: big ? 13 : 11, fontWeight: 700 };
+};
+
 function RealControls({ data, onRefresh }: { data: any; onRefresh: () => void }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -2140,12 +2162,9 @@ function RealControls({ data, onRefresh }: { data: any; onRefresh: () => void })
     maxDailyLossUsd: String(eff.maxDailyLossUsd ?? ""), maxOrdersPerHour: String(eff.maxOrdersPerHour ?? ""),
   });
 
-  const cardS: React.CSSProperties = { background: "#ffffff06", border: "1px solid #ffffff12", borderRadius: 8, padding: 14, marginBottom: 14 };
-  const hS: React.CSSProperties = { fontSize: 12, fontWeight: 700, color: "#bbb", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 };
-  const inS: React.CSSProperties = { background: "#00000030", border: "1px solid #ffffff18", borderRadius: 5, color: "#eee", padding: "5px 8px", fontSize: 12, width: "100%" };
   const btn = (label: string, onClick: () => void, tone: "danger" | "warn" | "ok" | "plain" = "plain", extra: React.CSSProperties = {}) => {
-    const c = tone === "danger" ? { bg: "#ff6b6b22", fg: "#ff6b6b", bd: "#ff6b6b55" } : tone === "warn" ? { bg: "#e8a83822", fg: "#e8a838", bd: "#e8a83855" } : tone === "ok" ? { bg: "#5fd08a22", fg: "#5fd08a", bd: "#5fd08a55" } : { bg: "#ffffff10", fg: "#ddd", bd: "#ffffff18" };
-    return <button disabled={busy} onClick={onClick} style={{ padding: "6px 12px", fontSize: 12, background: c.bg, color: c.fg, border: `1px solid ${c.bd}`, borderRadius: 6, cursor: busy ? "wait" : "pointer", opacity: busy ? 0.5 : 1, ...extra }}>{label}</button>;
+    const c = tone === "danger" ? { bg: "#ff6b6b22", fg: RC_RED, bd: "#ff6b6b55" } : tone === "warn" ? { bg: "#e8a83822", fg: RC_AMBER, bd: "#e8a83855" } : tone === "ok" ? { bg: "#5fd08a22", fg: RC_GREEN, bd: "#5fd08a55" } : { bg: INK, fg: TEXT, bd: LINE };
+    return <button disabled={busy} onClick={onClick} style={{ padding: "8px 14px", fontSize: 12, fontWeight: 600, background: c.bg, color: c.fg, border: `1px solid ${c.bd}`, borderRadius: 8, cursor: busy ? "wait" : "pointer", opacity: busy ? 0.5 : 1, ...extra }}>{label}</button>;
   };
 
   const post = async (payload: any): Promise<any> => {
@@ -2187,74 +2206,98 @@ function RealControls({ data, onRefresh }: { data: any; onRefresh: () => void })
   const MODES = ["off", "exits_only", "dry_run", "on"];
   const op = data.operatorMode as string | null;
   const envM = data.envMode as string;
+  const capsOverridden = data.caps?.override && Object.keys(data.caps.override).length;
   return (
-    <div style={{ ...cardS, borderColor: "#ffffff20" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-        <div style={hS}>Управление (owner)</div>
-        <input type="password" value={token} onChange={(e) => saveToken(e.target.value)} placeholder="control-токен (= REAL_CONTROL_TOKEN)" title="Должен совпадать с REAL_CONTROL_TOKEN в env сервера. Хранится в этом браузере." style={{ ...inS, width: 260, marginLeft: 12 }} />
-        {msg && <div style={{ fontSize: 11, color: msg.ok ? "#5fd08a" : "#ff6b6b", marginLeft: "auto" }}>{msg.ok ? "✓ " : "✗ "}{msg.text}</div>}
+    <div style={RS.card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <div style={RS.h}>Управление · owner</div>
+        {msg && <div style={{ marginLeft: "auto", fontSize: 12, fontWeight: 600, color: msg.ok ? RC_GREEN : RC_RED }}>{msg.ok ? "✓ " : "✗ "}{msg.text}</div>}
+      </div>
+
+      {/* control token */}
+      <div style={{ marginBottom: 18 }}>
+        <label style={{ ...RS.label, marginBottom: 5 }}>Control-токен <span style={{ color: RC_FAINT }}>— должен совпадать с REAL_CONTROL_TOKEN на сервере · хранится только в этом браузере</span></label>
+        <input type="password" value={token} onChange={(e) => saveToken(e.target.value)} placeholder="вставь токен, иначе кнопки управления не сработают" style={{ ...RS.input, maxWidth: 440 }} />
       </div>
 
       {/* STOP + режим */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
-        <span title="мгновенно — без подтверждения">{btn("■ STOP", doStop, "danger", { fontWeight: 700, fontSize: 13 })}</span>
-        <div style={{ width: 1, height: 22, background: "#ffffff18" }} />
-        <span style={{ fontSize: 11, color: "#888" }}>режим оператора:</span>
-        {MODES.map((m) => {
-          const active = (op ?? "—") === m;
-          const title = m === "on" ? "РЕАЛЬНЫЕ деньги — требует ввода фразы (не клик)" : m === "off" ? "мгновенно" : "повышение — одно подтверждение";
-          return <button key={m} title={title} disabled={busy} onClick={() => setMode(m)} style={{ padding: "5px 10px", fontSize: 11, borderRadius: 5, cursor: busy ? "wait" : "pointer", background: active ? (m === "on" ? "#ff6b6b33" : m === "off" ? "#ffffff20" : "#7fb4e833") : "transparent", color: active ? (m === "on" ? "#ff6b6b" : "#eee") : "#888", border: `1px solid ${active ? "#ffffff30" : "#ffffff12"}`, fontWeight: active ? 700 : 400 }}>{m === "on" ? "🔒 on" : m}</button>;
-        })}
-        <span style={{ fontSize: 10, color: "#666" }}>env={envM} (потолок) · действует <b style={{ color: "#bbb" }}>{data.mode}</b>{op == null && " · оператор не задан"}</span>
+      <div style={{ marginBottom: 18 }}>
+        <label style={{ ...RS.label, marginBottom: 7 }}>Режим оператора</label>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          {btn("■ STOP", doStop, "danger", { fontWeight: 800, fontSize: 13, padding: "9px 18px" })}
+          <div style={{ width: 1, alignSelf: "stretch", background: LINE }} />
+          <div style={{ display: "inline-flex", background: INK, border: `1px solid ${LINE}`, borderRadius: 10, padding: 3, gap: 3 }}>
+            {MODES.map((m) => {
+              const active = (op ?? null) === m;
+              const meta = MODE_META[m];
+              const title = m === "on" ? "РЕАЛЬНЫЕ деньги — требует ввода фразы (не клик)" : m === "off" ? "мгновенно" : "повышение — одно подтверждение";
+              return <button key={m} title={title} disabled={busy} onClick={() => setMode(m)} style={{ padding: "7px 14px", fontSize: 12, fontWeight: active ? 700 : 500, borderRadius: 8, cursor: busy ? "wait" : "pointer", background: active ? meta.bg : "transparent", color: active ? meta.c : MUTE, border: `1px solid ${active ? meta.c + "55" : "transparent"}` }}>{m === "on" ? "🔒 on" : m}</button>;
+            })}
+          </div>
+        </div>
+        <div style={{ ...RS.label, marginTop: 9, color: RC_FAINT }}>
+          env-потолок <b style={{ color: MUTE }}>{envM}</b> · сейчас действует <b style={{ color: MODE_META[data.mode]?.c ?? MUTE }}>{data.mode}</b>{op == null && " · override оператора не задан"}
+        </div>
       </div>
 
-      {data.paused && <div style={{ marginBottom: 14 }}>{btn("⏸ снять авто-паузу", clearPause, "warn")} <span style={{ fontSize: 10, color: "#888", marginLeft: 8 }}>{data.paused.reason}</span></div>}
+      {data.paused && <div style={{ marginBottom: 18, display: "flex", alignItems: "center", gap: 10 }}>{btn("⏸ снять авто-паузу", clearPause, "warn")}<span style={{ ...RS.label, color: RC_FAINT }}>{data.paused.reason}</span></div>}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-        {/* Лимиты (4 кэпа) */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 22 }}>
+        {/* Лимиты */}
         <div>
-          <div style={{ fontSize: 11, color: "#999", marginBottom: 6 }}>Лимиты (override; env — пол): {data.caps?.override && Object.keys(data.caps.override).length ? <span style={{ color: "#e8a838" }}>переопределены {Object.keys(data.caps.override).join(", ")}</span> : <span style={{ color: "#666" }}>из env</span>}</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            {[["maxOrderUsd", "ордер $"], ["maxExposureUsd", "экспозиция $"], ["maxDailyLossUsd", "дневной убыток $"], ["maxOrdersPerHour", "ордеров/час"]].map(([k, lbl]) => (
-              <label key={k} style={{ fontSize: 10, color: "#888" }}>{lbl}<input style={inS} type="number" value={caps[k] ?? ""} onChange={(e) => setCaps((c) => ({ ...c, [k]: e.target.value }))} /></label>
+          <label style={{ ...RS.label, marginBottom: 9 }}>Лимиты безопасности <span style={{ color: RC_FAINT }}>· env — жёсткий потолок, override только ужесточает</span></label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            {[["maxOrderUsd", "макс. ордер", "$"], ["maxExposureUsd", "макс. экспозиция", "$"], ["maxDailyLossUsd", "дневной убыток", "$"], ["maxOrdersPerHour", "ордеров / час", ""]].map(([k, lbl, unit]) => (
+              <label key={k} style={RS.label}>{lbl}
+                <div style={{ position: "relative", marginTop: 5 }}>
+                  {unit && <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: RC_FAINT, fontSize: 13 }}>{unit}</span>}
+                  <input style={{ ...RS.input, paddingLeft: unit ? 22 : 10 }} type="number" value={caps[k] ?? ""} onChange={(e) => setCaps((c) => ({ ...c, [k]: e.target.value }))} />
+                </div>
+              </label>
             ))}
           </div>
-          <div style={{ marginTop: 8 }}>{btn("сохранить лимиты", saveCaps, "ok")}</div>
+          <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10 }}>
+            {btn("Сохранить лимиты", saveCaps, "ok")}
+            <span style={{ ...RS.label, color: capsOverridden ? RC_AMBER : RC_FAINT }}>{capsOverridden ? `override: ${Object.keys(data.caps.override).join(", ")}` : "все значения из env"}</span>
+          </div>
         </div>
 
-        {/* Whitelist-редактор */}
+        {/* Whitelist */}
         <div>
-          <div style={{ fontSize: 11, color: "#999", marginBottom: 6 }}>Whitelist (v{data.whitelistVersion}) — {data.whitelist.length} строк</div>
-          <div style={{ maxHeight: 96, overflowY: "auto", marginBottom: 8 }}>
+          <label style={{ ...RS.label, marginBottom: 9 }}>Whitelist <span style={{ color: RC_FAINT }}>· v{data.whitelistVersion} · только эти стратегии могут торговать реал</span></label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5, maxHeight: 132, overflowY: "auto", marginBottom: 10 }}>
             {data.whitelist.map((w: any) => (
-              <div key={w.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0", fontSize: 11, color: "#ccc" }}>
-                <span style={{ width: 8, height: 8, borderRadius: 4, background: w.enabled ? "#5fd08a" : "#666", flexShrink: 0 }} />
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.strategy_id} <span style={{ color: "#666" }}>${w.max_order_usd}</span></span>
-                <button disabled={busy} onClick={() => post({ action: "whitelist_toggle", id: w.id, enabled: !w.enabled })} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 4, cursor: "pointer", background: "transparent", color: w.enabled ? "#e8a838" : "#5fd08a", border: `1px solid ${w.enabled ? "#e8a83855" : "#5fd08a55"}` }}>{w.enabled ? "выкл" : "вкл"}</button>
+              <div key={w.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 10px", background: INK, border: `1px solid ${LINE}`, borderRadius: 8, fontSize: 12, color: TEXT }}>
+                <span style={{ width: 8, height: 8, borderRadius: 4, background: w.enabled ? RC_GREEN : RC_FAINT, flexShrink: 0 }} />
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.strategy_id} <span style={{ color: RC_FAINT }}>· ${w.max_order_usd}/ордер</span></span>
+                <button disabled={busy} onClick={() => post({ action: "whitelist_toggle", id: w.id, enabled: !w.enabled })} style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 6, cursor: "pointer", background: "transparent", color: w.enabled ? RC_AMBER : RC_GREEN, border: `1px solid ${w.enabled ? "#e8a83855" : "#5fd08a55"}` }}>{w.enabled ? "выключить" : "включить"}</button>
               </div>
             ))}
-            {!data.whitelist.length && <div style={{ fontSize: 10, color: "#666" }}>пусто — реал ничего не торгует</div>}
+            {!data.whitelist.length && <div style={{ ...RS.label, color: RC_FAINT, padding: "8px 0" }}>пусто — реал не торгует ничего</div>}
           </div>
-          <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap" }}>
-            <label style={{ fontSize: 10, color: "#888", flex: 1 }}>стратегия<input style={inS} value={wl.strategyId} onChange={(e) => setWl((s) => ({ ...s, strategyId: e.target.value }))} /></label>
-            <label style={{ fontSize: 10, color: "#888", flex: 1 }}>категории (через запятую)<input style={inS} value={wl.categories} onChange={(e) => setWl((s) => ({ ...s, categories: e.target.value }))} /></label>
-            <label style={{ fontSize: 10, color: "#888", width: 70 }}>$/ордер<input style={inS} type="number" value={wl.maxOrderUsd} onChange={(e) => setWl((s) => ({ ...s, maxOrderUsd: e.target.value }))} /></label>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <label style={{ ...RS.label, flex: 2, minWidth: 110 }}>стратегия<input style={{ ...RS.input, marginTop: 4 }} value={wl.strategyId} onChange={(e) => setWl((s) => ({ ...s, strategyId: e.target.value }))} /></label>
+            <label style={{ ...RS.label, flex: 2, minWidth: 110 }}>категории (через запятую)<input style={{ ...RS.input, marginTop: 4 }} value={wl.categories} onChange={(e) => setWl((s) => ({ ...s, categories: e.target.value }))} /></label>
+            <label style={{ ...RS.label, width: 78 }}>$/ордер<input style={{ ...RS.input, marginTop: 4 }} type="number" value={wl.maxOrderUsd} onChange={(e) => setWl((s) => ({ ...s, maxOrderUsd: e.target.value }))} /></label>
             {btn("+ строка", addWl, "plain")}
           </div>
-          <div style={{ fontSize: 9, color: "#666", marginTop: 4 }}>добавляется <b>выключенной</b> — включи явно после проверки</div>
+          <div style={{ ...RS.label, color: RC_FAINT, marginTop: 6 }}>новая строка добавляется <b style={{ color: MUTE }}>выключенной</b> — включи явно после проверки</div>
         </div>
       </div>
 
-      {/* Аудит: кто/когда/что */}
-      <div style={{ marginTop: 14 }}>
-        <div style={{ fontSize: 11, color: "#999", marginBottom: 6 }}>Журнал управления (кто/когда/что)</div>
-        <div style={{ maxHeight: 120, overflowY: "auto", fontSize: 10, fontFamily: "monospace" }}>
+      {/* Журнал */}
+      <div style={{ marginTop: 18 }}>
+        <label style={{ ...RS.label, marginBottom: 9 }}>Журнал управления <span style={{ color: RC_FAINT }}>· кто / когда / что</span></label>
+        <div style={{ maxHeight: 132, overflowY: "auto", background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "6px 10px" }}>
           {(data.controlLog ?? []).map((e: any, i: number) => (
-            <div key={i} style={{ color: "#999", padding: "2px 0", borderBottom: "1px solid #ffffff06" }}>
-              <span style={{ color: "#666" }}>{(e.at || "").slice(0, 19).replace("T", " ")}</span> <span style={{ color: "#7fb4e8" }}>{e.action}</span> <span style={{ color: "#888" }}>{e.actor ?? "—"}</span> {e.detail && <span style={{ color: "#666" }}>{e.detail.length > 90 ? e.detail.slice(0, 90) + "…" : e.detail}</span>}
+            <div key={i} style={{ display: "flex", gap: 10, fontSize: 11, padding: "4px 0", borderBottom: i < ((data.controlLog?.length ?? 0) - 1) ? `1px solid ${LINE}55` : "none", fontFamily: "ui-monospace, monospace" }}>
+              <span style={{ color: RC_FAINT, flexShrink: 0 }}>{(e.at || "").slice(0, 19).replace("T", " ")}</span>
+              <span style={{ color: RC_BLUE, fontWeight: 600, flexShrink: 0 }}>{e.action}</span>
+              <span style={{ color: MUTE, flexShrink: 0 }}>{e.actor ?? "—"}</span>
+              {e.detail && <span style={{ color: RC_FAINT, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.detail.length > 100 ? e.detail.slice(0, 100) + "…" : e.detail}</span>}
             </div>
           ))}
-          {!(data.controlLog ?? []).length && <div style={{ color: "#666" }}>действий ещё не было</div>}
+          {!(data.controlLog ?? []).length && <div style={{ ...RS.label, color: RC_FAINT, padding: "4px 0" }}>действий ещё не было</div>}
         </div>
       </div>
     </div>
@@ -2262,92 +2305,131 @@ function RealControls({ data, onRefresh }: { data: any; onRefresh: () => void })
 }
 
 function RealScreen({ data, loading, onRefresh }: { data: any; loading: boolean; onRefresh: () => void }) {
-  const cardS: React.CSSProperties = { background: "#ffffff06", border: "1px solid #ffffff12", borderRadius: 8, padding: 14, marginBottom: 14 };
-  const hS: React.CSSProperties = { fontSize: 12, fontWeight: 700, color: "#bbb", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 };
-  const thS: React.CSSProperties = { textAlign: "left", fontSize: 10, color: "#888", fontWeight: 600, padding: "4px 8px", borderBottom: "1px solid #ffffff10" };
-  const tdS: React.CSSProperties = { fontSize: 11, color: "#ddd", padding: "4px 8px", borderBottom: "1px solid #ffffff08" };
-  const statusColor = (s: string) => s === "filled" ? "#5fd08a" : s === "partial" ? "#7fb4e8" : s === "expired" ? "#e8a838" : s === "rejected" ? "#ff6b6b" : "#999";
+  const statusColor = (s: string) => s === "filled" ? RC_GREEN : s === "partial" ? RC_BLUE : s === "expired" ? RC_AMBER : s === "rejected" ? RC_RED : MUTE;
   const cents = (n: number | null) => (n == null ? "—" : `${n}¢`);
-  if (!data) return <main style={S.main}><div style={{ padding: 40, textAlign: "center", color: "#888" }}>{loading ? "загрузка реал-контура…" : "нет данных"}</div></main>;
+  if (!data) return <main style={S.main}><div style={{ padding: 40, textAlign: "center", color: MUTE }}>{loading ? "загрузка реал-контура…" : "нет данных"}</div></main>;
   const r = data.report;
+  const b = data.bank;
+  const tdR: React.CSSProperties = { ...RS.td, textAlign: "right", fontVariantNumeric: "tabular-nums" };
+  const thR: React.CSSProperties = { ...RS.th, textAlign: "right" };
+  const openPositions = data.positions.filter((p: any) => Math.abs(p.size_shares) > 0.01);
+  const usedPct = b.dryBankUsd > 0 ? Math.min(100, (b.dryOpenUsd / b.dryBankUsd) * 100) : 0;
   return (
     <main style={S.main}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: "#e8e8e8" }}>Реальный контур</div>
-        <div style={{ fontSize: 11, color: "#888" }}>режим: <b style={{ color: data.mode === "on" ? "#ff6b6b" : "#7fb4e8" }}>{data.mode}</b>{data.mode !== data.envMode && <span style={{ color: "#e8a838" }}> (env={data.envMode}, действует авто-пауза)</span>}</div>
-        <button onClick={onRefresh} style={{ marginLeft: "auto", padding: "5px 12px", fontSize: 11, background: "#ffffff10", color: "#ddd", border: "1px solid #ffffff18", borderRadius: 6, cursor: "pointer" }}>{loading ? "…" : "↻ обновить"}</button>
+      {/* header */}
+      <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 4, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 20, fontWeight: 800, color: TEXT }}>Реальный контур</div>
+        <span style={modePill(data.mode, true)}>{data.mode}</span>
+        <button onClick={onRefresh} style={{ marginLeft: "auto", padding: "8px 14px", fontSize: 12, fontWeight: 600, background: INK, color: TEXT, border: `1px solid ${LINE}`, borderRadius: 8, cursor: "pointer" }}>{loading ? "…" : "↻ обновить"}</button>
       </div>
+      <div style={{ ...RS.label, color: RC_FAINT, marginBottom: 16 }}>{MODE_META[data.mode]?.label}{data.mode !== data.envMode && <span style={{ color: RC_AMBER }}> · env-потолок {data.envMode}, действует авто-пауза / override</span>}</div>
 
-      {data.paused && <div style={{ ...cardS, borderColor: "#e8a83855", background: "#e8a83812" }}><b style={{ color: "#e8a838" }}>⏸ АВТО-ПАУЗА (sticky):</b> <span style={{ color: "#ddd", fontSize: 12 }}>{data.paused.reason} · сброс — кнопкой ниже</span></div>}
-      {data.orphan && <div style={{ ...cardS, borderColor: "#ff6b6b55", background: "#ff6b6b12" }}><b style={{ color: "#ff6b6b" }}>⚠ ПОЗИЦИИ БЕЗ EXIT-УПРАВЛЕНИЯ:</b> <span style={{ color: "#ddd", fontSize: 12 }}>{data.orphan.message}</span></div>}
+      {/* alerts */}
+      {data.paused && <div style={{ ...RS.card, borderColor: "#e8a83866", background: "#e8a83814", display: "flex", gap: 10, alignItems: "center" }}><b style={{ color: RC_AMBER }}>⏸ АВТО-ПАУЗА</b><span style={{ fontSize: 12, color: TEXT }}>{data.paused.reason} · снять — в панели управления</span></div>}
+      {data.orphan && <div style={{ ...RS.card, borderColor: "#ff6b6b66", background: "#ff6b6b14", display: "flex", gap: 10, alignItems: "center" }}><b style={{ color: RC_RED }}>⚠ ПОЗИЦИИ БЕЗ EXIT-УПРАВЛЕНИЯ</b><span style={{ fontSize: 12, color: TEXT }}>{data.orphan.message}</span></div>}
 
       <RealControls data={data} onRefresh={onRefresh} />
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-        <div style={cardS}>
-          <div style={hS}>Банк / ledger</div>
-          <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
-            <div><div style={{ fontSize: 10, color: "#888" }}>РЕАЛЬНЫЙ баланс</div><div style={{ fontSize: 18, fontWeight: 700, color: data.bank.realBalanceUsd === 0 ? "#5fd08a" : "#ddd" }}>{fmtMoney(data.bank.realBalanceUsd)}</div><div style={{ fontSize: 9, color: "#666" }}>{data.bank.realBalanceUsd === 0 ? "пусто (dry-тег держит)" : ""}</div></div>
-            <div><div style={{ fontSize: 10, color: "#888" }}>DRY баланс</div><div style={{ fontSize: 18, fontWeight: 700, color: "#7fb4e8" }}>{fmtMoney(data.bank.dryBalanceUsd)}</div></div>
+      {/* bank + reconciliation */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 14 }}>
+        <div style={RS.card}>
+          <div style={{ ...RS.h, marginBottom: 14 }}>Банк</div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+            <div style={{ fontSize: 30, fontWeight: 800, color: RC_BLUE, letterSpacing: -0.5, fontVariantNumeric: "tabular-nums" }}>{fmtMoney(b.dryBankUsd)}</div>
+            <div style={RS.label}>виртуальный банк (dry)<br /><span style={{ color: RC_FAINT }}>из env REAL_BANK_USD</span></div>
           </div>
-          <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {Object.entries(data.bank.byKind || {}).map(([k, v]: any) => <span key={k} style={{ fontSize: 10, color: "#aaa", background: "#ffffff08", padding: "2px 7px", borderRadius: 4 }}>{k}: {fmtMoney(v)}</span>)}
+          <div style={{ marginTop: 14, height: 8, background: INK, borderRadius: 6, overflow: "hidden", border: `1px solid ${LINE}` }}>
+            <div style={{ width: `${usedPct}%`, height: "100%", background: RC_AMBER, transition: "width .3s" }} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 12, fontWeight: 600 }}>
+            <span style={{ color: RC_GREEN }}>свободно {fmtMoney(b.dryFreeUsd)}</span>
+            <span style={{ color: b.dryOpenUsd > 0 ? RC_AMBER : RC_FAINT }}>в игре {fmtMoney(b.dryOpenUsd)}</span>
+          </div>
+          <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${LINE}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+            <div>
+              <div style={RS.label}>Реальный ledger</div>
+              <div style={{ fontSize: 17, fontWeight: 700, color: b.realBalanceUsd === 0 ? RC_GREEN : TEXT, marginTop: 2 }}>{fmtMoney(b.realBalanceUsd)}</div>
+            </div>
+            <div style={{ ...RS.label, color: RC_FAINT, textAlign: "right", maxWidth: 190, lineHeight: 1.4 }}>реальные деньги не подключены — исполнитель придёт в Phase F</div>
+          </div>
+          {Object.keys(b.byKind || {}).length > 0 && <div style={{ marginTop: 12, display: "flex", gap: 6, flexWrap: "wrap" }}>{Object.entries(b.byKind).map(([k, v]: any) => <span key={k} style={RS.tag}>{k}: {fmtMoney(v)}</span>)}</div>}
+        </div>
+
+        <div style={RS.card}>
+          <div style={{ ...RS.h, marginBottom: 14 }}>Сверка</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
+            {[["whitelist версия", `v${data.whitelistVersion}`], ["строк / включено", `${data.whitelist.length} · ${data.whitelist.filter((w: any) => w.enabled).length}`], ["открытых позиций", `${openPositions.length}`]].map(([lbl, val]) => (
+              <div key={lbl} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, color: TEXT }}><span style={RS.label}>{lbl}</span><b style={{ fontVariantNumeric: "tabular-nums" }}>{val}</b></div>
+            ))}
+            <div style={{ marginTop: 6, padding: "10px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, background: (data.orphan || data.paused) ? "#e8a83814" : "#5fd08a14", color: (data.orphan || data.paused) ? RC_AMBER : RC_GREEN, border: `1px solid ${(data.orphan || data.paused) ? "#e8a83844" : "#5fd08a44"}` }}>{(data.orphan || data.paused) ? "⚠ есть активные алерты — см. выше" : "✓ алертов нет"}</div>
           </div>
         </div>
-        <div style={cardS}>
-          <div style={hS}>Сверка / whitelist</div>
-          <div style={{ fontSize: 12, color: "#ddd" }}>whitelist версия: <b>{data.whitelistVersion}</b> · строк: {data.whitelist.length} (enabled: {data.whitelist.filter((w: any) => w.enabled).length})</div>
-          <div style={{ fontSize: 11, color: data.orphan || data.paused ? "#e8a838" : "#5fd08a", marginTop: 6 }}>{data.orphan || data.paused ? "есть активные алерты (см. выше)" : "✓ алертов нет"}</div>
+      </div>
+
+      {/* real_vs_paper */}
+      <div style={RS.card}>
+        <div style={{ ...RS.h, marginBottom: 6 }}>Real vs paper — fill-rate по категориям</div>
+        <div style={{ ...RS.label, color: RC_AMBER, marginBottom: 14 }}>⚠ dry fill-rate — нижняя граница: высокий dry ⇒ высокий реальный; низкий dry ≠ низкий реальный.</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 480 }}>
+            <thead><tr><th style={RS.th}>категория</th><th style={thR}>ордеров</th><th style={thR}>fill %</th><th style={thR}>filled</th><th style={thR}>partial</th><th style={thR}>expired</th><th style={thR}>rejected</th></tr></thead>
+            <tbody>{r.fillRateByCategory.map((c: any) => (
+              <tr key={c.category}><td style={RS.td}>{c.category}</td><td style={tdR}>{c.total}</td><td style={{ ...tdR, color: c.fillPct >= 50 ? RC_GREEN : RC_AMBER, fontWeight: 700 }}>{c.fillPct}%</td><td style={tdR}>{c.filled}</td><td style={tdR}>{c.partial}</td><td style={tdR}>{c.expired}</td><td style={tdR}>{c.rejected}</td></tr>
+            ))}{!r.fillRateByCategory.length && <tr><td style={{ ...RS.td, color: RC_FAINT }} colSpan={7}>пока нет входов</td></tr>}</tbody>
+          </table>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12, marginTop: 16 }}>
+          {([
+            ["слиппедж входа (медиана)", cents(r.slippage.entryMedianCents), `n=${r.slippage.n}`],
+            ["missed fills", `${r.missedFills.count}`, `edge −${fmtMoney(r.missedFills.edgeLostUsd)}`],
+            ["издержки (fee)", fmtMoney(r.costs.feeUsd), r.costs.per100TurnoverUsd != null ? `${fmtMoney(r.costs.per100TurnoverUsd)}/$100` : ""],
+            ["P&L dry vs близнецы", `Δ ${fmtMoney(r.pnlDelta.deltaUsd)}`, `${fmtMoney(r.pnlDelta.realRealizedUsd)} / ${fmtMoney(r.pnlDelta.paperTwinPnlUsd)}`],
+          ] as [string, string, string][]).map(([lbl, val, sub], i) => (
+            <div key={i} style={{ background: INK, border: `1px solid ${LINE}`, borderRadius: 10, padding: "11px 13px" }}>
+              <div style={{ ...RS.label, color: RC_FAINT }}>{lbl}</div>
+              <div style={{ fontSize: 17, fontWeight: 700, color: TEXT, marginTop: 3, fontVariantNumeric: "tabular-nums" }}>{val}</div>
+              {sub && <div style={{ ...RS.label, color: RC_FAINT, marginTop: 2 }}>{sub}</div>}
+            </div>
+          ))}
         </div>
       </div>
 
-      <div style={cardS}>
-        <div style={hS}>real_vs_paper — fill-rate по категориям</div>
-        <div style={{ fontSize: 10, color: "#e8a838", marginBottom: 8 }}>⚠ dry fill-rate — нижняя граница (placement-snapshot); высокий dry ⇒ высокий реальный, низкий dry ≠ низкий реальный.</div>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr><th style={thS}>категория</th><th style={thS}>ордеров</th><th style={thS}>fill%</th><th style={thS}>filled</th><th style={thS}>partial</th><th style={thS}>expired</th><th style={thS}>rejected</th></tr></thead>
-          <tbody>{r.fillRateByCategory.map((c: any) => (
-            <tr key={c.category}><td style={tdS}>{c.category}</td><td style={tdS}>{c.total}</td><td style={{ ...tdS, color: c.fillPct >= 50 ? "#5fd08a" : "#e8a838", fontWeight: 700 }}>{c.fillPct}%</td><td style={tdS}>{c.filled}</td><td style={tdS}>{c.partial}</td><td style={tdS}>{c.expired}</td><td style={tdS}>{c.rejected}</td></tr>
-          ))}{!r.fillRateByCategory.length && <tr><td style={tdS} colSpan={7}>пока нет входов</td></tr>}</tbody>
-        </table>
-        <div style={{ display: "flex", gap: 24, marginTop: 12, flexWrap: "wrap", fontSize: 12, color: "#ddd" }}>
-          <div>слиппедж входа (медиана): <b>{cents(r.slippage.entryMedianCents)}</b> <span style={{ color: "#666" }}>(n={r.slippage.n})</span></div>
-          <div>missed_fills: <b>{r.missedFills.count}</b> · edge потерян <b>{fmtMoney(r.missedFills.edgeLostUsd)}</b></div>
-          <div>издержки: fee <b>{fmtMoney(r.costs.feeUsd)}</b>{r.costs.per100TurnoverUsd != null && <span> · {fmtMoney(r.costs.per100TurnoverUsd)}/$100 оборота</span>}</div>
-          <div>P&L: dry <b>{fmtMoney(r.pnlDelta.realRealizedUsd)}</b> vs близнецы <b>{fmtMoney(r.pnlDelta.paperTwinPnlUsd)}</b> (Δ {fmtMoney(r.pnlDelta.deltaUsd)})</div>
+      {/* order feed */}
+      <div style={RS.card}>
+        <div style={{ ...RS.h, marginBottom: 12 }}>Лента ордеров <span style={{ color: RC_FAINT, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>· {data.orders.length} · lifecycle + twin-дельта</span></div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 880 }}>
+            <thead><tr><th style={RS.th}>время</th><th style={RS.th}>категория</th><th style={RS.th}>стратегия</th><th style={RS.th}>сторона</th><th style={RS.th}>статус</th><th style={thR}>лимит→филл</th><th style={thR}>размер</th><th style={thR}>wl</th><th style={RS.th}>переходы</th><th style={thR}>twin слип</th><th style={thR}>paper P&L</th></tr></thead>
+            <tbody>{data.orders.map((o: any) => (
+              <tr key={o.id}>
+                <td style={{ ...RS.td, color: RC_FAINT, fontFamily: "ui-monospace, monospace" }}>{(o.createdAt || "").slice(11, 19)}</td>
+                <td style={RS.td}>{o.category ?? "—"}</td>
+                <td style={RS.td}>{o.strategyId}<span style={{ color: RC_FAINT }}>/{o.profileId}</span></td>
+                <td style={RS.td}>{o.side} {o.leg}{o.dry && <span style={{ color: RC_BLUE, fontSize: 10, marginLeft: 4 }}>dry</span>}</td>
+                <td style={{ ...RS.td, color: statusColor(o.status), fontWeight: 700 }}>{o.status}</td>
+                <td style={tdR}>{o.limitCents}¢→{cents(o.avgFillCents)}</td>
+                <td style={tdR}>{fmtMoney(o.filledUsd)}/{fmtMoney(o.sizeUsd)}</td>
+                <td style={tdR}>{o.whitelistVersion ?? "—"}</td>
+                <td style={{ ...RS.td, fontSize: 10, color: MUTE, fontFamily: "ui-monospace, monospace" }} title={o.events.map((e: any) => `${e.status} @ ${e.at}`).join("\n")}>{o.events.map((e: any) => e.status[0]).join("→")}</td>
+                <td style={{ ...tdR, color: o.entrySlipCents == null ? RC_FAINT : o.entrySlipCents > 0 ? RC_RED : RC_GREEN }}>{o.entrySlipCents == null ? "—" : `${o.entrySlipCents >= 0 ? "+" : ""}${o.entrySlipCents}¢`}</td>
+                <td style={{ ...tdR, color: (o.paperPnlUsd ?? 0) >= 0 ? RC_GREEN : RC_RED }}>{o.paperPnlUsd == null ? "—" : fmtMoney(o.paperPnlUsd)}</td>
+              </tr>
+            ))}{!data.orders.length && <tr><td style={{ ...RS.td, color: RC_FAINT }} colSpan={11}>ордеров пока нет — ждём футбольный вход в whitelist-категории</td></tr>}</tbody>
+          </table>
         </div>
       </div>
 
-      <div style={cardS}>
-        <div style={hS}>Лента ордеров ({data.orders.length}) — lifecycle + twin-дельта</div>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr><th style={thS}>время</th><th style={thS}>категория</th><th style={thS}>стратегия</th><th style={thS}>сторона</th><th style={thS}>статус</th><th style={thS}>лимит→филл</th><th style={thS}>размер</th><th style={thS}>wl_v</th><th style={thS}>переходы</th><th style={thS}>twin: реш→филл</th><th style={thS}>paper P&L</th></tr></thead>
-          <tbody>{data.orders.map((o: any) => (
-            <tr key={o.id}>
-              <td style={tdS}>{(o.createdAt || "").slice(11, 19)}</td>
-              <td style={tdS}>{o.category ?? "—"}</td>
-              <td style={tdS}>{o.strategyId}<span style={{ color: "#666" }}>/{o.profileId}</span></td>
-              <td style={tdS}>{o.side} {o.leg}{o.dry && <span style={{ color: "#7fb4e8", fontSize: 9 }}> dry</span>}</td>
-              <td style={{ ...tdS, color: statusColor(o.status), fontWeight: 700 }}>{o.status}</td>
-              <td style={tdS}>{o.limitCents}¢→{cents(o.avgFillCents)}</td>
-              <td style={tdS}>{fmtMoney(o.filledUsd)}/{fmtMoney(o.sizeUsd)}</td>
-              <td style={tdS}>{o.whitelistVersion ?? "—"}</td>
-              <td style={{ ...tdS, fontSize: 9, color: "#999" }} title={o.events.map((e: any) => `${e.status} @ ${e.at}`).join("\n")}>{o.events.map((e: any) => e.status[0]).join("→")}</td>
-              <td style={{ ...tdS, color: o.entrySlipCents == null ? "#666" : o.entrySlipCents > 0 ? "#ff6b6b" : "#5fd08a" }}>{o.paperEntryCents == null ? "—" : `${o.paperEntryCents}¢→${cents(o.avgFillCents)} (${o.entrySlipCents != null && o.entrySlipCents >= 0 ? "+" : ""}${o.entrySlipCents ?? "?"}¢)`}</td>
-              <td style={{ ...tdS, color: (o.paperPnlUsd ?? 0) >= 0 ? "#5fd08a" : "#ff6b6b" }}>{o.paperPnlUsd == null ? "—" : fmtMoney(o.paperPnlUsd)}</td>
-            </tr>
-          ))}{!data.orders.length && <tr><td style={tdS} colSpan={11}>ордеров пока нет — ждём футбольный вход (см. dry-status.ts)</td></tr>}</tbody>
-        </table>
-      </div>
-
-      <div style={cardS}>
-        <div style={hS}>Открытые позиции ({data.positions.filter((p: any) => Math.abs(p.size_shares) > 0.01).length})</div>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr><th style={thS}>токен</th><th style={thS}>стратегия</th><th style={thS}>шары</th><th style={thS}>ср. цена</th><th style={thS}>realized</th><th style={thS}></th></tr></thead>
-          <tbody>{data.positions.filter((p: any) => Math.abs(p.size_shares) > 0.01).map((p: any) => (
-            <tr key={p.token_id}><td style={{ ...tdS, fontFamily: "monospace", fontSize: 10 }}>{String(p.token_id).slice(0, 14)}…</td><td style={tdS}>{p.strategy_id ?? "—"}</td><td style={tdS}>{Math.round(p.size_shares)}</td><td style={tdS}>{cents(p.avg_price_cents)}</td><td style={{ ...tdS, color: (p.realized_pnl_usd ?? 0) >= 0 ? "#5fd08a" : "#ff6b6b" }}>{fmtMoney(p.realized_pnl_usd ?? 0)}</td><td style={tdS}>{p.dry ? <span style={{ color: "#7fb4e8", fontSize: 9 }}>dry</span> : <span style={{ color: "#ff6b6b", fontSize: 9 }}>REAL</span>}</td></tr>
-          ))}{!data.positions.filter((p: any) => Math.abs(p.size_shares) > 0.01).length && <tr><td style={tdS} colSpan={6}>открытых позиций нет</td></tr>}</tbody>
-        </table>
+      {/* positions */}
+      <div style={RS.card}>
+        <div style={{ ...RS.h, marginBottom: 12 }}>Открытые позиции <span style={{ color: RC_FAINT, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>· {openPositions.length}</span></div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520 }}>
+            <thead><tr><th style={RS.th}>токен</th><th style={RS.th}>стратегия</th><th style={thR}>шары</th><th style={thR}>ср. цена</th><th style={thR}>realized</th><th style={thR}>книга</th></tr></thead>
+            <tbody>{openPositions.map((p: any) => (
+              <tr key={p.token_id}><td style={{ ...RS.td, fontFamily: "ui-monospace, monospace", fontSize: 11, color: MUTE }}>{String(p.token_id).slice(0, 16)}…</td><td style={RS.td}>{p.strategy_id ?? "—"}</td><td style={tdR}>{Math.round(p.size_shares)}</td><td style={tdR}>{cents(p.avg_price_cents)}</td><td style={{ ...tdR, color: (p.realized_pnl_usd ?? 0) >= 0 ? RC_GREEN : RC_RED }}>{fmtMoney(p.realized_pnl_usd ?? 0)}</td><td style={tdR}>{p.dry ? <span style={{ color: RC_BLUE }}>dry</span> : <span style={{ color: RC_RED, fontWeight: 700 }}>REAL</span>}</td></tr>
+            ))}{!openPositions.length && <tr><td style={{ ...RS.td, color: RC_FAINT }} colSpan={6}>открытых позиций нет</td></tr>}</tbody>
+          </table>
+        </div>
       </div>
     </main>
   );
