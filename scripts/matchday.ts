@@ -21,7 +21,6 @@ const db = getDb();
 const now = Date.now();
 const HORIZON_H = Number(process.env.MATCHDAY_HORIZON_H) || 24;
 
-const espnRef = db.prepare(`SELECT provider_ref FROM provider_match_map WHERE match_id=? AND provider='espn'`);
 const fallbackMin = LINEUP_FALLBACK_MIN;
 
 let total = 0;
@@ -29,10 +28,13 @@ for (const c of R.listCompetitions(db, "football")) {
   const rows: string[] = [];
   for (const m of R.listMatches(db, c.id)) {
     if (m.state === "finished") continue;
-    const h = m.kickoff_at ? (Date.parse(m.kickoff_at) - now) / 3_600_000 : null;
-    if (h == null || h > HORIZON_H) continue;               // only the next 24h
+    const kMs = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
+    if (Number.isNaN(kMs)) continue;                        // no usable kickoff → can't reason about timing
+    const h = (kMs - now) / 3_600_000;
+    if (h > HORIZON_H || h < -3) continue;                  // next 24h (allow just-started)
     const minsToKick = h * 60;
-    const espn = (espnRef.get(m.id) as { provider_ref?: string } | undefined)?.provider_ref;
+    // ESPN link = a match_live row exists (the provider found & bound the fixture); XI = real starters captured.
+    const espn = !!R.getMatchLive(db, m.id);
     const xi = R.hasLineups(db, m.id);
     const asmts = R.assessmentsForMatch(db, m.id).filter((a) => a.status === "ok");
     const pre = asmts.find((a) => a.stage === "pre_lineup");
@@ -51,7 +53,7 @@ for (const c of R.listCompetitions(db, "football")) {
     else if (h > ANALYZE_PRE_HOURS) auto = `ждёт (>${ANALYZE_PRE_HOURS}ч)`;
     else if (awaiting && !fallbackNow) auto = `ждёт XI / fallback ${fallbackMin}м`;
     else auto = "запустится";
-    const kt = m.kickoff_at ? new Date(m.kickoff_at).toISOString().slice(5, 16).replace("T", " ") : "?";
+    const kt = new Date(kMs).toISOString().slice(5, 16).replace("T", " ");
     rows.push(
       `  ${kt} ${m.home}–${m.away}\n` +
       `      state=${m.state} · ESPN=${espn ? "✓" : "✗"} · XI=${xi ? "✓" : "✗"} · ` +
