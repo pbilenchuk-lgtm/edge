@@ -833,39 +833,52 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     if (snaps.length < 2) continue;
     const players = { p1: snaps[snaps.length - 1].p1 ?? "", p2: snaps[snaps.length - 1].p2 ?? "" };
     const breaks = detectBreaks(snaps);
-    const br = breaks[breaks.length - 1]; // most recent confirmed break
-    if (!br) continue;
-    if (R.metaGet(db, ACTED + m.id + ":" + br.batchAt)) continue; // already acted on this break
-    // Favourite ID off the MATCH-START (pre-match) price — NOT a per-break price. A per-break
-    // reference re-identifies the favourite every break, so after the PRE-MATCH favourite loses a
-    // set the current set-leader (the pre-match underdog) gets mislabelled "the favourite" and
-    // bought back against its inflated set-lead price — a phantom edge (the −$93 Barrera flip).
-    // startPrices is the clean pre-panic anchor Set-Value already uses; the recovery target below
-    // still reads the true pre-break price via prePriceBefore.
+    if (!breaks.length) continue;
+    // Favourite / moneyline / token are per-MATCH (break-independent), so resolve them ONCE before
+    // choosing which break to act on. Favourite ID is off the MATCH-START (pre-match) price — NOT a
+    // per-break price: a per-break reference re-identifies the favourite every break, so after the
+    // pre-match favourite loses a set the current set-leader (the pre-match underdog) gets mislabelled
+    // "the favourite" and bought back against its inflated set-lead price (the −$93 Barrera flip).
     const charge = chargeTennisMatch(db, m.id, players, startPrices(db, m.id));
     if (!charge.favSide || !charge.tradeable) continue; // no favourite / thin book → skip
-    const brSnap = snaps.find((s) => s.batch_at === br.batchAt) ?? snaps[snaps.length - 1];
-    const favSetsLost = charge.favSide === "first" ? (brSnap.sets_p2 ?? 0) : (brSnap.sets_p1 ?? 0);
-    const favPrice = favPriceFromScout(db, m.id, charge.favSide);
-    const signal = { brokenSide: br.server, setNum: br.setNum, favSetsLost, favPriceCents: favPrice };
-    if (!tennisReassessShouldCall(charge, signal)) { R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "gate_skip", now); continue; }
-
     const favName = charge.favSide === "first" ? players.p1 : players.p2;
     // Trade the MONEYLINE (winner market). The bet's market_label is the FAVOURITE'S NAME so settle's
     // resolveTennisWinner matches it to the advancing player. No moneyline → HONEST skip (never a prop).
     const ml = tennisMoneyline(db, m.id, players);
-    if (!ml) { R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "no_moneyline", now); R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `манилайн не найден (только пропы / неоднозначно) — вход пропущен (no_moneyline)`, created_at: now }); continue; }
-    const favMlPrice = charge.favSide === "first" ? ml.p1Cents : ml.p2Cents;
-    const prePrice = prePriceBefore(db, m.id, charge.favSide, br.batchAt) ?? favMlPrice;
+    if (!ml) {
+      const warned = R.tradeLogForMatch(db, m.id).some((l) => l.strategy_id === TENNIS_STRATEGY && l.type === "skip" && (l.text ?? "").includes("no_moneyline"));
+      if (!warned) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: "лайв", type: "skip", text: `манилайн не найден (только пропы / неоднозначно) — вход пропущен (no_moneyline)`, created_at: now });
+      continue;
+    }
     // token-fix-m1: the buyback trades the FAVOURITE's OWN winner token (resolved via favSide), NOT
     // blindly outcomes[0]. Side token not persisted yet (market imported before token_second) → HONEST
-    // skip WITHOUT burning the break's LLM shot: re-discovery backfills token_second, next tick retries.
+    // skip; re-discovery backfills token_second, next tick retries.
     const favToken = favTokenOf(ml, charge.favSide);
     if (!favToken) {
       const warned = R.tradeLogForMatch(db, m.id).some((l) => l.strategy_id === TENNIS_STRATEGY && l.type === "skip" && (l.text ?? "").includes("token_side_unavailable"));
-      if (!warned) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `token_side_unavailable: токен стороны фаворита ещё не сохранён (token_second) — вход отложен до ре-дискавери`, created_at: now });
+      if (!warned) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: "лайв", type: "skip", text: `token_side_unavailable: токен стороны фаворита ещё не сохранён (token_second) — вход отложен до ре-дискавери`, created_at: now });
       continue;
     }
+    const favMlPrice = charge.favSide === "first" ? ml.p1Cents : ml.p2Cents;
+    const favPrice = favPriceFromScout(db, m.id, charge.favSide);
+
+    // B1: examine EVERY not-yet-acted break, FRESHEST first — a later underdog break or an out-of-window
+    // break must NOT bury an earlier qualifying favourite EARLY break (the setup). Act on the freshest
+    // qualifying one (the live panic); an older break whose price already recovered self-rejects at
+    // sizing. One decision per match per tick; non-qualifying breaks are marked so we don't re-scan them.
+    let br: (typeof breaks)[number] | null = null;
+    let favSetsLost = 0;
+    for (const cand of [...breaks].reverse()) {
+      if (R.metaGet(db, ACTED + m.id + ":" + cand.batchAt)) continue; // already decided this break
+      const cSnap = snaps.find((s) => s.batch_at === cand.batchAt) ?? snaps[snaps.length - 1];
+      const cLost = charge.favSide === "first" ? (cSnap.sets_p2 ?? 0) : (cSnap.sets_p1 ?? 0);
+      if (!tennisReassessShouldCall(charge, { brokenSide: cand.server, setNum: cand.setNum, favSetsLost: cLost, favPriceCents: favPrice })) {
+        R.metaSet(db, ACTED + m.id + ":" + cand.batchAt, "gate_skip", now); continue; // underdog / out-of-window / priced-out
+      }
+      br = cand; favSetsLost = cLost; break; // freshest qualifying favourite early break
+    }
+    if (!br) continue; // no qualifying unacted break this tick
+    const prePrice = prePriceBefore(db, m.id, charge.favSide, br.batchAt) ?? favMlPrice;
 
     // A3 (per profile): each risk profile holds at most ONE buyback per match — no "докупка в
     // падающую" WITHIN a profile — but the profiles run SIDE-BY-SIDE, each on its OWN $1k budget,

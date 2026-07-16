@@ -174,6 +174,22 @@ test("tennisTradingTick: a DUST real book (Gamma-declared healthy) is skipped th
   assert.equal(R.betsForMatch(db, mid, "tennis_overreaction").filter((b) => b.status === "open").length, 0, "no dust position opened");
 });
 
+// ── B1. A later underdog break must NOT bury an earlier qualifying favourite EARLY break ──────────
+test("tennisTradingTick: a favourite early break is still acted on when a LATER underdog break follows it", async () => {
+  const db = openDb(":memory:");
+  const mid = seedMatch(db, { p1: "Marco Favvi", p2: "Diego Doggi", p1price: 62, book: 8000, token1: "t1", token2: "t2" });
+  // Break 1 = the FAVOURITE (first) broken in set 1 (the qualifying setup). Break 2 = the UNDERDOG
+  // (second) broken right after — the most-recent break. Old code looked only at breaks[last] (the
+  // underdog break), gate-skipped it, and NEVER saw the favourite break. B1 iterates freshest-first.
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", p1: "Marco Favvi", p2: "Diego Doggi", g1: 3, g2: 3, server: "first", p1c: 62, setNum: 1 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", p1: "Marco Favvi", p2: "Diego Doggi", g1: 3, g2: 4, server: "second", p1c: 55, setNum: 1 }); // fav (first) broken → br1
+  snap(db, mid, { at: "2026-07-14T10:03:00Z", p1: "Marco Favvi", p2: "Diego Doggi", g1: 4, g2: 4, server: "first", p1c: 50, setNum: 1 });  // underdog (second) broken → br2 (most recent)
+  const fetchImpl = tokenBookAndLLM({ t1: { bids: [[0.49, 2000]], asks: [[0.50, 2000]] } }, "Marco Favvi", 0.7);
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:03:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl });
+  assert.ok(opened >= 1, "the favourite's early break was acted on, not buried by the later underdog break");
+  assert.ok(R.betsForMatch(db, mid, "tennis_overreaction").some((b) => b.status === "open" && b.market_label === "Marco Favvi"), "buyback opened on the favourite");
+});
+
 // ── G. Quarantine: flag pre-fix second-outcome bets; leave first-outcome + post-fix bets alone ─────
 test("migrateQuarantinePoisonedTennis: flags ONLY pre-fix bets that held the wrong (second-outcome) token", () => {
   const db = openDb(":memory:");
