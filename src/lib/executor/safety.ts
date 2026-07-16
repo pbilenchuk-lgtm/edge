@@ -48,12 +48,14 @@ export function effectiveTradingMode(db: Database, env: Record<string, string | 
 }
 
 /** Safety caps = env/defaults, with the owner's UI caps-override merged over the top (env is read-only
- *  from the app, so an edited cap lives in the DB). Never LOOSENS past the env-or-default via a bad value
- *  — the override is trusted (owner-set), but each is still a positive number. */
+ *  from the app, so an edited cap lives in the DB). ENV IS A HARD CEILING: all four caps are "max"
+ *  limits (bigger = looser), so the override can only ever LOWER a cap, never raise it above env — the
+ *  UI can only tighten, matching the mode invariant. A bad/zero override is ignored. */
 export function resolveSafetyCaps(db: Database, env: Record<string, string | undefined> = process.env): SafetyCaps {
   const base = loadSafetyCaps(env);
   const o = RR.getCapsOverride(db);
-  const pick = (k: keyof SafetyCaps) => (Number.isFinite(o[k]) && (o[k] as number) > 0 ? (o[k] as number) : base[k]);
+  // min(env, override): the override tightens toward zero but can never exceed the env floor.
+  const pick = (k: keyof SafetyCaps) => (Number.isFinite(o[k]) && (o[k] as number) > 0 ? Math.min(base[k], o[k] as number) : base[k]);
   return { maxOrderUsd: pick("maxOrderUsd"), maxExposureUsd: pick("maxExposureUsd"), maxDailyLossUsd: pick("maxDailyLossUsd"), maxOrdersPerHour: pick("maxOrdersPerHour") };
 }
 
