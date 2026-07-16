@@ -88,15 +88,23 @@ const apiRow = (over: any = {}) => ({
   ...over,
 });
 
-test("boot-time emergency prune deletes OLD snapshots (disk recovery), keeps recent", () => {
+test("boot (initSchema) does NOT prune snapshots — retention is the background tick's job", () => {
   const db = openDb(":memory:");
   const old = new Date(Date.now() - 40 * 86_400_000).toISOString(); // 40 days ago (> 5-day retention)
   const fresh = new Date().toISOString();
   R.insertTennisSnapshot(db, { event_key: "OLD", provider: "apitennis", batch_at: old, p1: "A", p2: "B", tournament: null, event_type: null, live: 0, status: null, sets_p1: null, sets_p2: null, set_num: null, games_p1: null, games_p2: null, game_points: null, server: null, pm_match_id: null, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: null });
   R.insertTennisSnapshot(db, { event_key: "NEW", provider: "apitennis", batch_at: fresh, p1: "A", p2: "B", tournament: null, event_type: null, live: 1, status: null, sets_p1: null, sets_p2: null, set_num: null, games_p1: null, games_p2: null, game_points: null, server: null, pm_match_id: null, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: null });
-  initSchema(db); // re-run boot: the emergency prune runs before DDL
-  assert.equal(R.tennisSnapshotsForEvent(db, "OLD").length, 0, "old snapshot reclaimed");
-  assert.equal(R.tennisSnapshotsForEvent(db, "NEW").length, 1, "recent (live) snapshot kept");
+  // Boot must stay CHEAP: the old "emergency prune" here did a batch_at full-scan on the first
+  // getDb() (the /api/health path) and stalled Render's port scan. initSchema now touches nothing —
+  // both rows survive a re-boot; retention happens later, off the boot path.
+  initSchema(db);
+  assert.equal(R.tennisSnapshotsForEvent(db, "OLD").length, 1, "boot does NOT delete old rows");
+  assert.equal(R.tennisSnapshotsForEvent(db, "NEW").length, 1, "recent snapshot kept");
+  // The background tick's prune (lifecycle.ts) is what enforces retention.
+  const cutoff = new Date(Date.now() - 5 * 86_400_000).toISOString();
+  R.pruneTennisSnapshots(db, cutoff);
+  assert.equal(R.tennisSnapshotsForEvent(db, "OLD").length, 0, "tick prune reclaims old");
+  assert.equal(R.tennisSnapshotsForEvent(db, "NEW").length, 1, "tick prune keeps recent");
 });
 
 test("field parsers: server side, pair, current set", () => {

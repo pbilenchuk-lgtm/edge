@@ -169,28 +169,17 @@ export function openDb(path: string): Database {
   return db;
 }
 
-// Snapshot retention (days). 1 GB persistent disk can't hold years of raw payloads, so keep
-// this modest; bump only alongside a bigger Render disk. Env-overridable.
-const SNAPSHOT_RETENTION_DAYS = Math.max(1, Number(process.env.SNAPSHOT_RETENTION_DAYS ?? 5));
-
 export function initSchema(db: Database): void {
   const here = dirname(fileURLToPath(import.meta.url));
-  // EMERGENCY DISK RECOVERY (runs BEFORE any DDL): reclaim pages from over-retained snapshots
-  // so a FULL persistent disk can't block schema init or subsequent writes. DELETE succeeds
-  // even when the disk is full (it frees pages for reuse within the file); it's time-based, so
-  // live-match snapshots (recent) are never touched. Guarded — tables may not exist on a fresh DB.
-  try {
-    const cutoff = new Date(Date.now() - SNAPSHOT_RETENTION_DAYS * 86_400_000).toISOString();
-    // BOUNDED (≤N rows/table/boot). getDb() runs initSchema on its FIRST call — and /api/health (the
-    // Render health check) calls getDb() — so this MUST stay cheap. An UNBOUNDED delete over an
-    // OOM-bloated snapshots table hung the health response for minutes and failed Render's port scan
-    // (the whole "no open HTTP ports" saga). The tick's prune + row-caps do the full cleanup OFF the
-    // boot critical path; this only relieves a full disk cheaply. rowid-subquery LIMIT avoids needing
-    // SQLITE_ENABLE_UPDATE_DELETE_LIMIT.
-    for (const t of ["provider_snapshots", "tennis_snapshots"]) {
-      try { db.exec(`DELETE FROM ${t} WHERE rowid IN (SELECT rowid FROM ${t} WHERE batch_at < '${cutoff}' LIMIT 4000)`); } catch { /* table absent on a fresh DB */ }
-    }
-  } catch { /* best-effort recovery */ }
+  // NOTE: snapshot RETENTION is handled entirely by the background tick (lifecycle.ts →
+  // pruneSnapshots / pruneTennisSnapshots / caps), which runs AFTER the boot-grace window,
+  // OFF the /api/health critical path. There used to be an "emergency disk recovery" DELETE
+  // right here, meant to relieve a full disk before any DDL — but its `WHERE batch_at < cutoff`
+  // predicate has NO batch_at-only index, so on a bloated snapshots table it FULL-SCANS on the
+  // FIRST getDb() (which /api/health makes). node:sqlite is synchronous, so that scan blocked the
+  // health response during Render's post-deploy port scan → "No open HTTP ports" → the deploy
+  // timed out and crash-looped. Removed: keeping the boot path cheap matters far more than a
+  // best-effort full-disk band-aid the background prune already covers.
   const sql = readFileSync(join(here, "schema.sql"), "utf8");
   db.exec(sql);
   // Additive migrations for pre-existing databases (CREATE TABLE IF NOT EXISTS
