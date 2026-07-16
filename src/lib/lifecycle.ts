@@ -48,14 +48,6 @@ import type { Confidence, ReassessTrigger } from "./types.js";
 // (post-lineup) reassessment.
 export const ANALYZE_PRE_HOURS = 12;
 export const LINEUP_HOURS = 1;
-// Football normally holds pre-match analysis until ESPN publishes the real starting XI.
-// But ESPN doesn't cover every league (e.g. Norway Eliteserien, some cups), so the lineup
-// can never arrive and the match would sit un-analysed until the whistle — the "I had to
-// start the AI by hand" case. FALLBACK: once we're within this many minutes of kickoff and
-// lineups still haven't landed, run the pre-match pass anyway (a lineup-less read beats
-// none). Covered leagues are unaffected — they go the moment lineups arrive, usually
-// earlier. Default 35 min (~"за полчаса"); env-tunable via LINEUP_FALLBACK_MIN.
-export const LINEUP_FALLBACK_MIN = Math.max(5, Number(process.env.LINEUP_FALLBACK_MIN) || 35);
 // When a match's FIRST analysis lands just after kickoff (a scheduler gap spanned
 // the whistle), the pre-match strategist is normally skipped in live. But within
 // this grace of kickoff — score still 0:0, prices essentially unmoved — the
@@ -387,24 +379,15 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
     if (opts.liveOnly && m.state !== "live") continue;             // live-cycle back-fill: only rescue live-but-unanalysed matches
     if ((budgetByComp.get(comp) ?? 0) <= 0) continue;              // unfunded → skip (economical)
     if (!R.latestMarkets(db, m.id).length) continue;               // needs tradeable odds
-    // Football (lineup-sport): no pre-match analysis until the real starting XI
-    // is out — без составов анализ не делаем. Silently skip (it becomes eligible
-    // the tick after the provider publishes lineups; a live match is never held).
-    // Time gate: pre-match assessment only within ~12h of kickoff. Matches with no
-    // known kickoff (e.g. ESPN live) aren't gated. (Computed before the lineup gate so
-    // the fallback below can use kickoff proximity.)
+    // Football (lineup-sport): NO analysis until the real starting XI is out — без составов
+    // и без лайва не торгуем, поэтому и анализировать нечего (autoEnter всё равно держит вход
+    // до составов). Silently skip; it becomes eligible the tick after the provider publishes
+    // lineups. A live match is never held (awaitingLineup is false once state=live).
+    if (R.awaitingLineup(db, m, sportByComp.get(comp) ?? "football")) continue;
+    const stage = m.lineup_out ? "post_lineup" : "pre_lineup";
+    // Time gate: pre-match assessment only within ~12h of kickoff. Matches with no known
+    // kickoff (e.g. an ESPN live match) aren't gated.
     const h = hoursUntil(m.kickoff_at, nowMs);
-    // Football waits for the real starting XI — UNLESS ESPN never delivers it and we're
-    // now within the fallback window of kickoff (LINEUP_FALLBACK_MIN): then analyse anyway
-    // so an uncovered-league match is never left un-analysed until the whistle.
-    const minsToKick = h == null ? null : h * 60;
-    const lineupFallback = minsToKick != null && minsToKick > 0 && minsToKick <= LINEUP_FALLBACK_MIN;
-    const xiOut = R.hasLineups(db, m.id);
-    if (R.awaitingLineup(db, m, sportByComp.get(comp) ?? "football") && !lineupFallback) continue;
-    // Stage reflects whether the REAL starting XI is out — not just the time-based lineup_out
-    // flip. A fallback analysis (no lineups) is a PRE-match read; labelling it post_lineup would
-    // run the post-lineup path with no teamsheet and fail.
-    const stage = (m.lineup_out && xiOut) ? "post_lineup" : "pre_lineup";
     if (stage === "pre_lineup" && h != null && h > ANALYZE_PRE_HOURS) continue;
     if (R.assessmentsForMatch(db, m.id).some((a) => a.stage === stage && a.status === "ok")) continue; // already done this stage
     if (jobActive(R.getAnalysisJob(db, m.id), Date.now())) continue; // a run is in flight
@@ -416,7 +399,7 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
     // grace of the whistle, prices still pre-match), give the pre-match strategist
     // its one shot; forfeiting it would leave the match wholly un-traded.
     const skipStrat = m.state === "live" && !justKickedOff(m, nowMs);
-    const r = await analyzeMatch(db, m.id, deps, { skipStrategists: skipStrat, allowNoLineup: lineupFallback });
+    const r = await analyzeMatch(db, m.id, deps, { skipStrategists: skipStrat });
     out.push({ matchId: m.id, match: `${m.home}–${m.away}`, stage, ok: r.ok, bets: r.betsCreated ?? 0 });
   }
   return out;
