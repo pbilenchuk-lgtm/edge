@@ -18,5 +18,13 @@ else
   echo "→ database exists at $DB (skipping seed)"
 fi
 
+# Apply schema migrations HERE, before the server binds — not lazily on the first
+# /api/health call (Render's port scan), where a heavy migration blocks the event loop
+# or spikes RSS on the 512Mi box and fails the port scan → crash loop. Best-effort:
+# migrate.ts exits 0 even on error and `|| true` guards the process itself, so a hiccup
+# never wedges the deploy — the server just re-attempts initSchema on its first getDb().
+echo "→ applying schema migrations"
+node --experimental-sqlite --import tsx scripts/migrate.ts || true
+
 echo "→ starting EDGE LAB on 0.0.0.0:${PORT:-3000}"
 exec node_modules/.bin/next start -p "${PORT:-3000}" -H 0.0.0.0
