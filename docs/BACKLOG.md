@@ -258,3 +258,31 @@ on a break than the winner market). They are discarded, and ALL tennis threshold
 `interim` epoch until ~100 marks re-accumulate on the moneyline. The exit DESIGN (game-count
 stop, floor, take buffer) is price-independent and stays; its NUMBERS do not carry over — the
 moneyline panic amplitude is almost certainly LARGER, so armed bands + recovery stats will shift.
+
+## 🎯 token-fix-m1 — the FOURTH orientation bug + the invariant that outlives it
+
+The tennis buyback always transacted `outcomes[0]`'s token but reasoned/sized/settled on the
+FAVOURITE. When the favourite was the SECOND-named moneyline player (~half of matches) the
+position HELD THE WRONG PLAYER (Mrva–Roncadelli: sold at the opponent's 25%, logged the
+favourite's 73%). Root: the second outcome's token was never persisted, and every consumer
+re-derived orientation instead of reading it once — the same sin as the moneyline resolver,
+set_winner, and handicap-theo bugs. Fix: `markets.token_second` persists outcomes[1]'s token;
+`favTokenOf(ml, favSide)` resolves the favourite's OWN token; entry+exit (both strategies) use it;
+orientation (`favSide`+`firstIsP1`) is FROZEN on the bet. Pre-fix second-outcome bets are
+quarantined (`tokenFlipPoisoned`) out of every slice. Epoch `token-fix-m1`.
+
+**RULE (kept FOREVER, do not remove after the fix): the runtime orientation invariant.** Before
+any buy/sell the token's live top-of-book must sit within ~28% (`TOKEN_ORIENTATION_TOLERANCE_C`)
+of the side we sized on, else block + `token_orientation_mismatch`. "Last known consumer" ≠ "last
+consumer" — this backstops the fifth orientation bug we have not found yet.
+
+## 📌 Data-gated follow-ups (revisit with data, do NOT guess-tune now)
+
+- **B3 real-book floor `TENNIS_MIN_REAL_BOOK_USD` = $250** is a from-the-head start (declared
+  liquidity vs executable top-of-book notional are different metrics — the stage-1 $2k could not
+  transfer 1:1). The `thin_real_book` skip logs the real-vs-declared gap; after ~a week, look at
+  that distribution and raise the floor if dust still leaks.
+- **Scout H1-specific recovery** (external `/api/health` pinger / always-on plan + unhook the
+  heartbeat from `hasLiveMatchInPlay`, which a dead scout defeats) waits on the `scout:gap` verdict
+  (loop-death H2 vs cron-downtime H1). The observability (own liveness stamp + due-live watchdog +
+  unwrapped provider errors) shipped unconditionally.
