@@ -79,6 +79,9 @@ export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
     if (filter.toMs && (Date.parse(b.created_at) || 0) > filter.toMs) continue;
     if (filter.codeVersion && (b.code_version ?? "") !== filter.codeVersion) continue;
     const em: BetEntryMeta | null = parseEntryMeta(b.entry_meta);
+    // token-fix-m1: a POISONED bet (pre-fix, held the OPPONENT's token) is meaningless end-to-end — its
+    // entry edge/prob AND its exit P&L are about the wrong outcome — so it is dropped from EVERY slice.
+    if (em?.tokenFlipPoisoned === true) continue;
     const phase: "prematch" | "live" = em?.phase ?? (b.entered_minute && /\d/.test(b.entered_minute) ? "live" : "prematch");
     if (filter.phase && phase !== filter.phase) continue;
     const settled = R.isSettled(b.status);

@@ -191,7 +191,8 @@ CREATE TABLE IF NOT EXISTS markets (
   price        REAL NOT NULL,      -- цена в центах 0..100 (доля 0..1$)
   ai_prob      REAL,               -- вероятность по оценке ИИ (0..1)
   liquidity    TEXT,               -- «$2.5M» (справочно)
-  external_ref TEXT,               -- CLOB token_id рынка в Polymarket
+  external_ref TEXT,               -- CLOB token_id ПЕРВОГО исхода (outcomes[0]) — backs `price`
+  token_second TEXT,               -- CLOB token_id ВТОРОГО исхода (outcomes[1]); 2-исходный рынок хранит обе стороны
   snapshot_at  TEXT NOT NULL,
   is_closing   INTEGER NOT NULL DEFAULT 0, -- цена закрытия рынка? (для CLV)
   ask_cents    REAL,               -- исполнимый BUY-аск этой стороны (центы) из книги Gamma

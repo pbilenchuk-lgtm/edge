@@ -622,6 +622,10 @@ export async function discoverSportMatches(
 
 export interface MarketSnapshot {
   label: string; price: number; external_ref: string | null; liquidity: string | null;
+  /** CLOB token of the COMPLEMENTARY outcome (the other side of a 2-outcome market). Persisted so a
+   *  consumer can trade the second side's own token — the token-fix-m1 orientation fix. Null on a
+   *  genuinely single-sided listing. */
+  tokenSecond?: string | null;
   /** executable BUY price for THIS side (cents): outcome[0] = bestAsk; the complementary outcome[1] =
    *  100 − bestBid (buying No = selling Yes at its bid). Null when Gamma gave no book — caller falls
    *  back to `price` (the mid) and flags it. `spreadCents` is the market's bid/ask spread. */
@@ -670,7 +674,7 @@ export function matchMarketSnapshots(
         const key = side.label.toLowerCase().trim();
         if (seen.has(key)) continue;
         seen.add(key);
-        rows.push({ label: side.label, price: side.price, external_ref: side.token, liquidity: m.liquidity, liq: Number(m.liquidity ?? 0) || 0, askCents: side.askCents, spreadCents: side.spreadCents });
+        rows.push({ label: side.label, price: side.price, external_ref: side.token, tokenSecond: side.token2, liquidity: m.liquidity, liq: Number(m.liquidity ?? 0) || 0, askCents: side.askCents, spreadCents: side.spreadCents });
       }
     }
   }
@@ -686,7 +690,7 @@ export function matchMarketSnapshots(
  * team isn't hidden. Spreads/moneylines already name their side in the title
  * (and Polymarket lists each side separately), so they stay single.
  */
-function marketSides(m: PolyMarketRow): { label: string; price: number | null; token: string | null; askCents: number | null; spreadCents: number | null }[] {
+function marketSides(m: PolyMarketRow): { label: string; price: number | null; token: string | null; token2: string | null; askCents: number | null; spreadCents: number | null }[] {
   const o = m.outcomes;
   // Executable BUY ask per outcome index: outcome[0] = Gamma bestAsk; outcome[1] (complement) = 100 − bestBid
   // (buying No = selling Yes at its bid). Same book, mirrored — spread is shared. Null → no book → mid fallback.
@@ -704,9 +708,11 @@ function marketSides(m: PolyMarketRow): { label: string; price: number | null; t
     // (-1.5)") is already one side — its opposite is a separate market — so keep
     // it single. An "O/U 2.5" label (side lives only in the outcomes) expands.
     const directionalLabel = /\bover\b|\bunder\b|[+-]\s*\d/i.test(m.label);
-    if (!namesOutcome && !directionalLabel) return [0, 1].map((i) => ({ label: sideLabel(m.label, o[i], o[1 - i]), price: m.prices[i]!, token: m.tokenIds[i] ?? null, askCents: askFor(i), spreadCents: m.spreadCents }));
+    if (!namesOutcome && !directionalLabel) return [0, 1].map((i) => ({ label: sideLabel(m.label, o[i], o[1 - i]), price: m.prices[i]!, token: m.tokenIds[i] ?? null, token2: m.tokenIds[1 - i] ?? null, askCents: askFor(i), spreadCents: m.spreadCents }));
   }
-  return [{ label: clarifyLabel(m.label, o), price: m.priceCents, token: m.tokenIds[0] ?? null, askCents: m.bestAskCents, spreadCents: m.spreadCents }];
+  // Single side (spread/moneyline/one priced outcome): `token` backs the shown price (outcomes[0]);
+  // `token2` carries the complementary outcome so a 2-outcome "A vs B" moneyline still knows BOTH sides.
+  return [{ label: clarifyLabel(m.label, o), price: m.priceCents, token: m.tokenIds[0] ?? null, token2: m.tokenIds[1] ?? null, askCents: m.bestAskCents, spreadCents: m.spreadCents }];
 }
 
 /** Clear label for ONE side of a 2-way market. Over/Under bakes the side into

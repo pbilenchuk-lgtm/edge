@@ -18,7 +18,7 @@ import { settleBet, resolveTennisWinner } from "./settlement.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { chargeTennisTriggers, tennisReassessShouldCall, type TennisCharge } from "./tennisOverreaction.js";
 import { SET_VALUE_STRATEGY, SET_VALUE_ARMED, SET_VALUE_EPOCH, setValueGate } from "./tennisSetValue.js";
-import { detectBreaks, detectTennisEvents, tennisMoneyline, tennisTourOf, fetchTennisFixtures, trimRaw, TENNIS_TERMINAL_RE, loadTennisConfig } from "./tennisScout.js";
+import { detectBreaks, detectTennisEvents, tennisMoneyline, favTokenOf, tennisTourOf, fetchTennisFixtures, trimRaw, TENNIS_TERMINAL_RE, loadTennisConfig } from "./tennisScout.js";
 import { loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
 import { classifyOrderBook, paperSellFill } from "./executor/paperFill.js";
 import { PaperExecutor } from "./executor/paper.js";
@@ -226,6 +226,40 @@ function favSideForLabel(snap: R.TennisSnapshotRow, label: string): "first" | "s
   return null;
 }
 
+/**
+ * token-fix-m1 QUARANTINE (one-time, marker-guarded). Flags every PRE-FIX tennis buyback bet
+ * (Overreaction + Set-Value) that HELD THE WRONG OUTCOME's token — the favourite was the SECOND
+ * moneyline outcome, but the old code always transacted outcomes[0]. Such a bet's take/exit P&L is
+ * about the OPPONENT's token (the Mrva–Roncadelli "73¢ @ 25¢" class), so `tokenFlipPoisoned=true`
+ * excludes it from every calibration/win-rate slice. Orientation is recomputed from the still-present
+ * moneyline + last snapshot with the EXACT resolver the live path uses (favSideForLabel + firstIsP1)
+ * — no drift. A bet whose orientation can't be reconstructed (moneyline/snapshots gone) is left to the
+ * epoch break to exclude. Post-fix bets already store `favSide` and are skipped. Never throws into boot.
+ */
+export function migrateQuarantinePoisonedTennis(db: Database, now: string): number {
+  if (R.metaGet(db, "migrate:tennis_token_flip_quarantine")) return 0;
+  let flagged = 0;
+  const bets = db.prepare(`SELECT * FROM bets WHERE strategy_id IN (?,?)`).all(TENNIS_STRATEGY, SET_VALUE_STRATEGY) as Bet[];
+  for (const b of bets) {
+    const em = parseEntryMeta(b.entry_meta);
+    if (em?.favSide) continue;                    // post-fix bet: orientation already pinned & trusted
+    if (em?.tokenFlipPoisoned != null) continue;  // already processed on a prior run
+    const last = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(b.match_id) as R.TennisSnapshotRow | undefined;
+    if (!last?.p1 || !last?.p2) continue;          // players unrecoverable → leave to epoch segmentation
+    const favSide = favSideForLabel(last, b.market_label);
+    if (!favSide) continue;
+    const ml = tennisMoneyline(db, b.match_id, { p1: last.p1, p2: last.p2 });
+    if (!ml) continue;                             // moneyline gone → can't confirm; epoch already excludes it
+    const favIsFirstOutcome = (favSide === "first") === ml.firstIsP1;
+    if (favIsFirstOutcome) continue;               // held the RIGHT token (outcomes[0] == favourite) — clean
+    // CONFIRMED: favourite was the SECOND outcome, but the old code held outcomes[0] → wrong token.
+    R.updateBet(db, b.id, { entry_meta: serializeEntryMeta({ ...(em ?? {}), favSide, firstIsP1: ml.firstIsP1, tokenFlipPoisoned: true } as Partial<BetEntryMeta>) });
+    flagged++;
+  }
+  R.metaSet(db, "migrate:tennis_token_flip_quarantine", `flagged=${flagged}`, now);
+  return flagged;
+}
+
 /** Cash out an open tennis paper bet at the current price (mirrors football's closeBetEarly:
  *  payout = stake·current/entry, booked settled_by="early" so it's excluded from Brier/CLV —
  *  a trading realize, not a prediction outcome). §9.6: pure arithmetic, no LLM. A5: the log
@@ -285,18 +319,49 @@ function closeTennisBetPortion(db: Database, betId: string, fraction: number, cu
 }
 
 interface TennisSellCtx { poly: PolymarketConfig; bookCache: Map<string, OrderBookFetch> }
-interface TennisSellQuote { exitCents: number; fromBook: boolean; filledFrac: number; note: string; stale: boolean }
+interface TennisSellQuote { exitCents: number; fromBook: boolean; filledFrac: number; note: string; stale: boolean; blocked?: "token_side_unavailable" | "token_orientation_mismatch" }
+
+// ── token-fix-m1 RUNTIME INVARIANT — the belt behind the token fix (kept FOREVER) ───────────────
+// Every consumer that re-derives orientation instead of reading it once is how the four orientation
+// bugs happened; the token fix closes the last KNOWN consumer, and THIS check backstops the next
+// unknown one. The CLOB token we are about to BUY/SELL must be the SIDE we reasoned & sized on:
+// compare the token's live top-of-book to the expected side price. A flipped side sits at ~100−price
+// (≈50¢ off, except near 50/50 where the two sides are genuinely indistinguishable and the damage is
+// nil anyway); a coherent book is a few cents off (bid/ask + lag). Beyond tolerance → block + alert.
+// This single check would have caught Mrva–Roncadelli on day one. Env-tunable, ~28¢ default.
+const TOKEN_ORIENTATION_TOLERANCE_C = (() => { const n = Number(process.env.TOKEN_ORIENTATION_TOLERANCE_C); return Number.isFinite(n) && n > 0 ? n : 28; })();
+
+/** The mismatch (token's top-of-book cents + gap) when the book is PRESENT and diverges beyond
+ *  tolerance from the side we intend to transact — i.e. we're about to trade the wrong outcome.
+ *  null when coherent, or when there's no live top-of-book to compare (left to the fill engine's own
+ *  honest-skip, never force-blocked on a missing book). `side` picks ask (buy) vs bid (sell). */
+function orientationMismatch(book: OrderBookFetch, side: "buy" | "sell", expectedSideCents: number | null): { tokenCents: number; gap: number } | null {
+  const b = book.status === "ok" ? book.book : null;
+  const px = side === "buy" ? b?.asks?.[0]?.priceCents : b?.bids?.[0]?.priceCents;
+  if (px == null || expectedSideCents == null || !Number.isFinite(expectedSideCents)) return null;
+  const gap = Math.abs(px - expectedSideCents);
+  return gap > TOKEN_ORIENTATION_TOLERANCE_C ? { tokenCents: px, gap } : null;
+}
 
 /** Resolve a tennis EXIT price against the live moneyline BID book (sell-VWAP): sell the position's
  *  shares into bids, never asks. Execution model off → the midpoint (legacy paper, not "stale"). No
  *  live bid → the modelled/parametric price with stale=true (a defensive exit may use it flagged; a
  *  take must not). filledFrac<1 → the bid book is thin (partial exit → attention + retry). */
-async function resolveTennisSell(db: Database, ctx: TennisSellCtx, b: Bet, players: { p1: string; p2: string }, midCents: number, deps: EngineDeps): Promise<TennisSellQuote> {
+async function resolveTennisSell(db: Database, ctx: TennisSellCtx, b: Bet, players: { p1: string; p2: string }, favSide: "first" | "second", midCents: number, deps: EngineDeps): Promise<TennisSellQuote> {
   if (!ctx.poly.enabled) return { exitCents: midCents, fromBook: false, filledFrac: 1, note: "", stale: false }; // exec model off → midpoint (legacy)
   const ml = tennisMoneyline(db, b.match_id, players);
+  // token-fix-m1: SELL the FAVOURITE's OWN winner token (what the position actually holds), resolved
+  // via favSide — not blindly outcomes[0]. Unresolvable side token → BLOCK the exit (hold to settle),
+  // never dump the wrong outcome. That mis-oriented sell was the Mrva–Roncadelli "73¢ @ 25¢" loss.
+  const favToken = ml ? favTokenOf(ml, favSide) : null;
+  if (!favToken) return { exitCents: midCents, fromBook: false, filledFrac: 0, note: "нет токена фаворита (token_second не сохранён) — держим до финала/бэкфилла", stale: true, blocked: "token_side_unavailable" };
   const entry = b.entry_price ?? 0, stake = b.stake ?? 0;
   const shares = entry > 0 ? stake / (entry / 100) : 0;
-  const bookRes = await classifyOrderBook(ml?.token ?? null, ctx.poly, deps, ctx.bookCache);
+  const bookRes = await classifyOrderBook(favToken, ctx.poly, deps, ctx.bookCache);
+  // RUNTIME INVARIANT (belt): the token's live BID must sit near the favourite price we're exiting at.
+  // A flipped side bids at ~100−price → blocked before we can realize a loss on the opponent's token.
+  const mm = orientationMismatch(bookRes, "sell", midCents);
+  if (mm) return { exitCents: midCents, fromBook: false, filledFrac: 0, note: `бид токена ${mm.tokenCents}¢ vs ожидаемая сторона ${Math.round(midCents)}¢ (Δ${Math.round(mm.gap)}¢) — держим НЕ ТОТ исход`, stale: true, blocked: "token_orientation_mismatch" };
   const r = paperSellFill(bookRes, shares, stake, midCents, ml?.liquidity ?? 0, ctx.poly.exec);
   const filledFrac = r.requestedShares > 0 ? r.filledShares / r.requestedShares : 1;
   return { exitCents: r.cents, fromBook: r.fromBook, filledFrac, note: r.note ?? "", stale: !r.fromBook };
@@ -308,12 +373,21 @@ async function resolveTennisSell(db: Database, ctx: TennisSellCtx, b: Bet, playe
  *  sell what filled + remainder attention (retry, never dumped below floor); no bid → last-model price
  *  flagged stale + alert (§4.5). Returns 1 if it closed (fully or partially) this tick, else 0. */
 async function execTennisExit(
-  db: Database, ctx: TennisSellCtx, b: Bet, midCents: number, players: { p1: string; p2: string },
+  db: Database, ctx: TennisSellCtx, b: Bet, midCents: number, players: { p1: string; p2: string }, favSide: "first" | "second",
   trigger: string, reason: string, extra: { gameScore?: string; recvGames?: number }, deps: EngineDeps, now: string,
   o: { kind: "take" | "protective"; fraction?: number },
 ): Promise<number> {
-  const sell = await resolveTennisSell(db, ctx, b, players, midCents, deps);
+  const sell = await resolveTennisSell(db, ctx, b, players, favSide, midCents, deps);
   const logSkip = (text: string) => R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: b.entered_minute ?? "лайв", type: "skip", text, created_at: now });
+  if (sell.blocked) {
+    // token-fix-m1 FAIL-CLOSED: we cannot confirm the token is the side we hold → HOLD (never dump the
+    // wrong outcome), and make it LOUD once per match+strategy. A take and a protective exit alike defer
+    // to settle-by-label; that is strictly safer than realizing on the opponent's token. Backfill (or
+    // the token fix on a fresh entry) clears it. One alert, then silent holds until state changes.
+    const warned = R.tradeLogForMatch(db, b.match_id).some((l) => l.strategy_id === b.strategy_id && l.type === "skip" && (l.text ?? "").includes(sell.blocked!));
+    if (!warned) logSkip(`⚠ ВЫХОД ЗАБЛОКИРОВАН (${sell.blocked}): ${sell.note} — ${b.market_label} · триггер ${trigger} отложен, позиция держится до финала`);
+    return 0;
+  }
   if (o.kind === "take") {
     if (sell.stale) { logSkip(`тейк отложен: нет живого бида (${sell.note || "стакан на продажу пуст"}) — позиция держится, повтор на след. тике (${trigger})`); return 0; }
     const eff = Math.min(o.fraction ?? 1, sell.filledFrac);
@@ -403,14 +477,14 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
         const brokeBack = after.some((e) => e.type === "break" && e.server === oppSide); // favourite broke opponent back
         const K = Number.isFinite(plan?.thesis_stop?.receiver_games) ? Number(plan.thesis_stop.receiver_games) : SET_VALUE_ARMED.thesisStopReceiverGames;
         if (!brokeBack && recvAfter >= K) {
-          closed += await execTennisExit(db, sellCtx, b, cur, players, "thesis_stop", `стоп тезиса: брейк во 2-м сете без возврата за ${recvAfter} приёмных`, ext, deps, now, { kind: "protective" });
+          closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "thesis_stop", `стоп тезиса: брейк во 2-м сете без возврата за ${recvAfter} приёмных`, ext, deps, now, { kind: "protective" });
           continue;
         }
       }
       // catastrophic_floor — real collapse to ≤ floor, phantom-guarded by persistence (cur AND prev ≤ floor).
       const svFloor = Number.isFinite(plan?.catastrophic_floor?.at_cents) ? Number(plan.catastrophic_floor.at_cents) : null;
       if (svFloor != null && cur <= svFloor && prev != null && prev <= svFloor) {
-        closed += await execTennisExit(db, sellCtx, b, cur, players, "catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${svFloor}¢, подтверждён)`, ext, deps, now, { kind: "protective" });
+        closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${svFloor}¢, подтверждён)`, ext, deps, now, { kind: "protective" });
         continue;
       }
       // take_price — favourite recovered into the take band → fix HALF once, hold the rest to settle.
@@ -418,7 +492,7 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
       const frac = Number.isFinite(plan?.take_price?.fraction) ? Number(plan.take_price.fraction) : SET_VALUE_ARMED.takeFraction;
       const alreadyPartial = R.betsForMatch(db, b.match_id, SET_VALUE_STRATEGY).some((x) => x.settled_by === "partial" && (x.risk_profile_id ?? "medium") === (b.risk_profile_id ?? "medium") && x.market_label === b.market_label);
       if (cur >= svTake && !alreadyPartial) {
-        closed += await execTennisExit(db, sellCtx, b, cur, players, "take_price", `тейк камбэка: фаворит вернулся к ${cur}¢ (цель ≥${svTake}¢)`, ext, deps, now, { kind: "take", fraction: frac });
+        closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "take_price", `тейк камбэка: фаворит вернулся к ${cur}¢ (цель ≥${svTake}¢)`, ext, deps, now, { kind: "take", fraction: frac });
         continue;
       }
       continue; // Set-Value handled — never fall through to the Overreaction ladder
@@ -426,7 +500,7 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
 
     // #2 thesis_stop — a NEW break of the FAVOURITE's serve after entry.
     if (evs.some((e) => e.type === "break" && e.server === favSide)) {
-      closed += await execTennisExit(db, sellCtx, b, cur, players, "thesis_stop", `стоп тезиса: второй брейк фаворита — выход`, ext, deps, now, { kind: "protective" });
+      closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "thesis_stop", `стоп тезиса: второй брейк фаворита — выход`, ext, deps, now, { kind: "protective" });
       continue;
     }
     // #3 catastrophic_floor — a real collapse to ≤ floor, phantom-guarded by PERSISTENCE: cur AND the
@@ -435,19 +509,19 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
     // (±5-8¢) never reaches entry−15¢, only an injury/cascade does.
     const floorAt = Number.isFinite(plan?.catastrophic_floor?.at_cents) ? Number(plan.catastrophic_floor.at_cents) : null;
     if (floorAt != null && cur <= floorAt && prev != null && prev <= floorAt) {
-      closed += await execTennisExit(db, sellCtx, b, cur, players, "catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${floorAt}¢, подтверждён)`, ext, deps, now, { kind: "protective" });
+      closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${floorAt}¢, подтверждён)`, ext, deps, now, { kind: "protective" });
       continue;
     }
     // #4 game_count_stop — the favourite has played ≥K receiving games since entry with NO break-back.
     const K = Number.isFinite(plan?.game_count_stop?.receiver_games) ? Number(plan.game_count_stop.receiver_games) : TENNIS_GAME_COUNT_STOP;
     if (recvGames >= K && !counterBreak) {
-      closed += await execTennisExit(db, sellCtx, b, cur, players, "game_count_stop", `стоп по геймам: ${recvGames} приёмных без брейка назад`, ext, deps, now, { kind: "protective" });
+      closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "game_count_stop", `стоп по геймам: ${recvGames} приёмных без брейка назад`, ext, deps, now, { kind: "protective" });
       continue;
     }
     // #5 take_price — recovered to the pre-written take level (pre-break − buffer).
     const takeAt = Number.isFinite(plan?.take_price?.at_cents) ? Number(plan.take_price.at_cents) : null;
     if (takeAt != null && cur >= takeAt) {
-      closed += await execTennisExit(db, sellCtx, b, cur, players, "take_price", `тейк выкупа: фаворит вернулся к ${cur}¢ (цель ≥${takeAt}¢)`, ext, deps, now, { kind: "take", fraction: 1 });
+      closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "take_price", `тейк выкупа: фаворит вернулся к ${cur}¢ (цель ≥${takeAt}¢)`, ext, deps, now, { kind: "take", fraction: 1 });
       continue;
     }
   }
@@ -611,9 +685,10 @@ export function chargeTennisMatch(db: Database, matchId: string, players: { p1: 
 }
 
 /** Build the decision-time entry_meta for a tennis paper bet. */
-export function tennisEntryMeta(o: { favPrice: number; prePrice: number; edge: number; kelly: number; stake: number; thinnessUsd: number | null; setNum: number }): BetEntryMeta {
+export function tennisEntryMeta(o: { favPrice: number; prePrice: number; edge: number; kelly: number; stake: number; thinnessUsd: number | null; setNum: number; favSide?: "first" | "second" | null; firstIsP1?: boolean | null }): BetEntryMeta {
   return {
     phase: "live", minute: null, scoreHome: null, scoreAway: null,
+    favSide: o.favSide ?? null, firstIsP1: o.firstIsP1 ?? null, // token-fix-m1: pin the held outcome so the exit sells the SAME token it bought
     edge: Math.round(o.edge * 1000) / 1000, aiProb: Math.round((o.prePrice / 100) * 1000) / 1000, derivedProb: null,
     marketPrice: o.favPrice, impliedProb: Math.round((o.favPrice / 100) * 1000) / 1000, liveProbAdjusted: null,
     kellyFraction: Math.round(o.kelly * 1000) / 1000, sizeRequested: Math.round(o.stake * 100) / 100, sizeFilled: null, entrySlipCents: null,
@@ -661,7 +736,11 @@ const TENNIS_CATASTROPHIC_FLOOR = (() => { const n = Number(process.env.TENNIS_C
 // priced in a different world (fabricated 0¢ fills, exits at entry price — the Travaglia bug)
 // and are INCOMPARABLE: no cross-epoch aggregates. Old tennis stats are diagnostic, not
 // calibration (build notes). Env-tunable if a later recalibration needs a fresh tag.
-const TENNIS_ARMED_EPOCH = process.env.TENNIS_ARMED_EPOCH || "book-fill-m1";
+// EPOCH BREAK — token-fix-m1: entries/exits now transact the FAVOURITE's OWN winner token (favTokenOf),
+// backed by the runtime orientation invariant. Pre-token-fix tennis bets where the favourite was the
+// SECOND moneyline outcome HELD THE WRONG TOKEN — their take/exit P&L is about the opponent's token and
+// is INCOMPARABLE (quarantined by migrateQuarantinePoisonedTennis). Fresh tag → no cross-epoch aggregates.
+const TENNIS_ARMED_EPOCH = process.env.TENNIS_ARMED_EPOCH || "token-fix-m1";
 
 // Entry-order lifetime (spec §2.2: the live-panic window). Paper fills/skips immediately, so TIF is
 // carried only so the field is real for dry-run/real later.
@@ -714,7 +793,11 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
   const shadowCfg = loadShadowConfig(db, deps.env);
   // book-fill-m1: entries fill against the LIVE book via the shared engine (one book fetch per token
   // per tick, cached). No book / no edge / phantom → honest skip, never a fabricated 0¢ fill.
-  const executor = new PaperExecutor({ poly: deps.polymarket ?? loadPolymarketConfig(env), deps, bookCache: new Map<string, OrderBookFetch>(), nowMs: () => nowMs });
+  // Shared poly + book cache: the orientation invariant fetches the favourite token's book once and
+  // the executor reuses that same cached fetch when it fills — no double network hit per entry.
+  const poly = deps.polymarket ?? loadPolymarketConfig(env);
+  const bookCache = new Map<string, OrderBookFetch>();
+  const executor = new PaperExecutor({ poly, deps, bookCache, nowMs: () => nowMs });
   let opened = 0;
 
   const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, m })));
@@ -750,6 +833,15 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     if (!ml) { R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "no_moneyline", now); R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `манилайн не найден (только пропы / неоднозначно) — вход пропущен (no_moneyline)`, created_at: now }); continue; }
     const favMlPrice = charge.favSide === "first" ? ml.p1Cents : ml.p2Cents;
     const prePrice = prePriceBefore(db, m.id, charge.favSide, br.batchAt) ?? favMlPrice;
+    // token-fix-m1: the buyback trades the FAVOURITE's OWN winner token (resolved via favSide), NOT
+    // blindly outcomes[0]. Side token not persisted yet (market imported before token_second) → HONEST
+    // skip WITHOUT burning the break's LLM shot: re-discovery backfills token_second, next tick retries.
+    const favToken = favTokenOf(ml, charge.favSide);
+    if (!favToken) {
+      const warned = R.tradeLogForMatch(db, m.id).some((l) => l.strategy_id === TENNIS_STRATEGY && l.type === "skip" && (l.text ?? "").includes("token_side_unavailable"));
+      if (!warned) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `token_side_unavailable: токен стороны фаворита ещё не сохранён (token_second) — вход отложен до ре-дискавери`, created_at: now });
+      continue;
+    }
 
     // A3 (per profile): each risk profile holds at most ONE buyback per match — no "докупка в
     // падающую" WITHIN a profile — but the profiles run SIDE-BY-SIDE, each on its OWN $1k budget,
@@ -799,6 +891,17 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     // предматчевой" → 72% on a 38.5¢ side = a self-attributed 33.5% edge, the France–Morocco class bug).
     const ourProb = Math.min(pick.prob != null ? pick.prob * 100 : prePrice, prePrice) / 100;
     const implied = entryCents / 100; // moneyline price IS the de-vigged implied for a 2-outcome winner market
+    // RUNTIME INVARIANT (belt behind the token fix): the favourite token's live ASK must sit near the
+    // price we sized on. A flipped side asks at ~100−price → block + LOUD alert before a cent is spent.
+    // Book is cached, so the fill below reuses this exact fetch. Inert when exec model is off (no book).
+    if (poly.enabled) {
+      const favBook = await classifyOrderBook(favToken, poly, deps, bookCache);
+      const mm = orientationMismatch(favBook, "buy", entryCents);
+      if (mm) {
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `⚠ token_orientation_mismatch: аск токена «${favName}» ${mm.tokenCents}¢ vs ожидаемая цена фаворита ${Math.round(entryCents)}¢ (Δ${Math.round(mm.gap)}¢) — покупаем НЕ ТОТ исход, ВХОД ЗАБЛОКИРОВАН`, created_at: now });
+        continue;
+      }
+    }
     for (const profile of freeProfiles) {
       // Race guard: freeProfiles was computed BEFORE the awaited LLM call — an overlapping tick
       // (live + catch-up firing together) could have opened a buyback on this profile during the
@@ -814,14 +917,14 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `[${profile}] overreaction подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
       // book-fill-m1: fill against the LIVE moneyline book (VWAP / honest skip) — no more 0¢ fills.
       const decisionId = R.uid();
-      const ack = await fillTennisEntry(executor, decisionId, { token: ml.token, entryCents, sizeUsd: r.stake, fairProbPct: ourProb * 100, strategyId: TENNIS_STRATEGY, profileId: profile, matchId: m.id });
+      const ack = await fillTennisEntry(executor, decisionId, { token: favToken, entryCents, sizeUsd: r.stake, fairProbPct: ourProb * 100, strategyId: TENNIS_STRATEGY, profileId: profile, matchId: m.id });
       if (ack.status !== "filled") {
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `[${profile}] ВЫКУП «${favName}» не исполнен: no_book_liquidity:${ack.reason} (${TENNIS_SKIP_KIND[ack.reason ?? ""] ?? ack.reason}) — манилайн ${entryCents}¢, заявл. ликв. $${Math.round(ml.liquidity || 0)}`, created_at: now });
         continue;
       }
       const fillCents = ack.avgFillPriceCents ?? entryCents; // REAL book fill price
       const fillStake = ack.filledSizeUsd;                    // depth-aware size (thin book → smaller)
-      const meta = tennisEntryMeta({ favPrice: fillCents, prePrice, edge: r.edge, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: br.setNum });
+      const meta = tennisEntryMeta({ favPrice: fillCents, prePrice, edge: r.edge, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: br.setNum, favSide: charge.favSide, firstIsP1: ml.firstIsP1 });
       const betId = R.uid();
       R.insertBet(db, {
         id: betId, match_id: m.id, strategy_id: TENNIS_STRATEGY, risk_profile_id: profile, market_label: favName,
@@ -850,9 +953,10 @@ function startPrices(db: Database, matchId: string): { p1: number | null; p2: nu
 }
 
 /** Decision-time entry_meta for a Set-Value paper bet — a PARTIAL-take, hold-to-settle exit plan. */
-export function tennisSetValueEntryMeta(o: { favPrice: number; edge: number; kelly: number; stake: number; thinnessUsd: number | null; setNum: number }): BetEntryMeta {
+export function tennisSetValueEntryMeta(o: { favPrice: number; edge: number; kelly: number; stake: number; thinnessUsd: number | null; setNum: number; favSide?: "first" | "second" | null; firstIsP1?: boolean | null }): BetEntryMeta {
   return {
     phase: "live", minute: null, scoreHome: null, scoreAway: null,
+    favSide: o.favSide ?? null, firstIsP1: o.firstIsP1 ?? null, // token-fix-m1: pin the held outcome so the exit sells the SAME token it bought
     edge: Math.round(o.edge * 1000) / 1000, aiProb: Math.round(SET_VALUE_ARMED.comebackProb * 1000) / 1000, derivedProb: null,
     marketPrice: o.favPrice, impliedProb: Math.round((o.favPrice / 100) * 1000) / 1000, liveProbAdjusted: null,
     kellyFraction: Math.round(o.kelly * 1000) / 1000, sizeRequested: Math.round(o.stake * 100) / 100, sizeFilled: null, entrySlipCents: null,
@@ -883,7 +987,9 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
   const codeVer = `${effectiveCodeVersion(db)}·${SET_VALUE_EPOCH}`;
   const shadowCfg = loadShadowConfig(db, deps.env);
   const svNowMs = Date.parse(now) || Date.now();
-  const executor = new PaperExecutor({ poly: deps.polymarket ?? loadPolymarketConfig(env), deps, bookCache: new Map<string, OrderBookFetch>(), nowMs: () => svNowMs });
+  const poly = deps.polymarket ?? loadPolymarketConfig(env);
+  const bookCache = new Map<string, OrderBookFetch>();
+  const executor = new PaperExecutor({ poly, deps, bookCache, nowMs: () => svNowMs });
   let opened = 0;
 
   const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, m })));
@@ -903,10 +1009,19 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
     const favPrice = charge.favSide ? favPriceFromScout(db, m.id, charge.favSide) : null;
     const gate = setValueGate({ favSide: charge.favSide, tradeable: charge.tradeable, favPriceCents: favPrice, favSetsWon, favSetsLost, setNum: last.set_num, eventType: last.event_type, tournament: last.tournament });
     if (!gate.armed) continue; // transient (price not in band / set not yet lost) OR terminal — re-checked cheaply each tick; never mark acted until we actually decide
+    const favSide = charge.favSide; if (!favSide) continue; // gate.armed already implies a favourite; narrow for the token resolver
 
-    const favName = charge.favSide === "first" ? players.p1 : players.p2;
+    const favName = favSide === "first" ? players.p1 : players.p2;
     const ml = tennisMoneyline(db, m.id, players);
     if (!ml) { R.metaSet(db, SV_ACTED + m.id, "no_moneyline", now); R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `манилайн не найден — вход пропущен (no_moneyline)`, created_at: now }); continue; }
+    // token-fix-m1: trade the FAVOURITE's OWN winner token (resolved via favSide). Not persisted yet →
+    // honest skip WITHOUT marking acted (re-discovery backfills token_second, next tick retries).
+    const favToken = favTokenOf(ml, favSide);
+    if (!favToken) {
+      const warned = R.tradeLogForMatch(db, m.id).some((l) => l.strategy_id === SET_VALUE_STRATEGY && l.type === "skip" && (l.text ?? "").includes("token_side_unavailable"));
+      if (!warned) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `token_side_unavailable: токен стороны фаворита ещё не сохранён (token_second) — вход отложен до ре-дискавери`, created_at: now });
+      continue;
+    }
 
     // Cross-strategy one-position rule (tennis): a profile holding ANY open tennis buyback on this
     // match is not free. If ALL profiles are blocked, WAIT (don't mark acted) — Set-Value enters
@@ -936,9 +1051,19 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
     const pick = dec.picks.find((p) => norm(p.label) === norm(favName) || surnames(favName).some((t) => norm(p.label).includes(t)));
     if (!pick) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `не конкурентный сет / ретайр-риск: стратег воздержался — ${dec.note?.slice(0, 120) ?? ""}`, created_at: now }); continue; }
 
-    const entryCents = favPrice ?? (charge.favSide === "first" ? ml.p1Cents : ml.p2Cents);
+    const entryCents = favPrice ?? (favSide === "first" ? ml.p1Cents : ml.p2Cents);
     const ourProb = SET_VALUE_ARMED.comebackProb; // interim constant for a competitive lost set (calibrated later)
     const implied = entryCents / 100;
+    // RUNTIME INVARIANT (belt): the favourite token's live ASK must sit near the price we sized on —
+    // block + LOUD alert on a flipped side before spending. Cached; the fill reuses this fetch.
+    if (poly.enabled) {
+      const favBook = await classifyOrderBook(favToken, poly, deps, bookCache);
+      const mm = orientationMismatch(favBook, "buy", entryCents);
+      if (mm) {
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `⚠ token_orientation_mismatch: аск токена «${favName}» ${mm.tokenCents}¢ vs ожидаемая цена фаворита ${Math.round(entryCents)}¢ (Δ${Math.round(mm.gap)}¢) — покупаем НЕ ТОТ исход, ВХОД ЗАБЛОКИРОВАН`, created_at: now });
+        continue;
+      }
+    }
     for (const profile of freeProfiles) {
       // Race guard (see Overreaction): freeProfiles predates the awaited LLM call — re-check the
       // CROSS-strategy hold right before the insert so an overlapping tick can't double-enter.
@@ -954,14 +1079,14 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
       // should be LOW — a high no_book_liquidity rate here points at OUR book mapping first (tokenId /
       // side / limit vs spread), then the market (build notes: Set-Value routing criterion).
       const decisionId = R.uid();
-      const ack = await fillTennisEntry(executor, decisionId, { token: ml.token, entryCents, sizeUsd: r.stake, fairProbPct: ourProb * 100, strategyId: SET_VALUE_STRATEGY, profileId: profile, matchId: m.id });
+      const ack = await fillTennisEntry(executor, decisionId, { token: favToken, entryCents, sizeUsd: r.stake, fairProbPct: ourProb * 100, strategyId: SET_VALUE_STRATEGY, profileId: profile, matchId: m.id });
       if (ack.status !== "filled") {
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `[${profile}] SET-VALUE «${favName}» не исполнен: no_book_liquidity:${ack.reason} (${TENNIS_SKIP_KIND[ack.reason ?? ""] ?? ack.reason}) — манилайн ${entryCents}¢, заявл. ликв. $${Math.round(ml.liquidity || 0)}`, created_at: now });
         continue;
       }
       const fillCents = ack.avgFillPriceCents ?? entryCents;
       const fillStake = ack.filledSizeUsd;
-      const meta = tennisSetValueEntryMeta({ favPrice: fillCents, edge: r.edge, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: last.set_num ?? 2 });
+      const meta = tennisSetValueEntryMeta({ favPrice: fillCents, edge: r.edge, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: last.set_num ?? 2, favSide, firstIsP1: ml.firstIsP1 });
       const betId = R.uid();
       R.insertBet(db, {
         id: betId, match_id: m.id, strategy_id: SET_VALUE_STRATEGY, risk_profile_id: profile, market_label: favName,

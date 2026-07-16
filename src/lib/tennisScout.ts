@@ -157,7 +157,20 @@ const TENNIS_PROP_RE = /\b(over|under|handicap|winner|games?|odd|even|tie\s*brea
 const nameToks = (s: string) => normName(s).replace(/\./g, " ").split(/\s+/).filter((t) => t.length > 1);
 const surnamesOverlap = (a: string, b: string) => { const A = new Set(nameToks(a)); return nameToks(b).some((t) => A.has(t)); };
 
-export interface TennisMoneyline { p1Cents: number; p2Cents: number; label: string; token: string | null; liquidity: number; firstIsP1: boolean }
+export interface TennisMoneyline { p1Cents: number; p2Cents: number; label: string; token: string | null; tokenSecond: string | null; liquidity: number; firstIsP1: boolean }
+
+/**
+ * The CLOB token of the FAVOURITE's winner side (token-fix-m1). `favSide` names the favourite in
+ * SCOUT order (first=p1 / second=p2); `firstIsP1` says whether scout-p1 is the moneyline's first
+ * outcome. The favourite is the moneyline's FIRST outcome iff those agree — then it's `token`
+ * (external_ref, = outcomes[0]); otherwise it's the SECOND outcome → `tokenSecond`. Returns null when
+ * that token isn't persisted yet (market imported before token_second existed) — the caller then
+ * HONEST-SKIPS rather than transact the wrong side (fail-closed until re-discovery backfills it).
+ */
+export function favTokenOf(ml: TennisMoneyline, favSide: "first" | "second"): string | null {
+  const favIsFirstOutcome = (favSide === "first") === ml.firstIsP1;
+  return favIsFirstOutcome ? ml.token : ml.tokenSecond;
+}
 /**
  * Resolve a match's MONEYLINE (match-winner) price per player from the stored markets. The moneyline
  * is the SINGLE non-prop market ("Tournament: A vs B", stored price = P(first-named player); the
@@ -181,7 +194,7 @@ export function tennisMoneyline(db: Database, matchId: string, players: { p1: st
   if (p1IsA && !p1IsB) p1Cents = pFirst;            // players.p1 = A (first outcome)
   else if (p1IsB && !p1IsA) p1Cents = 100 - pFirst; // players.p1 = B (second outcome)
   else return null; // ambiguous / unalignable → honest skip
-  return { p1Cents: Math.round(p1Cents * 10) / 10, p2Cents: Math.round((100 - p1Cents) * 10) / 10, label: mk.label, token: mk.external_ref, liquidity: Number(mk.liquidity ?? 0) || 0, firstIsP1: p1IsA && !p1IsB };
+  return { p1Cents: Math.round(p1Cents * 10) / 10, p2Cents: Math.round((100 - p1Cents) * 10) / 10, label: mk.label, token: mk.external_ref, tokenSecond: mk.token_second ?? null, liquidity: Number(mk.liquidity ?? 0) || 0, firstIsP1: p1IsA && !p1IsB };
 }
 
 // ── Tennis PMV — Stage-0 Gate 0.1: prop LIQUIDITY survey (build-vs-park decision) ──

@@ -56,7 +56,7 @@ test("tennisSetValueTick: favourite lost a competitive set 1, price in band → 
   assert.ok(opened >= 1, "opened at least one profile");
   const bets = R.betsForMatch(db, mid, "tennis_set_value").filter((b) => b.status === "open");
   assert.ok(bets.length >= 1 && bets.every((b) => b.market_label === "Vitoria Zuccon" && (b.stake ?? 0) > 0), "favourite name, sized");
-  assert.ok(bets.every((b) => b.code_version?.includes("book-fill-m1")), "book-fill-m1 epoch (hard break from the 0¢ era)");
+  assert.ok(bets.every((b) => b.code_version?.includes("token-fix-m1")), "token-fix-m1 epoch (hard break: favourite's own token)");
 });
 
 // Combined fetch: CLOB /book requests get an order book; everything else is the LLM strategist.

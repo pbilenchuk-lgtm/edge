@@ -39,9 +39,10 @@ export const SET_VALUE_ARMED = {
   comebackProb: Math.min(0.95, Math.max(0.05, num(process.env.TENNIS_SV_COMEBACK_PROB, 0.5))),
 };
 
-// Armed-threshold epoch. book-fill-m1: Set-Value entries now fill against the LIVE book (VWAP /
-// honest skip), incomparable with the pre-book-fill 0¢ era — a hard break, no cross-epoch aggregate.
-export const SET_VALUE_EPOCH = process.env.TENNIS_SV_EPOCH || "book-fill-m1";
+// Armed-threshold epoch. token-fix-m1: Set-Value now transacts the FAVOURITE's OWN winner token
+// (favTokenOf) behind the orientation invariant. Pre-fix bets with a second-outcome favourite held the
+// WRONG token (quarantined) — incomparable, a hard break with no cross-epoch aggregate.
+export const SET_VALUE_EPOCH = process.env.TENNIS_SV_EPOCH || "token-fix-m1";
 
 // Grand-Slam men's singles are best-of-FIVE (different comeback math) — Set-Value trades bo3 ONLY.
 const GRAND_SLAM_RE = /australian open|roland garros|french open|wimbledon|us open|us\.? open/i;

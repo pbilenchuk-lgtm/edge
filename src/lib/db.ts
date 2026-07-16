@@ -16,6 +16,7 @@ import { mkdirSync } from "node:fs";
 import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy, migrateTennisSetValueStrategy, migrateTennisPmvStrategy, migrateVoidOutOfScopePmv, migrateVoidAllOpenPmv, migrateResettleExtraTimeVoids, migrateResetTennisMarks, migrateRetireFable } from "./seed.js";
 import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
+import { migrateQuarantinePoisonedTennis } from "./tennisTrading.js";
 
 // node:sqlite is experimental and not in @types/node, so require it
 // dynamically and give it a minimal local type.
@@ -151,6 +152,10 @@ export function getDb(path = dbPath()): Database {
   // → Opus 4.8 (Fable's structured calls failed ~¾ of the time → silently skipped matches).
   try { migrateRetireFable(db, new Date().toISOString()); }
   catch { /* non-fatal */ }
+  // token-fix-m1: flag pre-fix tennis buybacks that held the WRONG outcome's token (favourite = second
+  // moneyline outcome) so calibration/win-rate slices exclude their opponent-token P&L. Marker-guarded.
+  try { migrateQuarantinePoisonedTennis(db, new Date().toISOString()); }
+  catch { /* non-fatal */ }
   _db = db;
   return db;
 }
@@ -219,6 +224,10 @@ export function initSchema(db: Database): void {
     "ALTER TABLE real_ledger ADD COLUMN dry INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE markets ADD COLUMN ask_cents REAL",
     "ALTER TABLE markets ADD COLUMN spread_cents REAL",
+    // token-fix-m1: persist the SECOND outcome's CLOB token so a 2-outcome market (tennis moneyline)
+    // knows both sides. Before this the row kept only outcomes[0]'s token (external_ref); when the
+    // favourite was the second-named player the engine held the WRONG token (the fourth orientation bug).
+    "ALTER TABLE markets ADD COLUMN token_second TEXT",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }

@@ -53,6 +53,17 @@ export interface BetEntryMeta {
   // re-derives from the moneyline), so a prop that lists players in the opposite order to the
   // moneyline settles on the side it was actually bought. null/undefined for non-oriented families.
   propFirstIsP1?: boolean | null;
+  // Tennis MONEYLINE orientation, resolved ONCE at entry and FROZEN on the bet (token-fix-m1). The
+  // buyback trades the FAVOURITE's winner token; `favSide` names which player is the favourite (scout
+  // order) and `firstIsP1` whether scout-p1 == the moneyline's first outcome. Together they pin the
+  // exact outcome the position holds, so the exit sells the SAME token it bought — no re-derivation.
+  favSide?: "first" | "second" | null;
+  firstIsP1?: boolean | null;
+  // token-flip-poisoned: this bet was opened BEFORE token-fix-m1 while holding the WRONG outcome's
+  // token (favourite = second moneyline outcome, but the engine always bought outcomes[0]). Its
+  // take/exit P&L is about the opponent's token, not the favourite's — EXCLUDED from every
+  // calibration/win-rate slice. Set by migrateQuarantinePoisonedTennis; never on a post-fix bet.
+  tokenFlipPoisoned?: boolean | null;
   // ── Exit-execution flags (set when a tennis position is CLOSED against the book, book-fill-m1) ──
   // exitStalePrice: a protective exit had NO live bid book and executed at the MODELLED/stale price
   //   (§4.5). Its realized P&L is not a clean book fill — analytics EXCLUDES it from calibration/

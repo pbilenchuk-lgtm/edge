@@ -322,7 +322,8 @@ test("polymarket: eventToMarketSnapshots drops priceless markets", () => {
   const snaps = eventToMarketSnapshots(normalizeEvent(EVENT_FIXTURE[0]), "2026-07-03T00:00:00Z");
   const labels = snaps.map((s) => s.label);
   assert.equal(snaps.length, 3); // priceless dropped; the O/U total expands to BOTH sides
-  assert.deepEqual(snaps.find((s) => s.label === "Connor Doig vs Eudald Gonzalez"), { label: "Connor Doig vs Eudald Gonzalez", price: 62, external_ref: "tok-a", liquidity: "1234", askCents: null, spreadCents: null });
+  // token-fix-m1: the moneyline persists BOTH outcome tokens — external_ref (outcomes[0]) + tokenSecond (outcomes[1]).
+  assert.deepEqual(snaps.find((s) => s.label === "Connor Doig vs Eudald Gonzalez"), { label: "Connor Doig vs Eudald Gonzalez", price: 62, external_ref: "tok-a", tokenSecond: "tok-b", liquidity: "1234", askCents: null, spreadCents: null });
   assert.ok(labels.includes("Total Sets: Over 2.5") && labels.includes("Total Sets: Under 2.5")); // both sides of the total
 });
 

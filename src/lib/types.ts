@@ -154,7 +154,11 @@ export interface Market {
   price: number;
   ai_prob: number | null;
   liquidity: string | null;
-  external_ref: string | null;
+  external_ref: string | null;      // CLOB token of outcomes[0] (backs `price`)
+  /** CLOB token of outcomes[1] on a 2-outcome market (tennis moneyline). Lets a consumer resolve the
+   *  SECOND side's token instead of assuming the first — the token-fix-m1 orientation fix. Null on
+   *  single-sided rows and on markets imported before the column existed (backfilled on re-discovery). */
+  token_second?: string | null;
   snapshot_at: string;
   is_closing: boolean;
   /** executable BUY ask for this side (cents) and bid/ask spread — from Gamma's book fields, so a

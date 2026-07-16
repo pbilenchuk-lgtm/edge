@@ -240,14 +240,14 @@ test("tennisExitTick (book-fill-m1): protective exit on a THIN bid → partial s
   assert.ok(partial, "a partial slice was booked at the bid");
 });
 
-test("tennis calibration: the entry plan carries the INTERIM defaults (K=3, epoch=book-fill-m1)", async () => {
+test("tennis calibration: the entry plan carries the INTERIM defaults (K=3, epoch=token-fix-m1)", async () => {
   // The prop-priced 105-mark calibration was discarded (BACKLOG "price layer = the MONEYLINE"):
   // thresholds return to interim (K=3) until ~100 marks re-accumulate on the moneyline. The epoch
-  // tag is now book-fill-m1 — the hard break where entries fill against the live book, not 0¢.
+  // tag is now token-fix-m1 — the hard break where entries/exits transact the favourite's OWN token.
   const meta = tennisEntryMeta({ favPrice: 45, prePrice: 62, edge: 0.1, kelly: 0.2, stake: 100, thinnessUsd: 5000, setNum: 1 });
   const plan = meta.exitPlan as any;
   assert.equal(plan.game_count_stop.receiver_games, 3, "interim game-count stop");
-  assert.equal(plan.armed_epoch, "book-fill-m1");
+  assert.equal(plan.armed_epoch, "token-fix-m1");
   assert.equal(plan.take_price.at_cents, 59, "pre-break 62 − 3¢ buffer (kept)");
   assert.equal(plan.catastrophic_floor.at_cents, 30, "entry 45 − 15¢ floor (held structural)");
 });
