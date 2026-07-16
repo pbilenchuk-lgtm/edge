@@ -819,6 +819,7 @@ test("espnLeagueForSeries: covered leagues resolve, uncovered (tennis/minor) ret
   assert.equal(espnLeagueForSeries("FIFA World Cup", "soccer-fifwc"), "fifa.world");
   assert.equal(espnLeagueForSeries("UEFA Champions League", "soccer-ucl"), "uefa.champions");
   assert.equal(espnLeagueForSeries("Allsvenskan", "soccer-allsvenskan"), "swe.1"); // via name inference
+  assert.equal(espnLeagueForSeries("Chinese Super League", "soccer-csl"), "chn.1"); // ESPN chn.1 DOES carry it
   assert.equal(espnLeagueForSeries("Morocco Botola", "soccer-botola"), null);      // ESPN doesn't cover → skip
   assert.equal(espnLeagueForSeries(null, "atp-alcaraz-sinner"), null);             // tennis → no mapping → skip
   assert.equal(espnLeagueForSeries(null, null), null);
@@ -842,9 +843,10 @@ test("espnLeagueForSeries: UEFA cups resolve by NAME (fixes null/aus.1 mis-map) 
   assert.equal(espnLeagueForSeries("Liga 1", "liga-1"), "per.1");     // Polymarket "Liga 1" = Peru (pinned by slug)
   assert.equal(espnLeagueForSeries("Romania 1", "romania-1"), "rou.1");
   // NOT on ESPN (scoreboard returns no league object) → stay UNMAPPED, so discovery
-  // skips them and they're never funded: K-League, Australia Cup, Chinese Super League.
+  // skips them and they're never funded: K-League, Australia Cup.
   assert.equal(espnLeagueForSeries("K-league", "k-league"), null);
   assert.equal(espnLeagueForSeries("Australia Cup", "soccer-auc"), null);
-  assert.equal(espnLeagueForSeries("Chinese Super League", "chinese-super-league"), null);
+  // Chinese Super League used to be here, but ESPN's chn.1 feed DOES carry it (probed live) — now mapped.
+  assert.equal(espnLeagueForSeries("Chinese Super League", "chinese-super-league"), "chn.1");
 });
 

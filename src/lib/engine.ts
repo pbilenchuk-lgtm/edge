@@ -592,6 +592,11 @@ const LEAGUE_NAME_ESPN: [RegExp, string][] = [
   [/(efl championship|\bchampionship\b)/i, "eng.2"],
   [/saudi pro league/i, "ksa.1"],
   [/j1 league/i, "jpn.1"],
+  // Chinese Super League — ESPN's chn.1 feed DOES carry it (probed: Beijing Guoan, Henan,
+  // Yunnan Yukun all present with live status), so it's not "uncovered" — it was just unmapped,
+  // which made reconcileFootballCategories DELETE it every tick. Mapping it here backfills the
+  // league, auto-funds it via the standard grid, and lets enrichFromEspn pull live scores/events.
+  [/chinese super league|china.*super league|super league.*china/i, "chn.1"],
   [/\ba-?league\b/i, "aus.1"],
   [/(greek super league|super league greece)/i, "gre.1"],
   [/(austrian bundesliga|bundesliga.*austria)/i, "aut.1"],

@@ -153,12 +153,13 @@ test("reconcileFootballCategories: backfills mapping, funds covered-unfunded, de
   R.upsertCompetition(db, { id: "pm-epl", sport_id: "football", name: "EPL", budget: 0, external_league: "eng.1", created_at: "t" });
   mkMatch("m-epl", "pm-epl", "finished");
   R.upsertMatchLive(db, { match_id: "m-epl", espn_event_id: "e1", league: "eng.1", home_lineup: null, away_lineup: null, stats: null, updated_at: "t" });
-  // (3) CSL: unmapped (no provider will ever cover it), only a NOT-FILLED phantom
-  // bet, and an UPCOMING match — must STILL be DELETED (pending doesn't save an
-  // unmapped category now that StatPal/TheStatsAPI are gone).
-  R.upsertCompetition(db, { id: "pm-chinese-super-league", sport_id: "football", name: "Chinese Super League", budget: 0, external_league: null, created_at: "t" });
-  mkMatch("m-csl", "pm-chinese-super-league", "upcoming");
-  R.insertBet(db, { id: "b-csl", match_id: "m-csl", strategy_id: R.listStrategies(db, "football")[0].id, market_label: "Over 2.5", status: "not_filled", proposed_price: 50, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.5, stake: 0, rationale: null, entered_minute: null, result: null, payout: null, created_at: "t" });
+  // (3) K-League: unmapped (ESPN doesn't cover it), only a NOT-FILLED phantom bet,
+  // and an UPCOMING match — must STILL be DELETED (pending doesn't save an unmapped
+  // category now that StatPal/TheStatsAPI are gone). (Chinese Super League used to be
+  // this example, but ESPN's chn.1 feed does carry it, so it's now mapped+funded.)
+  R.upsertCompetition(db, { id: "pm-k-league", sport_id: "football", name: "K-League", budget: 0, external_league: null, created_at: "t" });
+  mkMatch("m-ksl", "pm-k-league", "upcoming");
+  R.insertBet(db, { id: "b-ksl", match_id: "m-ksl", strategy_id: R.listStrategies(db, "football")[0].id, market_label: "Over 2.5", status: "not_filled", proposed_price: 50, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.5, stake: 0, rationale: null, entered_minute: null, result: null, payout: null, created_at: "t" });
   // (4) Botola: UNMAPPABLE (ESPN doesn't cover), all finished, never observed, but
   // carries REAL P&L → KEPT (never destroy settled history), even though blind.
   R.upsertCompetition(db, { id: "pm-morocco-botola", sport_id: "football", name: "Morocco Botola", budget: 0, external_league: null, created_at: "t" });
@@ -175,8 +176,8 @@ test("reconcileFootballCategories: backfills mapping, funds covered-unfunded, de
   // EPL funded.
   assert.ok(R.listCompetitions(db).find((c) => c.id === "pm-epl")!.budget > 0, "covered-unfunded EPL funded");
   assert.ok(R.sharesForComp(db, "pm-epl").length > 0);
-  // CSL deleted despite an upcoming match (unmapped → no provider ever).
-  assert.equal(R.listCompetitions(db).find((c) => c.id === "pm-chinese-super-league"), undefined, "unmapped CSL deleted even with a pending match");
+  // K-League deleted despite an upcoming match (unmapped → no provider ever).
+  assert.equal(R.listCompetitions(db).find((c) => c.id === "pm-k-league"), undefined, "unmapped K-League deleted even with a pending match");
   // Botola kept (real P&L) despite being unmapped + never observed.
   assert.ok(R.listCompetitions(db).find((c) => c.id === "pm-morocco-botola"), "P&L-bearing category preserved");
 
