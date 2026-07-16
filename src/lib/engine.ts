@@ -146,9 +146,16 @@ export async function refreshMatchOdds(
     if (price == null || price === m.price) continue;
     updated++;
     // new versioned snapshot (§2.10)
+    // Quote-refresh updates the mid from CLOB /midpoint (no fresh book). The book's SPREAD structure
+    // changes slower than the mid tick, so carry the last Gamma-sourced ask/spread forward — a stale-ish
+    // ask still beats the mid on a wide-spread book. But drop it if the new mid has CROSSED the carried
+    // ask (price ≥ ask is incoherent → the book moved) — then edge falls back to mid (flagged). Cheap
+    // price-based staleness, no extra timestamp; the book-fill guard remains the final backstop.
+    const askStillCoherent = m.ask_cents != null && price < m.ask_cents;
     R.insertMarket(db, {
       id: R.uid(), match_id: matchId, label: m.label, price, ai_prob: m.ai_prob,
       liquidity: m.liquidity, external_ref: m.external_ref, snapshot_at: now, is_closing: false,
+      ask_cents: askStillCoherent ? m.ask_cents : null, spread_cents: askStillCoherent ? m.spread_cents : null,
     });
     // mark-to-market open bets on this market — at LIQUIDATION value (mid haircut
     // for exit slippage − exit fee), not the raw mid, so unrealized P&L / equity

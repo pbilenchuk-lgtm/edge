@@ -549,9 +549,9 @@ export function failStaleAnalysisJobs(db: Database, error: string, at: string): 
 // ---------- markets ----------
 export function insertMarket(db: Database, m: Market): void {
   db.prepare(
-    `INSERT INTO markets(id,match_id,label,price,ai_prob,liquidity,external_ref,snapshot_at,is_closing)
-     VALUES(?,?,?,?,?,?,?,?,?)`,
-  ).run(m.id, m.match_id, m.label, m.price, m.ai_prob, m.liquidity, m.external_ref, m.snapshot_at, m.is_closing ? 1 : 0);
+    `INSERT INTO markets(id,match_id,label,price,ai_prob,liquidity,external_ref,snapshot_at,is_closing,ask_cents,spread_cents)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(m.id, m.match_id, m.label, m.price, m.ai_prob, m.liquidity, m.external_ref, m.snapshot_at, m.is_closing ? 1 : 0, m.ask_cents ?? null, m.spread_cents ?? null);
 }
 /** Remove a market entirely (all snapshot rows + its kickoff-open row) from a match
  *  — used to drop a dust/orphan listing the importer no longer wants to surface.

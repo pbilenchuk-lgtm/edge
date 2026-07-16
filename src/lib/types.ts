@@ -157,6 +157,11 @@ export interface Market {
   external_ref: string | null;
   snapshot_at: string;
   is_closing: boolean;
+  /** executable BUY ask for this side (cents) and bid/ask spread — from Gamma's book fields, so a
+   *  decision's edge is measured against what a trade would actually PAY, not the mid. Null → no book
+   *  → edge falls back to `price` (mid) and is flagged mid_fallback. */
+  ask_cents?: number | null;
+  spread_cents?: number | null;
 }
 
 export interface Bet {

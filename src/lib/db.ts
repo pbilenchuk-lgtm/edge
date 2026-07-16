@@ -204,6 +204,8 @@ export function initSchema(db: Database): void {
     "ALTER TABLE real_fills ADD COLUMN dry INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE real_positions ADD COLUMN dry INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE real_ledger ADD COLUMN dry INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE markets ADD COLUMN ask_cents REAL",
+    "ALTER TABLE markets ADD COLUMN spread_cents REAL",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }

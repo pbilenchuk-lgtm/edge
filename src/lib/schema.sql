@@ -193,7 +193,9 @@ CREATE TABLE IF NOT EXISTS markets (
   liquidity    TEXT,               -- «$2.5M» (справочно)
   external_ref TEXT,               -- CLOB token_id рынка в Polymarket
   snapshot_at  TEXT NOT NULL,
-  is_closing   INTEGER NOT NULL DEFAULT 0  -- цена закрытия рынка? (для CLV)
+  is_closing   INTEGER NOT NULL DEFAULT 0, -- цена закрытия рынка? (для CLV)
+  ask_cents    REAL,               -- исполнимый BUY-аск этой стороны (центы) из книги Gamma
+  spread_cents REAL                -- bid/ask спред рынка (центы)
 );
 CREATE INDEX IF NOT EXISTS idx_markets_match ON markets(match_id, snapshot_at);
 

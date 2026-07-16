@@ -30,6 +30,9 @@ export interface BetEntryMeta {
   derivedProb: number | null;       // pure Poisson-derived prob (pre pick override)
   marketPrice: number | null;       // ¢, the de-vig-free quote at entry
   impliedProb: number | null;       // de-vigged implied prob
+  edgeSource?: "executable" | "mid_fallback"; // was edge measured vs the executable ask, or a mid fallback?
+  execAskCents?: number | null;     // ¢, the executable BUY ask edge was measured against (when executable)
+  spreadCents?: number | null;      // ¢, bid/ask spread at entry (wide = phantom-prone thin book)
   liveProbAdjusted: number | null;  // game-state P (live melting-option entries), else null
   kellyFraction: number | null;     // the calibration-scaled, clamped Kelly used
   sizeRequested: number | null;     // $ the sizer asked for (pre book-depth cap)

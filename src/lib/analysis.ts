@@ -329,7 +329,15 @@ export async function runStrategists(
       if (pick?.prob != null) R.setMarketAiProb(db, m.id, pick.prob);
       if (psFlags.has(m.label)) { flagged++; battle.push({ market: m.label, status: "flag", reason: "prob_sum вне допуска" }); continue; }
       const cKey = correlationKey(m.label, match.home, match.away);
-      const r = sizePrematch({ ourProb, priceCents: m.price, implied, calibration, liquidity: parseLiq(m.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg });
+      // Executable-ask edge (fix #1): a BUY pays the ASK, not the mid. Size/gate against the executable
+      // ask when we have the book (ask ≥ mid keeps it conservative — never inflates edge, closes the
+      // "1−ask phantom" on the other side); else fall back to the mid and FLAG it (mid_fallback) so the
+      // edge-analytics can separate honest executable edges from mid estimates.
+      const askUsable = m.ask_cents != null && m.ask_cents >= m.price && m.ask_cents < 100;
+      const execCents = askUsable ? (m.ask_cents as number) : m.price;
+      const edgeSource: "executable" | "mid_fallback" = askUsable ? "executable" : "mid_fallback";
+      const effImplied = askUsable ? execCents / 100 : implied;
+      const r = sizePrematch({ ourProb, priceCents: execCents, implied: effImplied, calibration, liquidity: parseLiq(m.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg });
       battle.push({ market: m.label, our_prob: round3(ourProb), implied: round3(implied), edge_pct: round3(r.edge * 100), status: r.status, stake: r.stake, kelly_fraction: round3(r.kellyFraction), reason: r.reason,
         ...(pick?.role ? { role: pick.role } : {}), ...(pick?.livesInBranches ? { lives_in_branches: pick.livesInBranches } : {}), ...(pick?.branchWeightSum != null ? { branch_weight_sum: pick.branchWeightSum } : {}), ...(pick?.phantomCheck ? { phantom_check: pick.phantomCheck } : {}), ...(pick?.totalCheck ? { total_check: pick.totalCheck } : {}), ...(pick?.exitPlan ? { exit: pick.exitPlan } : {}) });
       if (r.status === "flag") { flagged++; continue; }
@@ -343,6 +351,8 @@ export async function runStrategists(
         scoreHome: match.score_home ?? null, scoreAway: match.score_away ?? null,
         edge: round3(r.edge), aiProb: round3(ourProb), derivedProb: m.ai_prob != null ? round3(m.ai_prob) : null,
         marketPrice: m.price, impliedProb: round3(implied), liveProbAdjusted: null,
+        // fix #1 provenance: was the edge measured against the executable ask or a mid fallback?
+        edgeSource, execAskCents: askUsable ? execCents : null, spreadCents: m.spread_cents ?? null,
         kellyFraction: round3(r.kellyFraction), sizeRequested: round2p(r.stake), sizeFilled: null, entrySlipCents: null,
         calibration: calibration != null ? round3(calibration) : null,
         branchWeightSum: pick?.branchWeightSum != null ? round3(pick.branchWeightSum) : null,
