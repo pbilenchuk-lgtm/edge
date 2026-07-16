@@ -1361,6 +1361,25 @@ test("autoAnalyze: no-lineup match (ESPN-uncovered league) is analyzed within th
   assert.ok(!ran.some((a) => a.matchId === "m-far"), "no-lineup match still far from kickoff is NOT analyzed (waits for XI)");
 });
 
+test("autoAnalyze prioritizes the SOONEST kickoff under the per-tick cap", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("PRAGMA foreign_keys=OFF; DELETE FROM matches; PRAGMA foreign_keys=ON;"); // isolate: only our two matches
+  const comp = R.listCompetitions(db, "football").find((c) => c.budget > 0)!;
+  const now = "2026-07-11T12:00:00.000Z";
+  const deps = { now: () => now, fetchImpl: mockLLM({ match_type: "group", match_type_reason: "x", core: { xg_home: 1.4, xg_away: 1.1, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 }, overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 8, notes: "" }, unknowns: [] }), env: { ANTHROPIC_API_KEY: "k" } };
+  const mk = (id: string, kickoff: string) => {
+    R.insertMatch(db, { id, competition_id: comp.id, home: "H", away: "A", state: "lineup", lineup_out: true, kickoff_at: kickoff, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+    R.insertMarket(db, { id: R.uid(), match_id: id, label: "Over 2.5", price: 52, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: now, is_closing: false });
+    R.upsertMatchLive(db, { match_id: id, espn_event_id: "e-" + id, league: "l", home_lineup: JSON.stringify({ team: "H", formation: "4-4-2", starters: ["x"] }), away_lineup: JSON.stringify({ team: "A", formation: "4-4-2", starters: ["y"] }), stats: null, updated_at: now });
+  };
+  mk("m-late", "2026-07-11T22:00:00.000Z"); // +10h, inserted FIRST — would win under old insertion-order
+  mk("m-soon", "2026-07-11T13:00:00.000Z"); // +1h — the imminent one
+  const ran = await autoAnalyze(db, deps, { max: 1 });
+  assert.ok(ran.some((a) => a.matchId === "m-soon" && a.ok), "soonest-kickoff match analyzed first");
+  assert.ok(!ran.some((a) => a.matchId === "m-late"), "far match yields its slot to the imminent one");
+});
+
 test("migrateRetireFable moves any strategy/prompt left on Fable → Opus (and is marker-guarded)", () => {
   const db = openDb(":memory:");
   seedDatabase(db);

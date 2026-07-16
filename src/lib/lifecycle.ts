@@ -367,12 +367,22 @@ export interface AutoAnalyzeItem { matchId: string; match: string; stage: string
  * hundreds of discovered matches doesn't fire hundreds of model calls.
  */
 export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { max?: number; liveOnly?: boolean } = {}): Promise<AutoAnalyzeItem[]> {
-  const max = opts.max ?? 6;
+  // How many matches to analyse per pass. Bounded so one tick's LLM burst can't spike memory
+  // on the small instance; env-tunable (ANALYZE_MAX_PER_TICK) to raise throughput on busy days.
+  const max = opts.max ?? Math.max(1, Number(process.env.ANALYZE_MAX_PER_TICK) || 6);
   const nowMs = Date.parse(nowFn(deps)()) || Date.now();
   const budgetByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.budget]));
   const sportByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.sport_id]));
   const out: AutoAnalyzeItem[] = [];
-  for (const { comp, match: m } of activeMatches(db)) {
+  // PRIORITY: analyse the SOONEST-kickoff matches first. We only do `max` per pass, and matches
+  // are otherwise iterated in competition/insertion order — so a match kicking off in 30 min could
+  // sit behind ones that start next week and never get analysed before its whistle (the "AI didn't
+  // auto-start" case). Sorting by kickoff ascending puts live + imminent matches at the front; a
+  // missing/invalid kickoff sinks to the back. Live matches (kickoff in the past) naturally lead.
+  const queue = activeMatches(db)
+    .map((x) => ({ ...x, kickMs: x.match.kickoff_at ? (Date.parse(x.match.kickoff_at) || Number.POSITIVE_INFINITY) : Number.POSITIVE_INFINITY }))
+    .sort((a, b) => a.kickMs - b.kickMs);
+  for (const { comp, match: m } of queue) {
     if (out.length >= max) break;
     if (opts.liveOnly && m.state !== "live") continue;             // live-cycle back-fill: only rescue live-but-unanalysed matches
     if ((budgetByComp.get(comp) ?? 0) <= 0) continue;              // unfunded → skip (economical)
