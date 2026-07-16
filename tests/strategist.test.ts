@@ -32,6 +32,16 @@ test("sizePrematch: a binding cap is honored with FLOOR — never exceeded by ro
   assert.ok(r.stake <= 5, `floored at or below the $5.50 cap, got ${r.stake}`); // 5, not 6
 });
 
+test("sizePrematch B2: absurdEdgeBlock override widens the ceiling (tennis 40%); default 25% still flags", () => {
+  const base = { ourProb: 0.75, priceCents: 45, implied: 0.45, calibration: 0.7, budget: 1000, cfg: MED }; // edge 30%
+  assert.equal(sizePrematch(base).status, "flag", "default 25% ceiling flags a 30% edge as probably-a-bug");
+  const r = sizePrematch({ ...base, absurdEdgeBlock: 0.40 });
+  assert.equal(r.status, "enter", "the 40% tennis override admits the 30% edge (deep-but-real snapback)");
+  assert.ok(r.edge > 0.25 && r.edge < 0.40);
+  // above the override it still flags — the ceiling widened, it wasn't removed.
+  assert.equal(sizePrematch({ ...base, ourProb: 0.90, implied: 0.45, absurdEdgeBlock: 0.40 }).status, "flag", "edge 45% > 40% override → still flagged");
+});
+
 test("impliedProbs: de-vigs a two-sided group to sum 1; raw for one-sided", () => {
   // Over 55¢ + Under 52¢ = 1.07 vig → implied Over = 55/107 ≈ 0.514
   const imp = impliedProbs([{ label: "Over 2.5", priceCents: 55 }, { label: "Under 2.5", priceCents: 52 }, { label: "Team to Advance — X", priceCents: 70 }]);

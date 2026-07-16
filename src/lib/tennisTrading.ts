@@ -54,6 +54,14 @@ const TENNIS_MIN_REAL_BOOK_USD = (() => { const n = Number(process.env.TENNIS_MI
 // 49.5¢ Carle: a frozen/levelled "favourite"), there is no favoured level to snap back to and the edge
 // is phantom. Require the pre-break favourite price ≥ this AT TRIGGER TIME. Env-tunable.
 const TENNIS_MIN_PREBREAK_FAV_CENTS = (() => { const n = Number(process.env.TENNIS_MIN_PREBREAK_FAV_CENTS); return Number.isFinite(n) && n > 0 ? n : 52; })();
+// B2 — absurd_edge ceiling for the Overreaction buyback (fraction). Raised from the shared 25% to 40%:
+// the 25% net was catching legitimate DEEP moneyline snapbacks (the moneyline panic amplitude is larger
+// than the old prop-priced era assumed), while the real phantom sources are now cut UPSTREAM by dedicated
+// guards (token orientation invariant, thin_real_book, frozen_favourite). Every entry in the newly-opened
+// 25–40% band is COHORT-LOGGED so the ceiling can be re-tuned from the accumulated clean distribution. Env-tunable.
+const TENNIS_ABSURD_EDGE_BLOCK = (() => { const n = Number(process.env.TENNIS_ABSURD_EDGE_BLOCK); return Number.isFinite(n) && n > 0 ? n : 0.40; })();
+// The prior shared ceiling — the lower edge of the cohort we now watch (entries that USED to be blocked).
+const TENNIS_ABSURD_EDGE_COHORT_FROM = 0.25;
 const TENNIS_STRATEGY = "tennis_overreaction";
 // Both tennis strategies share the settle / exit / one-position machinery (both buy the favourite's
 // moneyline). Set-Value adds the "lost set 1" horizon-of-a-match entry with a partial-take exit.
@@ -972,11 +980,14 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       if (R.betsForMatch(db, m.id).some((b) => TENNIS_STRATEGIES.has(b.strategy_id) && b.status === "open" && b.risk_profile_id === profile)) continue;
       const cfg = getProfileConfig(db, profile);
       const held = R.betsForMatch(db, m.id, TENNIS_STRATEGY).filter((b) => b.status === "open" && b.risk_profile_id === profile).reduce((s, b) => s + (b.stake ?? 0), 0);
-      // allowLargeEdge OFF: unlike a football near-resolved market (where a huge edge is genuine), a
-      // huge tennis moneyline edge is the phantom signature — the absurd_edge_block (>25%) is a real
-      // backstop here (defense-in-depth behind the pre-match favourite anchor). Legit snapbacks are 5-12%.
-      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg });
+      // allowLargeEdge OFF: a huge tennis moneyline edge is still the phantom signature. B2: the ceiling
+      // is TENNIS_ABSURD_EDGE_BLOCK (40%, was the shared 25%) — the real phantom sources are cut upstream
+      // (token invariant / thin_real_book / frozen_favourite), so the net widens to admit deep-but-real snapbacks.
+      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, absurdEdgeBlock: TENNIS_ABSURD_EDGE_BLOCK });
       if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `[${profile}] overreaction подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
+      // B2 cohort tag: an entry whose edge sits in the newly-opened 25–40% band USED to be auto-blocked.
+      // Tag it (appended to the enter log below) so the raised ceiling can be validated from the clean distribution.
+      const cohortTag = r.edge > TENNIS_ABSURD_EDGE_COHORT_FROM ? ` · [cohort ${Math.round(TENNIS_ABSURD_EDGE_COHORT_FROM * 100)}–${Math.round(TENNIS_ABSURD_EDGE_BLOCK * 100)}%: edge ${(r.edge * 100).toFixed(1)}% ранее блокировался]` : "";
       // book-fill-m1: fill against the LIVE moneyline book (VWAP / honest skip) — no more 0¢ fills.
       const decisionId = R.uid();
       const ack = await fillTennisEntry(executor, decisionId, { token: favToken, entryCents, sizeUsd: r.stake, fairProbPct: ourProb * 100, strategyId: TENNIS_STRATEGY, profileId: profile, matchId: m.id });
@@ -996,7 +1007,7 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
         entry_meta: serializeEntryMeta(meta), code_version: codeVer, decision_id: decisionId, created_at: now,
       });
       try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: fillStake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(r.edge * 100).toFixed(1)}%, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${fillCents - TENNIS_CATASTROPHIC_FLOOR}¢, пороги:${TENNIS_ARMED_EPOCH})`, created_at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(r.edge * 100).toFixed(1)}%, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${fillCents - TENNIS_CATASTROPHIC_FLOOR}¢, пороги:${TENNIS_ARMED_EPOCH})${cohortTag}`, created_at: now });
       opened++;
     }
   }

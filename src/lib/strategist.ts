@@ -153,6 +153,11 @@ export interface SizeInput {
    *  data bug — a resolved market (Over 1.5 at 0:2 ≈ 98%) legitimately sits far
    *  from a lagging book; that gap IS the strategist's alpha. Default false. */
   allowLargeEdge?: boolean;
+  /** Per-strategy override of cfg.safeguards.absurd_edge_block (a fraction). Tennis Overreaction now
+   *  passes a wider ceiling (B2): the 25% default was catching legitimate deep moneyline snapbacks, and
+   *  the real phantom sources (wrong token, dust book, frozen favourite) are cut by dedicated guards
+   *  upstream — so the absurd-edge net can widen here. Omit → use the profile's cfg value. */
+  absurdEdgeBlock?: number;
 }
 
 /** HARD liquidity floor ($): a market whose known depth is below this is
@@ -195,7 +200,8 @@ export function sizePrematch(inp: SizeInput): SizeResult {
   // Safeguard: an edge above absurd_edge_block is almost surely a bug (bad quote /
   // wrong market), not value — flag, do NOT trade. Skipped in live (allowLargeEdge)
   // where a resolved-market edge is genuine.
-  if (!inp.allowLargeEdge && edge > cfg.safeguards.absurd_edge_block) return flag(`edge ${(edge * 100).toFixed(1)}% > absurd_edge_block ${(cfg.safeguards.absurd_edge_block * 100).toFixed(0)}% — вероятно баг`);
+  const absurdBlock = inp.absurdEdgeBlock ?? cfg.safeguards.absurd_edge_block; // B2: per-strategy override (tennis widens it)
+  if (!inp.allowLargeEdge && edge > absurdBlock) return flag(`edge ${(edge * 100).toFixed(1)}% > absurd_edge_block ${(absurdBlock * 100).toFixed(0)}% — вероятно баг`);
 
   // Thresholds (profile). Thin markets use the raised min_edge. UNKNOWN depth
   // (liquidity null — we couldn't read it) is treated as thin: an unmeasurable
