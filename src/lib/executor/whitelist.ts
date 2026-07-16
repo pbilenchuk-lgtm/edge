@@ -14,8 +14,10 @@ import type { OrderBookFetch, PolymarketConfig } from "../polymarket.js";
 import type { Bet } from "../types.js";
 import * as RR from "../realRepo.js";
 import { isSettled } from "../repo.js";
+import { parseEntryMeta } from "../betMeta.js";
 import { loadSafetyCaps, effectiveTradingMode, modeCaps, readTradingMode } from "./safety.js";
 import { DryRunExecutor } from "./dryRun.js";
+import { classifyOrderBook } from "./paperFill.js";
 import { clientOrderIdFor } from "./types.js";
 import type { Executor, OrderRequest } from "./types.js";
 
@@ -134,8 +136,13 @@ export async function mirrorPaperEntryToReal(db: Database, bet: Bet, ctx: Mirror
     // Past the whitelist = this entry was INTENDED for the real contour. ANY skip from here is a
     // "wanted to mirror, couldn't" — make it LOUD via onError (a silent skip once hid 280 no-op entries).
     const skip = (note: string) => { try { (ctx.onError ?? (() => {}))(`skip: ${note}`); } catch { /* logger must not throw */ } return { mirrored: false, note }; };
-    const size = ctx.sizeFraction != null
-      ? realSizeFromFraction(ctx.sizeFraction, ctx.realFreeUsd, row.max_order_usd)
+    // B5 (audit #13): size from the paper twin's ACTUAL sized fraction — kellyFraction stored in entry_meta,
+    // AFTER every down-scale (calibration, correlation, liquidity). Don't recompute a fresh raw intensity
+    // (that ignores the down-scales and over-sizes the "twin"). Fall back to ctx/proportional only if absent.
+    const storedFraction = (() => { try { return parseEntryMeta(bet.entry_meta)?.kellyFraction ?? null; } catch { return null; } })();
+    const fraction = storedFraction ?? ctx.sizeFraction ?? null;
+    const size = fraction != null
+      ? realSizeFromFraction(fraction, ctx.realFreeUsd, row.max_order_usd)
       : proportionalRealSize(ctx.paperStakeUsd ?? bet.stake ?? 0, ctx.paperBankUsd ?? 0, ctx.realFreeUsd, row.max_order_usd);
     if (size <= 0) return skip("реальный размер 0 (доля входа ≤0 / банк)");
     if (!bet.decision_id || !bet.entry_price) return skip("нет decision_id/цены входа (ставка до Phase A?)");
@@ -178,55 +185,76 @@ export interface SweepCtx {
   onError?: (msg: string) => void;
 }
 
-/** Close one dry position by mirroring its twin's exit (a dry SELL at the paper closing price). */
-async function mirrorDryExit(db: Database, pos: RR.RealPositionRow, decisionId: string, markCents: number, ctx: SweepCtx): Promise<boolean> {
+/** B4: close one dry position by a SELL whose limit sits BELOW the given cents (live bid − tolerance), so
+ *  the book VWAP fills at the going bid. seq lets a partial-exit remainder be re-quoted (C2). */
+async function mirrorDryExit(db: Database, pos: RR.RealPositionRow, decisionId: string, sellLimitCents: number, ctx: SweepCtx, seq = 0): Promise<"filled" | "partial" | "none"> {
   const mode = effectiveTradingMode(db, ctx.env);
-  if (pos.size_shares <= 1e-6 || !(markCents > 0)) return false;
-  // A SELL won't accept below its limit, so the limit must sit BELOW the going bid, not at the paper
-  // mark (§2.2: sell at bid − tolerance) — else a mark above the live bid never fills. The book-VWAP
-  // then fills at the actual (better) bid. Env-tunable.
-  const limitCents = Math.max(1, markCents - EXIT_SELL_TOLERANCE_CENTS);
-  // The executor derives shares = sizeUsd/(limit/100), so size the notional AT THE LIMIT to sell the
-  // EXACT held share count (close the whole position), not a notional-at-avg that leaves a remainder.
+  const limitCents = Math.max(1, Math.round(sellLimitCents));
+  if (pos.size_shares <= 1e-6 || !(limitCents > 0)) return "none";
+  // Size the notional AT THE LIMIT so shares = sizeUsd/(limit/100) = the exact held count.
   const sizeUsd = Math.round(pos.size_shares * (limitCents / 100) * 100) / 100;
   const order: OrderRequest = {
-    clientOrderId: clientOrderIdFor(decisionId, "exit"), leg: "exit", tokenId: pos.token_id, side: "SELL",
+    clientOrderId: clientOrderIdFor(decisionId, "exit", seq), leg: "exit", tokenId: pos.token_id, side: "SELL",
     limitPriceCents: limitCents, sizeUsd, timeInForceSec: 15, decisionId,
-    strategyId: pos.strategy_id ?? "", profileId: "medium", matchId: pos.match_id ?? "", expiryMode: "client-cancel",
+    strategyId: pos.strategy_id ?? "", profileId: pos.profile_id ?? "medium", matchId: pos.match_id ?? "", expiryMode: "client-cancel",
   };
   const executor = ctx.executorFor
     ? ctx.executorFor(mode)
     : modeCaps(mode).simulate
       ? new DryRunExecutor({ db, env: ctx.env, poly: ctx.poly, deps: ctx.deps, bookCache: ctx.bookCache, now: ctx.now, whitelistVersion: RR.currentWhitelistVersion(db) })
       : null;
-  if (!executor) return false;
+  if (!executor) return "none";
   const ack = await executor.place(order);
-  return ack.status === "filled" || ack.status === "partial";
+  return ack.status === "filled" ? "filled" : ack.status === "partial" ? "partial" : "none";
 }
 
-/** Sweep: every open DRY position whose paper twin has SETTLED is closed by a mirrored dry sell.
- *  Gate-first (off → nothing). Isolated per position (one failure never stops the sweep or paper). */
+/** B4: no live book + the twin settled by RESULT → close the dry position at 0/100 (or avg for a void),
+ *  crediting a redemption cash line + a realized-P&L memo. Directly flat — no book needed. */
+function resolutionCloseDry(db: Database, pos: RR.RealPositionRow, decisionId: string, resolveCents: number, nowIso: string): void {
+  const shares = pos.size_shares, avg = pos.avg_price_cents ?? 0;
+  const proceeds = Math.round(shares * (resolveCents / 100) * 100) / 100;
+  const realizedDelta = Math.round((shares * (resolveCents - avg)) / 100 * 100) / 100;
+  if (proceeds > 0.004) RR.insertRealLedger(db, { kind: "redemption", amount_usd: proceeds, token_id: pos.token_id, order_id: null, ref: decisionId, dry: 1, at: nowIso, created_at: nowIso });
+  if (Math.abs(realizedDelta) > 0.004) RR.insertRealRealized(db, { decisionId, tokenId: pos.token_id, amountUsd: realizedDelta, dry: 1, at: nowIso });
+  RR.upsertRealPosition(db, { token_id: pos.token_id, decision_id: decisionId, profile_id: pos.profile_id ?? null, match_id: pos.match_id, strategy_id: pos.strategy_id, size_shares: 0, avg_price_cents: avg, realized_pnl_usd: Math.round((pos.realized_pnl_usd + realizedDelta) * 100) / 100, unrealized_pnl_usd: null, dry: 1, updated_at: nowIso });
+}
+
+/** Sweep: every open DRY position whose paper twin has SETTLED is closed — by a SELL at the live bid, or
+ *  (no book) a resolution-close at 0/100. B1: resolves the EXACT twin by the position's own decision_id
+ *  (never a token-merged blob). C1: settled twins first (oldest updated_at), only they consume the
+ *  book-fetch budget, and truncation is logged. Gate-first; isolated per position. */
 export async function sweepDryExits(db: Database, ctx: SweepCtx): Promise<number> {
   if (readTradingMode(ctx.env) === "off") return 0; // hot-path no-op
-  let closed = 0, fetched = 0;
-  // OOM guard (the incident): each swept position fetches its book, so an unbounded scan × per-tick
-  // is the get_fixtures OOM class. Cap the WORK per tick — the rest are swept next tick (the twins are
-  // already settled and going nowhere). Env-tunable.
+  const nowIso = ctx.now();
+  let closed = 0, worked = 0, truncated = 0;
   const MAX = (() => { const n = Number(ctx.env.MAX_DRY_SWEEP); return Number.isFinite(n) && n > 0 ? n : 25; })();
-  for (const pos of RR.listRealPositions(db)) {
-    if (pos.dry !== 1 || Math.abs(pos.size_shares) < 1e-6) continue;
-    if (fetched >= MAX) break; // bound the book fetches this tick
-    fetched++;
+  // C1: oldest-first — settled twins (untouched since open) sort ahead of freshly-opened positions, so
+  // the ones that NEED closing aren't starved by new ones once there are > MAX live dry positions.
+  const positions = RR.listRealPositions(db)
+    .filter((p) => p.dry === 1 && p.legacy !== 1 && Math.abs(p.size_shares) > 1e-6 && p.decision_id)
+    .sort((a, b) => (a.updated_at < b.updated_at ? -1 : a.updated_at > b.updated_at ? 1 : 0));
+  for (const pos of positions) {
     try {
-      const entry = db.prepare(`SELECT decision_id FROM real_orders WHERE token_id=? AND leg='entry' ORDER BY created_at LIMIT 1`).get(pos.token_id) as { decision_id: string } | undefined;
-      if (!entry?.decision_id) continue;
-      const bet = db.prepare(`SELECT * FROM bets WHERE decision_id=?`).get(entry.decision_id) as { status: string; closing_price: number | null } | undefined;
-      if (!bet || !isSettled(bet.status)) continue; // twin still open → hold the dry position (mirror it later)
-      const limit = bet.closing_price ?? pos.avg_price_cents ?? 0;
-      if (await mirrorDryExit(db, pos, entry.decision_id, limit, ctx)) closed++;
+      const decisionId = pos.decision_id!;
+      const bet = db.prepare(`SELECT status FROM bets WHERE decision_id=?`).get(decisionId) as { status: string } | undefined;
+      if (!bet || !isSettled(bet.status)) continue; // twin open → hold (does NOT consume the budget)
+      if (worked >= MAX) { truncated++; continue; } // only settled twins that reach the fetch count
+      worked++;
+      // B4: exit from the LIVE bid; fall back to resolution-close when the book is gone.
+      const bookRes = await classifyOrderBook(pos.token_id, ctx.poly, ctx.deps, ctx.bookCache);
+      const bestBid = bookRes.status === "ok" ? bookRes.book.bids.reduce((m, b) => Math.max(m, b.priceCents), 0) : 0;
+      if (bestBid > 0) {
+        const r = await mirrorDryExit(db, pos, decisionId, bestBid - EXIT_SELL_TOLERANCE_CENTS, ctx);
+        if (r !== "none") closed++;
+      } else {
+        const resolveCents = bet.status === "settled_won" ? 100 : bet.status === "settled_lost" ? 0 : (pos.avg_price_cents ?? 0);
+        resolutionCloseDry(db, pos, decisionId, resolveCents, nowIso);
+        closed++;
+      }
     } catch (e) {
       try { (ctx.onError ?? (() => {}))(`dry-exit sweep failed for ${pos.token_id} (paper unaffected): ${e instanceof Error ? e.message : String(e)}`); } catch { /* logger must not throw */ }
     }
   }
+  if (truncated > 0) { try { (ctx.onError ?? (() => {}))(`dry-exit sweep: обрезано ${truncated} settled-позиций на кэпе ${MAX}/тик — добьём в следующий тик`); } catch { /* logger must not throw */ } }
   return closed;
 }

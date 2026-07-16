@@ -40,13 +40,13 @@ test("enforceCaps: order-size clamp to the per-order ceiling", () => {
 });
 test("enforceCaps: exposure ceiling from OPEN REAL positions (A3); dry excluded, releases on exit", () => {
   const d = db();
-  RR.upsertRealPosition(d, { token_id: "tok1", match_id: "m1", strategy_id: "overreaction", size_shares: 180, avg_price_cents: 100, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 0, updated_at: iso(NOW) }); // $180 real open
-  RR.upsertRealPosition(d, { token_id: "tokDry", match_id: "m1", strategy_id: "overreaction", size_shares: 900, avg_price_cents: 100, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 1, updated_at: iso(NOW) }); // $900 DRY — must NOT count
+  RR.upsertRealPosition(d, { token_id: "tok1", decision_id: "d1", profile_id: "medium", match_id: "m1", strategy_id: "overreaction", size_shares: 180, avg_price_cents: 100, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 0, updated_at: iso(NOW) }); // $180 real open
+  RR.upsertRealPosition(d, { token_id: "tokDry", decision_id: "d2", profile_id: "medium", match_id: "m1", strategy_id: "overreaction", size_shares: 900, avg_price_cents: 100, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 1, updated_at: iso(NOW) }); // $900 DRY — must NOT count
   const r = enforceCaps(d, { sizeUsd: 50, isEntry: true }, NOW, CAPS); // 180+50 > 200
   assert.equal(r.action, "reject");
   assert.match(r.reason ?? "", /экспозиция/);
-  // exit reduces the position → exposure drops below cap → a new entry passes again.
-  RR.upsertRealPosition(d, { token_id: "tok1", match_id: "m1", strategy_id: "overreaction", size_shares: 100, avg_price_cents: 100, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 0, updated_at: iso(NOW) }); // now $100
+  // exit reduces the SAME twin → exposure drops below cap → a new entry passes again.
+  RR.upsertRealPosition(d, { token_id: "tok1", decision_id: "d1", profile_id: "medium", match_id: "m1", strategy_id: "overreaction", size_shares: 100, avg_price_cents: 100, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 0, updated_at: iso(NOW) }); // now $100
   assert.equal(enforceCaps(d, { sizeUsd: 50, isEntry: true }, NOW, CAPS).action, "allow", "exposure released on exit");
 });
 test("enforceCaps: exposure RESERVES working real orders (A3 TOCTOU) — unfilled notional counts pre-fill", () => {
@@ -73,7 +73,7 @@ test("enforceCaps: orders/hour berserk guard rejects", () => {
 });
 test("enforceCaps: a defensive EXIT is never blocked by the caps", () => {
   const d = db();
-  RR.upsertRealPosition(d, { token_id: "tok1", match_id: "m1", strategy_id: "overreaction", size_shares: 199, avg_price_cents: 100, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 0, updated_at: iso(NOW) }); // exposure near cap
+  RR.upsertRealPosition(d, { token_id: "tok1", decision_id: "d1", profile_id: "medium", match_id: "m1", strategy_id: "overreaction", size_shares: 199, avg_price_cents: 100, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 0, updated_at: iso(NOW) }); // exposure near cap
   RR.insertRealRealized(d, { decisionId: "d", tokenId: "t", amountUsd: -100, dry: 0, at: "2026-07-15T09:00:00Z" }); // loss over cap
   const r = enforceCaps(d, { sizeUsd: 200, isEntry: false }, NOW, CAPS);
   assert.equal(r.action, "allow", "a stop must always be able to leave");

@@ -150,15 +150,21 @@ export function realFillsForOrder(db: Database, orderId: string): RealFillRow[] 
 }
 
 // ── real_positions ───────────────────────────────────────────────────────────
-export interface RealPositionRow { token_id: string; match_id: string | null; strategy_id: string | null; size_shares: number; avg_price_cents: number | null; realized_pnl_usd: number; unrealized_pnl_usd: number | null; dry: number; updated_at: string }
-export function upsertRealPosition(db: Database, p: Omit<RealPositionRow, "dry"> & { dry?: number }): void {
+export interface RealPositionRow { id?: string; token_id: string; decision_id: string | null; profile_id: string | null; match_id: string | null; strategy_id: string | null; size_shares: number; avg_price_cents: number | null; realized_pnl_usd: number; unrealized_pnl_usd: number | null; dry: number; legacy?: number; updated_at: string }
+/** B1: upsert keyed by (token_id, decision_id, dry) — each twin×book is its own row (no cross-decision or
+ *  dry/real merge). decision_id NULL (a legacy row) doesn't conflict, so it's never overwritten. */
+export function upsertRealPosition(db: Database, p: Omit<RealPositionRow, "dry" | "id" | "legacy" | "decision_id" | "profile_id"> & { dry?: number; decision_id?: string | null; profile_id?: string | null }): void {
   db.prepare(
-    `INSERT INTO real_positions(token_id,match_id,strategy_id,size_shares,avg_price_cents,realized_pnl_usd,unrealized_pnl_usd,dry,updated_at)
-     VALUES(?,?,?,?,?,?,?,?,?)
-     ON CONFLICT(token_id) DO UPDATE SET match_id=excluded.match_id, strategy_id=excluded.strategy_id,
+    `INSERT INTO real_positions(id,token_id,decision_id,profile_id,match_id,strategy_id,size_shares,avg_price_cents,realized_pnl_usd,unrealized_pnl_usd,dry,legacy,updated_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?)
+     ON CONFLICT(token_id,decision_id,dry) DO UPDATE SET profile_id=excluded.profile_id, match_id=excluded.match_id, strategy_id=excluded.strategy_id,
        size_shares=excluded.size_shares, avg_price_cents=excluded.avg_price_cents,
-       realized_pnl_usd=excluded.realized_pnl_usd, unrealized_pnl_usd=excluded.unrealized_pnl_usd, dry=excluded.dry, updated_at=excluded.updated_at`,
-  ).run(p.token_id, p.match_id, p.strategy_id, p.size_shares, p.avg_price_cents, p.realized_pnl_usd, p.unrealized_pnl_usd, p.dry ?? 0, p.updated_at);
+       realized_pnl_usd=excluded.realized_pnl_usd, unrealized_pnl_usd=excluded.unrealized_pnl_usd, updated_at=excluded.updated_at`,
+  ).run(uid(), p.token_id, p.decision_id ?? null, p.profile_id ?? null, p.match_id, p.strategy_id, p.size_shares, p.avg_price_cents, p.realized_pnl_usd, p.unrealized_pnl_usd, p.dry ?? 0, p.updated_at);
+}
+/** The exact position for a (token, decision, book), or null — B1 lookup for the sweep + updatePosition. */
+export function getRealPosition(db: Database, tokenId: string, decisionId: string | null, dry: number): RealPositionRow | null {
+  return (db.prepare(`SELECT * FROM real_positions WHERE token_id=? AND decision_id IS ? AND dry=?`).get(tokenId, decisionId, dry) as RealPositionRow | undefined) ?? null;
 }
 /** Positions. `realOnly` (reconciliation / real balance) excludes dry-run simulated positions so a
  *  dry rehearsal can't pollute the real books when the owner flips dry_run→on. */

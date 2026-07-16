@@ -140,6 +140,15 @@ export function getDb(path = dbPath()): Database {
   return db;
 }
 
+/** Run `fn` inside a single transaction (BEGIN → COMMIT, or ROLLBACK + rethrow on any throw). node:sqlite
+ *  has no `.transaction()` wrapper, so this is the atomicity primitive for money accounting (B2). Not
+ *  re-entrant — never nest. */
+export function transact<T>(db: Database, fn: () => T): T {
+  db.exec("BEGIN");
+  try { const r = fn(); db.exec("COMMIT"); return r; }
+  catch (e) { try { db.exec("ROLLBACK"); } catch { /* already rolled back */ } throw e; }
+}
+
 /** Open a fresh, isolated connection (used by tests). Not memoized. */
 export function openDb(path: string): Database {
   const { DatabaseSync } = require("node:sqlite") as SqliteModule;
@@ -224,6 +233,28 @@ export function initSchema(db: Database): void {
       db.exec("INSERT INTO strategy_shares_new(competition_id,strategy_id,risk_profile_id,pct) SELECT competition_id,strategy_id,'medium',pct FROM strategy_shares");
       db.exec("DROP TABLE strategy_shares");
       db.exec("ALTER TABLE strategy_shares_new RENAME TO strategy_shares");
+      db.exec("COMMIT");
+    }
+  } catch { try { db.exec("ROLLBACK"); } catch { /* ignore */ } }
+  // B1: rekey real_positions to (token_id, decision_id, dry) — one row per twin per book, so positions
+  // don't merge across decisions/strategies or across dry/real. SQLite can't change a PK, so rebuild when
+  // the old (token_id-PK, no decision_id) table is detected. Existing rows (≈none — no dry fills yet)
+  // carry over as legacy (decision_id NULL, legacy=1) and are excluded from the sweep. Row-preserving.
+  try {
+    const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='real_positions'").get() as { sql?: string } | undefined;
+    if (row?.sql && !/decision_id/i.test(row.sql)) {
+      db.exec("BEGIN");
+      db.exec(`CREATE TABLE real_positions_new (
+        id TEXT PRIMARY KEY, token_id TEXT NOT NULL, decision_id TEXT, profile_id TEXT,
+        match_id TEXT, strategy_id TEXT, size_shares REAL NOT NULL DEFAULT 0, avg_price_cents REAL,
+        realized_pnl_usd REAL NOT NULL DEFAULT 0, unrealized_pnl_usd REAL, dry INTEGER NOT NULL DEFAULT 0,
+        legacy INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
+        UNIQUE(token_id, decision_id, dry))`);
+      db.exec(`INSERT INTO real_positions_new(id,token_id,decision_id,profile_id,match_id,strategy_id,size_shares,avg_price_cents,realized_pnl_usd,unrealized_pnl_usd,dry,legacy,updated_at)
+        SELECT lower(hex(randomblob(16))), token_id, NULL, NULL, match_id, strategy_id, size_shares, avg_price_cents, realized_pnl_usd, unrealized_pnl_usd, dry, 1, updated_at FROM real_positions`);
+      db.exec("DROP TABLE real_positions");
+      db.exec("ALTER TABLE real_positions_new RENAME TO real_positions");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_real_pos_token ON real_positions(token_id)");
       db.exec("COMMIT");
     }
   } catch { try { db.exec("ROLLBACK"); } catch { /* ignore */ } }

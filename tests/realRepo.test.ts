@@ -72,11 +72,13 @@ test("real_whitelist: sport is hard-pinned football — tennis is rejected at th
     .run("w2", "tennis_set_value", "tennis", "[]", 50, 0, 1, now, now), /CHECK|constraint/i, "tennis can't reach real this stage");
 });
 
-test("real_positions: upsert by token round-trips", () => {
+test("real_positions: upsert by (token, decision, dry) round-trips", () => {
   const d = db();
-  RR.upsertRealPosition(d, { token_id: "tok1", match_id: "m1", strategy_id: "overreaction", size_shares: 100, avg_price_cents: 45, realized_pnl_usd: 0, unrealized_pnl_usd: 2, updated_at: "t1" });
-  RR.upsertRealPosition(d, { token_id: "tok1", match_id: "m1", strategy_id: "overreaction", size_shares: 150, avg_price_cents: 44, realized_pnl_usd: 0, unrealized_pnl_usd: 5, updated_at: "t2" });
-  const ps = RR.listRealPositions(d);
-  assert.equal(ps.length, 1, "upsert, not duplicate");
-  assert.equal(ps[0].size_shares, 150, "updated in place");
+  RR.upsertRealPosition(d, { token_id: "tok1", decision_id: "dec1", profile_id: "medium", match_id: "m1", strategy_id: "overreaction", size_shares: 100, avg_price_cents: 45, realized_pnl_usd: 0, unrealized_pnl_usd: 2, updated_at: "t1" });
+  RR.upsertRealPosition(d, { token_id: "tok1", decision_id: "dec1", profile_id: "medium", match_id: "m1", strategy_id: "overreaction", size_shares: 150, avg_price_cents: 44, realized_pnl_usd: 0, unrealized_pnl_usd: 5, updated_at: "t2" });
+  assert.equal(RR.listRealPositions(d).length, 1, "same twin → updated in place, not duplicated");
+  assert.equal(RR.listRealPositions(d)[0].size_shares, 150, "updated in place");
+  // B1: a DIFFERENT decision on the same token is its OWN row (no merge).
+  RR.upsertRealPosition(d, { token_id: "tok1", decision_id: "dec2", profile_id: "aggressive", match_id: "m1", strategy_id: "overreaction", size_shares: 40, avg_price_cents: 50, realized_pnl_usd: 0, unrealized_pnl_usd: null, updated_at: "t3" });
+  assert.equal(RR.listRealPositions(d).length, 2, "second twin on the same token → separate row");
 });

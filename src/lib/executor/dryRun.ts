@@ -22,7 +22,7 @@ import type { OrderBookFetch, PolymarketConfig } from "../polymarket.js";
 import { simulateBuy, simulateSell, takerFeeCents } from "../execution.js";
 import { classifyOrderBook } from "./paperFill.js";
 import * as RR from "../realRepo.js";
-import type { Database } from "../db.js";
+import { transact, type Database } from "../db.js";
 import { effectiveTradingMode, modeCaps, enforceCaps, conformOrderToMarket, resolveSafetyCaps, type SafetyCaps } from "./safety.js";
 import type { Executor, OrderRequest, OrderAck, CancelAck, Fill, Position, Balance, ExecutorHealth } from "./types.js";
 
@@ -46,12 +46,14 @@ export interface DryRunCtx {
   marketConstraints?: (tokenId: string) => { tickCents: number; minOrderUsd: number };
 }
 
-interface DryFill { filledUsd: number; priceCents: number; feeUsd: number; shares: number; note: string }
+// grossUsd = actual cash before fee (BUY: VWAP notional paid; SELL: shares × gross VWAP proceeds). The
+// ledger books grossUsd (B3), not the limit-price notional, so the cash ledger matches realized P&L.
+interface DryFill { filledUsd: number; grossUsd: number; priceCents: number; feeUsd: number; shares: number; note: string }
 
 /** Limit-respecting placement-snapshot fill (see model note above). */
 function dryFill(side: "BUY" | "SELL", limitCents: number, sizeUsd: number, bookRes: OrderBookFetch, exec: PolymarketConfig["exec"]): DryFill {
   const book = bookRes.status === "ok" ? bookRes.book : null;
-  const empty: DryFill = { filledUsd: 0, priceCents: 0, feeUsd: 0, shares: 0, note: "нет живой книги" };
+  const empty: DryFill = { filledUsd: 0, grossUsd: 0, priceCents: 0, feeUsd: 0, shares: 0, note: "нет живой книги" };
   if (!book) return empty;
   if (side === "BUY") {
     const eligible = book.asks.filter((a) => a.priceCents <= limitCents); // never pay above the limit
@@ -59,7 +61,7 @@ function dryFill(side: "BUY" | "SELL", limitCents: number, sizeUsd: number, book
     if (f.filledUsd <= 0.009) return { ...empty, note: `лучший аск > лимит ${limitCents}¢ — истёк по TIF` };
     const fee = takerFeeCents(f.avgPriceCents, exec.takerFeeRate);
     const eff = Math.round((f.avgPriceCents + fee) * 10) / 10;
-    return { filledUsd: f.filledUsd, priceCents: eff, feeUsd: (f.shares * fee) / 100, shares: f.shares, note: `VWAP ${f.avgPriceCents}¢ ≤ лимит ${limitCents}¢${f.unfilledUsd > 0.5 ? " · частично по глубине, остаток истёк" : ""}` };
+    return { filledUsd: f.filledUsd, grossUsd: f.filledUsd, priceCents: eff, feeUsd: (f.shares * fee) / 100, shares: f.shares, note: `VWAP ${f.avgPriceCents}¢ ≤ лимит ${limitCents}¢${f.unfilledUsd > 0.5 ? " · частично по глубине, остаток истёк" : ""}` };
   }
   const shares = limitCents > 0 ? sizeUsd / (limitCents / 100) : 0;
   const eligible = book.bids.filter((b) => b.priceCents >= limitCents); // never sell below the limit
@@ -68,21 +70,26 @@ function dryFill(side: "BUY" | "SELL", limitCents: number, sizeUsd: number, book
   const fee = takerFeeCents(f.avgPriceCents, exec.takerFeeRate);
   const eff = Math.round((f.avgPriceCents - fee) * 10) / 10;
   const frac = shares > 0 ? f.filledShares / shares : 1;
-  return { filledUsd: Math.round(sizeUsd * frac * 100) / 100, priceCents: eff, feeUsd: (f.filledShares * fee) / 100, shares: f.filledShares, note: `выход VWAP ${f.avgPriceCents}¢ ≥ лимит ${limitCents}¢${f.unfilledShares > 1e-6 ? " · частично по глубине, остаток истёк" : ""}` };
+  // B3: gross proceeds = filled shares × the ACTUAL bid VWAP (not the limit) — the real cash in. The
+  // ledger books this; fee is booked separately, so ledger cash matches realized P&L.
+  const grossUsd = Math.round((f.filledShares * f.avgPriceCents) / 100 * 100) / 100;
+  return { filledUsd: Math.round(sizeUsd * frac * 100) / 100, grossUsd, priceCents: eff, feeUsd: (f.filledShares * fee) / 100, shares: f.filledShares, note: `выход VWAP ${f.avgPriceCents}¢ ≥ лимит ${limitCents}¢${f.unfilledShares > 1e-6 ? " · частично по глубине, остаток истёк" : ""}` };
 }
 
 function updatePosition(db: Database, o: OrderRequest, fill: DryFill, nowIso: string): void {
-  const existing = RR.listRealPositions(db).find((p) => p.token_id === o.tokenId);
+  // B1: the position is the EXACT twin (token, decision, dry) — never a blob merged across decisions.
+  const existing = RR.getRealPosition(db, o.tokenId, o.decisionId, 1);
   const prevShares = existing?.size_shares ?? 0, prevAvg = existing?.avg_price_cents ?? 0, prevReal = existing?.realized_pnl_usd ?? 0;
+  const base = { token_id: o.tokenId, decision_id: o.decisionId, profile_id: o.profileId, match_id: o.matchId, strategy_id: o.strategyId, dry: 1, updated_at: nowIso };
   if (o.side === "BUY") {
     const newShares = prevShares + fill.shares;
     const newAvg = newShares > 0 ? (prevShares * prevAvg + fill.shares * fill.priceCents) / newShares : 0;
-    RR.upsertRealPosition(db, { token_id: o.tokenId, match_id: o.matchId, strategy_id: o.strategyId, size_shares: newShares, avg_price_cents: Math.round(newAvg * 100) / 100, realized_pnl_usd: prevReal, unrealized_pnl_usd: null, dry: 1, updated_at: nowIso });
+    RR.upsertRealPosition(db, { ...base, size_shares: newShares, avg_price_cents: Math.round(newAvg * 100) / 100, realized_pnl_usd: prevReal, unrealized_pnl_usd: null });
   } else {
     const newShares = prevShares - fill.shares;
     const realizedDelta = Math.round((fill.shares * (fill.priceCents - prevAvg)) / 100 * 100) / 100;
     const realized = Math.round((prevReal + realizedDelta) * 100) / 100;
-    RR.upsertRealPosition(db, { token_id: o.tokenId, match_id: o.matchId, strategy_id: o.strategyId, size_shares: newShares, avg_price_cents: prevAvg, realized_pnl_usd: realized, unrealized_pnl_usd: null, dry: 1, updated_at: nowIso });
+    RR.upsertRealPosition(db, { ...base, size_shares: newShares, avg_price_cents: prevAvg, realized_pnl_usd: realized, unrealized_pnl_usd: null });
     // A4 (audit #7): date + dry-tag this close's realized delta (own table, not the cash ledger) so the
     // daily-loss breaker reads real closed-lot P&L, not cash flow, and dry P&L can't trip it.
     if (Math.abs(realizedDelta) > 0.004) RR.insertRealRealized(db, { decisionId: o.decisionId, tokenId: o.tokenId, amountUsd: realizedDelta, dry: 1, at: nowIso });
@@ -119,12 +126,22 @@ export class DryRunExecutor implements Executor {
     if (!conf.ok) return this.ack(order, "rejected", 0, null, `conform: ${conf.reason}`);
     const limit = conf.limitPriceCents, sizeUsd = cap.sizeUsd;
 
-    // §4.3 idempotency: persist (created) keyed by client_order_id; a re-place returns the same order.
+    // §4.3 idempotency: a re-place of an order already past 'created' returns the same ack. B2 re-fill
+    // guard: if a fill row already exists for this client id, the accounting ran — never double-fill.
     const existing = RR.getRealOrderByClientId(db, order.clientOrderId);
     if (existing && existing.status !== "created") return this.ack(order, existing.status, existing.filled_size_usd, existing.avg_fill_cents, `идемпотентно: ордер уже ${existing.status}`);
+    if (existing && RR.realFillsForOrder(db, existing.id).length > 0) return this.ack(order, "filled", existing.filled_size_usd, existing.avg_fill_cents, "идемпотентно: филл уже записан");
     const orderId = existing?.id ?? randomUUID();
-    if (!existing) {
-      RR.insertRealOrder(db, {
+
+    // B2: fetch the book + compute the dry-fill BEFORE the transaction (the only await). Then insert →
+    // placed → fill → ledger → position → final transition run in ONE db.transaction, so a crash can
+    // never leave cash/position moved against a stuck 'placed' order — it's all-or-nothing.
+    const bookRes = await classifyOrderBook(order.tokenId, poly, deps, bookCache);
+    const fill = dryFill(order.side, limit, sizeUsd, bookRes, poly.exec);
+    const expired = fill.filledUsd <= 0.009;
+    const full = !expired && fill.filledUsd >= sizeUsd - 0.5;
+    transact(db, () => {
+      if (!existing) RR.insertRealOrder(db, {
         id: orderId, client_order_id: order.clientOrderId, exchange_order_id: null, decision_id: order.decisionId,
         strategy_id: order.strategyId, profile_id: order.profileId, match_id: order.matchId, token_id: order.tokenId,
         side: order.side, leg: order.leg, limit_price_cents: limit, size_usd: sizeUsd, tif_sec: order.timeInForceSec,
@@ -133,24 +150,16 @@ export class DryRunExecutor implements Executor {
         code_version: null, whitelist_version: this.ctx.whitelistVersion ?? null,
         note: `dry-run${cap.clamped ? ` · урезан кэпом до $${sizeUsd}` : ""}`, created_at: nowIso,
       });
-    }
-    RR.transitionRealOrder(db, orderId, "placed", nowIso, { note: "dry-run placed (не отправлено)" });
-
-    // dry-fill against the live book (placement-snapshot, limit-respecting).
-    const bookRes = await classifyOrderBook(order.tokenId, poly, deps, bookCache);
-    const fill = dryFill(order.side, limit, sizeUsd, bookRes, poly.exec);
-    if (fill.filledUsd <= 0.009) {
-      RR.transitionRealOrder(db, orderId, "expired", nowIso, { filledSizeUsd: 0, note: `TIF expired · ${fill.note}` });
-      return this.ack(order, "expired", 0, null, fill.note, cap.clamped);
-    }
-    // accounting: fill row + ledger (fill cash + fee) + position.
-    RR.insertRealFill(db, { order_id: orderId, client_order_id: order.clientOrderId, token_id: order.tokenId, side: order.side, size_usd: fill.filledUsd, price_cents: fill.priceCents, fee_usd: Math.round(fill.feeUsd * 100) / 100, dry: 1, at: nowIso, created_at: nowIso });
-    RR.insertRealLedger(db, { kind: "fill", amount_usd: order.side === "BUY" ? -fill.filledUsd : fill.filledUsd, token_id: order.tokenId, order_id: orderId, ref: null, dry: 1, at: nowIso, created_at: nowIso });
-    if (fill.feeUsd > 0.004) RR.insertRealLedger(db, { kind: "fee", amount_usd: -Math.round(fill.feeUsd * 100) / 100, token_id: order.tokenId, order_id: orderId, ref: null, dry: 1, at: nowIso, created_at: nowIso });
-    updatePosition(db, order, fill, nowIso);
-
-    const full = fill.filledUsd >= sizeUsd - 0.5;
-    RR.transitionRealOrder(db, orderId, full ? "filled" : "partial", nowIso, { filledSizeUsd: fill.filledUsd, avgFillCents: fill.priceCents, note: `dry-fill ${full ? "full" : "partial (остаток истёк по TIF, no chase)"} · ${fill.note}` });
+      RR.transitionRealOrder(db, orderId, "placed", nowIso, { note: "dry-run placed (не отправлено)" });
+      if (expired) { RR.transitionRealOrder(db, orderId, "expired", nowIso, { filledSizeUsd: 0, note: `TIF expired · ${fill.note}` }); return; }
+      RR.insertRealFill(db, { order_id: orderId, client_order_id: order.clientOrderId, token_id: order.tokenId, side: order.side, size_usd: fill.filledUsd, price_cents: fill.priceCents, fee_usd: Math.round(fill.feeUsd * 100) / 100, dry: 1, at: nowIso, created_at: nowIso });
+      // B3: book the ACTUAL gross proceeds (grossUsd), not the limit-price notional — cash matches realized P&L.
+      RR.insertRealLedger(db, { kind: "fill", amount_usd: order.side === "BUY" ? -fill.grossUsd : fill.grossUsd, token_id: order.tokenId, order_id: orderId, ref: null, dry: 1, at: nowIso, created_at: nowIso });
+      if (fill.feeUsd > 0.004) RR.insertRealLedger(db, { kind: "fee", amount_usd: -Math.round(fill.feeUsd * 100) / 100, token_id: order.tokenId, order_id: orderId, ref: null, dry: 1, at: nowIso, created_at: nowIso });
+      updatePosition(db, order, fill, nowIso);
+      RR.transitionRealOrder(db, orderId, full ? "filled" : "partial", nowIso, { filledSizeUsd: fill.filledUsd, avgFillCents: fill.priceCents, note: `dry-fill ${full ? "full" : "partial (остаток истёк по TIF, no chase)"} · ${fill.note}` });
+    });
+    if (expired) return this.ack(order, "expired", 0, null, fill.note, cap.clamped);
     return this.ack(order, full ? "filled" : "partial", fill.filledUsd, fill.priceCents, fill.note, cap.clamped);
   }
 

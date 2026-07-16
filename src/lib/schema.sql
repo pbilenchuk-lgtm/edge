@@ -672,8 +672,14 @@ CREATE TABLE IF NOT EXISTS real_fills (
 CREATE INDEX IF NOT EXISTS idx_real_fills_order ON real_fills(order_id);
 
 -- §2.3 real_positions — aggregate per token (the executor's own view; reconciled vs the exchange, §4.4).
+-- B1: keyed by (token_id, decision_id, dry) — ONE row per twin per book, so positions never merge across
+-- decisions/strategies or across dry/real (the sweep resolves the exact twin). `legacy=1` marks a
+-- pre-migration row with no decision_id — excluded from the sweep.
 CREATE TABLE IF NOT EXISTS real_positions (
-  token_id           TEXT PRIMARY KEY,
+  id                 TEXT PRIMARY KEY,
+  token_id           TEXT NOT NULL,
+  decision_id        TEXT,
+  profile_id         TEXT,
   match_id           TEXT,
   strategy_id        TEXT,
   size_shares        REAL NOT NULL DEFAULT 0,
@@ -681,8 +687,11 @@ CREATE TABLE IF NOT EXISTS real_positions (
   realized_pnl_usd   REAL NOT NULL DEFAULT 0,
   unrealized_pnl_usd REAL,
   dry                INTEGER NOT NULL DEFAULT 0,  -- 1 = dry-run position; real reconciliation filters dry=0
-  updated_at         TEXT NOT NULL
+  legacy             INTEGER NOT NULL DEFAULT 0,
+  updated_at         TEXT NOT NULL,
+  UNIQUE(token_id, decision_id, dry)
 );
+CREATE INDEX IF NOT EXISTS idx_real_pos_token ON real_positions(token_id);
 
 -- §2.3 real_ledger — every USDC movement, TYPED (enum) so reconciliation (§4.4) reasons by kind,
 -- not free text. amount_usd is signed: credits (deposit, redemption win) positive, debits
