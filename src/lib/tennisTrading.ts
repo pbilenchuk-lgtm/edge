@@ -21,6 +21,7 @@ import { SET_VALUE_STRATEGY, SET_VALUE_ARMED, SET_VALUE_EPOCH, setValueGate } fr
 import { detectBreaks, detectTennisEvents, tennisMoneyline, favTokenOf, tennisTourOf, fetchTennisFixtures, trimRaw, TENNIS_TERMINAL_RE, loadTennisConfig } from "./tennisScout.js";
 import { loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
 import { classifyOrderBook, paperSellFill } from "./executor/paperFill.js";
+import { bookDepthUsd } from "./execution.js";
 import { PaperExecutor } from "./executor/paper.js";
 import { clientOrderIdFor, type OrderAck } from "./executor/types.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
@@ -36,7 +37,17 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 const surnames = (name: string) => norm(name).replace(/[.,]/g, " ").split(/[\s-]+/).filter((t) => t.length > 1);
 
 // Per-match tradeability: winner-book depth ≥ this ($) on BOTH sides at charge time. Env-tunable.
+// NB: this gates on Gamma's SELF-DECLARED moneyline liquidity (`ml.liquidity`), a cheap pre-filter that
+// can be stale/inflated — see TENNIS_MIN_REAL_BOOK_USD for the real-book backstop at the money path.
 const TENNIS_MIN_BOOK_USD = (() => { const n = Number(process.env.TENNIS_MIN_BOOK_USD); return Number.isFinite(n) && n > 0 ? n : 2000; })();
+// Real-book depth floor AT THE MONEY PATH (B3 — sibling of token-fix-m1, same call site). The
+// tradeability gate above trusts Gamma's declared liquidity; the Mrva–Roncadelli winner book was $44 of
+// ACTUAL executable depth yet declared healthy, so it passed the $2k gate and the fill engine merely
+// clamped the stake small instead of cutting the trade. We already fetch the favourite token's book for
+// the orientation invariant — verify its real executable ask notional here; below this floor → skip
+// (thin_real_book), never a dust fill on a $44 book. Conservative default (real books are far thinner
+// than declared); env-tunable, and the real-vs-declared gap is logged so it can be calibrated from data.
+const TENNIS_MIN_REAL_BOOK_USD = (() => { const n = Number(process.env.TENNIS_MIN_REAL_BOOK_USD); return Number.isFinite(n) && n > 0 ? n : 250; })();
 const TENNIS_STRATEGY = "tennis_overreaction";
 // Both tennis strategies share the settle / exit / one-position machinery (both buy the favourite's
 // moneyline). Set-Value adds the "lost set 1" horizon-of-a-match entry with a partial-take exit.
@@ -901,6 +912,16 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `⚠ token_orientation_mismatch: аск токена «${favName}» ${mm.tokenCents}¢ vs ожидаемая цена фаворита ${Math.round(entryCents)}¢ (Δ${Math.round(mm.gap)}¢) — покупаем НЕ ТОТ исход, ВХОД ЗАБЛОКИРОВАН`, created_at: now });
         continue;
       }
+      // B3: the declared-liquidity gate lied for Mrva ($44 real book). Cut a dust book HERE (real ask
+      // notional < floor) rather than clamp a dust bet. Only when the book is present — an empty/absent
+      // book is the fill engine's honest-skip, not "thin".
+      if (favBook.status === "ok") {
+        const depthUsd = bookDepthUsd(favBook.book.asks);
+        if (depthUsd < TENNIS_MIN_REAL_BOOK_USD) {
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `thin_real_book: реальная книга «${favName}» $${Math.round(depthUsd)} < порог $${TENNIS_MIN_REAL_BOOK_USD} (Gamma заявила $${Math.round(ml.liquidity || 0)}) — дустовая книга, вход отклонён`, created_at: now });
+          continue;
+        }
+      }
     }
     for (const profile of freeProfiles) {
       // Race guard: freeProfiles was computed BEFORE the awaited LLM call — an overlapping tick
@@ -1062,6 +1083,14 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
       if (mm) {
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `⚠ token_orientation_mismatch: аск токена «${favName}» ${mm.tokenCents}¢ vs ожидаемая цена фаворита ${Math.round(entryCents)}¢ (Δ${Math.round(mm.gap)}¢) — покупаем НЕ ТОТ исход, ВХОД ЗАБЛОКИРОВАН`, created_at: now });
         continue;
+      }
+      // B3: cut a dust real book here (declared-liquidity gate can't see it), same as Overreaction.
+      if (favBook.status === "ok") {
+        const depthUsd = bookDepthUsd(favBook.book.asks);
+        if (depthUsd < TENNIS_MIN_REAL_BOOK_USD) {
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `thin_real_book: реальная книга «${favName}» $${Math.round(depthUsd)} < порог $${TENNIS_MIN_REAL_BOOK_USD} (Gamma заявила $${Math.round(ml.liquidity || 0)}) — дустовая книга, вход отклонён`, created_at: now });
+          continue;
+        }
       }
     }
     for (const profile of freeProfiles) {

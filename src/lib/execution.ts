@@ -16,6 +16,12 @@ export interface BookLevel { priceCents: number; size: number } // size = shares
 /** bids sorted DESC by price (best first), asks ASC by price (best first). */
 export interface OrderBook { bids: BookLevel[]; asks: BookLevel[] }
 
+/** Total notional resting on one side of the book, in USD (Σ shares × price). The REAL executable
+ *  depth — as opposed to a market's self-declared/aggregate liquidity, which can be stale or inflated. */
+export function bookDepthUsd(levels: BookLevel[]): number {
+  return round2(levels.reduce((s, l) => s + l.size * (l.priceCents / 100), 0));
+}
+
 export interface BuyFill {
   shares: number;          // shares acquired
   avgPriceCents: number;   // VWAP of the fill — the REAL entry price

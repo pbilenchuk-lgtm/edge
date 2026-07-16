@@ -154,7 +154,10 @@ export function getDb(path = dbPath()): Database {
   catch { /* non-fatal */ }
   // token-fix-m1: flag pre-fix tennis buybacks that held the WRONG outcome's token (favourite = second
   // moneyline outcome) so calibration/win-rate slices exclude their opponent-token P&L. Marker-guarded.
-  try { migrateQuarantinePoisonedTennis(db, new Date().toISOString()); }
+  // Log the count on the ONE run it flags anything: `flagged=N` = how much of the tennis sample was on
+  // the wrong token → how much of the pre-fix tennis analysis (recovery amplitudes, "first clean cycle")
+  // has to be re-read. Surfaces in the deploy log so it's readable without a shell.
+  try { const n = migrateQuarantinePoisonedTennis(db, new Date().toISOString()); if (n > 0) console.log(`[migrate] token-flip quarantine: flagged=${n} pre-fix tennis bets held the wrong (second-outcome) token`); }
   catch { /* non-fatal */ }
   _db = db;
   return db;

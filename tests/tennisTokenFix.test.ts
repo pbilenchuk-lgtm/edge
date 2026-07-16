@@ -142,6 +142,21 @@ test("tennisExitTick: favourite = FIRST → sells outcomes[0] token at its bid (
   assert.ok((R.getBet(db, "first")!.closing_price ?? 0) >= 70, "sold the favourite's own outcomes[0] token at 72¢");
 });
 
+// ── B3. Dust real book is CUT at entry even when Gamma declared it healthy (Mrva $44 class) ────────
+test("tennisTradingTick: a DUST real book (Gamma-declared healthy) is skipped thin_real_book, not clamped", async () => {
+  const db = openDb(":memory:");
+  // Favourite = first (Favvi = p1 = t1). Gamma declares $8000 liquidity, but the real ask book is $44.
+  const mid = seedMatch(db, { p1: "Marco Favvi", p2: "Diego Doggi", p1price: 62, book: 8000, token1: "t1", token2: "t2" });
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", p1: "Marco Favvi", p2: "Diego Doggi", g1: 3, g2: 3, server: "first", p1c: 62, setNum: 1 });  // pre-break favourite serving
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", p1: "Marco Favvi", p2: "Diego Doggi", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 }); // favourite's serve broken → panics to 50
+  // The favourite token's REAL book is dust: 88 shares @ 50¢ = $44 (< $250 floor). Orientation is fine (50¢≈50¢).
+  const fetchImpl = tokenBookAndLLM({ t1: { bids: [[0.49, 88]], asks: [[0.50, 88]] } }, "Marco Favvi", 0.7);
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl });
+  assert.equal(opened, 0, "a $44 real book is CUT, not clamped into a dust bet");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => /thin_real_book/.test(l.text ?? "")), "thin_real_book logged with the real-vs-declared gap");
+  assert.equal(R.betsForMatch(db, mid, "tennis_overreaction").filter((b) => b.status === "open").length, 0, "no dust position opened");
+});
+
 // ── G. Quarantine: flag pre-fix second-outcome bets; leave first-outcome + post-fix bets alone ─────
 test("migrateQuarantinePoisonedTennis: flags ONLY pre-fix bets that held the wrong (second-outcome) token", () => {
   const db = openDb(":memory:");
