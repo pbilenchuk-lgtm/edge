@@ -68,7 +68,7 @@ export function realView(db: Database, env: Record<string, string | undefined> =
     operatorMode,
     paused: RR.getRealAutoPause(db),
     orphan: RR.getRealOrphanAlert(db),
-    bank: { realBalanceUsd: RR.realLedgerBalance(db, true), dryBalanceUsd: RR.realLedgerBalance(db, false), byKind: RR.realLedgerByKind(db) },
+    bank: { realBalanceUsd: RR.realLedgerBalance(db, true), dryBalanceUsd: RR.realDryBalanceUsd(db), byKind: RR.realLedgerByKind(db) },
     positions: RR.listRealPositions(db),
     orders,
     whitelist: RR.listWhitelist(db),

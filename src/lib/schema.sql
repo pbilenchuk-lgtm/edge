@@ -642,6 +642,7 @@ CREATE TABLE IF NOT EXISTS real_orders (
 );
 CREATE INDEX IF NOT EXISTS idx_real_orders_decision ON real_orders(decision_id);
 CREATE INDEX IF NOT EXISTS idx_real_orders_status   ON real_orders(status);
+CREATE INDEX IF NOT EXISTS idx_real_orders_created  ON real_orders(created_at);
 
 -- §2.3 real_order_events — append-only status-transition log. ONE row per transition, each with its
 -- own timestamp, so §7 latency (decision→place→first_fill) reads exactly, not by inference.

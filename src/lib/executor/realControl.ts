@@ -77,8 +77,9 @@ export function setOperatorModeControl(db: Database, target: string, confirm: bo
 /** Clear the sticky auto-pause (explicit owner action, §4.1/§4.4) — and the orphan alert if resolved. */
 export function clearAutoPauseControl(db: Database, actor: string, now: string): ControlResult {
   RR.clearRealAutoPause(db);
+  RR.clearRealOrphanAlert(db); // C5 (audit #8): also clear the orphan alert the pause raised — as the docstring promises
   RR.logControl(db, "clear_pause", null, actor, now);
-  return { ok: true, note: "авто-пауза снята — режим снова управляется env/оператором" };
+  return { ok: true, note: "авто-пауза снята (и orphan-алерт очищен) — режим снова управляется env/оператором" };
 }
 
 /** Whitelist add — a versioned, journaled row (whitelist versioning) PLUS a control-log entry. */
@@ -90,6 +91,7 @@ export function whitelistAddControl(db: Database, input: AddWhitelistInput, acto
 }
 export function whitelistToggleControl(db: Database, id: string, enabled: boolean, actor: string, now: string): ControlResult {
   const version = setWhitelistEnabled(db, id, enabled, actor, now);
+  if (version == null) return { ok: false, note: `нет строки whitelist с id ${id} — ничего не изменено` }; // C5: no phantom toggle
   RR.logControl(db, "whitelist_toggle", JSON.stringify({ id, enabled, version }), actor, now);
   return { ok: true, note: `whitelist ${enabled ? "включена" : "выключена"} строка → v${version}` };
 }

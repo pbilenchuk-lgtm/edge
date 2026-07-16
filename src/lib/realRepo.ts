@@ -86,10 +86,12 @@ export function openDryExposureUsd(db: Database): number {
   return r.x ?? 0;
 }
 
-/** Orders placed in the last hour (the berserk-loop guard reads this). */
+/** Orders placed in the last hour (the berserk-loop guard reads this). C5 (audit #L3): an indexed SQL
+ *  window (created_at is ISO → lexicographic = chronological), not a full-table scan filtered in JS. */
 export function realOrdersLastHour(db: Database, nowMs: number): number {
-  const rows = db.prepare(`SELECT created_at FROM real_orders`).all() as { created_at: string }[];
-  return rows.filter((o) => nowMs - (Date.parse(o.created_at) || 0) <= 3_600_000).length;
+  const sinceIso = new Date(nowMs - 3_600_000).toISOString();
+  const r = db.prepare(`SELECT COUNT(*) AS n FROM real_orders WHERE created_at >= ?`).get(sinceIso) as { n: number };
+  return r.n ?? 0;
 }
 
 /** Record a closing lot's realized-P&L delta (A4) — dated + dry-tagged, in its own table so it can't
@@ -203,6 +205,12 @@ export function realLedgerByKind(db: Database, realOnly = false): Record<string,
  *  doesn't show up as a real balance when the owner flips dry_run→on. */
 export function realLedgerBalance(db: Database, realOnly = false): number {
   const r = db.prepare(`SELECT COALESCE(SUM(amount_usd),0) AS bal FROM real_ledger ${realOnly ? "WHERE dry=0" : ""}`).get() as { bal: number };
+  return r.bal ?? 0;
+}
+/** C3 (audit #18): the DRY-only ledger balance — so the Real view's "dry" figure is simulated money, not
+ *  a total that silently includes real cash once real trading starts. */
+export function realDryBalanceUsd(db: Database): number {
+  const r = db.prepare(`SELECT COALESCE(SUM(amount_usd),0) AS bal FROM real_ledger WHERE dry=1`).get() as { bal: number };
   return r.bal ?? 0;
 }
 

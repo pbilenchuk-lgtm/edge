@@ -84,3 +84,58 @@ test("B4: no live book + a settled-won twin → dry position resolution-closed a
   const byKind = RR.realLedgerByKind(d);
   assert.ok((byKind.redemption ?? 0) > 0, "resolution credited a redemption line (won → 100)");
 });
+
+// ── C3: dry balance is dry-only, never includes real cash ─────────────────────
+test("C3: realDryBalanceUsd is dry-only — real cash never leaks into the 'dry' figure", () => {
+  const d = db();
+  RR.insertRealLedger(d, { kind: "fill", amount_usd: -50, token_id: "t", order_id: null, ref: null, dry: 1, at: NOW, created_at: NOW });
+  RR.insertRealLedger(d, { kind: "fill", amount_usd: -200, token_id: "t", order_id: null, ref: null, dry: 0, at: NOW, created_at: NOW }); // REAL
+  assert.equal(RR.realDryBalanceUsd(d), -50, "dry-only");
+  assert.equal(RR.realLedgerBalance(d, true), -200, "real-only unchanged");
+});
+
+// ── C4: a settled/deleted twin that vanished → LOUD orphan alert, not a silent skip ───────────────
+test("C4: a dry position whose paper twin is missing raises a loud orphan alert (not a silent continue)", async () => {
+  const d = db();
+  RR.upsertRealPosition(d, { token_id: "0xORPH", decision_id: "gone", profile_id: "medium", match_id: "m1", strategy_id: "overreaction", size_shares: 50, avg_price_cents: 45, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 1, updated_at: NOW });
+  // NO bet with decision_id 'gone' exists.
+  const msgs: string[] = [];
+  await sweepDryExits(d, { env: { REAL_TRADING: "dry_run" }, poly: POLY, deps: { fetchImpl: bookFetch({ bids: [], asks: [] }) }, now: () => NOW, bookCache: new Map(), onError: (m) => msgs.push(m) });
+  assert.ok(msgs.some((m) => /orphan|близнец пропал/.test(m)), "orphan twin surfaced loudly");
+});
+
+// ── C5: whitelist toggle on an unknown id → no phantom version bump/log ────────────────────────────
+test("C5: whitelistToggleControl on a nonexistent id → ok:false, no version bump, no journal", async () => {
+  const { whitelistToggleControl } = await import("../src/lib/executor/realControl.js");
+  const d = db();
+  const v0 = RR.currentWhitelistVersion(d);
+  const r = whitelistToggleControl(d, "no-such-id", true, "owner", NOW);
+  assert.equal(r.ok, false);
+  assert.equal(RR.currentWhitelistVersion(d), v0, "version NOT bumped by a phantom toggle");
+});
+
+// ══ INTEGRATION (batch acceptance): dry entry → mirror(sized from fraction) → atomic fill → exposure up
+//    → twin settles → sweep resolution-close → exposure back to 0 → second sweep no-op ══════════════
+test("integration: whitelisted dry entry mirrors, fills atomically, then settles+sweeps flat and idempotent", async () => {
+  const d = db();
+  R.upsertSport(d, "football", "Ф");
+  R.upsertCompetition(d, { id: "epl", sport_id: "football", name: "EPL", budget: 1000, external_league: null, created_at: "t" });
+  R.insertStrategy(d, { id: "overreaction", sport_id: "football", name: "OR", tag: "o", color: "#fff", version: 1, prompt: "", prompt_live: null, params: {}, model: "m", model_live: null, created_at: "t" } as any);
+  const mid = R.uid();
+  R.insertMatch(d, { id: mid, competition_id: "epl", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t", minute: 90, score_home: 1, score_away: 0, final_score: "1:0", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid } as any);
+  addWhitelistRow(d, { strategyId: "overreaction", categories: ["epl"], maxOrderUsd: 50, enabled: true }, "owner", NOW);
+  const b: Bet = { id: "b1", match_id: mid, strategy_id: "overreaction", risk_profile_id: "medium", market_label: "Over 1.5", status: "open", proposed_price: 45, entry_price: 45, current_price: 45, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "3'", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ kellyFraction: 0.05 } as any), code_version: "e", decision_id: "dec-int", created_at: NOW };
+  // 1) mirror: sizes from the stored 0.05 fraction (× $300 free = $15, ≤ $50 cap), atomic dry fill.
+  const r = await mirrorPaperEntryToReal(d, b, { env: { REAL_TRADING: "dry_run" }, poly: POLY, deps: { fetchImpl: bookFetch({ bids: [], asks: [{ price: "0.45", size: "10000" }] }) }, now: () => NOW, bookCache: new Map(), sport: "football", categoryId: "epl", tokenId: "0xINT", realFreeUsd: 300 });
+  assert.ok(r.mirrored, "mirrored");
+  assert.ok(RR.openDryExposureUsd(d) > 0, "dry exposure rose on the entry");
+  const ord = d.prepare(`SELECT id,size_usd FROM real_orders WHERE decision_id='dec-int' AND leg='entry'`).get() as any;
+  assert.ok(ord.size_usd <= 15.5 && ord.size_usd >= 14.5, `size from stored fraction ≈ $15, got ${ord.size_usd}`);
+  // 2) twin settles won; 3) sweep resolution-closes (no book) at 100.
+  R.insertBet(d, { ...b, id: "twin", status: "settled_won", result: "won", payout: 200, settled_at: NOW } as any);
+  const closed = await sweepDryExits(d, { env: { REAL_TRADING: "dry_run" }, poly: POLY, deps: { fetchImpl: bookFetch({ bids: [], asks: [] }) }, now: () => "2026-07-15T12:05:00.000Z", bookCache: new Map() });
+  assert.equal(closed, 1);
+  assert.ok(RR.openDryExposureUsd(d) < 0.01, "dry exposure back to 0 after the sweep");
+  // 4) second sweep is a no-op (position already flat).
+  assert.equal(await sweepDryExits(d, { env: { REAL_TRADING: "dry_run" }, poly: POLY, deps: { fetchImpl: bookFetch({ bids: [], asks: [] }) }, now: () => "2026-07-15T12:06:00.000Z", bookCache: new Map() }), 0, "idempotent");
+});

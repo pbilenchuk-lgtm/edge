@@ -41,10 +41,12 @@ export function addWhitelistRow(db: Database, o: AddWhitelistInput, actor: strin
   RR.appendWhitelistLog(db, version, "add", JSON.stringify(o), actor, nowIso);
   return { ok: true, version };
 }
-/** Enable/disable a row — also a versioned, journaled change. */
-export function setWhitelistEnabled(db: Database, id: string, enabled: boolean, actor: string, nowIso: string): number {
+/** Enable/disable a row — a versioned, journaled change. C5 (audit #M5): a no-such-id UPDATE affects 0
+ *  rows → NO version bump, NO journal entry, returns null (a phantom toggle must not lie in the log). */
+export function setWhitelistEnabled(db: Database, id: string, enabled: boolean, actor: string, nowIso: string): number | null {
   const version = RR.currentWhitelistVersion(db) + 1;
-  db.prepare(`UPDATE real_whitelist SET enabled=?, version=?, updated_at=? WHERE id=?`).run(enabled ? 1 : 0, version, nowIso, id);
+  const res = db.prepare(`UPDATE real_whitelist SET enabled=?, version=?, updated_at=? WHERE id=?`).run(enabled ? 1 : 0, version, nowIso, id);
+  if ((res.changes as number) === 0) return null;
   RR.appendWhitelistLog(db, version, enabled ? "enable" : "disable", JSON.stringify({ id }), actor, nowIso);
   return version;
 }
@@ -237,14 +239,23 @@ export async function sweepDryExits(db: Database, ctx: SweepCtx): Promise<number
     try {
       const decisionId = pos.decision_id!;
       const bet = db.prepare(`SELECT status FROM bets WHERE decision_id=?`).get(decisionId) as { status: string } | undefined;
-      if (!bet || !isSettled(bet.status)) continue; // twin open → hold (does NOT consume the budget)
+      if (!bet) { // C4 (audit #19): the twin vanished (deleted / re-settled) — a dry position with no twin
+        // would silently never close. Make it LOUD instead of a silent continue.
+        try { (ctx.onError ?? (() => {}))(`orphan dry position ${pos.token_id} (decision ${decisionId}): бумажный близнец пропал — не свипается, нужен ручной разбор`); } catch { /* logger must not throw */ }
+        continue;
+      }
+      if (!isSettled(bet.status)) continue; // twin open → hold (does NOT consume the budget)
       if (worked >= MAX) { truncated++; continue; } // only settled twins that reach the fetch count
       worked++;
+      // C2 (audit #15): seq = exit orders already placed for this decision, so a partial's residual
+      // re-quotes as a NEW order (the one sanctioned second-order-on-a-leg case) instead of hitting the
+      // idempotency guard and stranding the remainder forever.
+      const seq = (db.prepare(`SELECT COUNT(*) AS n FROM real_orders WHERE decision_id=? AND leg='exit'`).get(decisionId) as { n: number }).n;
       // B4: exit from the LIVE bid; fall back to resolution-close when the book is gone.
       const bookRes = await classifyOrderBook(pos.token_id, ctx.poly, ctx.deps, ctx.bookCache);
       const bestBid = bookRes.status === "ok" ? bookRes.book.bids.reduce((m, b) => Math.max(m, b.priceCents), 0) : 0;
       if (bestBid > 0) {
-        const r = await mirrorDryExit(db, pos, decisionId, bestBid - EXIT_SELL_TOLERANCE_CENTS, ctx);
+        const r = await mirrorDryExit(db, pos, decisionId, bestBid - EXIT_SELL_TOLERANCE_CENTS, ctx, seq);
         if (r !== "none") closed++;
       } else {
         const resolveCents = bet.status === "settled_won" ? 100 : bet.status === "settled_lost" ? 0 : (pos.avg_price_cents ?? 0);
