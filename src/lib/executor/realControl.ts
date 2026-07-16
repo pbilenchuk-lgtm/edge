@@ -6,12 +6,27 @@
 // only ever tighten, never exceed the env ceiling. Every write is logged.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { timingSafeEqual } from "node:crypto";
 import type { Database } from "../db.js";
 import * as RR from "../realRepo.js";
 import { effectiveTradingMode, isLoosening, type TradingMode } from "./safety.js";
 import { addWhitelistRow, setWhitelistEnabled, type AddWhitelistInput } from "./whitelist.js";
 
 const VALID: TradingMode[] = ["off", "dry_run", "exits_only", "on"];
+
+/** A2 (audit #1): authorize a control POST from its Authorization header against env REAL_CONTROL_TOKEN.
+ *  Constant-time compare; a missing SERVER token means control is DISABLED (fail-closed, not open). The
+ *  route rejects before reading the body, so a denied call has zero side effects, and `actor` is derived
+ *  from the valid token ("owner") — never from the body. */
+export function authorizeControl(authorizationHeader: string | null | undefined, env: Record<string, string | undefined> = process.env): { ok: boolean; reason: "ok" | "no_server_token" | "bad_token" } {
+  const expected = (env.REAL_CONTROL_TOKEN ?? "").trim();
+  if (!expected) return { ok: false, reason: "no_server_token" };
+  const h = authorizationHeader ?? "";
+  const presented = h.toLowerCase().startsWith("bearer ") ? h.slice(7).trim() : "";
+  const a = Buffer.from(presented), b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, reason: "bad_token" };
+  return { ok: true, reason: "ok" };
+}
 export interface ControlResult { ok: boolean; note: string; needConfirm?: boolean; needPhrase?: boolean }
 
 // The STRONGEST barrier: arming the operator ceiling to `on` (real money can flow) is NOT a click and
@@ -20,18 +35,19 @@ export interface ControlResult { ok: boolean; note: string; needConfirm?: boolea
 // STOP are instant. This is the one button in the system that must cost deliberate keystrokes.
 export const ON_CONFIRM_PHRASE = "ВКЛЮЧИТЬ РЕАЛ";
 
-/** [STOP] — hard stop: operator mode → off + cancel every working order + alert. INSTANT: no confirm,
- *  zero friction (the panic button must not ask). GREEDY: cancels every order it can, reports N of M,
- *  never dies on the first failure. Open positions are NOT force-dumped (§4.2: a panic sell into a thin
- *  book is worse). Idempotent — a second press cancels 0 of 0 and still logs. Order matters: mode→off
- *  FIRST (no new orders), then sweep. */
+/** [STOP] — hard stop: operator mode → EXITS_ONLY + cancel every working ENTRY-capable order + alert.
+ *  A5 (audit #16): floors at exits_only, NOT off — so open positions keep their defensive exit management
+ *  ("positions ride under exits-only" is now TRUE). A full freeze is still available via an explicit
+ *  set_mode off (a deliberate choice, not the reflex). INSTANT: no confirm (the panic button must not
+ *  ask). GREEDY: cancels every order it can, reports N of M, never dies on the first failure. Open
+ *  positions are NOT force-dumped (§4.2: a panic sell into a thin book is worse). Idempotent. */
 export function operatorStop(db: Database, actor: string, now: string): ControlResult {
-  RR.setOperatorMode(db, "off", now);
+  RR.setOperatorMode(db, "exits_only", now);
   const c = RR.cancelWorkingRealOrders(db, now);
   const tail = c.failed ? `, ${c.failed} не удалось (см. лог)` : "";
-  RR.setRealOrphanAlert(db, `[STOP] нажат в ${now} — новые ордера остановлены, отменено ${c.cancelled}/${c.attempted} висящих${tail}. Позиции под exits-only.`, now);
-  RR.logControl(db, "stop", JSON.stringify(c), actor, now);
-  return { ok: true, note: `STOP: режим→off, отменено висящих ордеров: ${c.cancelled} из ${c.attempted}${tail}` };
+  RR.setRealOrphanAlert(db, `[STOP] нажат в ${now} — новые входы остановлены (exits_only), отменено ${c.cancelled}/${c.attempted} висящих${tail}. Позиции остаются под exit-управлением.`, now);
+  RR.logControl(db, "stop", JSON.stringify({ ...c, mode: "exits_only" }), actor, now);
+  return { ok: true, note: `STOP: режим→exits_only (позиции под защитой exit), отменено висящих: ${c.cancelled} из ${c.attempted}${tail}` };
 }
 
 /** Master switch — set the operator mode ceiling. ASYMMETRIC by design:

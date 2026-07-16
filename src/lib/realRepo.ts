@@ -63,15 +63,20 @@ export function expiredClientCancelOrders(db: Database, nowIso: string): RealOrd
   ).all(nowIso) as RealOrderRow[];
 }
 
-/** Live open real exposure ($) = notional still working or filled and not yet exited. Approximated as
- *  the sum of filled_size_usd on non-terminal + filled orders minus what's been sold — for the cap we
- *  use the conservative sum of BUY fills' notional on open positions (real_positions is the truth once
- *  wired; this is the order-side estimate the cap trusts as the last belt). */
+/** Live open REAL exposure ($) — A3 (audit #6). Two parts, REAL only (dry=0):
+ *   (1) open real positions at cost basis: Σ(size_shares × avg_price / 100) — releases when a SELL
+ *       reduces the position (unlike the old lifetime-buy-volume sum that never dropped on exit);
+ *   (2) a RESERVATION for real BUY orders still working (placed/partial, exchange_order_id set): the
+ *       UNFILLED notional (size_usd − filled). Reserving at check-time closes the TOCTOU where two
+ *       concurrent place() both read pre-fill state and both pass the cap.
+ *  Dry orders/positions never count — the real belt gates real state only. */
 export function openRealExposureUsd(db: Database): number {
-  const r = db.prepare(
-    `SELECT COALESCE(SUM(filled_size_usd),0) AS x FROM real_orders WHERE side='BUY' AND status IN ('placed','partial','filled')`,
+  const pos = db.prepare(`SELECT COALESCE(SUM(size_shares * avg_price_cents / 100.0),0) AS x FROM real_positions WHERE dry=0 AND size_shares > 0`).get() as { x: number };
+  const reserved = db.prepare(
+    `SELECT COALESCE(SUM(CASE WHEN size_usd - COALESCE(filled_size_usd,0) > 0 THEN size_usd - COALESCE(filled_size_usd,0) ELSE 0 END),0) AS x
+     FROM real_orders WHERE side='BUY' AND status IN ('placed','partial') AND exchange_order_id IS NOT NULL`,
   ).get() as { x: number };
-  return r.x ?? 0;
+  return (pos.x ?? 0) + (reserved.x ?? 0);
 }
 
 /** Open DRY exposure ($) — notional of open dry positions (size × avg). The virtual dry-bank's free is
@@ -87,14 +92,20 @@ export function realOrdersLastHour(db: Database, nowMs: number): number {
   return rows.filter((o) => nowMs - (Date.parse(o.created_at) || 0) <= 3_600_000).length;
 }
 
-/** Realized loss ($, positive number) booked to the ledger since local midnight of `dayIso` — the
- *  daily-loss auto-pause reads this. Sums negative fill/fee/gas net for the day. */
+/** Record a closing lot's realized-P&L delta (A4) — dated + dry-tagged, in its own table so it can't
+ *  touch the cash balance. Written on each SELL that reduces a position. */
+export function insertRealRealized(db: Database, e: { decisionId: string | null; tokenId: string | null; amountUsd: number; dry?: number; at: string }): void {
+  db.prepare(`INSERT INTO real_realized(id,decision_id,token_id,amount_usd,dry,at) VALUES(?,?,?,?,?,?)`)
+    .run(uid(), e.decisionId, e.tokenId, e.amountUsd, e.dry ?? 0, e.at);
+}
+/** Realized loss ($, positive) for the UTC day `dayPrefix` (YYYY-MM-DD) — A4 (audit #7). Sums real
+ *  (dry=0) closed-lot realized deltas for the day. A BUY that merely OPENS a position writes no realized
+ *  row → not a loss; dry P&L (dry=1) can neither mask nor trip the real breaker. Negative day → its
+ *  magnitude is the loss. */
 export function realRealizedLossTodayUsd(db: Database, dayPrefix: string): number {
-  const r = db.prepare(
-    `SELECT COALESCE(SUM(amount_usd),0) AS net FROM real_ledger WHERE kind IN ('fill','fee','gas','redemption') AND substr(at,1,10)=?`,
-  ).get(dayPrefix) as { net: number };
+  const r = db.prepare(`SELECT COALESCE(SUM(amount_usd),0) AS net FROM real_realized WHERE dry=0 AND substr(at,1,10)=?`).get(dayPrefix) as { net: number };
   const net = r.net ?? 0;
-  return net < 0 ? -net : 0; // loss = the magnitude of a negative day
+  return net < 0 ? -net : 0;
 }
 
 /** Append ONE status-transition event (its own timestamp) — the §7 latency source. */

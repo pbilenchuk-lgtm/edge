@@ -2127,6 +2127,11 @@ function RealControls({ data, onRefresh }: { data: any; onRefresh: () => void })
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [wl, setWl] = useState({ strategyId: "", categories: "", maxOrderUsd: "" });
+  // A2: control token (must match server REAL_CONTROL_TOKEN). Held per-browser; sent as Bearer on every
+  // control POST. Not a secret store — just so the owner doesn't retype it each action.
+  const [token, setToken] = useState("");
+  useEffect(() => { try { setToken(localStorage.getItem("real_control_token") ?? ""); } catch { /* SSR */ } }, []);
+  const saveToken = (t: string) => { setToken(t); try { localStorage.setItem("real_control_token", t); } catch { /* no storage */ } };
   const eff = data.caps?.effective ?? {};
   const [caps, setCaps] = useState<Record<string, string>>({
     maxOrderUsd: String(eff.maxOrderUsd ?? ""), maxExposureUsd: String(eff.maxExposureUsd ?? ""),
@@ -2144,7 +2149,7 @@ function RealControls({ data, onRefresh }: { data: any; onRefresh: () => void })
   const post = async (payload: any): Promise<any> => {
     setBusy(true);
     try {
-      const res = await fetch("/api/real-control", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+      const res = await fetch("/api/real-control", { method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(payload) });
       const j = await res.json();
       if (!j.needConfirm) { setMsg({ ok: !!j.ok, text: j.note || j.error || (j.ok ? "готово" : "ошибка") }); if (j.ok) onRefresh(); }
       return j;
@@ -2184,6 +2189,7 @@ function RealControls({ data, onRefresh }: { data: any; onRefresh: () => void })
     <div style={{ ...cardS, borderColor: "#ffffff20" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
         <div style={hS}>Управление (owner)</div>
+        <input type="password" value={token} onChange={(e) => saveToken(e.target.value)} placeholder="control-токен (= REAL_CONTROL_TOKEN)" title="Должен совпадать с REAL_CONTROL_TOKEN в env сервера. Хранится в этом браузере." style={{ ...inS, width: 260, marginLeft: 12 }} />
         {msg && <div style={{ fontSize: 11, color: msg.ok ? "#5fd08a" : "#ff6b6b", marginLeft: "auto" }}>{msg.ok ? "✓ " : "✗ "}{msg.text}</div>}
       </div>
 

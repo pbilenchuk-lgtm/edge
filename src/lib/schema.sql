@@ -687,6 +687,18 @@ CREATE TABLE IF NOT EXISTS real_positions (
 -- §2.3 real_ledger — every USDC movement, TYPED (enum) so reconciliation (§4.4) reasons by kind,
 -- not free text. amount_usd is signed: credits (deposit, redemption win) positive, debits
 -- (fill cost, fee, gas, withdrawal) negative.
+-- A4: dated realized-P&L (NON-CASH memo — the daily-loss breaker reads closed-lot realized deltas, not
+-- ledger cash flow). Separate table (no CHECK/rebuild) so it can't corrupt the cash ledger balance.
+CREATE TABLE IF NOT EXISTS real_realized (
+  id          TEXT PRIMARY KEY,
+  decision_id TEXT,
+  token_id    TEXT,
+  amount_usd  REAL NOT NULL,   -- signed realized delta of THIS close (negative = loss)
+  dry         INTEGER NOT NULL DEFAULT 0,
+  at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_real_realized_at ON real_realized(at);
+
 CREATE TABLE IF NOT EXISTS real_ledger (
   id          TEXT PRIMARY KEY,
   kind        TEXT NOT NULL CHECK (kind IN

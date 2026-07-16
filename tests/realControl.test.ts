@@ -4,7 +4,7 @@ import { openDb, initSchema } from "../src/lib/db.js";
 import * as RR from "../src/lib/realRepo.js";
 import {
   operatorStop, setOperatorModeControl, clearAutoPauseControl,
-  whitelistAddControl, whitelistToggleControl, setCapsControl, ON_CONFIRM_PHRASE,
+  whitelistAddControl, whitelistToggleControl, setCapsControl, ON_CONFIRM_PHRASE, authorizeControl,
 } from "../src/lib/executor/realControl.js";
 
 const NOW = "2026-07-15T12:00:00.000Z";
@@ -28,16 +28,16 @@ test("operatorStop: mode→off, cancels every working order, raises orphan alert
   workingOrder(d, "o1"); workingOrder(d, "o2");
   const r = operatorStop(d, "owner", NOW);
   assert.equal(r.ok, true);
-  assert.equal(RR.getOperatorMode(d), "off", "operator ceiling dropped to off");
+  assert.equal(RR.getOperatorMode(d), "exits_only", "A5: STOP floors at exits_only (positions keep exit management), not off");
   const statuses = ["o1", "o2"].map((id) => (d.prepare(`SELECT status FROM real_orders WHERE id=?`).get(id) as any).status);
   assert.deepEqual(statuses, ["cancelled", "cancelled"], "both working orders cancelled");
   assert.ok(RR.getRealOrphanAlert(d), "orphan alert set (positions ride under exits-only)");
-  assert.match(r.note, /отменено висящих ордеров: 2 из 2/, "reports N of M, not just attempted");
+  assert.match(r.note, /отменено висящих: 2 из 2/, "reports N of M, not just attempted");
   const log = RR.listControlLog(d, 10);
   assert.equal(log[0].action, "stop");
   assert.equal(log[0].actor, "owner");
   const det = JSON.parse(String(log[0].detail));
-  assert.deepEqual(det, { attempted: 2, cancelled: 2, failed: 0 }, "logs the greedy tally");
+  assert.deepEqual(det, { attempted: 2, cancelled: 2, failed: 0, mode: "exits_only" }, "logs the greedy tally + the floor mode");
 });
 
 test("operatorStop: greedy — transitions that throw do NOT abort the sweep; STOP still returns ok + a tally", () => {
@@ -48,9 +48,9 @@ test("operatorStop: greedy — transitions that throw do NOT abort the sweep; ST
   d.prepare(`DROP TABLE real_order_events`).run();
   const r = operatorStop(d, "owner", NOW);
   assert.equal(r.ok, true, "STOP never throws, even when the whole sweep fails");
-  assert.match(r.note, /отменено висящих ордеров: 0 из 3, 3 не удалось/, "honest N-of-M with failures surfaced");
+  assert.match(r.note, /отменено висящих: 0 из 3, 3 не удалось/, "honest N-of-M with failures surfaced");
   const det = JSON.parse(String(RR.listControlLog(d, 5)[0].detail));
-  assert.deepEqual(det, { attempted: 3, cancelled: 0, failed: 3 });
+  assert.deepEqual(det, { attempted: 3, cancelled: 0, failed: 3, mode: "exits_only" });
 });
 
 test("operatorStop: idempotent — a second press cancels nothing new and still logs", () => {
@@ -59,7 +59,7 @@ test("operatorStop: idempotent — a second press cancels nothing new and still 
   operatorStop(d, "owner", NOW);
   const r2 = operatorStop(d, "owner", NOW);
   assert.equal(r2.ok, true);
-  assert.match(r2.note, /отменено висящих ордеров: 0/);
+  assert.match(r2.note, /отменено висящих: 0/);
 });
 
 // ── mode switch: loosening needs confirm; env is the ceiling ────────────────────
@@ -199,4 +199,19 @@ test("setCapsControl override flows into resolveSafetyCaps (the belt reads it)",
     const caps = resolveSafetyCaps(d, process.env);
     assert.equal(caps.maxOrderUsd, 12, "override wins over env/default for the resolved cap");
   });
+});
+
+// ── A2 (audit #1): auth on the control surface ────────────────────────────────
+test("authorizeControl: only the exact Bearer token passes; missing/wrong → denied, no server token → disabled", () => {
+  const env = { REAL_CONTROL_TOKEN: "s3cret-owner-token" };
+  assert.equal(authorizeControl("Bearer s3cret-owner-token", env).ok, true, "exact token → ok");
+  assert.equal(authorizeControl("Bearer wrong", env).reason, "bad_token");
+  assert.equal(authorizeControl("s3cret-owner-token", env).reason, "bad_token", "must be a Bearer scheme");
+  assert.equal(authorizeControl(null, env).reason, "bad_token", "missing header → denied");
+  assert.equal(authorizeControl("Bearer ", env).reason, "bad_token");
+  // Fail-CLOSED: no server token means control is disabled, not open.
+  assert.equal(authorizeControl("Bearer anything", {}).reason, "no_server_token");
+  assert.equal(authorizeControl("Bearer anything", { REAL_CONTROL_TOKEN: "  " }).reason, "no_server_token", "blank token = unset");
+  // Case-insensitive scheme, trims.
+  assert.equal(authorizeControl("bearer  s3cret-owner-token ", env).ok, true);
 });

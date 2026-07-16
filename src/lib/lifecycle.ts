@@ -648,13 +648,20 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       // default (off), keeping autoEnter's hot path free. Isolated inside mirrorPaperEntryToReal: any
       // failure degrades to paper-only. Only football reaches here (sport gate is also enforced inside).
       if (readTradingMode(deps.env) !== "off" && sport === "football") {
-        const fresh = R.getBet(db, b.id);
-        if (fresh) await mirrorPaperEntryToReal(db, fresh, {
-          env: deps.env ?? process.env, poly, deps, now: () => now, bookCache,
-          sport, categoryId: m.competition_id, tokenId: mk?.external_ref ?? "",
-          sizeFraction: Math.round(intensity * 10000) / 10000, realFreeUsd: dryVirtualFreeUsd(db, deps.env ?? process.env),
-          onError: (msg) => { try { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `real-mirror: ${msg}`, created_at: now }); } catch { /* logger must not throw */ } },
-        });
+        // A1 (audit #12): the ENTIRE mirror path — including the support reads getBet / dryVirtualFreeUsd
+        // — is wrapped here, so ANY throw (incl. SQLITE_BUSY on a read) degrades to paper-only and NEVER
+        // breaks the paper loop. Before, those reads sat outside the mirror's try/catch and a DB hiccup
+        // could abort autoEnter for the rest of the cycle.
+        const mirrorLog = (msg: string) => { try { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `real-mirror: ${msg}`, created_at: now }); } catch { /* logger must not throw */ } };
+        try {
+          const fresh = R.getBet(db, b.id);
+          if (fresh) await mirrorPaperEntryToReal(db, fresh, {
+            env: deps.env ?? process.env, poly, deps, now: () => now, bookCache,
+            sport, categoryId: m.competition_id, tokenId: mk?.external_ref ?? "",
+            sizeFraction: Math.round(intensity * 10000) / 10000, realFreeUsd: dryVirtualFreeUsd(db, deps.env ?? process.env),
+            onError: mirrorLog,
+          });
+        } catch (e) { mirrorLog(`support-read failed (paper unaffected): ${e instanceof Error ? e.message : String(e)}`); }
       }
     }
   }

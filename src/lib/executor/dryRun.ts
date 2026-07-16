@@ -80,8 +80,12 @@ function updatePosition(db: Database, o: OrderRequest, fill: DryFill, nowIso: st
     RR.upsertRealPosition(db, { token_id: o.tokenId, match_id: o.matchId, strategy_id: o.strategyId, size_shares: newShares, avg_price_cents: Math.round(newAvg * 100) / 100, realized_pnl_usd: prevReal, unrealized_pnl_usd: null, dry: 1, updated_at: nowIso });
   } else {
     const newShares = prevShares - fill.shares;
-    const realized = prevReal + (fill.shares * (fill.priceCents - prevAvg)) / 100;
-    RR.upsertRealPosition(db, { token_id: o.tokenId, match_id: o.matchId, strategy_id: o.strategyId, size_shares: newShares, avg_price_cents: prevAvg, realized_pnl_usd: Math.round(realized * 100) / 100, unrealized_pnl_usd: null, dry: 1, updated_at: nowIso });
+    const realizedDelta = Math.round((fill.shares * (fill.priceCents - prevAvg)) / 100 * 100) / 100;
+    const realized = Math.round((prevReal + realizedDelta) * 100) / 100;
+    RR.upsertRealPosition(db, { token_id: o.tokenId, match_id: o.matchId, strategy_id: o.strategyId, size_shares: newShares, avg_price_cents: prevAvg, realized_pnl_usd: realized, unrealized_pnl_usd: null, dry: 1, updated_at: nowIso });
+    // A4 (audit #7): date + dry-tag this close's realized delta (own table, not the cash ledger) so the
+    // daily-loss breaker reads real closed-lot P&L, not cash flow, and dry P&L can't trip it.
+    if (Math.abs(realizedDelta) > 0.004) RR.insertRealRealized(db, { decisionId: o.decisionId, tokenId: o.tokenId, amountUsd: realizedDelta, dry: 1, at: nowIso });
   }
 }
 

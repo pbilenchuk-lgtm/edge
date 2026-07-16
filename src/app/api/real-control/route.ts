@@ -16,17 +16,29 @@ export const dynamic = "force-dynamic";
  *   whitelist_add { row }        — add a whitelist row (versioned + logged)
  *   whitelist_toggle { id, enabled }
  *   set_caps   { caps }          — override the 4 hard caps (env stays the floor)
+ *
+ * AUTH (A2, audit #1): every POST requires `Authorization: Bearer <REAL_CONTROL_TOKEN>`. A missing/wrong
+ * token → 401 with ZERO side effects (nothing written). `actor` is ALWAYS "owner" (derived from the valid
+ * token) — the body's `actor` is ignored, so the audit log's "who" can't be forged. The typed phrase for
+ * mode→on stays ON TOP of this (a second barrier), not instead.
  */
 export async function POST(req: Request) {
   try {
-    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
-    const action = String(body.action ?? "");
-    const actor = typeof body.actor === "string" && body.actor.trim() ? body.actor.trim() : "owner";
-
     const { getDb } = await import("@/lib/db");
     const C = await import("@/lib/executor/realControl");
     const db = getDb();
     const now = new Date().toISOString();
+
+    // ── auth gate (A2): reject before ANY body read / state write → a denied call has zero side effects ─
+    const auth = C.authorizeControl(req.headers.get("authorization"), process.env);
+    if (!auth.ok) {
+      try { const RR = await import("@/lib/realRepo"); RR.logControl(db, "auth_denied", JSON.stringify({ reason: auth.reason }), "anonymous", now); } catch { /* logging must not throw */ }
+      return NextResponse.json({ ok: false, error: auth.reason === "no_server_token" ? "REAL_CONTROL_TOKEN не задан на сервере — контроль отключён" : "unauthorized" }, { status: 401 });
+    }
+
+    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+    const action = String(body.action ?? "");
+    const actor = "owner"; // derived from the valid token, NEVER from the body
 
     let result: { ok: boolean; note: string; needConfirm?: boolean };
     switch (action) {
