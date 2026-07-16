@@ -10,6 +10,7 @@ import { providerEnabled, effectiveEnv } from "./llm.js";
 import { jobActive } from "./analysis.js";
 import { warsawLabel, warsawClock, isIso } from "./time.js";
 import { SPORT_LABELS, isNoiseMarket } from "./polymarket.js";
+import { tennisTourOf } from "./tennisScout.js";
 import { resolveFootballMarket, matchPhase } from "./settlement.js";
 import { maxLiveMinutes, liveDelivering } from "./lifecycle.js";
 import { listRiskProfileViews, type RiskProfileView } from "./riskConfig.js";
@@ -104,7 +105,7 @@ export interface StrategyStats {
 export interface AppData {
   treasuryTotal: number;
   sports: { id: string; label: string }[];
-  competitions: { id: string; sport: string; name: string; matches: string[] }[];
+  competitions: { id: string; sport: string; name: string; matches: string[]; inScope: boolean }[];
   compBudget: Record<string, number>;
   /** per-comp summed share % by strategy (across its profiles) — back-compat display */
   shares: Record<string, Record<string, number>>;
@@ -188,7 +189,10 @@ export function buildAppData(db: Database, env = process.env): AppData {
       shares[c.id] = byStrat;
       shareRows[c.id] = sh.map((s) => ({ strategyId: s.strategy_id, profileId: s.risk_profile_id, pct: s.pct }));
     }
-    return { id: c.id, sport: c.sport_id, name: c.name, matches: (matchesByComp.get(c.id) ?? []).map((m) => m.id) };
+    // Tennis is ATP/WTA-singles only (tennisTourOf → null for ITF/Challenger/doubles/125/quali).
+    // An out-of-scope tour is NEVER traded, so the UI must not show it as a funded "$12k движок".
+    const inScope = c.sport_id === "tennis" ? tennisTourOf(c) != null : true;
+    return { id: c.id, sport: c.sport_id, name: c.name, inScope, matches: (matchesByComp.get(c.id) ?? []).map((m) => m.id) };
   });
 
   const catalog: StrategyView[] = strategies.map((s) => ({

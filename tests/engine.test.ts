@@ -820,6 +820,8 @@ test("espnLeagueForSeries: covered leagues resolve, uncovered (tennis/minor) ret
   assert.equal(espnLeagueForSeries("UEFA Champions League", "soccer-ucl"), "uefa.champions");
   assert.equal(espnLeagueForSeries("Allsvenskan", "soccer-allsvenskan"), "swe.1"); // via name inference
   assert.equal(espnLeagueForSeries("Chinese Super League", "soccer-csl"), "chn.1"); // ESPN chn.1 DOES carry it
+  assert.equal(espnLeagueForSeries("Denmark Superliga", "denmark-superliga"), "den.1"); // NOT tur.1 — Turkish süper-lig rule must not swallow "Superliga"
+  assert.equal(espnLeagueForSeries("Süper Lig", "super-lig"), "tur.1");                 // real Turkish league still maps
   assert.equal(espnLeagueForSeries("Morocco Botola", "soccer-botola"), null);      // ESPN doesn't cover → skip
   assert.equal(espnLeagueForSeries(null, "atp-alcaraz-sinner"), null);             // tennis → no mapping → skip
   assert.equal(espnLeagueForSeries(null, null), null);

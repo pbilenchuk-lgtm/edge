@@ -572,11 +572,15 @@ const LEAGUE_NAME_ESPN: [RegExp, string][] = [
   [/eliteserien/i, "nor.1"],
   [/eredivisie/i, "ned.1"], [/eerste divisie/i, "ned.2"],
   [/(primeira liga|liga portugal)/i, "por.1"],
-  [/s[üu]per\s*lig/i, "tur.1"],
+  // Danish/Denmark Superliga BEFORE the Turkish Süper Lig — and the Turkish rule is
+  // anchored with \b so it matches "Süper Lig" (two words) but NOT "Superliga" (Denmark's
+  // one word). Without both, "Denmark Superliga" fell through to tur.1 and would have pulled
+  // TURKISH live data onto Danish matches.
+  [/(danish|denmark)\s*super\s*liga|superligaen/i, "den.1"],
+  [/s[üu]per\s*lig\b/i, "tur.1"],
   [/(scottish premiership|scottish prem)/i, "sco.1"],
   [/(jupiler|belgian pro league|pro league)/i, "bel.1"],
   [/(swiss super|super league.*switzerland)/i, "sui.1"],
-  [/(danish superliga|superligaen)/i, "den.1"],
   [/(major league soccer|\bmls\b)/i, "usa.1"],
   [/\bnwsl\b|national women'?s soccer/i, "usa.nwsl"],
   // Brazil: Série B before Série A so "Serie B" doesn't fall into the A rule.

@@ -688,7 +688,9 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
               // whole comp budget — so the comp-card % reconciles with the sum of
               // the per-strategy rows below instead of being diluted by idle budget.
               const activeBudget = isTennis ? budget : cStrats.reduce((a, s) => a + stratBudget(compBudget, c.id, shares, s.id), 0);
-              const funded = isTennis ? tPairs.length > 0 : budget > 0;
+              // Out-of-scope tennis tours (ITF/Challenger/doubles/125/quali — c.inScope=false) are
+              // never traded, so don't present them as a funded "$12k движок".
+              const funded = isTennis ? (c.inScope && tPairs.length > 0) : budget > 0;
               return (
                 <div key={c.id} style={{ ...S.compCard, ...(c.id === comp?.id ? S.compOn : {}) }}>
                   <button style={S.compMain} onClick={() => setCompId(c.id)}>
@@ -698,7 +700,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
                       {hasBets
                         ? <div style={{ ...S.compDelta, color: delta >= 0 ? "#5fd08a" : "#ff6b6b" }}>{delta >= 0 ? "▲ +" : "▼ "}{fmtMoney(delta)} ({delta >= 0 ? "+" : ""}{(activeBudget > 0 ? (delta / activeBudget) * 100 : 0).toFixed(1)}%) <span style={S.compRoi}>· {agg.staked > 0.005 ? `${fmtMoney0(agg.staked)} в игре` : `сейчас ${fmtMoney0(eq)}`}</span></div>
                         : <div style={S.compFlat}>{isTennis ? "ставок нет · движок ждёт сигнал" : "ставок нет · бюджет свободен"}</div>}
-                    </> : <div style={S.compUnalloc}>{c.matches.length ? (isTennis ? "стратегия не активна" : "нет бюджета") : "нет матчей"}</div>}
+                    </> : <div style={S.compUnalloc}>{c.matches.length ? (isTennis ? (c.inScope ? "стратегия не активна" : "вне скоупа · не торгуется (не ATP/WTA сингл)") : "нет бюджета") : "нет матчей"}</div>}
                   </button>
                   {!isTennis && <button style={S.allocIcon} title="Бюджет турнира" onClick={() => setCompModal(c.id)}>$</button>}
                 </div>
