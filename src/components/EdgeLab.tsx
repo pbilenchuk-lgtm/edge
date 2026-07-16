@@ -938,6 +938,10 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
   // reassessments + trade log + events + provider snapshots + live-data diagnosis)
   // as one .md file — the exact dump for offline / hand-off analysis.
   const [logBusy, setLogBusy] = useState(false);
+  // Personal "already downloaded?" mark — per-browser (localStorage), so the owner doesn't lose track
+  // of which match logs he's pulled for offline analysis. Read on mount to avoid a hydration mismatch.
+  const [logDownloaded, setLogDownloaded] = useState(false);
+  useEffect(() => { try { setLogDownloaded(localStorage.getItem(`mlog_dl_${match.id}`) === "1"); } catch { /* SSR / no storage */ } }, [match.id]);
   const downloadMatchLog = async () => {
     setLogBusy(true);
     try {
@@ -948,6 +952,8 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
       const a = document.createElement("a");
       a.href = url; a.download = `match-log-${(match.home + "-" + match.away).replace(/[^\w-]+/g, "_")}.md`; a.click();
       URL.revokeObjectURL(url);
+      try { localStorage.setItem(`mlog_dl_${match.id}`, "1"); } catch { /* no storage */ }
+      setLogDownloaded(true);
     } catch { alert("ошибка сети"); } finally { setLogBusy(false); }
   };
   const runAnalyze = async () => {
@@ -974,7 +980,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
       <div style={S.cardHead}>
         <div>
           <div style={S.matchup}>{match.home}{(match.state === "live" && !match.liveNoData) || match.state === "finished" ? <span style={S.score}> {match.scoreHome}:{match.scoreAway} </span> : <span style={S.vs}> — </span>}{match.away}</div>
-          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && <>{match.kickoff}{tennisPreLive && pastKickoff && <span style={{ color: "#e8a838" }}> · ждём выхода на корт (скаут ещё не видит игру live)</span>}</>}{match.state === "live" && (match.liveNoData ? "ждём данные провайдера — матч не торгуется" : `LIVE · ${match.clock || (match.minute != null ? `${match.minute}'` : "")}`)}{match.state === "finished" && (match.endTime ? `завершён ${match.endTime}` : "финал")}{hasLineups && (() => { const out = match.lineupsReady || match.state === "live" || match.state === "finished"; return <>{"  ·  "}<span style={{ color: out ? "#70b56a" : "#e8a838" }}>{out ? "✓ состав" : "○ ждём состав — анализ позже"}</span></>; })()}</div>
+          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && <>{match.kickoff}{tennisPreLive && pastKickoff && <span style={{ color: "#e8a838" }}> · ждём выхода на корт (скаут ещё не видит игру live)</span>}</>}{match.state === "live" && (match.liveNoData ? "ждём данные провайдера — матч не торгуется" : `LIVE · ${match.clock || (match.minute != null ? `${match.minute}'` : "")}`)}{match.state === "finished" && (match.endLabel || match.endTime ? `завершён ${match.endLabel ?? match.endTime}` : "финал")}{hasLineups && (() => { const out = match.lineupsReady || match.state === "live" || match.state === "finished"; return <>{"  ·  "}<span style={{ color: out ? "#70b56a" : "#e8a838" }}>{out ? "✓ состав" : "○ ждём состав — анализ позже"}</span></>; })()}</div>
           {match.state === "finished" && match.duration && <div style={S.finishTiming}>{match.kickoffTime}–{match.endTime} · длительность {match.duration}{match.endNote && ` · ${match.endNote}`}</div>}
         </div>
         <div style={{ ...S.stateBadge, background: meta.bg, color: meta.color }}>{match.state === "live" && !match.liveNoData && <span style={S.pulse} />}{meta.label}</div>
@@ -1074,9 +1080,10 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                     </div>
                   </div>
                 )}
-                <div style={{ display: "flex", justifyContent: "flex-end", padding: "4px 0" }}>
+                <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, padding: "4px 0" }}>
+                  {logDownloaded && <span title="этот лог ты уже скачивал (отметка в этом браузере)" style={{ fontSize: 11, color: "#5fd08a" }}>✓ скачан</span>}
                   <button style={{ ...S.artifactBtn, opacity: logBusy ? 0.6 : 1 }} disabled={logBusy} onClick={downloadMatchLog} title="Весь лог матча одним файлом: анализ, стратеги, боевые листы, ставки, переоценки, трейд-лог, события, снимки провайдеров, диагноз live-данных">
-                    {logBusy ? "собираю…" : "📥 Скачать полный лог матча (.md)"}
+                    {logBusy ? "собираю…" : logDownloaded ? "📥 Скачать снова (.md)" : "📥 Скачать полный лог матча (.md)"}
                   </button>
                 </div>
                 <ArtifactsPanel artifacts={match.artifacts} />
