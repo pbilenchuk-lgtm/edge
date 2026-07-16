@@ -2,11 +2,13 @@
 # EDGE LAB production entrypoint: seed the demo DB on first boot, then serve.
 set -e
 
-# Cap V8's heap so it garbage-collects BEFORE RSS blows past the 512Mi instance
-# limit. Without this, V8's default (multi-GB) heap lets the process balloon past
-# the container's cgroup limit before GC runs → OOM-kill. 400MB heap leaves ~112MB
-# for native (node:sqlite) + non-heap. Applies to both the seed and the server.
-export NODE_OPTIONS="--experimental-sqlite --max-old-space-size=400"
+# Cap V8's heap so it garbage-collects before RSS approaches the instance's RAM
+# limit. The service runs on a 2 GB instance (Render Standard), so 1024 MB of heap
+# leaves ~1 GB for native (node:sqlite page cache/WAL) + non-heap with comfortable
+# headroom. NOTE: this was 400 MB back when the box was 512 MB — far too low for 2 GB,
+# it pinned the heap and made V8 GC-thrash (stalling the event loop during the heavy
+# cycle, which starved Render's post-deploy port scan). Applies to seed and server.
+export NODE_OPTIONS="--experimental-sqlite --max-old-space-size=1024"
 
 DB="${EDGE_DB_PATH:-/app/data/edge.db}"
 mkdir -p "$(dirname "$DB")"

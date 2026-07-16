@@ -26,24 +26,32 @@ let started = false;
 // DB-backed so it survives the process restart that kills the in-process loop.
 const LAST_LIVE_TICK_KEY = "last_live_tick_ms";
 
-// QUIET BOOT WINDOW. For the first BOOT_GRACE_MS after the process starts, NO
-// heavy engine cycle runs — not the scheduler passes, not a health-ping-driven
-// heartbeat catch-up. Why: node:sqlite is SYNCHRONOUS, so a full cycle (discover
-// + 12 provider snapshots + LLM) both spikes RSS past the 512Mi instance ceiling
-// AND blocks the event loop. Running one during Render's post-deploy health-check
-// window made /api/health unanswerable (Render: "no open HTTP ports") and OOM-
-// killed the process → the deploy's health check timed out and the deploy Failed,
-// leaving prod frozen on old code. Staying idle until the port is up and health is
-// green lets the deploy succeed; the engine starts a couple of minutes in.
-// Trade-off: after a restart mid-live-match, live management resumes only after the
-// grace (bounded, ~2 min). Tunable via BOOT_GRACE_SEC (0 disables — e.g. for tests).
+// QUIET BOOT WINDOW. For the first BOOT_GRACE_MS after the process starts, NO heavy
+// engine cycle runs — not the scheduler passes, not a health-ping-driven heartbeat
+// catch-up. Why: node:sqlite is SYNCHRONOUS, so a full cycle (discover + provider
+// snapshots + LLM + blocking sqlite writes) monopolises the event loop. The port is
+// bound within ~400ms ("Ready in"), but Render still has to CONFIRM the open port by
+// probing it — and if the heavy cycle is holding the event loop during that probe
+// window, the app can't answer, so Render reports "No open HTTP ports detected on
+// 0.0.0.0" and the deploy times out. (This is an event-loop-starvation problem, NOT
+// memory — the instance has 2 GB and sits at <1 GB RSS.) It's a RACE: a deploy
+// succeeds when Render confirms the port BEFORE the grace expires and the first cycle
+// fires; it fails when the cycle starts first and locks the loop for the rest of the
+// scan window. Keeping the loop free well past Render's port-scan window (which can
+// run several minutes) lets every deploy win that race; the engine starts a few
+// minutes in, on an already-confirmed-healthy instance. Trade-off: after a restart
+// mid-live-match, live management resumes only after the grace (bounded). Tunable via
+// BOOT_GRACE_SEC (0 disables — e.g. for tests).
 const bootAtMs = Date.now();
-// Grace defaults to 120s in production (Render), 0 elsewhere — so tests and local
-// dev keep the immediate-run behavior and only the deployed instance gets the quiet
-// boot window. Override explicitly with BOOT_GRACE_SEC.
+// Grace defaults to 300s in production (Render), 0 elsewhere — so tests and local dev
+// keep the immediate-run behavior and only the deployed instance gets the quiet boot
+// window. 300s comfortably clears Render's port-scan window (it was 120s before, which
+// left only a ~50s margin after Render started scanning — too tight as the DB grew and
+// first-request latency crept up, so deploys flipped from flaky to always-failing).
+// Override explicitly with BOOT_GRACE_SEC.
 function bootGraceMs(env: Record<string, string | undefined> = process.env): number {
   const raw = env.BOOT_GRACE_SEC;
-  const def = env.NODE_ENV === "production" ? 120 : 0;
+  const def = env.NODE_ENV === "production" ? 300 : 0;
   const sec = raw != null && raw !== "" && Number.isFinite(Number(raw)) ? Number(raw) : def;
   return Math.max(0, sec) * 1000;
 }
