@@ -159,6 +159,21 @@ test("tennisExitTick: a TAKE into a dust bid (slip > cap, within orientation tol
   assert.ok(!skips.some((l) => /token_orientation_mismatch/.test(l.text ?? "")), "NOT mislabelled as an orientation flip (15¢ < 28¢ tol)");
 });
 
+// ── Carle. A favourite that levelled to a coin-flip BY the break is not an overreaction setup ──────
+test("tennisTradingTick: a favourite whose pre-break price levelled to a coin-flip (49.5¢) is skipped frozen_favourite", async () => {
+  const db = openDb(":memory:");
+  const mid = seedMatch(db, { p1: "Marta Carle", p2: "Nina Doria", p1price: 62, book: 8000, token1: "t1", token2: "t2" });
+  // Pre-MATCH: Carle is a clear favourite (62¢, underdog 38¢) → charge IDs her. But the match TIGHTENS:
+  // by the break the pre-break reference has drifted to a coin-flip (49.5¢). There is no favoured level
+  // to snap back to → the Overreaction thesis doesn't hold.
+  snap(db, mid, { at: "2026-07-14T10:00:00Z", p1: "Marta Carle", p2: "Nina Doria", g1: 0, g2: 0, server: "first", p1c: 62, setNum: 1 }); // pre-match anchor → favourite = first
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", p1: "Marta Carle", p2: "Nina Doria", g1: 3, g2: 3, server: "first", p1c: 49.5, setNum: 1 }); // levelled (pre-break reference)
+  snap(db, mid, { at: "2026-07-14T10:03:00Z", p1: "Marta Carle", p2: "Nina Doria", g1: 3, g2: 4, server: "second", p1c: 45, setNum: 1 }); // favourite broken → the trigger
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:03:05Z", env: {} }); // no LLM key: the guard must fire BEFORE the strategist call
+  assert.equal(opened, 0, "no buyback — the 'favourite' wasn't a favourite at the break");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => /frozen_favourite/.test(l.text ?? "")), "frozen_favourite skip logged");
+});
+
 // ── B3. Dust real book is CUT at entry even when Gamma declared it healthy (Mrva $44 class) ────────
 test("tennisTradingTick: a DUST real book (Gamma-declared healthy) is skipped thin_real_book, not clamped", async () => {
   const db = openDb(":memory:");

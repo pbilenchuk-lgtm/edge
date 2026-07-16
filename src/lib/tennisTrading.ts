@@ -48,6 +48,12 @@ const TENNIS_MIN_BOOK_USD = (() => { const n = Number(process.env.TENNIS_MIN_BOO
 // (thin_real_book), never a dust fill on a $44 book. Conservative default (real books are far thinner
 // than declared); env-tunable, and the real-vs-declared gap is logged so it can be calibrated from data.
 const TENNIS_MIN_REAL_BOOK_USD = (() => { const n = Number(process.env.TENNIS_MIN_REAL_BOOK_USD); return Number.isFinite(n) && n > 0 ? n : 250; })();
+// Carle frozen-favourite guard (¢): the Overreaction snapback needs a GENUINE favourite to recover TO.
+// The favourite is ID'd off the PRE-MATCH price (underdog ≤ favUnderdogMax → favourite ≥ ~60¢), but a
+// match can TIGHTEN by the break — if the pre-break recovery reference has drifted to a coin-flip (the
+// 49.5¢ Carle: a frozen/levelled "favourite"), there is no favoured level to snap back to and the edge
+// is phantom. Require the pre-break favourite price ≥ this AT TRIGGER TIME. Env-tunable.
+const TENNIS_MIN_PREBREAK_FAV_CENTS = (() => { const n = Number(process.env.TENNIS_MIN_PREBREAK_FAV_CENTS); return Number.isFinite(n) && n > 0 ? n : 52; })();
 const TENNIS_STRATEGY = "tennis_overreaction";
 // Both tennis strategies share the settle / exit / one-position machinery (both buy the favourite's
 // moneyline). Set-Value adds the "lost set 1" horizon-of-a-match entry with a partial-take exit.
@@ -879,6 +885,15 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     }
     if (!br) continue; // no qualifying unacted break this tick
     const prePrice = prePriceBefore(db, m.id, charge.favSide, br.batchAt) ?? favMlPrice;
+    // Carle guard: re-check at TRIGGER time that the favourite is STILL a favourite. The pre-break
+    // reference is the recovery target; if it has drifted to a coin-flip (frozen/levelled favourite),
+    // there's nothing favoured to snap back to → skip (not an overreaction setup). The pre-break price
+    // is historical/fixed, so mark the break decided — it won't retroactively become favoured.
+    if (prePrice < TENNIS_MIN_PREBREAK_FAV_CENTS) {
+      R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "frozen_favourite", now);
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `фаворит не был фаворитом на момент брейка: предбрейк ${prePrice}¢ < порога ${TENNIS_MIN_PREBREAK_FAV_CENTS}¢ (замороженный/сравнявшийся фаворит) — не сетап переоценки (frozen_favourite)`, created_at: now });
+      continue;
+    }
 
     // A3 (per profile): each risk profile holds at most ONE buyback per match — no "докупка в
     // падающую" WITHIN a profile — but the profiles run SIDE-BY-SIDE, each on its OWN $1k budget,

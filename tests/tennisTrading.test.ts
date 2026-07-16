@@ -333,7 +333,7 @@ test("tennisTradingTick A3: when EVERY profile already holds a buyback on the ma
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20 });
   // Hold an open buyback for EACH default profile → no free profile left → block before the LLM.
   for (const p of ["aggressive", "medium", "conservative"]) buybackBet(db, mid, "held-" + p, { take_price: { at_cents: 59 } }, p);
-  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 50, setNum: 1 });
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 60, setNum: 1 }); // pre-break: a REAL favourite (≥52¢), so the frozen-favourite guard passes
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
   // No fetchImpl: if the block fails and the LLM is reached, the call throws → test surfaces it.
   const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: {} });
@@ -585,7 +585,7 @@ test("tennisTradingTick BUG-3: cross-strategy block is symmetric — Overreactio
     R.insertBet(db, { id: "sv-" + p, match_id: mid, strategy_id: "tennis_set_value", risk_profile_id: p, market_label: "Aleksandar Vukic", status: "open", proposed_price: 39, entry_price: 39, current_price: 39, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "set-value", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: null, code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
   }
   // A fresh favourite break that WOULD arm Overreaction if the cross-strategy block were absent.
-  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 50, setNum: 1 });
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 60, setNum: 1 }); // pre-break: a REAL favourite (≥52¢) so the frozen-favourite guard passes
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
   const fetchImpl = (async () => { throw new Error("LLM must not be reached — a Set-Value hold should block Overreaction"); }) as unknown as typeof fetch;
   const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl });
