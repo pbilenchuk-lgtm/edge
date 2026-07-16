@@ -1006,6 +1006,22 @@ export function migrateResetTennisMarks(db: Database, now: string): void {
   R.metaSet(db, TENNIS_MARKS_RESET_MARK, now, now);
 }
 
+// Retire the dead Fable arm. Fable 5's structured analysis calls were failing ~¾ of the time
+// (see the duel investigation) — a match assigned to Fable got NO analysis, silently skipped.
+// The analysis DUEL is already off by default (env ANALYSIS_DUEL), so nothing new picks Fable;
+// this moves any strategy/analytics-prompt STILL stored on Fable → Opus 4.8, the reliable model,
+// so "Opus everywhere, no missed matches" holds on the live DB too. One-time, marker-guarded —
+// respects any later deliberate model choice. (Sonnet-for-live strategists are untouched.)
+const RETIRE_FABLE_MARK = "retire_fable_to_opus_v1";
+export function migrateRetireFable(db: Database, now: string): void {
+  if (R.metaGet(db, RETIRE_FABLE_MARK)) return;
+  const OPUS = "Claude Opus 4.8", FABLE = "Claude Fable 5";
+  try { db.prepare(`UPDATE strategies SET model=? WHERE model=?`).run(OPUS, FABLE); } catch { /* table shape */ }
+  try { db.prepare(`UPDATE strategies SET model_live=? WHERE model_live=?`).run(OPUS, FABLE); } catch { /* column may be absent */ }
+  try { db.prepare(`UPDATE analytics_prompts SET model=? WHERE model=?`).run(OPUS, FABLE); } catch { /* table shape */ }
+  R.metaSet(db, RETIRE_FABLE_MARK, now, now);
+}
+
 // One-time: put the FULL grid of pairs on every football category — all 3
 // strategists × all 3 risk profiles = 9 pairs, funds split evenly — so every
 // (strategy, profile) combination is simulated side by side. Marker-guarded:

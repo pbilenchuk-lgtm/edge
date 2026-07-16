@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { openDb } from "../src/lib/db.js";
-import { seedDatabase } from "../src/lib/seed.js";
+import { seedDatabase, migrateRetireFable } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision, winsOnEventOccurrence } from "../src/lib/thresholds.js";
 import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition } from "../src/lib/lifecycle.js";
@@ -1339,6 +1339,42 @@ test("autoAnalyze analyzes an eligible match once per stage", async () => {
 
   const second = await autoAnalyze(db, deps);
   assert.ok(!second.some((a) => a.matchId === "m-lineup"), "not re-analyzed for the same stage");
+});
+
+test("autoAnalyze: no-lineup match (ESPN-uncovered league) is analyzed within the fallback window, not before", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const now = "2026-07-11T12:00:00.000Z";
+  const deps = { now: () => now, fetchImpl: mockLLM({ match_type: "group", match_type_reason: "x", core: { xg_home: 1.4, xg_away: 1.1, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 }, overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 8, notes: "" }, unknowns: [] }), env: { ANTHROPIC_API_KEY: "k" } };
+  // Two football matches, NO lineups captured (ESPN doesn't cover the league): one 20 min
+  // from kickoff (inside the 35-min fallback), one 5 h out (outside it, still <12h).
+  const mk = (id: string, kickoff: string) => {
+    R.insertMatch(db, { id, competition_id: comp.id, home: "N", away: "M", state: "lineup", lineup_out: true, kickoff_at: kickoff, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+    R.insertMarket(db, { id: R.uid(), match_id: id, label: "Over 2.5", price: 52, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: now, is_closing: false });
+  };
+  mk("m-near", "2026-07-11T12:20:00.000Z"); // 20 min → within fallback
+  mk("m-far", "2026-07-11T17:00:00.000Z");  // 5 h  → outside fallback
+
+  const ran = await autoAnalyze(db, deps);
+  assert.ok(ran.some((a) => a.matchId === "m-near" && a.ok), "no-lineup match near kickoff IS analyzed (fallback)");
+  assert.ok(!ran.some((a) => a.matchId === "m-far"), "no-lineup match still far from kickoff is NOT analyzed (waits for XI)");
+});
+
+test("migrateRetireFable moves any strategy/prompt left on Fable → Opus (and is marker-guarded)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const strat = R.listStrategies(db, "football")[0];
+  R.updateStrategy(db, strat.id, { model: "Claude Fable 5" });
+  db.prepare(`UPDATE strategies SET model_live='Claude Fable 5' WHERE id=?`).run(strat.id);
+  migrateRetireFable(db, "2026-07-16T00:00:00Z");
+  const after = R.getStrategy(db, strat.id)!;
+  assert.equal(after.model, "Claude Opus 4.8", "pre-match model Fable→Opus");
+  assert.equal(after.model_live, "Claude Opus 4.8", "live model Fable→Opus");
+  // marker-guarded: a later manual Fable choice is NOT reverted on re-run
+  R.updateStrategy(db, strat.id, { model: "Claude Fable 5" });
+  migrateRetireFable(db, "2026-07-16T00:01:00Z");
+  assert.equal(R.getStrategy(db, strat.id)!.model, "Claude Fable 5", "one-time: does not fight a later deliberate choice");
 });
 
 test("live-unanalysed match: back-fill analyses it (feeds live reassess) but SKIPS the pre-match strategist pass", async () => {

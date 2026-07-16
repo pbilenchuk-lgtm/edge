@@ -71,7 +71,7 @@ function renderFootballBody(as: AssembledAnalysis): string {
 }
 
 export async function analyzeMatch(
-  db: Database, matchId: string, deps: AnalyzeDeps = {}, opts: { skipStrategists?: boolean } = {},
+  db: Database, matchId: string, deps: AnalyzeDeps = {}, opts: { skipStrategists?: boolean; allowNoLineup?: boolean } = {},
 ): Promise<AnalyzeResult> {
   const now = deps.now ?? (() => new Date().toISOString());
   const match = R.getMatch(db, matchId);
@@ -88,7 +88,10 @@ export async function analyzeMatch(
   // lineup data (без составов анализ не делаем). A live match's lineup is out by
   // definition, so it's never held here. Returned before any assessment is
   // recorded, so a match still waiting on lineups is «ждём состав», not a failure.
-  if (R.awaitingLineup(db, match, sport)) {
+  // allowNoLineup: the caller (autoAnalyze's kickoff-fallback, or a deliberate manual run)
+  // has decided a lineup-less pre-match read is better than none — e.g. an ESPN-uncovered
+  // league where the XI will never arrive. Recorded as pre_lineup below.
+  if (!opts.allowNoLineup && R.awaitingLineup(db, match, sport)) {
     return { ok: false, error: "ждём состав — без стартового состава анализ не делаем", stage: "pre_lineup" };
   }
   const prompt = R.analyticsPromptFor(db, sport, match.competition_id);
@@ -97,7 +100,7 @@ export async function analyzeMatch(
   // instead of dead-ending.
   const DEFAULT_MODEL = deps.defaultModel ?? "Claude Opus 4.8";
   const safeModel = (m: string | null | undefined) => (m && resolveModel(m) ? m : DEFAULT_MODEL);
-  const stage: "pre_lineup" | "post_lineup" = match.lineup_out ? "post_lineup" : "pre_lineup";
+  const stage: "pre_lineup" | "post_lineup" = (match.lineup_out && R.hasLineups(db, match.id)) ? "post_lineup" : "pre_lineup";
 
   // Key resolution: explicit deps.env wins (tests/callers); otherwise env vars
   // OR a key entered via the UI (Models screen), resolved from the DB.
@@ -220,7 +223,7 @@ export async function runStrategists(
   const sport = comp?.sport_id ?? "football";
   const assessment = R.assessmentsForMatch(db, matchId).filter((x) => x.status === "ok").sort((x, y) => (x.created_at >= y.created_at ? -1 : 1))[0];
   if (!assessment) return { betsCreated: 0, decisions: [] }; // nothing analysed yet
-  const stage: "pre_lineup" | "post_lineup" = match.lineup_out ? "post_lineup" : "pre_lineup";
+  const stage: "pre_lineup" | "post_lineup" = (match.lineup_out && R.hasLineups(db, match.id)) ? "post_lineup" : "pre_lineup";
   const prompt = R.analyticsPromptFor(db, sport, match.competition_id);
   const DEFAULT_MODEL = deps.defaultModel ?? "Claude Opus 4.8";
   const safeModel = (m: string | null | undefined) => (m && resolveModel(m) ? m : DEFAULT_MODEL);

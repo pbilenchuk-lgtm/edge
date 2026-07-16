@@ -595,7 +595,11 @@ export function pruneMarketSnapshots(db: Database, keepPerLabel = 8): number {
 // match. provider_snapshots is NOT here on purpose: it's long-retention research
 // data, and the prune queries below EXCLUDE any match that has snapshots, so a
 // snapshotted match is never deleted (protects the data AND avoids the FK error).
-const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "markets", "bets", "reassessments", "trade_log", "analysis_jobs", "match_live", "match_events", "market_open", "provider_match_map", "provider_snapshots", "shadow_reserves", "shadow_events", "fill_costs"];
+// EVERY table with a FK to matches(id) must be here — a match DELETE fails the FK
+// otherwise. analysis_artifacts was missing, which is why pruneMatches / pruneCategories
+// / reconcileFootball logged "FOREIGN KEY constraint failed" (an analyzed match couldn't
+// be pruned). (shadow_reserves/shadow_events/fill_costs have no FK but are cleaned here too.)
+const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "analysis_artifacts", "markets", "bets", "reassessments", "trade_log", "analysis_jobs", "match_live", "match_events", "market_open", "provider_match_map", "provider_snapshots", "shadow_reserves", "shadow_events", "fill_costs"];
 
 /**
  * Prune bloat matches to keep the DB (and every `buildAppData` scan) bounded.

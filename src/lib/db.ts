@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy, migrateTennisSetValueStrategy, migrateTennisPmvStrategy, migrateVoidOutOfScopePmv, migrateVoidAllOpenPmv, migrateResettleExtraTimeVoids, migrateResetTennisMarks } from "./seed.js";
+import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy, migrateTennisSetValueStrategy, migrateTennisPmvStrategy, migrateVoidOutOfScopePmv, migrateVoidAllOpenPmv, migrateResettleExtraTimeVoids, migrateResetTennisMarks, migrateRetireFable } from "./seed.js";
 import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
 
@@ -146,6 +146,10 @@ export function getDb(path = dbPath()): Database {
   // One-time: wipe the 105 tennis calibration marks measured on PROP prices (the moneyline-resolver
   // fix invalidated them). Marker-guarded → runs once, then marks re-accumulate on the moneyline.
   try { migrateResetTennisMarks(db, new Date().toISOString()); }
+  catch { /* non-fatal */ }
+  // Retire the dead Fable arm on the live DB: any strategy/analytics-prompt still on Fable 5
+  // → Opus 4.8 (Fable's structured calls failed ~¾ of the time → silently skipped matches).
+  try { migrateRetireFable(db, new Date().toISOString()); }
   catch { /* non-fatal */ }
   _db = db;
   return db;
