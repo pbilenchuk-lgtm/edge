@@ -47,9 +47,20 @@ export function getDb(path = dbPath()): Database {
   if (_db) return _db;
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const { DatabaseSync } = require("node:sqlite") as SqliteModule;
+  // BOOT DIAGNOSTIC: the FIRST getDb() runs synchronously on the /api/health path
+  // (Render's post-deploy port scan). node:sqlite is blocking, so a slow open +
+  // initSchema stalls the health response and can fail the deploy ("no open HTTP
+  // ports"). Time each phase + print RSS so a failed deploy's runtime log names the
+  // culprit instead of us guessing. One line, first-open only — negligible cost.
+  const _t0 = Date.now();
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+  const _tOpen = Date.now();
   initSchema(db);
+  try {
+    const rss = Math.round(process.memoryUsage().rss / 1e6);
+    console.log(`[db] first open ${_tOpen - _t0}ms + initSchema ${Date.now() - _tOpen}ms → total ${Date.now() - _t0}ms, rss ${rss}MB (${path})`);
+  } catch { /* memoryUsage unavailable — never block boot on a log */ }
   // Reconcile analyze jobs orphaned by a crash/restart: the background promise
   // that would finish them dies with the process. The deploy runs a SINGLE
   // instance (disk-pinned), so ANY 'running' row at boot is orphaned — fail them
