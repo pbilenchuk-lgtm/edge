@@ -36,7 +36,7 @@ import { strategistDecide, effectiveEnv } from "./llm.js";
 import { hoursUntil, finishStamp } from "./time.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit, type ShadowEntryRequest } from "./shadow.js";
 import { collectSnapshots } from "./snapshots.js";
-import { collectTennisSnapshots, recordTennisBreakMarks } from "./tennisScout.js";
+import { collectTennisSnapshots, recordTennisBreakMarks, tennisScoutSilence } from "./tennisScout.js";
 import { tennisTradingTick, tennisSetValueTick, tennisExitTick, settleTennisBets, finishTennisMatches, tennisScoutInPlay, tennisFinalResult, pollTennisFinals } from "./tennisTrading.js";
 import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
 import { overreactionShouldCall } from "./reassessGate.js";
@@ -1409,6 +1409,23 @@ export async function runAutoCycle(
   // Tennis provider scouting (Stage 0) — parallel, observe-only, gated on API_TENNIS_KEY.
   // Never touches football/money-path; isolated so a provider blip can't abort the tick.
   await step("tennisScout", () => collectTennisSnapshots(db, deps), 0);
+  // Scout watchdog (the signal it never had): alert ONCE when the scout is silent while the schedule
+  // says a match should be live — self-concealing death otherwise (a dead scout drops the match out of
+  // "live", which then blinds the heartbeat's own recovery). Throttled: one alert per silence episode,
+  // cleared on recovery, so a genuinely quiet slate never flaps.
+  stepSync("tennisScoutWatchdog", () => {
+    const at = nowFn(deps)();
+    const h = tennisScoutSilence(db, deps);
+    const KEY = "tennis_scout_silence_alerted";
+    if (h.silent && !R.metaGet(db, KEY)) {
+      console.warn(`[tennisScout] ${h.note}`);
+      try { R.insertCronLog(db, { id: R.uid(), at, kind: "tick", ok: 0, summary: h.note, created_at: at }); } catch { /* journal best-effort */ }
+      R.metaSet(db, KEY, "1", at);
+    } else if (!h.silent && R.metaGet(db, KEY)) {
+      R.metaSet(db, KEY, "", at); // recovered → re-arm the one-shot alert for the next episode
+    }
+    return 0;
+  }, 0);
   stepSync("tennisBreakMarks", () => recordTennisBreakMarks(db, deps), 0); // mark completed break windows (≥6min old)
   await step("tennisExit", () => tennisExitTick(db, deps), 0);             // §6 paper: deterministic take_price / thesis_stop close via the book (no LLM, §9.6)
   await step("tennisFinalPoll", () => pollTennisFinals(db, deps), 0);      // A+B: chase FINAL results via get_fixtures for stranded positions (live feed drops finished matches) → writes the terminal snapshot settle consumes

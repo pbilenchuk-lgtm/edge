@@ -5,7 +5,7 @@ import * as R from "../src/lib/repo.js";
 import {
   serverSide, parsePair, currentSet, normalizeLive, detectBreaks, detectTennisEvents,
   collectTennisSnapshots, buildTennisScoutReport, loadTennisConfig, tennisScoutMarkdown,
-  recordTennisBreakMarks, buildTennisBreakReport, tennisMoneyline,
+  recordTennisBreakMarks, buildTennisBreakReport, tennisMoneyline, tennisScoutSilence,
 } from "../src/lib/tennisScout.js";
 
 const T0 = Date.parse("2026-07-14T00:00:00.000Z");
@@ -198,6 +198,36 @@ test("collectTennisSnapshots: no key → inert; with a mock feed → writes pars
   assert.equal(rows.length, 1);
   assert.equal(rows[0].server, "second");
   assert.equal(rows[0].games_p1, 2);
+});
+
+test("tennisScoutSilence: alerts when the schedule says live but no snapshot lands; recovers on a fresh write", () => {
+  const db = openDb(":memory:");
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "pm-atp", sport_id: "tennis", name: "ATP", budget: 0, external_league: null, created_at: "t" });
+  const now = "2026-07-14T12:00:00Z";
+  const nowMs = Date.parse(now);
+  const mid = "sched1";
+  // Kickoff 90 min ago, not finished → per the EXTERNAL schedule this match should be live now.
+  R.insertMatch(db, { id: mid, competition_id: "pm-atp", home: "A", away: "B", state: "upcoming", lineup_out: true, kickoff_at: new Date(nowMs - 90 * 60_000).toISOString(), minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid } as any);
+  // No snapshots at all AND no scout-OK marker → silent, classified H1 (scout not being called).
+  const s1 = tennisScoutSilence(db, { now: () => now });
+  assert.equal(s1.silent, true, "due-live match + no scout data → silent");
+  assert.match(s1.note, /H1|не вызывался/, "classified as loop/process not calling the scout");
+  // A fresh snapshot within the window → recovered (not silent).
+  R.insertTennisSnapshot(db, { event_key: "E", provider: "apitennis", batch_at: new Date(nowMs - 60_000).toISOString(), p1: "A", p2: "B", tournament: "ATP", event_type: "ATP Singles", live: 1, status: "live", sets_p1: 0, sets_p2: 0, set_num: 1, games_p1: 1, games_p2: 0, game_points: null, server: "first", pm_match_id: mid, pm_mid_cents: 60, pm_p1_cents: 60, pm_p2_cents: 40, raw: "{}" } as any);
+  assert.equal(tennisScoutSilence(db, { now: () => now }).silent, false, "a fresh write clears the alert");
+  // No due-live match at all → never silent (a genuinely quiet slate).
+  R.updateMatch(db, mid, { state: "finished" });
+  assert.equal(tennisScoutSilence(db, { now: () => now }).silent, false, "finished match → nothing due-live → quiet, not an alert");
+});
+
+test("collectTennisSnapshots: stamps the OWN liveness marker on a completed run (independent of match.state)", async () => {
+  const db = openDb(":memory:");
+  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => ({ success: 1, result: [] }) })) as any; // provider returns EMPTY
+  const n = await collectTennisSnapshots(db, { env: { API_TENNIS_KEY: "k" }, now: () => "2026-07-14T12:00:00Z", fetchImpl });
+  assert.equal(n, 0, "empty provider response → 0 written");
+  const ok = R.metaGet(db, "tennis_scout_last_ok");
+  assert.ok(ok && ok.endsWith("|0"), "OK marker stamped with written=0 — the loop ran (blind), it did not die silently");
 });
 
 test("buildTennisScoutReport aggregates coverage + breaks from stored snapshots", () => {

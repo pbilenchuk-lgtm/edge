@@ -293,11 +293,25 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
   const cfg = loadTennisConfig(env);
   if (!cfg.enabled) return 0;
   const batchAt = nowFn(deps)();
+  const nowMs = Date.parse(batchAt) || Date.now();
+  // (b) Unwrap the provider fetch: a failure here used to propagate as a bare swallowed step-error
+  // (a stdout line that scrolls away). Record a QUERYABLE breadcrumb + re-throw so the step log still
+  // fires. The OWN liveness stamp below stays stale (we didn't complete), so the watchdog can tell a
+  // provider that THROWS apart from a loop that never ran (H2 vs H1) — the self-concealing death the
+  // scout had no signal for. (The Fable lesson in a third form: graceful degradation hid the failure.)
+  let raw: Awaited<ReturnType<typeof fetchTennisLivescores>>;
+  try { raw = await fetchTennisLivescores(cfg, deps); }
+  catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    try { R.metaSet(db, TENNIS_SCOUT_ERR_KEY, `${nowMs}|${msg.slice(0, 200)}`, batchAt); } catch { /* never block on a marker */ }
+    console.error(`[tennisScout] ПРОВАЙДЕР УПАЛ (снапшотов в этот тик нет): ${msg}`);
+    throw e;
+  }
   // Keep in-play rows AND any TERMINAL transition row the feed happens to emit (live=0 + "Finished"/
   // "Retired"): that row carries the final result and MUST be persisted — dropping it was why a
   // normally-finished match never settled. (The primary terminal path is the get_fixtures poller,
   // since a match usually just vanishes from the live feed; this keeps the row when the feed does send it.)
-  const live = (await fetchTennisLivescores(cfg, deps)).filter((m) => m.live === 1 || TENNIS_TERMINAL_RE.test(m.status ?? ""));
+  const live = raw.filter((m) => m.live === 1 || TENNIS_TERMINAL_RE.test(m.status ?? ""));
   const poly = deps.polymarket ?? loadPolymarketConfig(env);
   let written = 0;
   const seenLog = new Set<string>(); // log a match's mapping verdict once per collection pass
@@ -331,7 +345,55 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
     });
     written++;
   }
+  // (a) OWN liveness signal — stamped on EVERY completed run, independent of match.state (which is
+  // scout-derived and dies WITH the scout). `written=0` while the schedule says a match should be
+  // live is the "provider returned empty / nothing mapped" signature (a blind loop, not a dead one).
+  try { R.metaSet(db, TENNIS_SCOUT_OK_KEY, `${nowMs}|${written}`, batchAt); } catch { /* never block on a marker */ }
   return written;
+}
+
+// Scout observability markers (app_meta). OK = last COMPLETED collect ("ms|written"); ERR = last
+// provider fetch failure ("ms|message"). Read by tennisScoutSilence to classify a silence H1 vs H2.
+const TENNIS_SCOUT_OK_KEY = "tennis_scout_last_ok";
+const TENNIS_SCOUT_ERR_KEY = "tennis_scout_last_error";
+// A tennis match whose scheduled kickoff is within this many minutes in the past SHOULD still be
+// generating scout data (an upper bound on match length). Schedule is EXTERNAL — it doesn't die with
+// the scout, so it's a safe liveness reference (match.state is NOT — the scout drives it). Env-tunable.
+const TENNIS_PLAY_CEILING_MIN = (() => { const n = Number(process.env.TENNIS_PLAY_CEILING_MIN); return Number.isFinite(n) && n > 0 ? n : 300; })();
+// Scout is "silent" if no snapshot has been WRITTEN in this many minutes while a match is due-live. Env-tunable.
+const TENNIS_SCOUT_SILENT_MIN = (() => { const n = Number(process.env.TENNIS_SCOUT_SILENT_MIN); return Number.isFinite(n) && n > 0 ? n : 15; })();
+
+/**
+ * SCOUT WATCHDOG (the signal the scout never had). Compares the scout's data-freshness to the EXTERNAL
+ * schedule (match kickoff times, which don't die with the scout — unlike match.state, which the scout
+ * itself drives). Returns silent=true when ≥1 tennis match should be live per its kickoff yet no
+ * snapshot has landed in TENNIS_SCOUT_SILENT_MIN, with an H1/H2 cause hint from the OK/ERR markers:
+ *   • OK stamp fresh, writes stale  → loop ALIVE, provider blind/empty (H2)
+ *   • recent ERR marker             → provider is throwing
+ *   • OK stamp stale                → scout not being called at all — loop/process down (H1)
+ * Pure read; the caller alerts (throttled). No due-live match → not silent (a genuinely quiet slate).
+ */
+export function tennisScoutSilence(db: Database, deps: EngineDeps = {}): { silent: boolean; note: string } {
+  const nowMs = Date.parse(nowFn(deps)()) || Date.now();
+  const due = R.listCompetitions(db).filter((c) => c.sport_id === "tennis")
+    .flatMap((c) => R.listMatches(db, c.id))
+    .filter((m) => m.state !== "finished" && m.kickoff_at != null)
+    .filter((m) => { const k = Date.parse(m.kickoff_at as string) || 0; return k > 0 && k <= nowMs && nowMs - k <= TENNIS_PLAY_CEILING_MIN * 60_000; });
+  if (!due.length) return { silent: false, note: "" };
+  const lastWrite = (db.prepare(`SELECT MAX(batch_at) b FROM tennis_snapshots`).get() as { b?: string } | undefined)?.b;
+  const writeAgeMin = lastWrite ? (nowMs - (Date.parse(lastWrite) || 0)) / 60_000 : Infinity;
+  if (writeAgeMin <= TENNIS_SCOUT_SILENT_MIN) return { silent: false, note: "" };
+  const okRaw = R.metaGet(db, TENNIS_SCOUT_OK_KEY);
+  const okMs = okRaw ? Number(okRaw.split("|")[0]) || 0 : 0;
+  const errRaw = R.metaGet(db, TENNIS_SCOUT_ERR_KEY);
+  const errMs = errRaw ? Number(errRaw.split("|")[0]) || 0 : 0;
+  const recentErr = errMs > nowMs - TENNIS_SCOUT_SILENT_MIN * 60_000;
+  const cause = okMs > nowMs - TENNIS_SCOUT_SILENT_MIN * 60_000
+    ? "луп ЖИВ, но провайдер отдаёт пусто/не мапится (H2 — слепой скаут)"
+    : recentErr ? `провайдер падает: ${errRaw!.split("|").slice(1).join("|")}`
+    : "скаут не вызывался — луп/процесс его не крутит (H1)";
+  const ageTxt = Number.isFinite(writeAgeMin) ? `${Math.round(writeAgeMin)} мин` : "никогда";
+  return { silent: true, note: `⚠ СКАУТ МОЛЧИТ (${ageTxt}) при ${due.length} матч(ах), которые по расписанию должны быть live — ${cause}` };
 }
 
 // ── §4 Passive break marker: the panic window on the broken player's winner market ──
