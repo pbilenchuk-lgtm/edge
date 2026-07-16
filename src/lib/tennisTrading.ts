@@ -62,6 +62,39 @@ const TENNIS_MIN_PREBREAK_FAV_CENTS = (() => { const n = Number(process.env.TENN
 const TENNIS_ABSURD_EDGE_BLOCK = (() => { const n = Number(process.env.TENNIS_ABSURD_EDGE_BLOCK); return Number.isFinite(n) && n > 0 ? n : 0.40; })();
 // The prior shared ceiling — the lower edge of the cohort we now watch (entries that USED to be blocked).
 const TENNIS_ABSURD_EDGE_COHORT_FROM = 0.25;
+
+// B6 — per-profile MINIMUM panic depth to enter (the drop pre-break − entry, ¢), as QUANTILES of the
+// in-scope early-break panic distribution: aggressive=p40 (thin frequent edge), medium=p60,
+// conservative=p80. On a shallow distribution (early-break median ≈3.5¢) this means conservative enters
+// RARELY and DEEP — accepted as design: the real edge lives in the tail, so a conservative profile trades
+// only genuine deep panics, not 3.5¢ noise eaten by spread/vig (the football "conservative funnel of
+// losses" paradox, avoided). Self-calibrating from tennis_break_marks; env-override per profile.
+const TENNIS_PANIC_QUANTILE: Record<string, number> = { aggressive: 0.40, medium: 0.60, conservative: 0.80 };
+// Minimum in-scope early marks before the quantiles are trusted; below it, hold the interim floors
+// (so a thin sample can't make the thresholds jump around).
+const TENNIS_PANIC_MIN_MARKS = (() => { const n = Number(process.env.TENNIS_PANIC_MIN_MARKS); return Number.isFinite(n) && n > 0 ? n : 200; })();
+const TENNIS_PANIC_INTERIM: Record<string, number> = { aggressive: 2, medium: 3.5, conservative: 6 };
+
+export interface TennisPanicThresholds { aggressive: number; medium: number; conservative: number; source: "env" | "quantile" | "interim"; n: number }
+/**
+ * B6 min-drop-at-entry per profile, resolved from the panic-amplitude distribution. POOL = ATP+WTA
+ * EARLY marks ONLY — Challenger is not traded (mixing its marks calibrates thresholds on a population we
+ * don't trade) and LATE breaks are Set-Value's domain. env-override per profile wins entirely; else
+ * quantiles once ≥ TENNIS_PANIC_MIN_MARKS in-scope marks exist; else the interim floors. Pure read.
+ */
+export function tennisPanicThresholds(db: Database): TennisPanicThresholds {
+  const envDrop = (p: string) => { const n = Number(process.env[`TENNIS_PANIC_MIN_DROP_${p.toUpperCase()}`]); return Number.isFinite(n) && n >= 0 ? n : null; };
+  const eA = envDrop("aggressive"), eM = envDrop("medium"), eC = envDrop("conservative");
+  if (eA != null && eM != null && eC != null) return { aggressive: eA, medium: eM, conservative: eC, source: "env", n: 0 };
+  // In-scope early panic amplitudes: ATP or WTA, NOT Challenger, broke_early.
+  const xs = R.listTennisBreakMarks(db)
+    .filter((m) => m.panic_cents != null && m.broke_early && !/challenger/i.test(m.event_type ?? "") && /\b(atp|wta|men|women)\b/i.test(m.event_type ?? ""))
+    .map((m) => m.panic_cents as number)
+    .sort((a, b) => a - b);
+  if (xs.length < TENNIS_PANIC_MIN_MARKS) return { ...(TENNIS_PANIC_INTERIM as { aggressive: number; medium: number; conservative: number }), source: "interim", n: xs.length };
+  const q = (p: number) => { const i = Math.min(xs.length - 1, Math.max(0, Math.floor(p * (xs.length - 1)))); return Math.round(xs[i] * 10) / 10; };
+  return { aggressive: q(TENNIS_PANIC_QUANTILE.aggressive), medium: q(TENNIS_PANIC_QUANTILE.medium), conservative: q(TENNIS_PANIC_QUANTILE.conservative), source: "quantile", n: xs.length };
+}
 const TENNIS_STRATEGY = "tennis_overreaction";
 // Both tennis strategies share the settle / exit / one-position machinery (both buy the favourite's
 // moneyline). Set-Value adds the "lost set 1" horizon-of-a-match entry with a partial-take exit.
@@ -723,10 +756,11 @@ export function chargeTennisMatch(db: Database, matchId: string, players: { p1: 
 }
 
 /** Build the decision-time entry_meta for a tennis paper bet. */
-export function tennisEntryMeta(o: { favPrice: number; prePrice: number; edge: number; kelly: number; stake: number; thinnessUsd: number | null; setNum: number; favSide?: "first" | "second" | null; firstIsP1?: boolean | null }): BetEntryMeta {
+export function tennisEntryMeta(o: { favPrice: number; prePrice: number; edge: number; kelly: number; stake: number; thinnessUsd: number | null; setNum: number; favSide?: "first" | "second" | null; firstIsP1?: boolean | null; panicDropCents?: number | null; panicThresholdCents?: number | null }): BetEntryMeta {
   return {
     phase: "live", minute: null, scoreHome: null, scoreAway: null,
     favSide: o.favSide ?? null, firstIsP1: o.firstIsP1 ?? null, // token-fix-m1: pin the held outcome so the exit sells the SAME token it bought
+    panicDropCents: o.panicDropCents ?? null, panicThresholdCents: o.panicThresholdCents ?? null, // B6: freeze the depth gate that admitted this bet
     edge: Math.round(o.edge * 1000) / 1000, aiProb: Math.round((o.prePrice / 100) * 1000) / 1000, derivedProb: null,
     marketPrice: o.favPrice, impliedProb: Math.round((o.favPrice / 100) * 1000) / 1000, liveProbAdjusted: null,
     kellyFraction: Math.round(o.kelly * 1000) / 1000, sizeRequested: Math.round(o.stake * 100) / 100, sizeFilled: null, entrySlipCents: null,
@@ -836,6 +870,9 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
   const poly = deps.polymarket ?? loadPolymarketConfig(env);
   const bookCache = new Map<string, OrderBookFetch>();
   const executor = new PaperExecutor({ poly, deps, bookCache, nowMs: () => nowMs });
+  // B6: per-profile minimum panic depth (quantiles of the in-scope early-break distribution), resolved
+  // ONCE per tick — the same thresholds gate every match this tick and are frozen on each bet.
+  const panicTh = tennisPanicThresholds(db);
   let opened = 0;
 
   const tennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => ({ comp: c.id, m })));
@@ -972,12 +1009,19 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
         }
       }
     }
+    // B6: the realized panic depth at entry (drop pre-break − entry) — profile-independent, so compute once.
+    const panicDropCents = Math.round(Math.max(0, prePrice - entryCents) * 10) / 10;
     for (const profile of freeProfiles) {
       // Race guard: freeProfiles was computed BEFORE the awaited LLM call — an overlapping tick
       // (live + catch-up firing together) could have opened a buyback on this profile during the
       // await. Re-check right before the insert so two overlapping ticks can't double-enter the same
       // profile (the 22:00:22 + 22:00:42 double-batch that only the shadow cap caught).
       if (R.betsForMatch(db, m.id).some((b) => TENNIS_STRATEGIES.has(b.strategy_id) && b.status === "open" && b.risk_profile_id === profile)) continue;
+      // B6 panic-depth gate: this profile buys only a panic at least as deep as its quantile threshold.
+      // On a shallow distribution conservative enters rarely and deep BY DESIGN — thin 3.5¢ noise (eaten
+      // by spread/vig on dust books) isn't traded; the real edge is in the tail. Threshold frozen on the bet.
+      const minDrop = profile === "aggressive" ? panicTh.aggressive : profile === "conservative" ? panicTh.conservative : panicTh.medium;
+      if (panicDropCents < minDrop) { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `[${profile}] паника ${panicDropCents}¢ < порога ${minDrop}¢ (${panicTh.source}, n=${panicTh.n}) — мелко для риск-профиля`, created_at: now }); continue; }
       const cfg = getProfileConfig(db, profile);
       const held = R.betsForMatch(db, m.id, TENNIS_STRATEGY).filter((b) => b.status === "open" && b.risk_profile_id === profile).reduce((s, b) => s + (b.stake ?? 0), 0);
       // allowLargeEdge OFF: a huge tennis moneyline edge is still the phantom signature. B2: the ceiling
@@ -997,7 +1041,7 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       }
       const fillCents = ack.avgFillPriceCents ?? entryCents; // REAL book fill price
       const fillStake = ack.filledSizeUsd;                    // depth-aware size (thin book → smaller)
-      const meta = tennisEntryMeta({ favPrice: fillCents, prePrice, edge: r.edge, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: br.setNum, favSide: charge.favSide, firstIsP1: ml.firstIsP1 });
+      const meta = tennisEntryMeta({ favPrice: fillCents, prePrice, edge: r.edge, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: br.setNum, favSide: charge.favSide, firstIsP1: ml.firstIsP1, panicDropCents, panicThresholdCents: minDrop });
       const betId = R.uid();
       R.insertBet(db, {
         id: betId, match_id: m.id, strategy_id: TENNIS_STRATEGY, risk_profile_id: profile, market_label: favName,

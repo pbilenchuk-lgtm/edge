@@ -59,6 +59,11 @@ export interface BetEntryMeta {
   // exact outcome the position holds, so the exit sells the SAME token it bought — no re-derivation.
   favSide?: "first" | "second" | null;
   firstIsP1?: boolean | null;
+  // B6 tennis panic-depth gate, FROZEN at entry (like orientation): the realized drop (pre-break −
+  // entry, ¢) this buyback entered on, and the per-profile quantile threshold that admitted it. Frozen
+  // so retro-analysis of "why did this profile enter" stays honest as the self-calibrating threshold drifts.
+  panicDropCents?: number | null;
+  panicThresholdCents?: number | null;
   // token-flip-poisoned: this bet was opened BEFORE token-fix-m1 while holding the WRONG outcome's
   // token (favourite = second moneyline outcome, but the engine always bought outcomes[0]). Its
   // take/exit P&L is about the opponent's token, not the favourite's — EXCLUDED from every

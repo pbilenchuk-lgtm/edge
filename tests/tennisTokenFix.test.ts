@@ -11,7 +11,7 @@ import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 import { serializeEntryMeta, parseEntryMeta } from "../src/lib/betMeta.js";
 import { favTokenOf, tennisMoneyline, type TennisMoneyline } from "../src/lib/tennisScout.js";
-import { tennisTradingTick, tennisExitTick, migrateQuarantinePoisonedTennis } from "../src/lib/tennisTrading.js";
+import { tennisTradingTick, tennisExitTick, migrateQuarantinePoisonedTennis, tennisPanicThresholds } from "../src/lib/tennisTrading.js";
 import { migrateTennisStrategy, migrateTennisSetValueStrategy } from "../src/lib/seed.js";
 import { betRecords } from "../src/lib/profileAnalytics.js";
 
@@ -203,6 +203,44 @@ test("tennisTradingTick: a favourite early break is still acted on when a LATER 
   const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:03:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl });
   assert.ok(opened >= 1, "the favourite's early break was acted on, not buried by the later underdog break");
   assert.ok(R.betsForMatch(db, mid, "tennis_overreaction").some((b) => b.status === "open" && b.market_label === "Marco Favvi"), "buyback opened on the favourite");
+});
+
+// ── B6. Panic-depth quantiles: pool = ATP+WTA early, volume floor, per-profile min-drop entry gate ─
+test("tennisPanicThresholds: interim below the volume floor; quantiles above it; Challenger + late excluded", () => {
+  const db = openDb(":memory:");
+  assert.equal(tennisPanicThresholds(db).source, "interim", "empty → interim floors");
+  const mk = (evt: string, early: boolean, panic: number, i: number) => R.insertTennisBreakMark(db, { event_key: `e${evt}${i}`, match_id: null, players: null, tournament: null, event_type: evt, set_num: 1, broken_side: "first", broke_early: early ? 1 : 0, t_event: "t", pre_cents: 60, floor_cents: 60 - panic, t_floor_sec: 60, panic_cents: panic, recovery_1: null, recovery_2: null, recovery_3: null, recovery_5: null, window_quotes: 3, confidence_flags: null, code_version: "e", created_at: `2026-01-01T00:${String(i).padStart(2, "0")}:00Z` } as any);
+  // 250 in-scope ATP-early marks with panic ramping 1..25¢ → clear quantiles.
+  for (let i = 0; i < 250; i++) mk("ATP Singles", true, 1 + (i % 25), i);
+  // Noise that must NOT enter the pool: Challenger-early (huge) + ATP-LATE (huge). If they leaked, the
+  // quantiles would be pulled far higher than the ATP-early distribution.
+  for (let i = 0; i < 250; i++) mk("ATP Challenger", true, 90, 300 + i);
+  for (let i = 0; i < 250; i++) mk("ATP Singles", false, 90, 600 + i);
+  const th = tennisPanicThresholds(db);
+  assert.equal(th.source, "quantile");
+  assert.equal(th.n, 250, "pool is ONLY the 250 ATP-early marks (Challenger + late excluded)");
+  assert.ok(th.aggressive < th.medium && th.medium < th.conservative, "p40 < p60 < p80");
+  assert.ok(th.conservative <= 25, "quantiles bounded by the ATP-early range, NOT pulled to the 90¢ noise");
+});
+
+test("tennisTradingTick B6: a shallow panic enters aggressive+medium but is too thin for conservative", async () => {
+  const db = openDb(":memory:");
+  // Interim thresholds (no marks): aggressive 2¢ / medium 3.5¢ / conservative 6¢.
+  const mid = seedMatch(db, { p1: "Marta Favvi", p2: "Nina Doria", p1price: 62, token1: "t1", token2: "t2" });
+  // Pre-break favourite 56¢ (≥52 passes the frozen-favourite guard), panics to 52¢ → drop 4¢:
+  // ≥ aggressive(2) and medium(3.5), but < conservative(6).
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", p1: "Marta Favvi", p2: "Nina Doria", g1: 3, g2: 3, server: "first", p1c: 56, setNum: 1 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", p1: "Marta Favvi", p2: "Nina Doria", g1: 3, g2: 4, server: "second", p1c: 52, setNum: 1 });
+  const body = { content: [{ text: JSON.stringify({ picks: [{ label: "Marta Favvi", prob: 0.6, reason: "выкуп" }] }) }] };
+  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => body })) as unknown as typeof fetch; // exec off (no POLYMARKET) → quote fill
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl });
+  assert.equal(opened, 2, "aggressive + medium enter on the 4¢ panic; conservative does not");
+  const profiles = R.betsForMatch(db, mid, "tennis_overreaction").filter((b) => b.status === "open").map((b) => b.risk_profile_id).sort();
+  assert.deepEqual(profiles, ["aggressive", "medium"], "conservative skipped — 4¢ < its 6¢ floor");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => /\[conservative\].*паника 4¢ < порога 6¢/.test(l.text ?? "")), "conservative skip logged with the depth gate");
+  // The admitting threshold is FROZEN on each bet.
+  const em = parseEntryMeta(R.betsForMatch(db, mid, "tennis_overreaction").find((b) => b.status === "open")!.entry_meta);
+  assert.equal(em?.panicDropCents, 4);
 });
 
 // ── G. Quarantine: flag pre-fix second-outcome bets; leave first-outcome + post-fix bets alone ─────
