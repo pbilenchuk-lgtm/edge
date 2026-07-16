@@ -38,6 +38,24 @@ function seedScan(db: ReturnType<typeof openDb>, mlCents: number, props: { label
   return mid;
 }
 
+test("scan B5: a verified two-sided set_winner (side resolved+stored) with a big dev ENTERs; order-symmetric Over stays blocked", () => {
+  const db = openDb(":memory:");
+  const theo = tennisTheo(0.65, BASE_HOLD.wta);
+  const swLabel = Q + "Set 1 Winner";               // player-specific; Kawa (label-first) == scout p1 → first resolved
+  const swTheo = Math.round(theoForProp(parseProp(swLabel)!, theo, true)! * 100);
+  const gamesLabel = Q + "Set 2 Over 8.5";          // order-symmetric Over/Under — no player side to misread
+  const gTheo = Math.round(theoForProp(parseProp(gamesLabel)!, theo, true)! * 100);
+  const mid = seedScan(db, 65, [
+    { label: swLabel, mid: swTheo - 25, liq: 3000 },     // dev +25, set_winner, side resolved+stored → ENTER (B5 narrows the block)
+    { label: gamesLabel, mid: gTheo - 25, liq: 3000 },   // dev +25, total_games (order-symmetric) → STILL anti-Draw block (unchanged)
+  ]);
+  const scan = scanMatchProps(db, mid, { p1: "Kawa", p2: "Waltert" }, "wta", "WTA");
+  const by = (frag: string) => scan.candidates.find((c) => c.label.includes(frag))!;
+  assert.equal(by("Set 1 Winner").action, "enter", "verified set_winner big dev → ENTER, not a Draw-misread block");
+  assert.match(by("Set 1 Winner").reason, /верифиц/);
+  assert.equal(by("Set 2 Over").action, "provenance_review", "order-symmetric total_games big dev → still blocked (side risk N/A; that's B2/B7)");
+});
+
 test("scan: deviation ≥7¢ → enter; ≥18¢ → provenance_review (anti-Draw); thin/out-of-band → skip", () => {
   const db = openDb(":memory:");
   const theo = tennisTheo(0.65, BASE_HOLD.wta); // must match the scan's anchor (WTA, hard)
