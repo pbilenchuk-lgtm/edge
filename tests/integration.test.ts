@@ -665,6 +665,17 @@ test("callLLMParsed: a PROVIDER failure is NOT content-re-asked (that's callLLM'
   assert.equal(calls, 1, "400 fails once — no content re-ask on a provider error");
 });
 
+test("callLLM: an EMPTY completion (2xx, no text) is RETRIED as transient, recovering on the next attempt", async () => {
+  // The Visker 40→4 bug: an empty model reply was treated as a hard failure (retryable:false) and the
+  // decision was dropped on the first empty — no retry at either layer. It's transient; it must retry.
+  let calls = 0;
+  const fetchImpl = (async () => { calls++; return { ok: true, status: 200, json: async () => (calls === 1 ? { content: [] } : { content: [{ text: '{"a":1}' }] }) }; }) as unknown as typeof fetch;
+  const r = await callLLM({ model: "Claude Opus 4.8", prompt: "hi" }, { ...OPTS, fetchImpl });
+  assert.equal(r.ok, true, "recovered on the retry after the first empty reply");
+  if (r.ok) assert.equal(r.text, '{"a":1}');
+  assert.equal(calls, 2, "the empty completion was retried, not dropped on the first attempt");
+});
+
 test("callLLMParsed: persistently unparseable → ok:false with a diagnosable tail, bounded to 1+1 asks", async () => {
   const sent: string[] = [];
   const fetchImpl = seqAnthropic(["мусор один", "мусор два раз и навсегда"], sent);

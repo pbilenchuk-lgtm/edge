@@ -212,7 +212,11 @@ async function callLLMOnce(
     }
     const json = await res.json();
     const text = extractText(provider, json);
-    if (text == null) return { result: { ok: false, provider, error: "пустой ответ модели" }, retryable: false };
+    // An EMPTY completion (2xx but no text — an overload/safety stop / transient hiccup) is TRANSIENT,
+    // not a hard failure: re-sending the same request usually gets a real answer. Marking it retryable
+    // routes it through callLLM's backoff so the strategist gets its retries instead of silently
+    // dropping the decision on the first empty reply (the Visker 40→4 "failure masked as a decision").
+    if (text == null) return { result: { ok: false, provider, error: "пустой ответ модели" }, retryable: true };
     return { result: { ok: true, text, provider, model: apiId }, retryable: false };
   } catch (e) {
     // undici's fetch throws a bare "fetch failed" and hides the real reason on
