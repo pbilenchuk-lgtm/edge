@@ -390,7 +390,17 @@ export async function runStrategists(
         // `skipped` == число рынков, и старое «N рынков ниже порога edge» — ложь движка.
         R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — стратег вернул 0 picks (полный пропуск)`, created_at: now() });
       } else if (dec.ok && (skipped + flagged) > 0) {
-        const why = flagged > 0 && skipped === 0 ? `флаги предохранителей (${flagged})` : `нет достаточного края (${skipped} рынк. ниже порога edge)`;
+        // TRUTHFUL audit (правдивый лог): `skipped` = markets the STRATEGIST chose not to pick (his
+        // judgement: no edge there), NOT markets a code threshold rejected — so "N рынков ниже порога"
+        // was a lie of the engine. And if the strategist DID name picks (nPicks>0) that then failed to
+        // enter, say THAT — "chose N, none passed entry" is a different event than "chose nothing",
+        // and the difference matters for audit (his call vs the code's gate).
+        const nPicks = Array.isArray(picksArr) ? picksArr.length : 0;
+        const why = nPicks > 0
+          ? `стратег выбрал ${nPicks} pick(s), ни один не прошёл вход${flagged > 0 ? ` (${flagged} снят предохранителем)` : " (порог edge / неисполнимо на книге)"}`
+          : flagged > 0
+            ? `флаги предохранителей сняли ${flagged} рынк.`
+            : `стратег не выбрал ни один рынок (нет края по его оценке)`;
         R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — ${why}`, created_at: now() });
       }
     }
