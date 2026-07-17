@@ -25,9 +25,12 @@ import * as R from "./repo.js";
 const PMV = "prematch_value";
 const KNOWN_SOURCES = new Set(["decision", "meta_backfill", "inferred_backfill"]);
 const VERDICT_SOURCES = new Set(["decision", "meta_backfill"]);
-// The stop-fix (circuit-break + Under-stop suppression) deploy boundary — a bet whose EXIT ran after
-// this had un-poisoned win%/P&L. Env-tunable so it can be pinned to the real deploy time.
-const STOP_FIX_CUTOFF = process.env.STOP_FIX_CUTOFF_ISO || "2026-07-17T00:00:00Z";
+// The stop-fix (circuit-break + Under-stop suppression, commit a3ac8e4) deploy boundary — a bet whose
+// EXIT ran after this had un-poisoned win%/P&L. Pinned to the real Render deploy time: a3ac8e4 went
+// Live 2026-07-17 01:08 UTC (deploy start 01:06:07 + 1m53s build). Verified against settled_at: three
+// PMV "wins" at 00:55/01:02/01:03 UTC settled under the BUGGY exit and correctly fall to pre_fix.
+// Env-overridable for what-if re-cuts.
+const STOP_FIX_CUTOFF = process.env.STOP_FIX_CUTOFF_ISO || "2026-07-17T01:08:00Z";
 
 export type PmvFamily = "totals" | "btts" | "handicap" | "outcome" | "other";
 export function pmvFamily(label: string): PmvFamily {
