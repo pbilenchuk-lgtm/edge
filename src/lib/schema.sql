@@ -225,6 +225,8 @@ CREATE TABLE IF NOT EXISTS bets (
                                    -- phase/score/thinness/exitPlan/…) for risk-profile analytics
   code_version   TEXT,             -- system epoch at entry — segregate pre/post-fix eras in analysis
   decision_id    TEXT,             -- stable id of the decision (twin link paper↔real order, spec §0.1)
+  origin         TEXT,             -- 'prematch'|'live' — decision context (before/after kickoff), fixed at entry
+  origin_source  TEXT,             -- 'decision'|'meta_backfill'|'inferred_backfill' — provenance of `origin`
   created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bets_match_strat ON bets(match_id, strategy_id);

@@ -203,6 +203,12 @@ export interface Bet {
    *  a real Polymarket order carries the same decision_id as its paper bet, so paper
    *  and real can be compared 1:1. Auto-generated at insert when absent. */
   decision_id?: string | null;
+  /** Origin phase — 'prematch' | 'live' — the DECISION context (before/after kickoff), fixed at entry,
+   *  never rewritten by the fill. Resolved once in insertBet; see betMeta.resolveBetOrigin. */
+  origin?: string | null;
+  /** Provenance of `origin`: 'decision' (stamped at entry) | 'meta_backfill' (lifted from entry_meta on
+   *  an existing row) | 'inferred_backfill' (reconstructed from entered_minute — lower trust). */
+  origin_source?: string | null;
 }
 
 export interface Reassessment {

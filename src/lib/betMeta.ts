@@ -90,3 +90,30 @@ export function parseEntryMeta(raw: string | null | undefined): BetEntryMeta | n
   try { const v = JSON.parse(raw); return v && typeof v === "object" ? v as BetEntryMeta : null; }
   catch { return null; }
 }
+
+// ── origin phase (prematch vs live) as a FIELD with explicit provenance ─────────────────────────
+// origin = the DECISION context: prematch if the open decision was made before kickoff, live if a new
+// entry after. Fixed at entry, NEVER rewritten by the fill (a pre-kickoff decision filled after
+// kickoff stays prematch; a halftime entry is live). We judge a decision's quality in ITS information
+// context; kickoff is the context boundary. Provenance is tracked so the report can trust the field
+// over the reconstruction (valid-metric-in-a-valid-epoch, applied to field provenance):
+//   'decision'         — stamped at entry from entry_meta.phase (authoritative).
+//   'meta_backfill'    — recovered from entry_meta.phase on an existing row (still a decision-time field,
+//                        just lifted out of the JSON blob into the column).
+//   'inferred_backfill'— RECONSTRUCTED, no entry_meta.phase existed. FROZEN RULE (2026-07-17): the bet's
+//                        `entered_minute` contains a digit → live, else prematch. This is a lower-trust
+//                        reconstruction of legacy (mostly pre-stop-fix) rows; the report keeps it on a
+//                        separate diagnostic line and never lets it drive a verdict.
+export type OriginSource = "decision" | "meta_backfill" | "inferred_backfill";
+/** The frozen legacy inference — a bet with a numeric entered_minute was opened in-play. */
+export function inferOriginFromEnteredMinute(enteredMinute: string | null | undefined): "prematch" | "live" {
+  return enteredMinute && /\d/.test(enteredMinute) ? "live" : "prematch";
+}
+/** Resolve (origin, source) for a bet. `atInsert` distinguishes a fresh write ('decision' / a loud
+ *  'inferred_backfill' when a new entry arrives with NO phase — a bug, never a silent 'prematch'
+ *  default) from a one-time backfill of an existing row ('meta_backfill' / 'inferred_backfill'). */
+export function resolveBetOrigin(entryMetaRaw: string | null | undefined, enteredMinute: string | null | undefined, atInsert: boolean): { origin: "prematch" | "live"; source: OriginSource } {
+  const phase = parseEntryMeta(entryMetaRaw)?.phase;
+  if (phase === "prematch" || phase === "live") return { origin: phase, source: atInsert ? "decision" : "meta_backfill" };
+  return { origin: inferOriginFromEnteredMinute(enteredMinute), source: "inferred_backfill" };
+}

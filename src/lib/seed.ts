@@ -15,7 +15,25 @@ import { STRAT_PMV_DESC, pmvTour } from "./tennisPmv.js";
 import { resolveFootballMarket, matchPhase, settleBet } from "./settlement.js";
 import { seedRiskProfiles, RISK_PROFILE_DEFS, listRiskProfileViews } from "./riskConfig.js";
 import { SPORT_LABELS } from "./polymarket.js";
+import { resolveBetOrigin } from "./betMeta.js";
 import type { Bet, Market } from "./types.js";
+
+/**
+ * One-time backfill of the `bets.origin` field (+ provenance). Fills every row still NULL — after the
+ * ALTER added the columns nullable. Idempotent (only touches origin IS NULL). Provenance:
+ *   entry_meta.phase present → origin = phase, source 'meta_backfill' (decision-time field, un-blobbed).
+ *   otherwise                → FROZEN inference (2026-07-17): entered_minute has a digit → live, else
+ *                              prematch; source 'inferred_backfill' (lower trust, kept off verdicts).
+ * The freeze rule lives in betMeta.resolveBetOrigin / inferOriginFromEnteredMinute so the exact
+ * reconstruction is auditable years later, not "some old code".
+ */
+export function migrateBetOrigin(db: Database): number {
+  const rows = db.prepare(`SELECT id, entry_meta, entered_minute FROM bets WHERE origin IS NULL`).all() as { id: string; entry_meta: string | null; entered_minute: string | null }[];
+  const upd = db.prepare(`UPDATE bets SET origin=?, origin_source=? WHERE id=?`);
+  let n = 0;
+  for (const r of rows) { const { origin, source } = resolveBetOrigin(r.entry_meta, r.entered_minute, false); upd.run(origin, source, r.id); n++; }
+  return n;
+}
 
 const T = "2026-07-03T12:00:00.000Z"; // deterministic seed timestamp
 

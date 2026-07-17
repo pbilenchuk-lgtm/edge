@@ -5,6 +5,7 @@
 // ============================================================
 
 import { randomUUID } from "node:crypto";
+import { resolveBetOrigin } from "./betMeta.js";
 import type { Database } from "./db.js";
 import type {
   AnalysisJob,
@@ -847,14 +848,28 @@ export function insertBet(db: Database, b: Bet): void {
   // spec §0.1). Callers may pass one to group bets under a shared decision; otherwise a
   // fresh id is minted here so no row ever lacks one.
   const decisionId = b.decision_id ?? uid();
+  // origin phase is a FIELD resolved once here (never inferred at read). A caller may pass it
+  // explicitly (backfill); otherwise derive from entry_meta.phase → source 'decision'. FAIL-LOUD: a
+  // fresh entry with NO phase is a bug (some path forgot to stamp it) — we tag it 'inferred_backfill'
+  // (visible in the report's diagnostic line, NOT a silent 'prematch' default) and warn, so it can't
+  // become a quiet fourth "empty" class.
+  let origin = b.origin ?? null, originSource = b.origin_source ?? null;
+  if (origin == null) {
+    const r = resolveBetOrigin(b.entry_meta, b.entered_minute, true);
+    origin = r.origin; originSource = r.source;
+    // The durable loud signal is the 'inferred_backfill' tag on a fresh row (the report surfaces it).
+    // A console warn on top ONLY for the clearest bug — a bet that HAS entry_meta but no phase (a prod
+    // path that forgot to stamp it); entry_meta-less inserts (legacy/tests) stay quiet.
+    if (r.source !== "decision" && b.entry_meta != null) console.warn(`[origin] bet ${b.id} (${b.strategy_id}) has entry_meta but NO phase → reconstructed origin='${r.origin}'. A new entry must stamp entry_meta.phase.`);
+  }
   db.prepare(
     `INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,proposed_price,entry_price,
-       current_price,closing_price,ai_prob,stake,rationale,entered_minute,result,payout,settled_by,settled_at,entry_meta,code_version,decision_id,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       current_price,closing_price,ai_prob,stake,rationale,entered_minute,result,payout,settled_by,settled_at,entry_meta,code_version,decision_id,origin,origin_source,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     b.id, b.match_id, b.strategy_id, b.risk_profile_id ?? null, b.market_label, b.status, b.proposed_price, b.entry_price,
     b.current_price, b.closing_price, b.ai_prob, b.stake, b.rationale, b.entered_minute,
-    b.result, b.payout, b.settled_by ?? null, b.settled_at ?? null, b.entry_meta ?? null, b.code_version ?? null, decisionId, b.created_at,
+    b.result, b.payout, b.settled_by ?? null, b.settled_at ?? null, b.entry_meta ?? null, b.code_version ?? null, decisionId, origin, originSource, b.created_at,
   );
 }
 export function updateBet(db: Database, id: string, patch: Partial<Bet>): void {

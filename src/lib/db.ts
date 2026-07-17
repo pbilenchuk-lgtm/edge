@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy, migrateTennisSetValueStrategy, migrateTennisPmvStrategy, migrateVoidOutOfScopePmv, migrateVoidAllOpenPmv, migrateResettleExtraTimeVoids, migrateResetTennisMarks, migrateRetireFable } from "./seed.js";
+import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy, migrateTennisSetValueStrategy, migrateTennisPmvStrategy, migrateVoidOutOfScopePmv, migrateVoidAllOpenPmv, migrateResettleExtraTimeVoids, migrateResetTennisMarks, migrateRetireFable, migrateBetOrigin } from "./seed.js";
 import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
 import { migrateQuarantinePoisonedTennis } from "./tennisTrading.js";
@@ -231,9 +231,15 @@ export function initSchema(db: Database): void {
     // knows both sides. Before this the row kept only outcomes[0]'s token (external_ref); when the
     // favourite was the second-named player the engine held the WRONG token (the fourth orientation bug).
     "ALTER TABLE markets ADD COLUMN token_second TEXT",
+    // origin phase as a FIELD with provenance (was read-time inferred in profileAnalytics). Backfilled
+    // once by migrateBetOrigin below; new bets stamp it in insertBet.
+    "ALTER TABLE bets ADD COLUMN origin TEXT",
+    "ALTER TABLE bets ADD COLUMN origin_source TEXT",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }
+  // Backfill bets.origin once the columns exist (idempotent — only origin IS NULL rows).
+  try { const n = migrateBetOrigin(db); if (n > 0) console.log(`[migrate] bets.origin backfilled: ${n} legacy rows (from entry_meta.phase or the frozen entered_minute inference)`); } catch { /* best-effort */ }
   // strategy_shares gained risk_profile_id + a 3-part PK. SQLite can't ALTER a
   // PK, so recreate the table when the old (2-part) one is detected, backfilling
   // every existing allocation onto the MEDIUM profile. Guarded + row-preserving.
