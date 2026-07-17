@@ -1162,7 +1162,10 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                             const entryDisp = b.entryPrice != null ? `${b.entryPrice}¢` : (b.price != null ? `${b.price}¢` : "");
                             return (
                               <div key={i} style={{ ...S.betRow, ...(dead ? { opacity: 0.5 } : {}) }}>
-                                <div style={S.betMain}><span style={S.betMarket}>{b.market}</span><span style={S.betOdds}>@ {entryDisp}</span></div>
+                                <div style={S.betMain}>
+                                  <span style={{ ...S.betStatusIcon, color: dead ? MUTE : isOpen ? "#5fd08a" : "#e8a838" }} title={dead ? "не заполнилась" : isOpen ? "в процессе (позиция открыта)" : "только предложена"}>{dead ? "⊘" : isOpen ? "●" : "○"}</span>
+                                  <span style={S.betMarket}>{b.market}</span><span style={S.betOdds}>@ {entryDisp}</span>
+                                </div>
                                 <div style={S.betMeta}>
                                   {/* a not_filled bet never deployed — show it greyed, no green "value" edge, and it does NOT count toward «задействовано» below */}
                                   {edge != null && !dead && <span style={{ ...S.betEdge, color: edge >= 5 ? "#5fd08a" : edge >= 3 ? "#e8a838" : "#9aa4b2" }}>edge {edge >= 0 ? "+" : ""}{edge.toFixed(1)}%</span>}
@@ -1183,7 +1186,10 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
                             const statusTxt = isCash ? (b.closedPct >= 100 ? "закрыта" : `фиксация ${b.closedPct}%`) : (b.result === "won" ? "✓ выиграла" : "✕ проиграла");
                             return (
                               <div key={`c${i}`} style={{ ...S.betRow, opacity: 0.85 }}>
-                                <div style={S.betMain}><span style={S.betMarket}>{b.market}</span><span style={S.betOdds}>{statusTxt}</span></div>
+                                <div style={S.betMain}>
+                                  <span style={{ ...S.betStatusIcon, color: up ? "#5fd08a" : "#ff6b6b" }} title={up ? "закрыта в плюс" : "закрыта в минус"}>{up ? "✓" : "✕"}</span>
+                                  <span style={S.betMarket}>{b.market}</span><span style={S.betOdds}>{statusTxt}</span>
+                                </div>
                                 <div style={S.betMeta}>
                                   <span style={S.betStake}>{fmtMoney(b.stake)}</span>
                                   <span style={{ ...S.betLive, color: up ? "#5fd08a" : "#ff6b6b" }}>{up ? "▲+" : "▼"}{fmtMoney(pnl)}</span>
@@ -2987,6 +2993,7 @@ const S: Record<string, React.CSSProperties> = {
   betList: { display: "flex", flexDirection: "column", gap: 6 },
   betRow: { background: INK, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 10px" },
   betMain: { display: "flex", alignItems: "baseline", gap: 8 },
+  betStatusIcon: { flexShrink: 0, width: 13, textAlign: "center", fontSize: 12, fontWeight: 700, lineHeight: 1 } as React.CSSProperties,
   betMarket: { fontSize: 13, fontWeight: 600 },
   betOdds: { fontSize: 12, color: MUTE, fontFamily: "'JetBrains Mono', monospace" },
   betMeta: { display: "flex", alignItems: "center", gap: 10, marginTop: 5, fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5 },
