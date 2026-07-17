@@ -375,7 +375,10 @@ const TENNIS_SCOUT_SILENT_MIN = (() => { const n = Number(process.env.TENNIS_SCO
  */
 export function tennisScoutSilence(db: Database, deps: EngineDeps = {}): { silent: boolean; note: string } {
   const nowMs = Date.parse(nowFn(deps)()) || Date.now();
-  const due = R.listCompetitions(db).filter((c) => c.sport_id === "tennis")
+  // Only IN-SCOPE (ATP/WTA singles) matches count as "due-live that matters": ITF/Challenger/doubles
+  // aren't traded and may not even be streamed by the provider, so a quiet ITF-only window is NOT a scout
+  // failure — counting them would make the watchdog cry wolf on every low-activity ITF slate.
+  const due = R.listCompetitions(db).filter((c) => c.sport_id === "tennis" && tennisTourOf(c) != null)
     .flatMap((c) => R.listMatches(db, c.id))
     .filter((m) => m.state !== "finished" && m.kickoff_at != null)
     .filter((m) => { const k = Date.parse(m.kickoff_at as string) || 0; return k > 0 && k <= nowMs && nowMs - k <= TENNIS_PLAY_CEILING_MIN * 60_000; });
