@@ -255,6 +255,7 @@ function collectClosed(competitions: any[], matchDb: any, catalog: any[]) {
             strat: st.name, stratColor: st.color, stratId: st.id,
             market: b.market, stake: b.stake, payout: b.payout, pnl,
             result: b.result, settledBy: b.settledBy, closedPct: b.closedPct ?? 100,
+            at: b.at, atLabel: b.atLabel, atIso: b.atIso ?? "",
           });
         }
       }
@@ -2011,9 +2012,14 @@ function PortfolioScreen({ open, closed, onGoMatches }: any) {
   const groups: any = {};
   for (const p of positions) {
     const key = groupBy === "strat" ? p.strat : p.compName;
-    const g = (groups[key] = groups[key] || { items: [], color: p.stratColor, stake: 0, live: 0, pnl: 0 });
+    const g = (groups[key] = groups[key] || { items: [], color: p.stratColor, stake: 0, live: 0, pnl: 0, maxAt: "" });
     g.items.push(p); g.stake += p.stake || 0; g.live += p.live || 0; g.pnl += p.pnl || 0;
+    if (view === "closed" && (p.atIso ?? "") > g.maxAt) g.maxAt = p.atIso ?? "";
   }
+  // Завершённые: свежие исполнения сверху — и внутри группы, и группы между собой,
+  // чтобы новые закрытия не приходилось искать. (ISO-строки сортируются хронологически.)
+  if (view === "closed")
+    for (const k in groups) groups[k].items.sort((a: any, b: any) => (a.atIso ?? "") < (b.atIso ?? "") ? 1 : (a.atIso ?? "") > (b.atIso ?? "") ? -1 : 0);
   const closedLabel = (p: any) => p.settledBy === "void" ? "возврат ставки" : p.result === "void" ? "= в ноль" : p.result === "won" ? "✓ выигрыш" : "✕ проигрыш";
 
   return (
@@ -2055,7 +2061,7 @@ function PortfolioScreen({ open, closed, onGoMatches }: any) {
             <button style={{ ...S.pfGroupBtn, ...(groupBy === "strat" ? S.pfGroupOn : {}) }} onClick={() => setGroupBy("strat")}>по стратегии</button>
             <button style={{ ...S.pfGroupBtn, ...(groupBy === "comp" ? S.pfGroupOn : {}) }} onClick={() => setGroupBy("comp")}>по турниру</button>
           </div>
-          {Object.entries(groups).map(([key, g]: any) => (
+          {Object.entries(groups).sort((a: any, b: any) => view === "closed" ? (a[1].maxAt < b[1].maxAt ? 1 : a[1].maxAt > b[1].maxAt ? -1 : 0) : 0).map(([key, g]: any) => (
             <div key={key} style={S.pfGroup}>
               <div style={S.pfGroupHead}>
                 {groupBy === "strat" && <span style={{ ...S.dot, background: g.color }} />}
@@ -2095,6 +2101,7 @@ function PortfolioScreen({ open, closed, onGoMatches }: any) {
                         {groupBy === "strat" ? p.compName : <span style={{ color: p.stratColor }}>{p.strat}</span>}
                         {" · "}{p.match}{p.finalScore ? ` · ${p.finalScore}` : ""}
                         {p.closedPct < 100 && <span style={S.pfPosEntered}> · фиксация {p.closedPct}%</span>}
+                        {p.atLabel && <span style={S.pfPosEntered}> · закрыто {p.atLabel}</span>}
                       </div>
                     </div>
                     <div style={S.pfPosRight}>

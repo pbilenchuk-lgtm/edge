@@ -54,7 +54,7 @@ export interface MatchView {
   bets: Record<string, { rationale: string | null; items: BetItemView[] }>;
   reassessByStrat: Record<string, { min: string | null; at: string | null; text: string; conf: string | null }[]>;
   logByStrat: Record<string, { min: string | null; at: string | null; text: string; type: string }[]>;
-  settledBets: Record<string, { market: string; stake: number; result: string; payout: number; settledBy: string | null; closedPct: number; at: string | null; profileId?: string }[]>;
+  settledBets: Record<string, { market: string; stake: number; result: string; payout: number; settledBy: string | null; closedPct: number; at: string | null; atLabel: string | null; atIso: string | null; profileId?: string }[]>;
   result: Record<string, number>;
   /** real lineups (ESPN), if enriched — shown under the СОСТАВ toggle */
   lineups: { home: LineupView | null; away: LineupView | null } | null;
@@ -266,7 +266,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
           const pctM = b.settled_by === "partial" ? /(\d+)\s*%/.exec(b.rationale ?? "") : null;
           const closedPct = pctM ? Number(pctM[1]) : 100;
           (settledTmp[b.strategy_id] ||= []).push({
-            view: { market: b.market_label, stake: b.stake ?? 0, result: b.result ?? "void", payout: b.payout ?? 0, settledBy: b.settled_by ?? null, closedPct, at: warsawClock(b.settled_at), profileId: b.risk_profile_id ?? "medium" },
+            view: { market: b.market_label, stake: b.stake ?? 0, result: b.result ?? "void", payout: b.payout ?? 0, settledBy: b.settled_by ?? null, closedPct, at: warsawClock(b.settled_at), atLabel: warsawLabel(b.settled_at), atIso: b.settled_at ?? null, profileId: b.risk_profile_id ?? "medium" },
             at: b.settled_at ?? "",
           });
           result[b.strategy_id] = (result[b.strategy_id] ?? 0) + ((b.payout ?? 0) - (b.stake ?? 0));
