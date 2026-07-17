@@ -42,6 +42,25 @@ test("sizePrematch B2: absurdEdgeBlock override widens the ceiling (tennis 40%);
   assert.equal(sizePrematch({ ...base, ourProb: 0.90, implied: 0.45, absurdEdgeBlock: 0.40 }).status, "flag", "edge 45% > 40% override → still flagged");
 });
 
+test("sizePrematch #3b: live backstops catch a fabricated edge (VAR phantom) while a real in-play edge passes", () => {
+  // allowLargeEdge=true is the live path where the plain absurd block is OFF.
+  // (1) DIVERGENCE: model near-certain (≥90%) vs a market pricing it near-dead (≤12¢) → block.
+  const div = sizePrematch({ ourProb: 0.95, priceCents: 8, implied: 0.08, calibration: 0.7, budget: 1000, cfg: MED, allowLargeEdge: true });
+  assert.equal(div.status, "flag", "prob 95% vs market 8¢ → data-error, blocked");
+  assert.match(div.reason, /live_divergence_block/);
+  // (2) ABSOLUTE CAP: edge > 80% even in live (price 15¢ dodges the ≤12¢ divergence gate) → block.
+  const cap = sizePrematch({ ourProb: 0.99, priceCents: 15, implied: 0.15, calibration: 0.7, budget: 1000, cfg: MED, allowLargeEdge: true });
+  assert.equal(cap.status, "flag", "edge 84% > live_absurd_cap 80% → blocked");
+  assert.match(cap.reason, /live_absurd_edge_block/);
+  // (3) REAL in-play edge PASSES: a 0:2 game's Over 1.5 — model 90%, market 44¢ (edge 46%). Neither
+  //     divergence (price > 12¢) nor the absolute cap (edge < 80%) fires → this is the edge we KEEP.
+  const real = sizePrematch({ ourProb: 0.90, priceCents: 44, implied: 0.44, calibration: 0.7, budget: 1000, cfg: MED, allowLargeEdge: true });
+  assert.equal(real.status, "enter", "a genuine large in-play edge still trades");
+  // Prematch (allowLargeEdge=false) is unchanged: the tight absurd block still catches a 46% edge.
+  const pre = sizePrematch({ ourProb: 0.90, priceCents: 44, implied: 0.44, calibration: 0.7, budget: 1000, cfg: MED });
+  assert.equal(pre.status, "flag", "prematch keeps the tight absurd_edge_block");
+});
+
 test("impliedProbs: de-vigs a two-sided group to sum 1; raw for one-sided", () => {
   // Over 55¢ + Under 52¢ = 1.07 vig → implied Over = 55/107 ≈ 0.514
   const imp = impliedProbs([{ label: "Over 2.5", priceCents: 55 }, { label: "Under 2.5", priceCents: 52 }, { label: "Team to Advance — X", priceCents: 70 }]);

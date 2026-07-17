@@ -167,6 +167,18 @@ export interface SizeInput {
  *  if it "felt" an edge. Env-tunable; same value as the import hard floor. */
 export const MIN_LIQUIDITY_BLOCK = (() => { const n = Number(process.env.MARKET_HARD_FLOOR); return Number.isFinite(n) && n > 0 ? n : 50; })();
 
+// LIVE absurd-edge backstops (audit: NWSL VAR double-count → prob=1.0, edge 56.5% → $424 martingale).
+// In-play the plain absurd_edge_block is relaxed (allowLargeEdge) because a real in-play edge CAN be
+// huge (0:2 → Over 1.5 ≈ 1.0). That removes the only guard against a FABRICATED edge from bad data,
+// and a phantom edge is indistinguishable from a real one BY MAGNITUDE. Two live-specific safeguards:
+//  • DIVERGENCE — the model is near-certain (prob ≥ PROB) while the market prices it near-dead
+//    (≤ PRICE_C¢): the market strongly disagrees, which for a REAL in-play edge can't happen (the
+//    price would already be moving WITH the model). That split is the data-error signature.
+//  • ABSOLUTE CAP — an edge past CAP is almost surely a bug even in-play.
+const LIVE_DIVERGENCE_PROB = (() => { const n = Number(process.env.LIVE_DIVERGENCE_PROB); return Number.isFinite(n) && n > 0 && n <= 1 ? n : 0.90; })();
+const LIVE_DIVERGENCE_PRICE_C = (() => { const n = Number(process.env.LIVE_DIVERGENCE_PRICE_C); return Number.isFinite(n) && n > 0 ? n : 12; })();
+const LIVE_ABSURD_EDGE_CAP = (() => { const n = Number(process.env.LIVE_ABSURD_EDGE_CAP); return Number.isFinite(n) && n > 0 ? n : 0.80; })();
+
 /**
  * Deterministically decide entry + size for ONE market against a risk profile.
  * The whole point of profiles: aggressive enters a smaller edge and stakes more,
@@ -202,6 +214,15 @@ export function sizePrematch(inp: SizeInput): SizeResult {
   // where a resolved-market edge is genuine.
   const absurdBlock = inp.absurdEdgeBlock ?? cfg.safeguards.absurd_edge_block; // B2: per-strategy override (tennis widens it)
   if (!inp.allowLargeEdge && edge > absurdBlock) return flag(`edge ${(edge * 100).toFixed(1)}% > absurd_edge_block ${(absurdBlock * 100).toFixed(0)}% — вероятно баг`);
+  // LIVE backstops (allowLargeEdge): the plain absurd block is off in-play, so guard the fabricated
+  // edge instead — a phantom is indistinguishable from a real edge by magnitude, so gate on the
+  // model↔market DIVERGENCE and an absolute ceiling (audit: NWSL VAR martingale).
+  if (inp.allowLargeEdge) {
+    if (ourProb >= LIVE_DIVERGENCE_PROB && priceCents <= LIVE_DIVERGENCE_PRICE_C)
+      return flag(`live-дивергенция: модель ${(ourProb * 100).toFixed(0)}% против рынка ${priceCents}¢ (≥${(LIVE_DIVERGENCE_PROB * 100).toFixed(0)}% vs ≤${LIVE_DIVERGENCE_PRICE_C}¢) — вероятная ошибка данных, не край (live_divergence_block)`);
+    if (edge > LIVE_ABSURD_EDGE_CAP)
+      return flag(`edge ${(edge * 100).toFixed(1)}% > live_absurd_cap ${(LIVE_ABSURD_EDGE_CAP * 100).toFixed(0)}% — почти наверняка баг даже в live (live_absurd_edge_block)`);
+  }
 
   // Thresholds (profile). Thin markets use the raised min_edge. UNKNOWN depth
   // (liquidity null — we couldn't read it) is treated as thin: an unmeasurable

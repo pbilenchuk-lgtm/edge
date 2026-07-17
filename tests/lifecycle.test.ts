@@ -952,6 +952,34 @@ test("strategistReassess CIRCUIT-BREAKER: a hard-auth 400 opens the breaker — 
   assert.ok(!strategistHardBlocked(db, Date.parse(t2)), "a live success CLOSED the breaker");
 });
 
+test("strategistReassess #3b MARTINGALE BLOCK: no re-add to a market this pair already lost in-match", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Courage", away: "Spirit", state: "live", lineup_out: true, kickoff_at: null, minute: 80, score_home: 0, score_away: 2, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: mid, league: "usa.nwsl", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { shots: 5 }, away: { shots: 3 } }), updated_at: "t" });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Spirit Over 1.5", price: 60, ai_prob: 0.7, liquidity: "2000", external_ref: "TOK-A", snapshot_at: "t", is_closing: false });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Spirit Over 2.5", price: 40, ai_prob: 0.6, liquidity: "2000", external_ref: "TOK-B", snapshot_at: "t", is_closing: false });
+  // This pair already CLOSED "Spirit Over 1.5" at a LOSS earlier in THIS match (an early stop).
+  R.insertBet(db, { id: "lost", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Spirit Over 1.5", status: "settled_lost", settled_by: "early", settled_at: "2026-07-16T20:00:00Z", proposed_price: 55, entry_price: 55, current_price: 20, closing_price: 20, ai_prob: 0.6, stake: 80, rationale: "r", entered_minute: "60'", result: "lost", payout: 0, created_at: "t" } as any);
+  // The strategist tries to re-add BOTH: the lost market (martingale) and a fresh one.
+  const mock = (async (url: any) => {
+    const u = String(url);
+    if (u.includes("anthropic") || u.includes("/messages")) return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [{ label: "Spirit Over 1.5", prob: 0.8, reason: "доливка" }, { label: "Spirit Over 2.5", prob: 0.7, reason: "новый вход" }], exits: [] }) }] }) } as any;
+    return { ok: true, status: 200, json: async () => (u.includes("/book") ? { bids: [], asks: [] } : {}) } as any;
+  }) as unknown as typeof fetch;
+  await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => "2026-07-16T20:05:00Z" }, { newEventMatchIds: new Set([mid]), max: 50 });
+  // Scope to THIS pair (other seeded strategies have no loss history and may enter the same market).
+  const mine = R.betsForMatch(db, mid, strat.id).filter((b) => b.status === "proposed").map((b) => b.market_label.toLowerCase());
+  assert.ok(!mine.includes("spirit over 1.5"), "NO re-entry into the market this pair lost in-match (martingale_block)");
+  assert.ok(mine.includes("spirit over 2.5"), "a DIFFERENT market this pair never lost still enters");
+  assert.ok(R.reassessmentsForMatch(db, mid).some((r) => r.strategy_id === strat.id && /martingale_block/.test(r.body)), "the block is recorded in this pair's reassessment note");
+});
+
 test("strategistReassess hands the model minute estimate, price movement, liquidity and a no-score note", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
@@ -1171,7 +1199,7 @@ test("strategistReassess opens a fresh entry on a live trigger (no prior positio
   assert.ok(!res2.entries.some((e) => e.matchId === mid), "no re-entry without a trigger or position");
 });
 
-test("strategistReassess: re-entry cooldown blocks re-buying a market this pair just closed at a LOSS", async () => {
+test("strategistReassess #3b: a losing close blocks re-entry for the WHOLE match (martingale), but a winning close does not", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
@@ -1182,19 +1210,24 @@ test("strategistReassess: re-entry cooldown blocks re-buying a market this pair 
   const mid = R.uid();
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Mjallby", away: "AIK", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Mjallby — Yes", price: 26, ai_prob: 0.55, liquidity: "3000", external_ref: "t", snapshot_at: "t", is_closing: false });
-  // this pair closed «Mjallby — Yes» at a LOSS 5 min ago (early cash-out).
+  // this pair closed «Mjallby — Yes» at a LOSS earlier THIS match (early cash-out).
   R.insertBet(db, { id: "loss", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Mjallby — Yes", status: "settled_lost", proposed_price: 34, entry_price: 34, current_price: 20, closing_price: 20, ai_prob: 0.5, stake: 30, rationale: "r", entered_minute: "предматч", result: "lost", payout: 17, settled_by: "early", settled_at: "2026-07-11T13:55:00Z", created_at: "t" });
   const mock = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [{ label: "Mjallby — Yes", conviction: "высокая", reason: "докупаю падение", prob: 0.55 }], exits: [], note: "" }) }] }) }) as any);
 
-  // within the 10-min cooldown → the re-entry is blocked (no falling-knife chase).
+  // The losing close blocks re-entry — no doubling-down into a broken thesis.
   const res = await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => now }, { newEventMatchIds: new Set([mid]), max: 50 });
-  assert.ok(!res.entries.some((e) => e.market === "Mjallby — Yes"), "cooldown blocks re-entry into the just-lost market");
-  assert.equal(R.betsForMatch(db, mid, strat.id).filter((b) => b.status === "proposed").length, 0, "no fresh proposal within the cooldown");
+  assert.ok(!res.entries.some((e) => e.market === "Mjallby — Yes"), "martingale block: no re-entry into the just-lost market");
+  assert.equal(R.betsForMatch(db, mid, strat.id).filter((b) => b.status === "proposed").length, 0, "no fresh proposal after the losing close");
 
-  // move the losing close OUTSIDE the window → the pair may re-enter (price had time to confirm).
-  R.updateBet(db, "loss", { settled_at: "2026-07-11T13:40:00Z" });
+  // Even a MUCH earlier losing close (whole-match scope, not a time window) STILL blocks.
+  R.updateBet(db, "loss", { settled_at: "2026-07-11T13:00:00Z" });
   const res2 = await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => now }, { newEventMatchIds: new Set([mid]), max: 50 });
-  assert.ok(res2.entries.some((e) => e.market === "Mjallby — Yes"), "past the cooldown, re-entry is allowed");
+  assert.ok(!res2.entries.some((e) => e.market === "Mjallby — Yes"), "still blocked — the block is match-scoped, not a time window");
+
+  // But a WINNING close never blocks: flip it to settled_won → re-entry is allowed.
+  R.updateBet(db, "loss", { status: "settled_won", result: "won" });
+  const res3 = await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => now }, { newEventMatchIds: new Set([mid]), max: 50 });
+  assert.ok(res3.entries.some((e) => e.market === "Mjallby — Yes"), "a winning close does not block re-entry");
 });
 
 test("strategistReassess sizes off the strategist's LIVE prob, refreshing the stale market ai_prob", async () => {

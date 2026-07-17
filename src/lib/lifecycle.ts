@@ -1351,16 +1351,16 @@ export async function strategistReassess(
             if (ourProb == null) { unfilled.push(`«${mk.label}» — нет оценки`); continue; }
             if (pick.prob != null) R.setMarketAiProb(db, mk.id, pick.prob);
             if (held.has(norm(mk.label))) continue;                       // already in this market
-            // Re-entry cooldown: this pair CLOSED this market at a LOSS within the window
-            // → don't chase it lower on a noisy book (see REENTRY_COOLDOWN_MS). Only an
-            // EARLY/PARTIAL losing close cools down (a real end-of-match settlement can't
-            // occur mid-live); a winning close never does.
-            const cutoff = nowMs - REENTRY_COOLDOWN_MS;
-            const recentLoss = myPairSettled.some((x) => x.status === "settled_lost"
+            // MARTINGALE BLOCK (audit #3b: NWSL VAR martingale $80→$200; Örgryte re-add). This pair
+            // already CLOSED this market at a LOSS in THIS match — re-entering is doubling down into a
+            // broken thesis, the escalation pattern INDEPENDENT of where the (possibly phantom) edge
+            // came from. Widened from a time-window cooldown to the WHOLE MATCH (Petro): an
+            // early/partial losing close can only occur mid-live, and a real end-of-match settlement
+            // never triggers it, so match-scope is safe. A WINNING close never blocks (re-entry ok).
+            const lostThisMarket = myPairSettled.some((x) => x.status === "settled_lost"
               && (x.settled_by === "early" || x.settled_by === "partial")
-              && norm(x.market_label) === norm(mk.label)
-              && x.settled_at != null && Date.parse(x.settled_at) >= cutoff);
-            if (recentLoss) { unfilled.push(`«${mk.label}» — недавний убыточный выход, кулдаун на перезаход (reentry_cooldown)`); continue; }
+              && norm(x.market_label) === norm(mk.label));
+            if (lostThisMarket) { unfilled.push(`«${mk.label}» — уже был убыточный выход в этом матче, доливка запрещена (martingale_block)`); continue; }
             const implied = impliedMap.get(mk.label)?.implied ?? mk.price / 100;
             const cKey = correlationKey(mk.label, m.home, m.away);
             const r = sizePrematch({ ourProb, priceCents: mk.price, implied, calibration, liquidity: liqNum(mk.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg, allowLargeEdge: true });
