@@ -54,6 +54,11 @@ export async function GET(req: Request) {
       if (format === "csv") return new NextResponse(pmv.pmvBetsCsv(rep), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="pmv-bets.csv"` } });
       return NextResponse.json(rep);
     }
+    // ?report=ovr_cohort → Overreaction calibration Step 1: is the FAVOURITE-broken-early cohort
+    // tradeable (Petro's breakeven formula), before any calibration? Diagnostic, read-only.
+    if (url.searchParams.get("report") === "ovr_cohort") {
+      return NextResponse.json(scout.buildTennisOverreactionCohort(getDb()));
+    }
     // ?report=calibration → Part B recovery-vs-no-recovery split (calibrates K / floor / take buffer).
     if (url.searchParams.get("report") === "calibration") {
       if (format === "csv") return new NextResponse(scout.tennisCalibrationCsv(getDb()), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="tennis-calibration.csv"` } });

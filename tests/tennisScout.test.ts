@@ -6,6 +6,7 @@ import {
   serverSide, parsePair, currentSet, normalizeLive, detectBreaks, detectTennisEvents,
   collectTennisSnapshots, buildTennisScoutReport, loadTennisConfig, tennisScoutMarkdown,
   recordTennisBreakMarks, buildTennisBreakReport, tennisMoneyline, tennisScoutSilence,
+  buildTennisOverreactionCohort,
 } from "../src/lib/tennisScout.js";
 
 const T0 = Date.parse("2026-07-14T00:00:00.000Z");
@@ -240,6 +241,50 @@ test("buildTennisScoutReport aggregates coverage + breaks from stored snapshots"
   assert.equal(rep.breaks.length, 1, "the break is surfaced in the report");
   assert.equal(rep.coverageByType[0].type, "ATP Singles");
   assert.match(tennisScoutMarkdown(rep), /разведка провайдера/i);
+});
+
+test("buildTennisOverreactionCohort: armed-cohort filter, from-floor recovery, breakeven verdict (Step 1)", () => {
+  const db = openDb(":memory:");
+  let seq = 0;
+  const mk = (o: { pre: number; floor: number; panic: number; rec2: number; early?: number; type?: string }) =>
+    R.insertTennisBreakMark(db, {
+      event_key: `e${seq++}`, match_id: null, players: "A vs B", tournament: "T", event_type: o.type ?? "ATP Singles",
+      set_num: 1, broken_side: "first", broke_early: o.early ?? 1, t_event: iso(0),
+      pre_cents: o.pre, floor_cents: o.floor, t_floor_sec: 60, panic_cents: o.panic,
+      recovery_1: null, recovery_2: o.rec2, recovery_3: null, recovery_5: null,
+      post_entry_min_cents: o.floor, post_entry_min_sec: 60, window_quotes: 5, confidence_flags: null, code_version: "e", created_at: iso(0),
+    });
+  // 90 favourite-early ATP marks: 72 recover to the take level (pre−3), 18 slide deep with no recovery.
+  //   recover: pre65 floor52 panic13, rec2=13 ≥ panic−3(10) → recovered.
+  //   deep:    pre65 floor42 panic23, rec2=0  < 20            → not recovered.
+  // → floor p60 = 52 (E), pre median 65 → take 62 (T), panic p90 = 23 → stop 42 (S).
+  //   breakeven = (E−S)/(T−S) = 10/20 = 0.5 → threshold max(0.55, 0.55) = 0.55; recovery 0.8 ≥ 0.55 → GO.
+  for (let i = 0; i < 72; i++) mk({ pre: 65, floor: 52, panic: 13, rec2: 13 });
+  for (let i = 0; i < 18; i++) mk({ pre: 65, floor: 42, panic: 23, rec2: 0 });
+  // NOISE that must be EXCLUDED from the primary cohort:
+  mk({ pre: 45, floor: 30, panic: 15, rec2: 14 });                    // underdog (pre < 60) — excluded
+  mk({ pre: 65, floor: 52, panic: 13, rec2: 13, early: 0 });          // late break — excluded
+  mk({ pre: 65, floor: 52, panic: 13, rec2: 13, type: "Challenger" }); // out of tour scope — excluded
+  mk({ pre: 57, floor: 45, panic: 12, rec2: 11 });                    // 55–60¢ band — sensitivity, NOT primary
+
+  const rep = buildTennisOverreactionCohort(db);
+  assert.equal(rep.primary.n, 90, "only favourite(≥60)-early ATP/WTA marks count in the primary cohort");
+  assert.equal(rep.primary.floorP60, 52, "entry = floor p60");
+  assert.equal(rep.primary.takeLevel, 62, "take = pre median − 3");
+  assert.equal(rep.primary.stopLevel, 42, "stop = pre median − slide p90");
+  assert.equal(rep.primary.breakevenPct, 0.5, "breakeven (E−S)/(T−S)");
+  assert.equal(rep.primary.goThreshold, 0.55, "threshold = max(0.55, breakeven+0.05)");
+  assert.equal(rep.primary.recoveryShare, 0.8, "72/90 reached the take level within ≤2 min of the floor");
+  assert.equal(rep.primary.verdict, "go", "recovery 80% ≥ 55% → tradeable edge → Step 2 allowed");
+  assert.equal(rep.sensitivity.n, 1, "the 55–60¢ mark is a separate sensitivity band, never merged into primary");
+  assert.equal(rep.sensitivity.verdict, "sensitivity");
+
+  // Sufficiency gate: a thin cohort (< 80) is INSUFFICIENT, not a verdict.
+  const db2 = openDb(":memory:");
+  seq = 0;
+  const mk2 = (o: any) => R.insertTennisBreakMark(db2, { event_key: `e${seq++}`, match_id: null, players: "A vs B", tournament: "T", event_type: "WTA Singles", set_num: 1, broken_side: "first", broke_early: 1, t_event: iso(0), pre_cents: 65, floor_cents: 52, t_floor_sec: 60, panic_cents: 13, recovery_1: null, recovery_2: 13, recovery_3: null, recovery_5: null, post_entry_min_cents: 52, post_entry_min_sec: 60, window_quotes: 5, confidence_flags: null, code_version: "e", created_at: iso(0) });
+  for (let i = 0; i < 40; i++) mk2({});
+  assert.equal(buildTennisOverreactionCohort(db2).primary.verdict, "insufficient", "n=40 < 80 → insufficient, don't decide");
 });
 
 test("recordTennisBreakMarks: marks the panic window on the broken player's winner price (§4)", () => {

@@ -733,6 +733,85 @@ export function tennisCalibrationCsv(db: Database): string {
   return [head.join(","), ...rows].join("\n");
 }
 
+// ── Overreaction CALIBRATION Step 1 — armed-COHORT diagnostic (Petro's 6 conditions) ──────────────
+// The pooled 1529 marks are every break (underdogs, coin-flips, late sets); the strategy arms only a
+// FAVOURITE broken EARLY. Calibrating armed prices off the pooled median (floor ≈ 22¢) would repeat
+// the PMV mistake. This filters to the armed cohort and answers, per Petro's formula, whether it has a
+// TRADEABLE recovery edge — before any calibration.
+//   #1 favourite = pre_cents ≥ 60¢ (primary); 55–60¢ reported as a separate sensitivity band, never merged.
+//   #2 buyback entry = floor p60 (conservative-rarity, per B6).
+//   #3 go/no-go = recovery ≥ max(55%, breakeven+5pp); breakeven from the cohort's OWN levels
+//      (E=floor p60, T=pre−3, S=pre−slide p90). Marks are mid (no spread/fill) so recovery% is an
+//      UPPER bound → the +5pp margin is mandatory.
+//   #4 sufficiency: primary needs n≥80 (else "insufficient"); a per-tour verdict needs that tour n≥40.
+//   #6 recovery = reached the TAKE level (pre−3¢) within ≤2 min of the FLOOR — recovery_N is already
+//      measured from the floor (overreactionLatency: target = floorTime + N·60s), so this is exact:
+//      max(recovery_1, recovery_2) ≥ panic − 3.
+const OVR_TAKE_BUFFER = 3;              // ¢ below pre = the recovery take level (#3/#6)
+const OVR_FAV_MIN_PRIMARY = 60;         // #1 clear favourite
+const OVR_FAV_MIN_SENSITIVITY = 55;     // #1 sensitivity band lower bound
+const OVR_MIN_N_PRIMARY = 80;           // #4
+const OVR_MIN_N_TOUR = 40;              // #4
+const OVR_FLOOR_HARD = 0.55;            // #3 hard recovery floor
+const OVR_MARGIN_PP = 0.05;             // #3 mandatory margin over breakeven (mid → upper-bound)
+const ovrTour = (t: string | null): "ATP" | "WTA" | null => /challenger/i.test(t ?? "") ? null : /wta|women/i.test(t ?? "") ? "WTA" : /atp|men/i.test(t ?? "") ? "ATP" : null;
+/** #6: did the favourite snap back to the take level (pre−3) within ≤2 min of the FLOOR? */
+function ovrReachedTake(m: R.TennisBreakMarkRow): boolean {
+  if (m.panic_cents == null) return false;
+  const need = m.panic_cents - OVR_TAKE_BUFFER; // cents above floor to reach pre − buffer
+  return (m.recovery_1 != null && m.recovery_1 >= need) || (m.recovery_2 != null && m.recovery_2 >= need);
+}
+export interface OvrCohortStats {
+  label: string; n: number; recoveryShare: number;
+  floorP60: number | null; preMedian: number | null; slideP90: number | null;
+  takeLevel: number | null; stopLevel: number | null; breakevenPct: number | null; goThreshold: number | null;
+  verdict: "go" | "no_go" | "insufficient" | "degenerate" | "sensitivity";
+}
+export interface OvrCohortReport {
+  primary: OvrCohortStats; byTour: OvrCohortStats[]; sensitivity: OvrCohortStats;
+  recoveryDef: string; orientation: string; note: string;
+}
+function ovrCohortStats(marks: R.TennisBreakMarkRow[], label: string, kind: "primary" | "tour" | "sensitivity"): OvrCohortStats {
+  const meas = marks.filter((m) => m.pre_cents != null && m.floor_cents != null && m.panic_cents != null);
+  const n = meas.length;
+  const recoveryShare = n ? Math.round(meas.filter(ovrReachedTake).length / n * 1000) / 1000 : 0;
+  const floorP60 = pctl(meas.map((m) => m.floor_cents as number), 60);
+  const preMedian = pctl(meas.map((m) => m.pre_cents as number), 50);
+  const slideP90 = pctl(meas.map((m) => m.panic_cents as number), 90);
+  const takeLevel = preMedian != null ? Math.round((preMedian - OVR_TAKE_BUFFER) * 10) / 10 : null;
+  const stopLevel = preMedian != null && slideP90 != null ? Math.round((preMedian - slideP90) * 10) / 10 : null;
+  const E = floorP60, T = takeLevel, S = stopLevel;
+  const degenerate = E == null || T == null || S == null || !(T > E && E > S);
+  const breakevenPct = degenerate ? null : Math.round((E! - S!) / (T! - S!) * 1000) / 1000;
+  const goThreshold = breakevenPct == null ? null : Math.round(Math.max(OVR_FLOOR_HARD, breakevenPct + OVR_MARGIN_PP) * 1000) / 1000;
+  const minN = kind === "tour" ? OVR_MIN_N_TOUR : OVR_MIN_N_PRIMARY;
+  let verdict: OvrCohortStats["verdict"];
+  if (kind === "sensitivity") verdict = "sensitivity";
+  else if (n < minN) verdict = "insufficient";        // #4: too few marks → don't decide (before any level check)
+  else if (degenerate) verdict = "degenerate";
+  else verdict = recoveryShare >= (goThreshold as number) ? "go" : "no_go";
+  return { label, n, recoveryShare, floorP60, preMedian, slideP90, takeLevel, stopLevel, breakevenPct, goThreshold, verdict };
+}
+/** Step-1 cohort diagnostic: is the FAVOURITE-broken-EARLY cohort tradeable (per Petro's formula)? */
+export function buildTennisOverreactionCohort(db: Database): OvrCohortReport {
+  const all = R.listTennisBreakMarks(db).filter((m) => m.broke_early === 1 && ovrTour(m.event_type) != null);
+  const primaryMarks = all.filter((m) => (m.pre_cents ?? 0) >= OVR_FAV_MIN_PRIMARY);
+  const bandMarks = all.filter((m) => (m.pre_cents ?? 0) >= OVR_FAV_MIN_SENSITIVITY && (m.pre_cents ?? 0) < OVR_FAV_MIN_PRIMARY);
+  const primary = ovrCohortStats(primaryMarks, `ATP+WTA, ранний брейк фаворита ≥${OVR_FAV_MIN_PRIMARY}¢`, "primary");
+  const byTour = (["ATP", "WTA"] as const).map((tour) => ovrCohortStats(primaryMarks.filter((m) => ovrTour(m.event_type) === tour), `${tour} ≥${OVR_FAV_MIN_PRIMARY}¢`, "tour"));
+  const sensitivity = ovrCohortStats(bandMarks, `полоса ${OVR_FAV_MIN_SENSITIVITY}–${OVR_FAV_MIN_PRIMARY}¢ (sensitivity, не мержим)`, "sensitivity");
+  const verdictNote = primary.verdict === "insufficient" ? `когорта n=${primary.n} < ${OVR_MIN_N_PRIMARY} — вердикт INSUFFICIENT, копим, не решаем`
+    : primary.verdict === "degenerate" ? "уровни вырождены (T≤E или E≤S) — проверить данные, не калибровать"
+      : primary.verdict === "go" ? `recovery ${(primary.recoveryShare * 100).toFixed(1)}% ≥ порога ${((primary.goThreshold ?? 0) * 100).toFixed(1)}% (breakeven ${((primary.breakevenPct ?? 0) * 100).toFixed(1)}% + маржа) → у когорты ЕСТЬ торгуемый edge, можно на Шаг 2 (калибровка)`
+        : `recovery ${(primary.recoveryShare * 100).toFixed(1)}% < порога ${((primary.goThreshold ?? 0) * 100).toFixed(1)}% → edge НЕ покрывает безубыток+маржу, Overreaction парковать как PMV`;
+  return {
+    primary, byTour, sensitivity,
+    recoveryDef: "recovery = цена вернулась к тейк-уровню (pre−3¢) в пределах ≤2 мин ОТ ДНА (recovery_N меряется от floor: floorTime+N·60s), т.е. max(recovery_1,recovery_2) ≥ panic−3. Марки — mid без спреда/филла → верхняя граница торгуемости, отсюда обязательная маржа +5пп.",
+    orientation: "цена — winner-манилайн СЛОМАННОЙ стороны (broken_side из детектора брейков по дельте геймов, не токен/first-named); фильтр pre≥60¢ сам отсекает перевёрнутые марки (у андердога winner-цена <40¢). Пятый ориентационный баг здесь не воспроизводится.",
+    note: verdictNote,
+  };
+}
+
 /** Per-break-mark CSV — inspect the actual pre/floor/panic per break (is the panic real?). */
 export function tennisBreakMarksCsv(db: Database): string {
   const esc = (v: unknown) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
