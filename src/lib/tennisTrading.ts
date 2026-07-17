@@ -21,7 +21,7 @@ import { SET_VALUE_STRATEGY, SET_VALUE_ARMED, SET_VALUE_EPOCH, setValueGate } fr
 import { detectBreaks, detectTennisEvents, tennisMoneyline, favTokenOf, tennisTourOf, fetchTennisFixtures, trimRaw, TENNIS_TERMINAL_RE, loadTennisConfig } from "./tennisScout.js";
 import { loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
 import { classifyOrderBook, paperSellFill } from "./executor/paperFill.js";
-import { bookDepthUsd } from "./execution.js";
+import { bookDepthUsd, liquidationCents } from "./execution.js";
 import { PaperExecutor } from "./executor/paper.js";
 import { clientOrderIdFor, type OrderAck } from "./executor/types.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
@@ -532,6 +532,17 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
     const gs = `${last.games_p1}-${last.games_p2}`;
     const ext = { gameScore: gs, recvGames };
     const players = { p1: last.p1 ?? "", p2: last.p2 ?? "" }; // for the book/token resolution on exit
+
+    // MARK-TO-MARKET (open tennis positions): the portfolio froze unrealized P&L at entry because only
+    // the FOOTBALL engine marked bets live (engine.ts:163-167); tennis touched current_price solely on
+    // exit/settle. Every tick already resolves `cur` (the live favourite price) for the exit checks —
+    // write its LIQUIDATION value (same mid-haircut the football path uses) so «Актуальные» reflects
+    // cash-out value, not the entry. If an exit fires below, it overwrites this with the fill price.
+    {
+      const liq = Number((mlNow ?? tennisMoneyline(db, b.match_id, players))?.liquidity ?? 0) || 0;
+      const mtm = sellCtx.poly.enabled ? liquidationCents(cur, b.stake ?? 0, liq, sellCtx.poly.exec.fallbackK, sellCtx.poly.exec.takerFeeRate) : cur;
+      if (mtm != null && mtm !== b.current_price) R.updateBet(db, b.id, { current_price: mtm });
+    }
 
     // ── SET-VALUE ladder (horizon = the match): retire → thesis_stop → floor → partial take ──
     // (retire/finish already handled above by the finished-continue.) Defensive exits outrank the

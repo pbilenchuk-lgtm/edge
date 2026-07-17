@@ -189,3 +189,17 @@ test("Set-Value exit ORDER: thesis_stop outranks the take even when price ≥ ta
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /thesis_stop/.test(l.text)), "defensive thesis_stop wins over the take");
   assert.ok(!R.betsForMatch(db, mid, "tennis_set_value").some((b) => b.settled_by === "partial"), "no partial fixation happened");
 });
+
+test("Set-Value MTM: an open position is marked to the live price each tick, not frozen at entry", async () => {
+  const db = openDb(":memory:");
+  const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins" });
+  seedOpenSV(db, mid, 38); // entry 38¢ → current_price seeded at 38
+  const P = { p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 1, setNum: 2 } as const;
+  svSnap(db, mid, { ...P, at: "2026-07-14T10:05:00Z", g1: 0, g2: 0, server: "first", p1c: 38 });
+  svSnap(db, mid, { ...P, at: "2026-07-14T10:08:00Z", g1: 1, g2: 0, server: "second", p1c: 48 }); // recovered to 48¢ (< take 55, favourite HELD — no break, no exit)
+  const closed = await tennisExitTick(db, { now: () => "2026-07-14T10:08:05Z" });
+  assert.equal(closed, 0, "no exit fired at 48¢ (below take, no break)");
+  const bet = R.getBet(db, "sv1")!;
+  assert.equal(bet.status, "open", "position still open");
+  assert.equal(bet.current_price, 48, "current_price marked to the live 48¢, not frozen at entry 38¢ (exec model off → raw mid)");
+});
