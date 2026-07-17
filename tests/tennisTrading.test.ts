@@ -336,7 +336,7 @@ test("tennisTradingTick A3: when EVERY profile already holds a buyback on the ma
   snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 60, setNum: 1 }); // pre-break: a REAL favourite (≥52¢), so the frozen-favourite guard passes
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
   // No fetchImpl: if the block fails and the LLM is reached, the call throws → test surfaces it.
-  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: {} });
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { TENNIS_OVR_PARKED: "false", } });
   assert.equal(opened, 0, "all profiles held → no new buyback");
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /blocked_second_buyback/.test(l.text)), "block is logged");
 });
@@ -352,12 +352,29 @@ test("tennisTradingTick: one overreaction opens a bet per FREE risk profile, eac
   const body = { content: [{ text: JSON.stringify({ picks: [{ label: "Aleksandar Vukic", prob: 0.7, reason: "выкуп переоценки" }] }) }] };
   let llmCalls = 0;
   const fetchImpl = (async () => { llmCalls++; return { ok: true, status: 200, json: async () => body }; }) as unknown as typeof fetch;
-  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl });
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { TENNIS_OVR_PARKED: "false",  ANTHROPIC_API_KEY: "k" }, fetchImpl });
   assert.equal(llmCalls, 1, "the real_shift question is asked ONCE, not per profile (Model-A dedup)");
   assert.equal(opened, 3, "one bet per default profile (aggressive/medium/conservative)");
   const bets = R.betsForMatch(db, mid, "tennis_overreaction").filter((b) => b.status === "open");
   assert.deepEqual([...new Set(bets.map((b) => b.risk_profile_id))].sort(), ["aggressive", "conservative", "medium"], "distinct profiles, side-by-side");
   assert.ok(bets.every((b) => b.ai_prob === 0.62), "§9.6: the LLM's inflated 0.70 was clamped to the armed pre-break 0.62 — no self-attributed edge");
+});
+
+test("tennisTradingTick PARKED (default): a would-be buyback places NO entry — Overreaction is no_go (ovr_cohort)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady", p1price: 80, p2price: 20, p1liq: 8000, p2liq: 8000 });
+  snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 62, setNum: 1 });
+  snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
+  let llmCalls = 0;
+  const fetchImpl = (async () => { llmCalls++; return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [{ label: "Aleksandar Vukic", prob: 0.7, reason: "выкуп" }] }) }] }) }; }) as unknown as typeof fetch;
+  // Default env (no TENNIS_OVR_PARKED) → parked → NO entry, and the strategist is never even asked.
+  const parked = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl });
+  assert.equal(parked, 0, "parked → zero entries");
+  assert.equal(llmCalls, 0, "parked short-circuits before any strategist call");
+  assert.equal(R.betsForMatch(db, mid, "tennis_overreaction").filter((b) => b.status === "open").length, 0, "no open buyback");
+  // The SAME break with the park flag off still trades — the entry machinery is intact, only gated.
+  const live = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { TENNIS_OVR_PARKED: "false", ANTHROPIC_API_KEY: "k" }, fetchImpl });
+  assert.ok(live > 0, "with the park flag off, the same setup enters (machinery intact)");
 });
 
 test("tennisTradingTick G: a transient strategist failure does NOT burn the break — next tick retries and enters", async () => {
@@ -367,11 +384,11 @@ test("tennisTradingTick G: a transient strategist failure does NOT burn the brea
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
   // Tick 1: strategist fails (500) → no entry, and the break's ACTED marker must NOT be set.
   const failFetch = (async () => ({ ok: false, status: 500, json: async () => ({}), text: async () => "" })) as unknown as typeof fetch;
-  assert.equal(await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: failFetch }), 0, "transient failure → no entry");
+  assert.equal(await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { TENNIS_OVR_PARKED: "false",  ANTHROPIC_API_KEY: "k" }, fetchImpl: failFetch }), 0, "transient failure → no entry");
   // Tick 2: strategist recovers → the SAME break is retried and entered (proves the marker was not burned).
   const okBody = { content: [{ text: JSON.stringify({ picks: [{ label: "Aleksandar Vukic", prob: 0.6, reason: "выкуп" }] }) }] };
   const okFetch = (async () => ({ ok: true, status: 200, json: async () => okBody })) as unknown as typeof fetch;
-  const opened2 = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:15Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: okFetch });
+  const opened2 = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:15Z", env: { TENNIS_OVR_PARKED: "false",  ANTHROPIC_API_KEY: "k" }, fetchImpl: okFetch });
   assert.ok(opened2 >= 1, "the transient failure did not permanently skip the break — retry entered");
 });
 
@@ -548,7 +565,7 @@ test("tennisTradingTick: an ITF match is NOT traded (tour scope — favourite-re
   snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 50, setNum: 1 });
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
   const fetchImpl = (async () => { throw new Error("LLM must not be reached for an out-of-scope ITF match"); }) as unknown as typeof fetch;
-  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl });
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { TENNIS_OVR_PARKED: "false",  ANTHROPIC_API_KEY: "k" }, fetchImpl });
   assert.equal(opened, 0, "ITF is out of scope → no entry");
   assert.equal(R.betsForMatch(db, mid, "tennis_overreaction").length, 0, "no bet created for the ITF match");
   // Single-source: the scope decision lives in chargeTennisMatch (charge.outOfScope / tradeable=false).
@@ -588,7 +605,7 @@ test("tennisTradingTick BUG-3: cross-strategy block is symmetric — Overreactio
   snap(db, mid, { at: "2026-07-14T10:01:00Z", g1: 3, g2: 3, server: "first", p1c: 60, setNum: 1 }); // pre-break: a REAL favourite (≥52¢) so the frozen-favourite guard passes
   snap(db, mid, { at: "2026-07-14T10:02:00Z", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 });
   const fetchImpl = (async () => { throw new Error("LLM must not be reached — a Set-Value hold should block Overreaction"); }) as unknown as typeof fetch;
-  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl });
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { TENNIS_OVR_PARKED: "false",  ANTHROPIC_API_KEY: "k" }, fetchImpl });
   assert.equal(opened, 0, "every profile holds a Set-Value position → Overreaction is blocked (no opposite-side double exposure)");
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /blocked_second_buyback/.test(l.text)), "the cross-strategy block is logged");
 });

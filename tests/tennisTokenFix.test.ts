@@ -78,7 +78,7 @@ test("tennisTradingTick: favourite is the SECOND player → entry BUYS token_sec
   // Book keyed by token: the FAVOURITE's token (t2) has a coherent book near the favourite price (~50¢);
   // the underdog token (t1) is left EMPTY. So a correct fill (t2) succeeds; the old wrong-token fill (t1) would skip.
   const fetchImpl = tokenBookAndLLM({ t2: { bids: [[0.49, 2000]], asks: [[0.51, 2000]] } }, "Favorito F", 0.7);
-  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl });
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { TENNIS_OVR_PARKED: "false",  ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl });
   assert.ok(opened >= 1, "opened on the FAVOURITE's token (t2) — the underdog token (t1) had no book");
   const bets = R.betsForMatch(db, mid, "tennis_overreaction").filter((b) => b.status === "open");
   assert.ok(bets.length >= 1 && bets.every((b) => b.market_label === "Favorito F"), "bet is on the favourite (second-named)");
@@ -169,7 +169,7 @@ test("tennisTradingTick: a favourite whose pre-break price levelled to a coin-fl
   snap(db, mid, { at: "2026-07-14T10:00:00Z", p1: "Marta Carle", p2: "Nina Doria", g1: 0, g2: 0, server: "first", p1c: 62, setNum: 1 }); // pre-match anchor → favourite = first
   snap(db, mid, { at: "2026-07-14T10:02:00Z", p1: "Marta Carle", p2: "Nina Doria", g1: 3, g2: 3, server: "first", p1c: 49.5, setNum: 1 }); // levelled (pre-break reference)
   snap(db, mid, { at: "2026-07-14T10:03:00Z", p1: "Marta Carle", p2: "Nina Doria", g1: 3, g2: 4, server: "second", p1c: 45, setNum: 1 }); // favourite broken → the trigger
-  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:03:05Z", env: {} }); // no LLM key: the guard must fire BEFORE the strategist call
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:03:05Z", env: { TENNIS_OVR_PARKED: "false" } }); // no LLM key: the guard must fire BEFORE the strategist call
   assert.equal(opened, 0, "no buyback — the 'favourite' wasn't a favourite at the break");
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /frozen_favourite/.test(l.text ?? "")), "frozen_favourite skip logged");
 });
@@ -183,7 +183,7 @@ test("tennisTradingTick: a DUST real book (Gamma-declared healthy) is skipped th
   snap(db, mid, { at: "2026-07-14T10:02:00Z", p1: "Marco Favvi", p2: "Diego Doggi", g1: 3, g2: 4, server: "second", p1c: 50, setNum: 1 }); // favourite's serve broken → panics to 50
   // The favourite token's REAL book is dust: 88 shares @ 50¢ = $44 (< $250 floor). Orientation is fine (50¢≈50¢).
   const fetchImpl = tokenBookAndLLM({ t1: { bids: [[0.49, 88]], asks: [[0.50, 88]] } }, "Marco Favvi", 0.7);
-  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl });
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { TENNIS_OVR_PARKED: "false",  ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl });
   assert.equal(opened, 0, "a $44 real book is CUT, not clamped into a dust bet");
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /thin_real_book/.test(l.text ?? "")), "thin_real_book logged with the real-vs-declared gap");
   assert.equal(R.betsForMatch(db, mid, "tennis_overreaction").filter((b) => b.status === "open").length, 0, "no dust position opened");
@@ -200,7 +200,7 @@ test("tennisTradingTick: a favourite early break is still acted on when a LATER 
   snap(db, mid, { at: "2026-07-14T10:02:00Z", p1: "Marco Favvi", p2: "Diego Doggi", g1: 3, g2: 4, server: "second", p1c: 55, setNum: 1 }); // fav (first) broken → br1
   snap(db, mid, { at: "2026-07-14T10:03:00Z", p1: "Marco Favvi", p2: "Diego Doggi", g1: 4, g2: 4, server: "first", p1c: 50, setNum: 1 });  // underdog (second) broken → br2 (most recent)
   const fetchImpl = tokenBookAndLLM({ t1: { bids: [[0.49, 2000]], asks: [[0.50, 2000]] } }, "Marco Favvi", 0.7);
-  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:03:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl });
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:03:05Z", env: { TENNIS_OVR_PARKED: "false",  ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl });
   assert.ok(opened >= 1, "the favourite's early break was acted on, not buried by the later underdog break");
   assert.ok(R.betsForMatch(db, mid, "tennis_overreaction").some((b) => b.status === "open" && b.market_label === "Marco Favvi"), "buyback opened on the favourite");
 });
@@ -233,7 +233,7 @@ test("tennisTradingTick B6: a shallow panic enters aggressive+medium but is too 
   snap(db, mid, { at: "2026-07-14T10:02:00Z", p1: "Marta Favvi", p2: "Nina Doria", g1: 3, g2: 4, server: "second", p1c: 52, setNum: 1 });
   const body = { content: [{ text: JSON.stringify({ picks: [{ label: "Marta Favvi", prob: 0.6, reason: "выкуп" }] }) }] };
   const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => body })) as unknown as typeof fetch; // exec off (no POLYMARKET) → quote fill
-  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl });
+  const opened = await tennisTradingTick(db, { now: () => "2026-07-14T10:02:05Z", env: { TENNIS_OVR_PARKED: "false",  ANTHROPIC_API_KEY: "k" }, fetchImpl });
   assert.equal(opened, 2, "aggressive + medium enter on the 4¢ panic; conservative does not");
   const profiles = R.betsForMatch(db, mid, "tennis_overreaction").filter((b) => b.status === "open").map((b) => b.risk_profile_id).sort();
   assert.deepEqual(profiles, ["aggressive", "medium"], "conservative skipped — 4¢ < its 6¢ floor");

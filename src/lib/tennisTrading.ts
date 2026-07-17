@@ -814,6 +814,31 @@ const TENNIS_CATASTROPHIC_FLOOR = (() => { const n = Number(process.env.TENNIS_C
 // is INCOMPARABLE (quarantined by migrateQuarantinePoisonedTennis). Fresh tag → no cross-epoch aggregates.
 const TENNIS_ARMED_EPOCH = process.env.TENNIS_ARMED_EPOCH || "token-fix-m1";
 
+// ⛔ PARKED — tennis Overreaction (early-break favourite buyback) has NO tradeable edge (verdict
+// no_go, 2026-07). The Step-1 armed-cohort diagnostic (GET /api/tennis-scout?report=ovr_cohort,
+// buildTennisOverreactionCohort) measured the favourite-broken-early moneyline cohort and found the
+// TRADE DOESN'T EXIST: a clear favourite (pre ~77¢) barely dips on an early break — floor p60 = 73.5¢,
+// take (pre−3) = 74.5¢ → upside 1¢, while the tail stop (pre − slide p90) sits at 59.5¢ → downside 14¢.
+// Breakeven 93.3% (honest, from that 1:14 geometry); actual recovery only 40.8% (ATP 35.2% / WTA 43.5%
+// / band 55-60¢ 24.3% — all agree, n=265). The moneyline prices an early favourite break EFFICIENTLY;
+// there is no overreaction to buy back. So entries are OFF. Break-mark collection STAYS (it feeds
+// Set-Value's late-break amplitudes and would re-power any FUTURE hypothesis). DO NOT re-enable on a
+// hunch — a return to this idea requires a NEW hypothesis + a NEW go/no-go criterion fixed BEFORE the
+// data + a FRESH sample (re-parametrising p60/take on THIS dataset would be curve-fitting).
+//
+// SCOPE — this verdict is ONLY the early-break favourite BUYBACK. It is NOT a verdict on tennis:
+//   • Set-Value (tennisSetValue.ts) — deeper/later panic (favourite LOST set 1), amplitudes 7-11¢ vs
+//     the ~3.5¢ early dip — is a SEPARATE, still-ACTIVE tennis hypothesis. No verdict yet: its
+//     criterion (n≥30 clean cycles on token-fix-m1, verdict by CLV+win+P&L agreement) isn't reached.
+//     Today's "a deep dip is more often a real shift than an overreaction" is a legitimate PRIOR/
+//     headwind for it too — but a prior is NOT a verdict; verdict-transfer between strategies is
+//     forbidden in BOTH directions. Its data decides it.
+//   • Football Overreaction is UNAFFECTED — different sport, different market, edge proven on its own
+//     data (n=36, metric agreement). Different market ≠ transferable verdict.
+// Default PARKED. Read per-call from the tick's env so it's testable (entry-mechanics tests opt in
+// with TENNIS_OVR_PARKED="false"); prod leaves it unset → parked.
+export const tennisOvrParked = (env: Record<string, string | undefined>): boolean => (env.TENNIS_OVR_PARKED ?? "true").toLowerCase() !== "false";
+
 // Entry-order lifetime (spec §2.2: the live-panic window). Paper fills/skips immediately, so TIF is
 // carried only so the field is real for dry-run/real later.
 const TENNIS_ENTRY_TIF_SEC = 45;
@@ -855,6 +880,11 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
   const env = deps.env ?? effectiveEnv(R.getProviderKeys(db));
   const strat = getStrategy(db, TENNIS_STRATEGY);
   if (!strat) return 0; // strategy not seeded → tennis trading off
+  // PARKED (no_go, ovr_cohort — see TENNIS_OVR_PARKED): place NO entries. Break-mark collection
+  // (recordTennisBreakMarks) runs on a SEPARATE tick and is untouched, so Set-Value still gets its
+  // amplitudes and a future re-test keeps its data. Exits/settlement of any already-open positions
+  // also run on their own ticks (tennisExitTick / settleTennisBets), so parked positions wind down.
+  if (tennisOvrParked(env)) return 0;
   const now = nowFn(deps)();
   const nowMs = Date.parse(now) || Date.now();
   // Stamp the armed-threshold epoch INTO the bet's code_version so the showcase (which segments
