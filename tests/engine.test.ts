@@ -504,7 +504,12 @@ test("syncMatchStatus: first finish stamps a Warsaw end_time + Warsaw kickoff + 
   const final: SportsMatchStatus = { externalRef: "SIM1", home: "Бразилия", away: "Англия", state: "finished", minute: 90, scoreHome: 2, scoreAway: 2, final: true };
   await syncMatchStatus(db, final, { ...CFG, now: () => "2026-07-11T16:01:00.000Z" } as any);
   const m = R.getMatch(db, "m-live")!;
-  assert.equal(m.end_time, "18:01", "16:01 UTC → 18:01 Warsaw (CEST) — the finish time in Warsaw");
+  // end_time is now stored as the raw ISO instant (so the UI can render both the clock AND the dated
+  // label from it, matching tennis); it renders to 18:01 Warsaw (16:01 UTC + CEST) via warsawClock.
+  const { warsawClock, warsawLabel } = await import("../src/lib/time.js");
+  assert.equal(m.end_time, "2026-07-11T16:01:00.000Z", "stored as the ISO instant, not a pre-formatted clock");
+  assert.equal(warsawClock(m.end_time), "18:01", "renders to 18:01 Warsaw (CEST)");
+  assert.match(warsawLabel(m.end_time)!, /11\.07.*18:01/, "the dated label the football card now shows");
   assert.equal(m.kickoff_time, "16:00", "14:00 UTC → 16:00 Warsaw");
   assert.equal(m.duration, "2 ч 1 мин", "14:00→16:01 span");
 });

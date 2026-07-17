@@ -41,14 +41,16 @@ export function durationLabel(startIso: string | null | undefined, endIso: strin
 
 /** Warsaw finish-stamp fields for a match transitioning into "finished": the finish
  *  clock (HH:MM Warsaw), the kickoff clock, and the elapsed duration — so a card shows
- *  «завершён 22:01» / «20:00–22:01 · длительность 2 ч 01 мин» instead of a bare «финал».
- *  end_time is always set (nowIso is a real instant); kickoff_time/duration only when
- *  derivable. Apply on EVERY path that flips a match to finished (ESPN enrich, the poll,
- *  the clock auto-finish) — else covered matches finished via ESPN never get a time. */
+ *  «завершён чт 17.07, 22:01» / «20:00–22:01 · длительность 2 ч 01 мин» instead of a bare «финал».
+ *  end_time is stored as the raw ISO INSTANT (not a pre-formatted clock) so the UI can render
+ *  BOTH the short clock (warsawClock) AND the dated label (warsawLabel) from it — matching how
+ *  tennis stamps its finish. Football used to store the bare clock, which left the card without a
+ *  completion DATE. kickoff_time/duration only when derivable. Apply on EVERY path that flips a
+ *  match to finished (ESPN enrich, the poll, the clock auto-finish) — else it never gets a time. */
 export function finishStamp(
   kickoffAtIso: string | null | undefined, nowIso: string,
 ): { end_time: string | null; kickoff_time?: string; duration?: string } {
-  const patch: { end_time: string | null; kickoff_time?: string; duration?: string } = { end_time: warsawClock(nowIso) };
+  const patch: { end_time: string | null; kickoff_time?: string; duration?: string } = { end_time: isIso(nowIso) ? nowIso : warsawClock(nowIso) };
   const kt = warsawClock(kickoffAtIso);
   if (kt) patch.kickoff_time = kt;
   const dur = durationLabel(kickoffAtIso, nowIso);
