@@ -27,6 +27,7 @@ import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
 import { exitDecision, winsOnEventOccurrence } from "./thresholds.js";
+import { underThesisMarginGoals } from "./settlement.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
@@ -78,6 +79,23 @@ export const EXIT_PHANTOM_GAP = (() => { const n = Number(process.env.EXIT_PHANT
 // HOLD instead: let the position ride to a deeper book / real settlement. Only on a REAL
 // book and only on a LARGE full-stake slip (normal exits slip 0–1¢). Env-tunable.
 export const EXIT_SLIPPAGE_BLOCK = (() => { const n = Number(process.env.EXIT_SLIPPAGE_BLOCK); return Number.isFinite(n) && n > 0 ? n : 15; })();
+// UNDER-thesis stop suppression (audit: Sarpsborg Under 3.5 @1:0 dumped @21-26¢; Inter FK Sarajevo
+// Under 1.5 stopped @7-8¢ then SETTLED 100¢). An Under LOSES only when goals climb to the line — so
+// while the score sits this many goals (or more) BELOW the line, a price crash is a book artifact,
+// not a broken thesis, and the deterministic price stop is a category error (mirror of the Over
+// melting-option exemption). GAP-based, not time-based: management defers to strategist / settlement
+// only while the thesis is MATHEMATICALLY safe; the moment a goal narrows the margin below this, the
+// stop is restored (self-correcting — re-checked against the live score every cycle, so a credit
+// blackout can't leave it suppressed past the point of real danger). Env-tunable.
+export const UNDER_STOP_SUPPRESS_MARGIN = (() => { const n = Number(process.env.UNDER_STOP_SUPPRESS_MARGIN); return Number.isFinite(n) && n >= 0 ? n : 1; })();
+// ILLIQUID-BOOK stop guard, generalised from the absolute-dust phantom floor to a mark↔bid GAP
+// (audit: 20-26¢ bids slipped between the ≤5¢ phantom floor and the 15¢ slippage gap). On a real
+// book, when the mark is rich (≥ MIN¢) but the best bid sits ≥ GAP¢ below it, the executable bid has
+// decoupled from the value — that's illiquidity/broken depth, not a thesis break — so a stop dumps
+// at a price the market doesn't really bear. HOLD. Deliberately CONSERVATIVE (rich mark + large gap)
+// and logged distinctly (exit_illiquid_mark_gap) so a week of firings can be calibrated. Env-tunable.
+export const EXIT_ILLIQUID_MARK_GAP = (() => { const n = Number(process.env.EXIT_ILLIQUID_MARK_GAP); return Number.isFinite(n) && n > 0 ? n : 20; })();
+export const EXIT_ILLIQUID_MARK_MIN = (() => { const n = Number(process.env.EXIT_ILLIQUID_MARK_MIN); return Number.isFinite(n) && n > 0 ? n : 60; })();
 // TIME-DECAY FLOOR for "wins on event occurrence" markets (Over, BTTS Yes, team-to-score),
 // which are EXEMPT from the price stop (their price is a melting option — see
 // winsOnEventOccurrence). Exempt ≠ hold the corpse to the whistle: an option that is BOTH
@@ -102,10 +120,34 @@ export const EXIT_TIME_STOP_RESOLVED_CENTS = (() => { const n = Number(process.e
 const LAST_STRATEGIST_OK_KEY = "last_strategist_ok_ms";
 const LAST_STRATEGIST_FAIL_KEY = "last_strategist_fail_ms";
 export const STRATEGIST_STALE_MIN = (() => { const n = Number(process.env.STRATEGIST_STALE_MIN); return Number.isFinite(n) && n > 0 ? n : 45; })();
-/** True when the strategist layer is in an ACTIVE outage: its most recent outcome was a
- *  failure and that failure is recent (within STRATEGIST_STALE_MIN). A quiet period with no
- *  reassessments is NOT degraded (last fail is stale) — only a live, currently-failing layer. */
+// CIRCUIT-BREAKER for a HARD, non-transient strategist outage (audit: Rosenborg 45'+ printed 248
+// straight `HTTP 400 "credit balance too low"`). A credit-exhausted / auth / permission failure is
+// GLOBAL and won't clear this cycle — yet every (match,strategy) pair kept re-issuing the same dead
+// call, a 248-request storm, and left every live position with no reassessment for the whole 2nd
+// half. When such a failure is seen, OPEN the breaker for a cooldown: subsequent reassess calls
+// short-circuit (one log per match, no storm) and the deterministic exit net takes over. The FIRST
+// strategist SUCCESS closes the breaker immediately. Env-tunable.
+const STRATEGIST_HARD_BLOCK_KEY = "strategist_hard_block_until_ms";
+export const STRATEGIST_HARD_COOLDOWN_MIN = (() => { const n = Number(process.env.STRATEGIST_HARD_COOLDOWN_MIN); return Number.isFinite(n) && n > 0 ? n : 15; })();
+/** A strategist failure that retrying THIS cycle cannot fix — credit exhausted, auth, permission,
+ *  a hard 401/403. Detected from the error text so a GLOBAL outage trips the breaker while a one-off
+ *  malformed request (a single 400 on one market's prompt) does NOT block every other pair. */
+export function isHardStrategistFailure(err: string | null | undefined): boolean {
+  const e = String(err ?? "");
+  return /HTTP\s*40[13]\b/.test(e) || /credit balance|balance is too low|too low to access|authentication|invalid.{0,12}api.?key|permission|insufficient|quota/i.test(e);
+}
+/** True while the hard-outage breaker is OPEN (a hard failure was seen within the cooldown and no
+ *  success has since closed it). Skip strategist calls; keep the deterministic net in charge. */
+export function strategistHardBlocked(db: Database, nowMs: number): boolean {
+  return nowMs < Number(R.metaGet(db, STRATEGIST_HARD_BLOCK_KEY) ?? 0);
+}
+/** True when the strategist layer is in an ACTIVE outage: the breaker is open (hard outage), OR its
+ *  most recent outcome was a failure and that failure is recent (within STRATEGIST_STALE_MIN). A
+ *  quiet period with no reassessments is NOT degraded — only a live, currently-failing layer. The
+ *  breaker is folded in so the price-stop restore stays active across a SKIPPED (not re-issued)
+ *  cooldown, not just on the tick that recorded the failure. */
 export function strategistDegraded(db: Database, nowMs: number): boolean {
+  if (strategistHardBlocked(db, nowMs)) return true;
   const lastOk = Number(R.metaGet(db, LAST_STRATEGIST_OK_KEY) ?? 0);
   const lastFail = Number(R.metaGet(db, LAST_STRATEGIST_FAIL_KEY) ?? 0);
   return lastFail > lastOk && nowMs - lastFail <= STRATEGIST_STALE_MIN * 60_000;
@@ -850,6 +892,22 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
         // fire (insurance restored) and note WHY, so the log distinguishes it from a normal stop.
         d = { ...d, reason: `${d.reason} · стратег-слой недоступен, ценовой стоп восстановлен (degraded_mode)` };
       }
+      // UNDER-THESIS GATE (mirror of the melting-option exemption). An Under/team-total LOSES only
+      // when goals climb to the line — so while the score sits ≥ UNDER_STOP_SUPPRESS_MARGIN goals
+      // BELOW the line, a price crash is a book artifact (Sarpsborg Under 3.5 @1:0 dumped @21-26¢;
+      // Inter FK Sarajevo Under 1.5 @7-8¢ then SETTLED 100¢), not a broken thesis. Suppress the
+      // price STOP; take-profit / edge-gone still fire. GAP-based & self-correcting: re-checked
+      // against the live score every cycle, so unlike the Over exemption it needs NO degraded-mode
+      // restore — a goal narrowing the margin below the threshold restores the stop on its own,
+      // even through a strategist blackout. Only the STOP is gated (winsOnEventOccurrence already
+      // handled Over, so this reaches Under/No totals). Take-profit unaffected.
+      if (d.kind === "stop") {
+        const uMargin = underThesisMarginGoals(b.market_label, m.score_home ?? 0, m.score_away ?? 0, { home: m.home, away: m.away });
+        if (uMargin != null && uMargin >= UNDER_STOP_SUPPRESS_MARGIN) {
+          holdOnce(`ценовой стоп подавлен по ${holdKey}: Under-тезис в запасе — до линии ещё ${uMargin} гол(ов) при счёте ${m.score_home ?? 0}:${m.score_away ?? 0}; цена оторвана книгой, тезис не под ударом (under_thesis_safe); держим до стратег-выхода / сеттла`);
+          continue;
+        }
+      }
       // Phantom-bid guard: a stop firing on a degenerate bid (≤FLOOR¢) that sits far
       // below the mid is dumping into a momentarily-broken book, not managing risk —
       // HOLD, let it settle on the real result. (A take-profit can no longer fire on a
@@ -867,6 +925,15 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // book; a genuine small-slip stop (0–1¢) still fires.
       if (sell.fromBook && sell.bestBidCents != null && (sell.bestBidCents - sell.cents) >= EXIT_SLIPPAGE_BLOCK) {
         holdOnce(`выход отклонён по ${holdKey}: фулл-стейк VWAP ${sell.cents}¢ против бида ${sell.bestBidCents}¢ (слип −${Math.round((sell.bestBidCents - sell.cents) * 10) / 10}¢) — книга не держит размер (${d.reason}); держим до реального рынка/сеттла (exit_slippage_block)`);
+        continue;
+      }
+      // Illiquid-mark-gap guard (audit: 20-26¢ bids that slipped between the ≤5¢ phantom floor and
+      // the 15¢ slippage gap). On a real book, a RICH mark (≥ MIN¢) with the best bid ≥ GAP¢ below it
+      // means the executable bid decoupled from the value — illiquidity, not a thesis break — so a
+      // stop would dump at a price the market doesn't bear. HOLD. Only for a STOP (a take-profit
+      // needs a HIGH bid, never triggers here); conservative + logged for calibration.
+      if (d.kind === "stop" && sell.fromBook && sell.bestBidCents != null && mk.price >= EXIT_ILLIQUID_MARK_MIN && (mk.price - sell.bestBidCents) >= EXIT_ILLIQUID_MARK_GAP) {
+        holdOnce(`выход отклонён по ${holdKey}: марк ${mk.price}¢, но лучший бид ${sell.bestBidCents}¢ (Δ−${Math.round((mk.price - sell.bestBidCents) * 10) / 10}¢) — книга неликвидна, цена оторвана от стоимости, не слом тезиса (${d.reason}); держим до реального рынка/сеттла (exit_illiquid_mark_gap)`);
         continue;
       }
       const pnl = closeBetEarly(db, b, sell.cents, d.reason, minuteLabel(m), now);
@@ -1060,6 +1127,7 @@ export async function strategistReassess(
       else byStrategy.set(strat.id, { strat, profiles: [{ profile, pct }] });
     }
     const matchStart = calls;
+    let blockedLogged = false; // circuit-breaker: log the outage once per match, not per pair
     for (const { strat, profiles } of byStrategy.values()) {
       if (calls - matchStart >= MAX_PAIRS_PER_MATCH) break; // бюджет теперь считает СТРАТЕГИИ, не пары
       if (opts.onlyStrategyId && strat.id !== opts.onlyStrategyId) continue; // manual: one strategy only
@@ -1097,6 +1165,18 @@ export async function strategistReassess(
           continue;
         }
       }
+      // CIRCUIT-BREAKER short-circuit: a hard strategist outage (credit/auth) is open → don't
+      // re-issue the dead call for every pair. The deterministic exit net (degraded → price-stop
+      // restore + Under gap-suppression) manages the positions until a probe closes the breaker.
+      if (strategistHardBlocked(db, nowMs)) {
+        if (!blockedLogged) {
+          blockedLogged = true;
+          const until = Number(R.metaGet(db, STRATEGIST_HARD_BLOCK_KEY) ?? 0);
+          const hhmm = new Date(until).toISOString().slice(11, 16);
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "skip", text: `стратег разомкнут (кредит/авторизация) — переоценки приостановлены до ~${hhmm}Z; позиции ведёт детерминированный слой (стоп/gap-подавление/сеттл) (strategist_circuit_open)`, created_at: now });
+        }
+        continue;
+      }
       calls++;
       // Pre-registered counter_scenario conditions per market (structured field in the plan) —
       // used to verify a counter_scenario exit tag against the live score/minute (trigger honesty).
@@ -1123,13 +1203,21 @@ export async function strategistReassess(
         // Stamp the strategist-layer OUTAGE so the deterministic exit net can restore the
         // price stop to exempt markets while the LLM is blind (degraded-mode fallback).
         try { R.metaSet(db, LAST_STRATEGIST_FAIL_KEY, String(nowMs), now); } catch {}
+        // A HARD outage (credit/auth) → OPEN the breaker so the rest of this pass (and the next
+        // cooldown) doesn't re-issue the same dead call for every pair. A transient failure
+        // (timeout / 5xx / empty reply) does NOT trip it — those are worth a fresh try next cycle.
+        if (isHardStrategistFailure(dec.error)) {
+          try { R.metaSet(db, STRATEGIST_HARD_BLOCK_KEY, String(nowMs + STRATEGIST_HARD_COOLDOWN_MIN * 60_000), now); } catch {}
+        }
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "skip", text: `переоценка не выполнена — стратег недоступен (${dec.error || "нет ответа ИИ"})`, created_at: now });
         continue;
       }
       touched.add(sid);
       // The strategist layer is alive — record it so the exit net keeps trusting it to manage
-      // the melting-option positions (and doesn't restore the price stop).
+      // the melting-option positions (and doesn't restore the price stop). A live success also
+      // CLOSES the hard-outage breaker immediately (recovery beats waiting out the cooldown).
       try { R.metaSet(db, LAST_STRATEGIST_OK_KEY, String(nowMs), now); } catch {}
+      try { if (Number(R.metaGet(db, STRATEGIST_HARD_BLOCK_KEY) ?? 0) > 0) R.metaSet(db, STRATEGIST_HARD_BLOCK_KEY, "0", now); } catch {}
       // Одно решение — на КАЖДЫЙ профиль: выходы бьют только по позициям профиля,
       // входы сайзятся его risk_config (§9.6), заметка переоценки — своя.
       // Дедуп заметок: суждение стратега общее (Модель А), поэтому в частом случае

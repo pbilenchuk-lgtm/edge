@@ -9,7 +9,7 @@ import { edgePct, impliedProb, decimalOdds } from "../src/lib/edge.js";
 import {
   extractThresholdsHeuristic, validateParams, sizeBet, confidenceRank,
 } from "../src/lib/thresholds.js";
-import { payout, settleBet, resolveFootballMarket, matchPhase } from "../src/lib/settlement.js";
+import { payout, settleBet, resolveFootballMarket, matchPhase, underThesisMarginGoals } from "../src/lib/settlement.js";
 import {
   brierScore, clvValue, calibration, computeMetrics, verdict, MIN_SAMPLES,
 } from "../src/lib/metrics.js";
@@ -187,6 +187,25 @@ test("settlement: payout and P&L", () => {
   assert.equal(patch.status, "settled_won");
   assert.equal(patch.closing_price, 92);
   assert.equal(patch.pnl, 81.82);
+});
+
+test("underThesisMarginGoals: gap-based Under-thesis margin (mirror of winsOnEventOccurrence)", () => {
+  const teams = { home: "Sarpsborg", away: "Viking" };
+  // Match total: line − combined goals.
+  assert.equal(underThesisMarginGoals("Under 3.5", 1, 0, teams), 2.5); // Sarpsborg @1:0 → safe (≥1)
+  assert.equal(underThesisMarginGoals("Under 2.5", 1, 0, teams), 1.5); // safe
+  assert.equal(underThesisMarginGoals("Under 2.5", 2, 0, teams), 0.5); // threatened (<1) → stop allowed
+  assert.equal(underThesisMarginGoals("Under 2.5", 1, 2, teams), -0.5); // already lost
+  // Team total: settles off the NAMED side's goals only.
+  assert.equal(underThesisMarginGoals("Viking Under 1.5", 3, 0, teams), 1.5); // away scored 0 → safe despite 3:0
+  assert.equal(underThesisMarginGoals("Viking Under 1.5", 0, 1, teams), 0.5); // away has 1 → threatened
+  // Clean-sheet-as-0.5 team total: a 0.5 line is always a knife-edge (margin < 1) → never suppressed.
+  assert.equal(underThesisMarginGoals("Sarpsborg Under 0.5", 0, 0, teams), 0.5);
+  // Not an Under total → null (caller keeps the normal stop): Over, o/u (backs over), moneyline, named-but-unknown.
+  assert.equal(underThesisMarginGoals("Over 2.5", 0, 0, teams), null);
+  assert.equal(underThesisMarginGoals("O/U 2.5", 0, 0, teams), null);
+  assert.equal(underThesisMarginGoals("Sarpsborg", 0, 0, teams), null);
+  assert.equal(underThesisMarginGoals("Barcelona Under 2.5", 0, 0, teams), null); // named side we can't disambiguate
 });
 
 test("settlement: football market resolution from score 2:1", () => {

@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase, migrateRetireFable } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision, winsOnEventOccurrence } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure } from "../src/lib/lifecycle.js";
 import { analyzeMatch, runStrategists } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
@@ -186,9 +186,11 @@ test("evaluateExits HOLDS a position on a live match the provider isn't deliveri
   // match_live (zeros stats). A price crash (55¢ → 15¢) would normally hard-stop.
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Orlando", away: "Kansas", state: "live", lineup_out: true, kickoff_at: "2026-07-11T00:00:00Z", minute: null, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   R.upsertMatchLive(db, { match_id: mid, espn_event_id: "e", league: "usa.nwsl", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { shots: 0 }, away: { shots: 0 } }), updated_at: "t" });
-  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 15, ai_prob: 0.5, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  // Directional moneyline (not an Under total) so this test isolates the delivery-gate — the
+  // Under-thesis stop suppression is a separate concern tested elsewhere.
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Orlando", price: 15, ai_prob: 0.5, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
   const bid = R.uid();
-  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Under 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, market_label: "Orlando", status: "open", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
 
   await evaluateExits(db, { now: () => "t" });
   assert.equal(R.getBet(db, bid)!.status, "open", "no delivery → held, not cut on unverifiable price noise");
@@ -309,13 +311,13 @@ test("untradeable-market gate is SYMMETRIC: one placeholder market blocks ENTRY 
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 33, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   R.upsertMatchLive(db, { match_id: mid, espn_event_id: "e", league: "l", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { shots: 1 }, away: { shots: 1 } }), updated_at: "t" });
   // ONE market/token. Mark has crashed to 12¢ — a stop-out on any OPEN position here.
-  // Under 1.5 (a mirror "loses on the event" market) — keeps the price stop, so this test
-  // still exercises the untradeable EXIT modelling rather than the optionality exemption.
-  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 1.5", price: 12, ai_prob: 0.5, liquidity: "1000", external_ref: "TOKEN", snapshot_at: "t", is_closing: false });
+  // A directional moneyline ("A") — keeps the price stop, so this test exercises the untradeable
+  // EXIT modelling rather than the optionality exemption OR the Under-thesis suppression.
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "A", price: 12, ai_prob: 0.5, liquidity: "1000", external_ref: "TOKEN", snapshot_at: "t", is_closing: false });
   // (a) a fresh proposal on this market (aggressive) — the ENTRY side.
-  R.insertBet(db, { id: "sym-entry", match_id: mid, strategy_id: strat.id, risk_profile_id: "aggressive", market_label: "Under 1.5", status: "proposed", proposed_price: 12, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "план", entered_minute: null, result: null, payout: null, created_at: "t" });
+  R.insertBet(db, { id: "sym-entry", match_id: mid, strategy_id: strat.id, risk_profile_id: "aggressive", market_label: "A", status: "proposed", proposed_price: 12, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "план", entered_minute: null, result: null, payout: null, created_at: "t" });
   // (b) an already-OPEN position on the SAME market (medium, different pair) — the EXIT side.
-  R.insertBet(db, { id: "sym-open", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Under 1.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 12, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+  R.insertBet(db, { id: "sym-open", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "A", status: "open", proposed_price: 55, entry_price: 55, current_price: 12, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
 
   // The SAME empty-but-fetch-OK book drives both sides.
   const emptyBook = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? { bids: [], asks: [] } : {}) })) as unknown as typeof fetch;
@@ -440,7 +442,9 @@ test("evaluateExits HOLDS a stop when the full stake would SLIP far below the be
   db.exec("DELETE FROM bets"); // isolate from seeded positions (the mock book applies to every token)
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
   const strat = R.listStrategies(db, "football")[0];
-  const liveMatch = (id: string, ref: string) => R.insertMatch(db, { id, competition_id: comp.id, home: "Orgryte", away: "Hacken", state: "live", lineup_out: true, kickoff_at: null, minute: 38, score_home: 1, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: ref });
+  // 2:2 so the team-total "BK Hacken Under 2.5" is genuinely under threat (Hacken 2, margin 0.5 < 1)
+  // → the Under-thesis suppression does NOT apply and this test isolates the slippage guard.
+  const liveMatch = (id: string, ref: string) => R.insertMatch(db, { id, competition_id: comp.id, home: "Orgryte", away: "Hacken", state: "live", lineup_out: true, kickoff_at: null, minute: 38, score_home: 2, score_away: 2, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: ref });
   // Large $100 position entered at 52¢ (~192 shares) — enough to walk a thin book.
   const openBet = (id: string, mid: string) => R.insertBet(db, { id, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "BK Hacken Under 2.5", status: "open", proposed_price: 52, entry_price: 52, current_price: 40, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "35'", result: null, payout: null, created_at: "t" });
   const bookFetch = (book: any) => (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
@@ -498,14 +502,27 @@ test("evaluateExits: price stop is SUPPRESSED for a melting-option market, KEPT 
   assert.equal(R.getBet(db, "over-bet")!.status, "open", "Over 0.5 held through the dip (rides to the goal / settlement)");
   assert.ok(R.tradeLogForMatch(db, m1).some((l) => l.type === "hold" && /price_stop_exempt/.test(l.text)), "suppression logged");
 
-  // (2) MIRROR «Under 2.5» same −55% drawdown at 62' → stop STILL fires (each goal is an
-  //     irreversible step down — Örgryte class). The fix must not exempt this.
-  const m2 = R.uid(); liveMatch(m2, "AS2", 62);
+  // (2) MIRROR «Under 2.5» same −55% drawdown at 62', but SCORE 1:0 (margin 2.5−1 = 1.5 ≥ 1) →
+  //     the Under thesis is NOT under threat (needs two more goals), so the 18¢ is a book artifact,
+  //     not a broken thesis → price stop SUPPRESSED (under_thesis_safe). This is the audit fix:
+  //     Sarpsborg/Brann/Inter dumped winning Unders into illiquid 20-26¢ bids at safe scores.
+  const m2 = R.uid(); liveMatch(m2, "AS2", 62); // score_home 1, score_away 0
   R.insertMarket(db, { id: R.uid(), match_id: m2, label: "Under 2.5", price: 18, ai_prob: 0.6, liquidity: "2000", external_ref: "TOK2", snapshot_at: "t", is_closing: false });
   openBet("under-bet", m2, "Under 2.5", 40, 18);
   const ex2 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: deep(0.18) });
-  assert.ok(ex2.some((e) => e.matchId === m2), "Under (loses on the event) keeps the price stop");
-  assert.ok(R.getBet(db, "under-bet")!.status.startsWith("settled"), "Under stop executed");
+  assert.ok(!ex2.some((e) => e.matchId === m2), "Under stop SUPPRESSED while the thesis has ≥1 goal of margin");
+  assert.equal(R.getBet(db, "under-bet")!.status, "open", "safe Under held (rides to strategist / settlement)");
+  assert.ok(R.tradeLogForMatch(db, m2).some((l) => l.type === "hold" && /under_thesis_safe/.test(l.text)), "Under suppression logged");
+
+  // (2b) SAME Under 2.5 but SCORE 2:0 (margin 2.5−2 = 0.5 < 1) → a single goal breaks it, the
+  //      thesis IS under real threat (Örgryte goal-storm class) → the price stop FIRES.
+  const m2b = R.uid();
+  R.insertMatch(db, { id: m2b, competition_id: comp.id, home: "Argentina", away: "Switzerland", state: "live", lineup_out: true, kickoff_at: null, minute: 62, score_home: 2, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "AS2B" });
+  R.insertMarket(db, { id: R.uid(), match_id: m2b, label: "Under 2.5", price: 18, ai_prob: 0.6, liquidity: "2000", external_ref: "TOK2B", snapshot_at: "t", is_closing: false });
+  openBet("under-bet-threat", m2b, "Under 2.5", 40, 18);
+  const ex2b = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: deep(0.18) });
+  assert.ok(ex2b.some((e) => e.matchId === m2b), "threatened Under (margin < 1 goal) keeps the price stop");
+  assert.ok(R.getBet(db, "under-bet-threat")!.status.startsWith("settled"), "threatened Under stop executed");
 
   // (3) EXEMPT but SPENT: «Over 0.5» at 3¢ on 85' → the time-decay floor closes it (a spent
   //     lottery ticket is not held to a 0¢ settle).
@@ -875,6 +892,64 @@ test("strategistReassess STALENESS guard: an event repriced the market between d
   assert.equal(R.getBet(db, "stale-bet")!.status, "open", "stale-reality exit deferred — position NOT sold on a decision from a different price");
   assert.ok(!R.betsForMatch(db, mid).some((b) => b.status.startsWith("settled")), "no partial booked");
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "hold" && /exit_staleness_reassess/.test(l.text)), "staleness deferral logged for reassessment");
+});
+
+test("isHardStrategistFailure: credit/auth/permission trip the breaker; transient failures don't", () => {
+  for (const e of ['anthropic HTTP 400 — {"error":{"message":"Your credit balance is too low to access the Anthropic API"}}', "anthropic HTTP 401 — auth", "provider HTTP 403 — permission denied", "authentication_error", "insufficient quota"])
+    assert.equal(isHardStrategistFailure(e), true, `hard: ${e}`);
+  for (const e of ["anthropic HTTP 429 — rate limit", "anthropic HTTP 529 — overloaded", "anthropic HTTP 500", "модель не ответила за отведённое время (таймаут)", "пустой ответ модели", "fetch failed (ECONNRESET)"])
+    assert.equal(isHardStrategistFailure(e), false, `transient: ${e}`);
+});
+
+test("strategistReassess CIRCUIT-BREAKER: a hard-auth 400 opens the breaker — one call, not a 248-storm; a later success closes it", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  // Two live matches each holding an open position → several (match,strategy) pairs would each
+  // call the strategist. Unthrottled that's the Rosenborg 248-call storm; the breaker caps it.
+  const mk = (id: string, ref: string) => {
+    R.insertMatch(db, { id, competition_id: comp.id, home: "Rosenborg", away: "Kristiansund", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: ref });
+    R.upsertMatchLive(db, { match_id: id, espn_event_id: id, league: "nor.1", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { shots: 3 }, away: { shots: 2 } }), updated_at: "t" });
+    R.insertMarket(db, { id: R.uid(), match_id: id, label: "Rosenborg", price: 55, ai_prob: 0.6, liquidity: "2000", external_ref: `TOK-${ref}`, snapshot_at: "t", is_closing: false });
+    R.insertBet(db, { id: `bet-${ref}`, match_id: id, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Rosenborg", status: "open", proposed_price: 55, entry_price: 55, current_price: 55, closing_price: null, ai_prob: 0.6, stake: 40, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  };
+  const m1 = R.uid(), m2 = R.uid();
+  mk(m1, "M1"); mk(m2, "M2");
+
+  let llmCalls = 0;
+  const creditError = (async (url: any) => {
+    const u = String(url);
+    if (u.includes("anthropic") || u.includes("/messages")) { llmCalls++; return { ok: false, status: 400, text: async () => '{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API"}}' } as any; }
+    return { ok: true, status: 200, json: async () => (u.includes("/book") ? { bids: [], asks: [] } : {}) } as any;
+  }) as unknown as typeof fetch;
+  const t0 = "2026-07-16T20:00:00Z";
+  await strategistReassess(db, { fetchImpl: creditError, polymarket: poly, env: { ANTHROPIC_API_KEY: "k" }, now: () => t0 }, { newEventMatchIds: new Set([m1, m2]), max: 50 });
+  assert.equal(llmCalls, 1, "breaker opened after the FIRST hard-auth 400 — the other pairs short-circuit (no storm)");
+  assert.ok(strategistHardBlocked(db, Date.parse(t0)), "hard-outage breaker is open");
+  const logs = [...R.tradeLogForMatch(db, m1), ...R.tradeLogForMatch(db, m2)];
+  assert.ok(logs.some((l) => /strategist_circuit_open/.test(l.text)), "circuit-open logged for the skipped matches");
+
+  // A reassess DURING the cooldown makes ZERO calls (fully short-circuited).
+  llmCalls = 0;
+  await strategistReassess(db, { fetchImpl: creditError, polymarket: poly, env: { ANTHROPIC_API_KEY: "k" }, now: () => "2026-07-16T20:05:00Z" }, { newEventMatchIds: new Set([m1, m2]), max: 50 });
+  assert.equal(llmCalls, 0, "still within cooldown → no strategist calls at all");
+
+  // Past the cooldown (15 min default) the breaker lets a probe through; a SUCCESS closes it.
+  let okCalls = 0;
+  const good = (async (url: any) => {
+    const u = String(url);
+    if (u.includes("anthropic") || u.includes("/messages")) { okCalls++; return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [], note: "ok" }) }] }) } as any; }
+    return { ok: true, status: 200, json: async () => (u.includes("/book") ? { bids: [], asks: [] } : {}) } as any;
+  }) as unknown as typeof fetch;
+  const t2 = "2026-07-16T20:16:00Z";
+  await strategistReassess(db, { fetchImpl: good, polymarket: poly, env: { ANTHROPIC_API_KEY: "k" }, now: () => t2 }, { newEventMatchIds: new Set([m1, m2]), max: 50 });
+  assert.ok(okCalls >= 1, "past cooldown the strategist is probed again");
+  assert.ok(!strategistHardBlocked(db, Date.parse(t2)), "a live success CLOSED the breaker");
 });
 
 test("strategistReassess hands the model minute estimate, price movement, liquidity and a no-score note", async () => {

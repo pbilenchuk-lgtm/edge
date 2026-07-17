@@ -217,6 +217,35 @@ function labelSide(l: string, teams?: { home: string; away: string }): "home" | 
   return null;
 }
 
+/**
+ * For an UNDER-type total ("Under 3.5", "Rosenborg Under 2.5", team clean-sheet "X Under 0.5"),
+ * how much MARGIN the thesis still has RIGHT NOW, in goals: (line − goals-so-far-on-the-relevant
+ * -side). Positive = the Under is still winning if the match ended now; ≥1 means a single further
+ * goal cannot yet break it. This is the mirror of `winsOnEventOccurrence` (which flags Over/BTTS-Yes
+ * options): an Under LOSES only when goals climb to the line, so while the margin is comfortable a
+ * price crash is a book artifact, not a broken thesis — the deterministic price stop must not fire.
+ *
+ * Returns null when the label isn't an Under total we can score (the "o/u" alias BACKS the over, a
+ * named team total we can't disambiguate, or not a total at all) → caller keeps the normal stop.
+ * Team totals settle off the named side; a generic/absent prefix off the aggregate — identical
+ * parsing to resolveFootballMarket's totals branch, so live suppression and final settlement agree.
+ */
+export function underThesisMarginGoals(
+  label: string, scoreHome: number, scoreAway: number, teams?: { home: string; away: string },
+): number | null {
+  const l = label.toLowerCase();
+  const ou = l.match(/(?:^|\s)(under|o\/u)\s*(\d+(?:\.\d+)?)/);
+  if (!ou || ou[1] !== "under") return null; // only the UNDER side loses on a goal ("o/u" backs over)
+  const line = parseFloat(ou[2]);
+  if (!isFinite(line)) return null;
+  const side = labelSide(l, teams);
+  const prefix = l.slice(0, ou.index ?? 0).trim();
+  const genericPrefix = prefix.split(/\s+/).filter(Boolean).every((t) => TOTAL_WORDS.has(t));
+  if (side == null && !genericPrefix) return null; // named team total we can't disambiguate → keep the stop
+  const scored = side === "home" ? scoreHome : side === "away" ? scoreAway : scoreHome + scoreAway;
+  return line - scored;
+}
+
 // Generic club suffixes that don't identify a team on their own — "Manchester
 // United" vs "Newcastle United" must key on "manchester", not "united", or the
 // moneyline is unresolvable and gets wrongly voided.
