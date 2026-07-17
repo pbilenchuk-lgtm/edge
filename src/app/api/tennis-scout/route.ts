@@ -36,6 +36,12 @@ export async function GET(req: Request) {
       const pmv = await import("@/lib/tennisPmv");
       return NextResponse.json(pmv.buildTennisFrequencyReport(getDb()));
     }
+    // ?report=pmv_settle_check → Option-A sim de-risk: dry-run the settlement path over finished
+    // ATP/WTA matches (no bet touched) → do props resolve to won/lost or would they hang open?
+    if (url.searchParams.get("report") === "pmv_settle_check") {
+      const pmv = await import("@/lib/tennisPmv");
+      return NextResponse.json(pmv.buildPmvSettleCheck(getDb()));
+    }
     // ?report=pmv_brier → PMV core success criterion: Brier of the Markov prob vs the implied mid.
     if (url.searchParams.get("report") === "pmv_brier") {
       const pmv = await import("@/lib/tennisPmv");

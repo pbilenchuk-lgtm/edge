@@ -452,6 +452,59 @@ export function buildPmvBetsReport(db: Database): PmvBetsReport {
   return { generatedNote: `${entries.length} PMV-ставок · ${provenanceFlags.length} provenance-флагов · ${skips.length} прочих скипов`, entries, provenanceFlags, skips };
 }
 
+// ── Settlement self-check (Option-A sim de-risk) ──────────────────────────────
+// The PMV sim only yields data if a FINISHED ATP/WTA match actually resolves to won/lost — but the
+// settlement path (tennisFinalResult → finalSetsFromRaw → resolveTennisProp) has NEVER run in prod
+// (every prior bet was migration-voided before it could settle). This dry-runs that EXACT path over
+// recently-finished in-scope matches WITHOUT touching any bet, so we learn — before betting blind —
+// whether the pipeline produces outcomes or the props would hang open. A canonical Total Sets O/U 2.5
+// is used as the probe (orientation-independent, the dominant PMV family), plus the real per-match
+// finished/retired/manual verdict. If most matches land in `unreadable_sets`, settlement is broken and
+// must be fixed before the sim can accumulate a Brier — the whole point of running the check first.
+export interface PmvSettleCheck {
+  finishedInScope: number;
+  resolvable: number;      // fs readable AND a canonical prop resolves to won/lost
+  voidClause: number;      // fs readable but resolves null (retire/cancel on a void-family prop)
+  unreadableSets: number;  // finished, but finalSetsFromRaw couldn't read per-set detail → would hang OPEN
+  manual: number;          // winner unknown → flagged, never guessed
+  verdict: "settles" | "mostly_unreadable" | "no_finished_matches";
+  sample: { match: string; comp: string; state: string; note: string }[];
+  note: string;
+}
+export function buildPmvSettleCheck(db: Database, limit = 20): PmvSettleCheck {
+  let finishedInScope = 0, resolvable = 0, voidClause = 0, unreadableSets = 0, manual = 0;
+  const sample: PmvSettleCheck["sample"] = [];
+  for (const c of R.listCompetitions(db)) {
+    if (c.sport_id !== "tennis" || pmvTour(c) == null) continue; // ATP/WTA singles only — same scope as the sim
+    for (const m of R.listMatches(db, c.id)) {
+      if (m.state !== "finished") continue;
+      const fin = tennisFinalResult(db, m.id);
+      if (!fin || !fin.finished) continue;
+      finishedInScope++;
+      let state: string, note: string;
+      if (fin.manual) { manual++; state = "manual"; note = "победитель неизвестен → флаг, не угадываем"; }
+      else {
+        const row = db.prepare(`SELECT raw FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(m.id) as { raw?: string } | undefined;
+        const fs = finalSetsFromRaw(row?.raw ?? null);
+        if (!fs) { unreadableSets++; state = "unreadable_sets"; note = "финиш, но per-set detail не читается → ставка зависла бы OPEN"; }
+        else {
+          // canonical probe: Total Sets Over 2.5 (family total_sets — orientation-independent).
+          const won = resolveTennisProp("Total Sets: Over 2.5", fs, { retired: fin.retired, canceled: fin.canceled, firstIsP1: true });
+          if (won == null) { voidClause++; state = "void"; note = `${fin.canceled ? "cancel" : fin.retired ? "retire" : "clause"} → void (возврат)`; }
+          else { resolvable++; state = "resolvable"; note = `сеты ${fs.setsWonP1}-${fs.setsWonP2}, геймы ${fs.matchGames} → ${won ? "won" : "lost"}`; }
+        }
+      }
+      if (sample.length < limit) sample.push({ match: `${m.home} — ${m.away}`, comp: c.name, state, note });
+    }
+  }
+  const verdict: PmvSettleCheck["verdict"] = finishedInScope === 0 ? "no_finished_matches"
+    : resolvable >= Math.max(1, unreadableSets) ? "settles" : "mostly_unreadable";
+  const note = finishedInScope === 0 ? "нет доигранных ATP/WTA матчей в скоупе — проверить нечего (жди матчей)"
+    : verdict === "settles" ? `${resolvable}/${finishedInScope} матчей резолвятся в won/lost — путь сеттлмента РАБОТАЕТ, сим будет копить Brier`
+      : `${unreadableSets}/${finishedInScope} матчей с нечитаемым per-set detail — сеттлмент СЛОМАН, чинить finalSetsFromRaw до накопления (иначе ставки виснут open)`;
+  return { finishedInScope, resolvable, voidClause, unreadableSets, manual, verdict, sample, note };
+}
+
 export function pmvBetsCsv(r: PmvBetsReport): string {
   const esc = (v: unknown) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const head = ["created_at", "match", "comp", "profile", "prop", "family", "side", "line", "mid_cents", "theo_cents", "deviation_cents", "delta", "book_usd", "edge_pct", "stake", "status", "result", "payout", "voided", "epoch", "rationale"];

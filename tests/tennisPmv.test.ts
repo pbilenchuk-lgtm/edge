@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { parseProp, theoForProp, resolveTennisProp, scanMatchProps, finalSetsFromRaw, pmvTour, corrCluster, propFirstIsP1, settleTennisPmvBets, type FinalSets } from "../src/lib/tennisPmv.js";
+import { parseProp, theoForProp, resolveTennisProp, scanMatchProps, finalSetsFromRaw, pmvTour, corrCluster, propFirstIsP1, settleTennisPmvBets, buildPmvSettleCheck, type FinalSets } from "../src/lib/tennisPmv.js";
 import { tennisTheo, BASE_HOLD } from "../src/lib/tennisMarkov.js";
 import { migrateTennisPmvStrategy } from "../src/lib/seed.js";
 import { serializeEntryMeta } from "../src/lib/betMeta.js";
@@ -218,6 +218,32 @@ test("orientation single-source (C): a reversed-order set_winner settles on the 
   // Sinner (the prop's first-named) won set 1 6-4 → the bet WON. The moneyline orientation
   // (Alcaraz=first) — the old code's source — would have wrongly settled this LOST.
   assert.equal(R.getBet(db, "pmv1")!.status, "settled_won", "reversed-order set_winner settles on the prop's own player");
+});
+
+test("buildPmvSettleCheck: dry-runs the real settle path — resolvable vs unreadable finished ATP/WTA matches", () => {
+  const db = openDb(":memory:");
+  migrateTennisPmvStrategy(db);
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "pm-atp", sport_id: "tennis", name: "ATP", budget: 0, external_league: null, created_at: "t" });
+  R.upsertCompetition(db, { id: "pm-itf", sport_id: "tennis", name: "ITF Torino", budget: 0, external_league: null, created_at: "t" }); // out of scope
+  // (1) RESOLVABLE — finished with readable per-set detail (2 sets → Total Sets O/U 2.5 resolves).
+  const m1 = R.uid();
+  R.insertMatch(db, { id: m1, competition_id: "pm-atp", home: "Carlos Alcaraz", away: "Jannik Sinner", state: "finished", lineup_out: true, kickoff_at: "t", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: m1 } as any);
+  R.insertTennisSnapshot(db, { event_key: "W1", provider: "apitennis", batch_at: "2026-07-14T14:00:00Z", p1: "C. Alcaraz", p2: "J. Sinner", tournament: "ATP", event_type: "ATP Singles", live: 0, status: "Finished", sets_p1: 0, sets_p2: 2, set_num: 2, games_p1: 3, games_p2: 6, game_points: null, server: null, pm_match_id: m1, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "Second Player", scores: [{ score_set: 1, score_first: 4, score_second: 6 }, { score_set: 2, score_first: 3, score_second: 6 }] }) } as any);
+  // (2) UNREADABLE — finished by the columns, but raw carries no per-set detail → finalSetsFromRaw null.
+  const m2 = R.uid();
+  R.insertMatch(db, { id: m2, competition_id: "pm-atp", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: m2 } as any);
+  R.insertTennisSnapshot(db, { event_key: "W2", provider: "apitennis", batch_at: "2026-07-14T14:00:00Z", p1: "A", p2: "B", tournament: "ATP", event_type: "ATP Singles", live: 0, status: "Finished", sets_p1: 2, sets_p2: 0, set_num: 2, games_p1: 6, games_p2: 3, game_points: null, server: null, pm_match_id: m2, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: "{}" } as any);
+  // (3) OUT OF SCOPE — an ITF finished match must NOT be counted (PMV is ATP/WTA singles only).
+  const m3 = R.uid();
+  R.insertMatch(db, { id: m3, competition_id: "pm-itf", home: "X", away: "Y", state: "finished", lineup_out: true, kickoff_at: "t", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: m3 } as any);
+  R.insertTennisSnapshot(db, { event_key: "W3", provider: "apitennis", batch_at: "2026-07-14T14:00:00Z", p1: "X", p2: "Y", tournament: "ITF Torino", event_type: "ITF", live: 0, status: "Finished", sets_p1: 2, sets_p2: 0, set_num: 2, games_p1: 6, games_p2: 4, game_points: null, server: null, pm_match_id: m3, pm_mid_cents: null, pm_p1_cents: null, pm_p2_cents: null, raw: JSON.stringify({ event_winner: "First Player", scores: [{ score_set: 1, score_first: 6, score_second: 4 }, { score_set: 2, score_first: 6, score_second: 3 }] }) } as any);
+
+  const rep = buildPmvSettleCheck(db);
+  assert.equal(rep.finishedInScope, 2, "only the two ATP matches count — ITF is out of scope");
+  assert.equal(rep.resolvable, 1, "the match with readable sets resolves to won/lost");
+  assert.equal(rep.unreadableSets, 1, "the match with no per-set detail would hang open");
+  assert.equal(rep.verdict, "settles"); // resolvable(1) >= max(1, unreadable(1))
 });
 
 test("prop settle: total_sets respects the O/U LINE, not a hardcoded 2.5 (bo5 3-0 is UNDER 3.5)", () => {
