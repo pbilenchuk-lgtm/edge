@@ -54,11 +54,23 @@ export interface SportsProvider {
   leaguesFor?(sport: string): string[];
 }
 
-function eventType(text: string): MatchEvent["type"] {
+// A goal that VAR OVERTURNED / never stood — the scoreline never counts it, and neither must we
+// (else it lingers in the event list as a phantom goal). Covers the many phrasings ESPN/StatPal use.
+const GOAL_NEGATED_RE = /no goal|disallow|ruled out|overturn|chalked off|cancel|goal removed|struck off|var:?\s*no goal/;
+// A goal STILL UNDER VAR REVIEW — the outcome is unknown, so it is NOT yet a confirmed goal. Audit
+// (NWSL Courage): a "50' Goal" + a "52' VAR Checking (same scorer)" were both typed `goal`, so the
+// strategist read TWO goals, fabricated a prob≈1.0 edge, and martingaled $280 into an already-lost
+// market (the goal was disallowed, final 0:2). Pending-review text must not read as a scored goal;
+// it resolves next tick into either a confirmed goal (score delta) or a negation. "VAR: goal
+// confirmed/awarded/given/stands" is a RESOLVED-yes and stays a goal (not matched here).
+const GOAL_PENDING_RE = /\b(var[\s-]*check|under review|being reviewed|checking|awaiting|review in progress|pending)\b/;
+export function eventType(text: string): MatchEvent["type"] {
   const t = text.toLowerCase();
   if (/red card/.test(t)) return "red_card";
   if (/yellow card/.test(t)) return "yellow_card";
-  if (/goal/.test(t) && !/no goal|disallow/.test(t)) return "goal";
+  // A goal only counts when it is neither negated nor still under review. A pending VAR check is
+  // classified "other" so it never inflates the goal-event list the strategist reasons over.
+  if (/goal/.test(t) && !GOAL_NEGATED_RE.test(t) && !GOAL_PENDING_RE.test(t)) return "goal";
   // Penalty NOT converted (saved / missed / awarded / VAR). A SCORED penalty
   // already reads as "goal" above; this catches the rest — a high-impact event
   // (a ~0.79 xG chance the scoreline doesn't reflect) that must not be dropped as

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
 import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
-import { parseEspnEvent, parseEspnSummary, MockSportsProvider } from "../src/lib/sports.js";
+import { parseEspnEvent, parseEspnSummary, MockSportsProvider, eventType } from "../src/lib/sports.js";
 import {
   canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch, settleStaleOpenBets, settleMatch, syncCompetitions,
 } from "../src/lib/engine.js";
@@ -70,6 +70,27 @@ test("parseEspnSummary extracts lineups + typed key events", () => {
   assert.equal(d.events[0].minute, 23);
   assert.equal(d.events[0].team, "Colombia");
   assert.equal(d.events[1].type, "yellow_card");
+});
+
+test("eventType: a VAR-pending or overturned goal is NOT counted as a scored goal (NWSL Courage double-count)", () => {
+  // Confirmed goals stay goals — including a goal VAR ultimately CONFIRMED/awarded.
+  assert.equal(eventType("Goal by James"), "goal");
+  assert.equal(eventType("Goal! Ashley Sanchez scores"), "goal");
+  assert.equal(eventType("VAR: goal confirmed — Sanchez"), "goal");
+  assert.equal(eventType("Goal awarded after VAR review"), "goal");
+  // Pending review — outcome unknown → NOT a goal yet (resolves next tick). This is the exact NWSL
+  // 52' "VAR Checking (Sanchez)" that was double-counted with the 50' goal.
+  assert.equal(eventType("VAR Checking — possible goal North Carolina Courage (Ashley Sanchez)"), "other");
+  assert.equal(eventType("Goal under review (VAR)"), "other");
+  assert.equal(eventType("Possible goal being reviewed"), "other");
+  // Overturned / never stood → NOT a goal.
+  assert.equal(eventType("Goal disallowed by VAR — offside"), "other");
+  assert.equal(eventType("Goal ruled out for offside"), "other");
+  assert.equal(eventType("Goal overturned after VAR"), "other");
+  assert.equal(eventType("No goal — chalked off"), "other");
+  // Non-goal events unaffected.
+  assert.equal(eventType("Red card for violent conduct"), "red_card");
+  assert.equal(eventType("Penalty - Saved"), "penalty");
 });
 
 test("parseEspnSummary keeps the positional layout: role tags, ordered by formation slot", () => {
