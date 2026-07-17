@@ -1351,6 +1351,16 @@ export async function strategistReassess(
             if (ourProb == null) { unfilled.push(`«${mk.label}» — нет оценки`); continue; }
             if (pick.prob != null) R.setMarketAiProb(db, mk.id, pick.prob);
             if (held.has(norm(mk.label))) continue;                       // already in this market
+            // PROB-SUM COHERENCE (audit #4: Larne «Draw 100¢» + «Draw — No 100¢» = 200¢; corrupted
+            // 3-way twins). Two supposedly-complementary contracts whose prices sum far from 100¢ are
+            // an incoherent/duplicated book — the "edge" against either is a phantom of the bad quote.
+            // The prematch analysis path already blocks these (analysis.ts probSumFlags); wire the SAME
+            // guard into the LIVE entry path, which was ungated. Reuses the cycle's de-vig groupSum.
+            const psInfo = impliedMap.get(mk.label);
+            if (psInfo?.sided && psInfo.groupSum != null && Math.abs(psInfo.groupSum - 1) > cfg.safeguards.prob_sum_tolerance + 1e-9) {
+              unfilled.push(`«${mk.label}» — сумма пары ${Math.round(psInfo.groupSum * 100)}¢ вне допуска (±${Math.round(cfg.safeguards.prob_sum_tolerance * 100)}¢) — несогласованный/дублированный рынок, не торгуем (prob_sum_block)`);
+              continue;
+            }
             // MARTINGALE BLOCK (audit #3b: NWSL VAR martingale $80→$200; Örgryte re-add). This pair
             // already CLOSED this market at a LOSS in THIS match — re-entering is doubling down into a
             // broken thesis, the escalation pattern INDEPENDENT of where the (possibly phantom) edge

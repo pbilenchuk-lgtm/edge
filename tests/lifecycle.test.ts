@@ -980,6 +980,34 @@ test("strategistReassess #3b MARTINGALE BLOCK: no re-add to a market this pair a
   assert.ok(R.reassessmentsForMatch(db, mid).some((r) => r.strategy_id === strat.id && /martingale_block/.test(r.body)), "the block is recorded in this pair's reassessment note");
 });
 
+test("strategistReassess #4: an incoherent complementary pair (sum far from 100¢) is not traded live (prob_sum_block)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.clearShares(db, comp.id);
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, risk_profile_id: "medium", pct: 50 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Larne", away: "Tre Fiori", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 1, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: mid, league: "uefa.champions_qual", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { shots: 4 }, away: { shots: 2 } }), updated_at: "t" });
+  // A corrupted twin: bare "Draw" AND "Draw — No" BOTH priced 60¢ → pair sum 120¢, incoherent
+  // (and off the rails, so this exercises the coherence guard, not the ≥98¢ resolved-market block).
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Draw", price: 60, ai_prob: 0.9, liquidity: "2000", external_ref: "TOK-D", snapshot_at: "t", is_closing: false });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Draw — No", price: 60, ai_prob: 0.9, liquidity: "2000", external_ref: "TOK-DN", snapshot_at: "t", is_closing: false });
+  // A clean, coherent control market on the same match (no sibling → always allowed).
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 45, ai_prob: 0.7, liquidity: "2000", external_ref: "TOK-O", snapshot_at: "t", is_closing: false });
+  const mock = (async (url: any) => {
+    const u = String(url);
+    if (u.includes("anthropic") || u.includes("/messages")) return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [{ label: "Draw", prob: 0.95, reason: "фантом-край" }, { label: "Over 2.5", prob: 0.7, reason: "ок" }], exits: [] }) }] }) } as any;
+    return { ok: true, status: 200, json: async () => (u.includes("/book") ? { bids: [], asks: [] } : {}) } as any;
+  }) as unknown as typeof fetch;
+  await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => "2026-07-14T20:00:00Z" }, { newEventMatchIds: new Set([mid]), max: 50 });
+  const mine = R.betsForMatch(db, mid, strat.id).filter((b) => b.status === "proposed").map((b) => b.market_label.toLowerCase());
+  assert.ok(!mine.includes("draw"), "the incoherent 200¢-sum twin is NOT traded (prob_sum_block)");
+  assert.ok(R.reassessmentsForMatch(db, mid).some((r) => r.strategy_id === strat.id && /prob_sum_block/.test(r.body)), "the block is recorded in the reassessment note");
+});
+
 test("strategistReassess hands the model minute estimate, price movement, liquidity and a no-score note", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

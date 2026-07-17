@@ -26,8 +26,17 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 // Strip a trailing "yes"/"no" (with any separator/spacing) → the group stem, so
 // two sides of a Yes/No market normalise to the SAME key regardless of how each
 // is formatted ("BTTS - Yes" and "BTTS No" both → "btts"). Symmetric de-vig.
-const yesNoSide = (n: string): "yes" | "no" | null => { const m = n.match(/\b(yes|no)\s*$/); return m ? (m[1] as "yes" | "no") : null; };
-const yesNoStem = (n: string): string => n.replace(/\s*(—|-)?\s*(yes|no)\s*$/, "").trim();
+// A bare result market that is IMPLICITLY the "yes" side of a Yes/No pair — a market titled just
+// "Draw" IS the draw-yes contract, whose complement is "Draw — No" (audit #4: Larne carried both a
+// bare «Draw» and a «Draw — No», a corrupted twin the pairwise guard couldn't relate until the bare
+// side was recognised). First entry of the equivalence table; extend as new implicit-yes labels appear.
+const IMPLICIT_YES_RE = /^(draw|ничья|tie)$/;
+const yesNoSide = (n: string): "yes" | "no" | null => {
+  const m = n.match(/\b(yes|no)\s*$/);
+  if (m) return m[1] as "yes" | "no";
+  return IMPLICIT_YES_RE.test(n.trim()) ? "yes" : null;
+};
+const yesNoStem = (n: string): string => IMPLICIT_YES_RE.test(n.trim()) ? n.trim() : n.replace(/\s*(—|-)?\s*(yes|no)\s*$/, "").trim();
 export function siblingLabel(label: string, labels: string[]): string | null {
   const n = norm(label);
   const find = (target: string) => labels.find((l) => l !== label && norm(l) === target) ?? null;
