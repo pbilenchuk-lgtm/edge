@@ -779,6 +779,9 @@ export function tennisEntryMeta(o: { favPrice: number; prePrice: number; edge: n
 // PER-PROFILE paper budget for a tennis Overreaction position: each risk profile trades the
 // same setup side-by-side against its OWN budget (comps stay budget-0 so the football engine
 // never touches tennis; this loop owns tennis sizing). $1k each. Env-tunable.
+// Set-Value + Overreaction paper bankroll. Kept SEPARATE from the PMV sim (TENNIS_PMV_SIM_BUDGET_USD):
+// these are active $1k-scale hypotheses measured for clean cycles, NOT the isolated PMV sim. Do NOT set
+// this to the PMV sim size — that leak sized Set-Value bets at $7k+ on a $1k account.
 const TENNIS_PAPER_BUDGET = (() => { const n = Number(process.env.TENNIS_PAPER_BUDGET_USD); return Number.isFinite(n) && n > 0 ? n : 1000; })();
 
 const ACTED = "tennis_acted:"; // per (match, break) idempotency marker

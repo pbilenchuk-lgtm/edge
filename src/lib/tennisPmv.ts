@@ -60,7 +60,11 @@ const PMV_MAX_PROPS = Math.max(1, Math.round(num(process.env.TENNIS_PMV_MAX_PROP
 // we don't read a phantom deviation against a mid that already prices the void option. Others resolve
 // on their completed unit → no haircut.
 const PMV_COMPLETE_PROB = Math.min(1, Math.max(0.5, num(process.env.TENNIS_PMV_COMPLETE_PROB, 0.93)));
-const PMV_BUDGET = (() => { const n = Number(process.env.TENNIS_PAPER_BUDGET_USD); return Number.isFinite(n) && n > 0 ? n : 1000; })();
+// PMV runs an ISOLATED sim bankroll (Option A) — a DEDICATED env var so a large PMV sim budget can
+// NEVER leak into Set-Value/Overreaction sizing (those read TENNIS_PAPER_BUDGET_USD). Sharing one var
+// WAS the bug: TENNIS_PAPER_BUDGET_USD=$1M for the PMV sim also sized Set-Value bets at $7k+ on a $1k
+// account, showing $29k «в игре» on a $4.7k balance. PMV no longer reads the shared paper budget.
+const PMV_BUDGET = (() => { const n = Number(process.env.TENNIS_PMV_SIM_BUDGET_USD); return Number.isFinite(n) && n > 0 ? n : 1000; })();
 // FLAG-ONLY until the core is re-calibrated (momentum + base_hold from our own frequencies). The
 // scanner still logs every would-be entry so data accumulates, but places NO bets — the first-day
 // systematic one-sided edge was phantom value from the model's own math. Set env "false" to re-enable.
