@@ -71,6 +71,36 @@ test("collectSnapshots: captures Sportmonks raw + extracted labels", async () =>
   }
 });
 
+test("polymarketSnapshot: the captured book is never crossed (bid ≤ ask), even on inverted /price sides", async () => {
+  const db = seed();
+  // A market with a CLOB token so the Polymarket leg captures a book.
+  R.insertMarket(db, { id: "k1", match_id: "m1", label: "Under 3.5", price: 79, ai_prob: 0.8, liquidity: "500", external_ref: "tok-under", token_second: null, snapshot_at: "2026-07-09T20:00:00Z", is_closing: false, ask_cents: null, spread_cents: null } as any);
+  const orig = globalThis.fetch;
+  // Reproduce the prod inversion: /midpoint 79¢; side=sell → 0.79, side=buy → 0.21. The naive
+  // `ask(buy) − bid(sell)` gave spread −58¢ (crossed). The fix must present bid=21, ask=79, spread≥0.
+  globalThis.fetch = (async (url: any) => {
+    const u = String(url);
+    if (u.includes("/midpoint")) return jsonRes({ mid: "0.79" });
+    if (u.includes("/price") && u.includes("side=sell")) return jsonRes({ price: "0.79" });
+    if (u.includes("/price") && u.includes("side=buy")) return jsonRes({ price: "0.21" });
+    return jsonRes({ data: [] }, 404);
+  }) as typeof fetch;
+  try {
+    const n = await collectSnapshots(db, { env: { POLYMARKET_ENABLED: "true" }, now: () => "2026-07-09T20:57:00Z" });
+    assert.equal(n, 1, "one polymarket snapshot row");
+    const meta = R.snapshotMetaForMatch(db, "m1").find((s) => s.provider === "polymarket");
+    assert.ok(meta, "polymarket snapshot present");
+    const pm = JSON.parse(meta!.extracted!);
+    const row = pm.markets[0];
+    assert.ok(row.bidCents <= row.askCents, `book must not be crossed: bid ${row.bidCents} ≤ ask ${row.askCents}`);
+    assert.ok(row.spreadCents >= 0, `spread must be ≥ 0, got ${row.spreadCents}`);
+    assert.equal(row.bidCents, 21, "bid = the lower side");
+    assert.equal(row.askCents, 79, "ask = the higher side");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
 test("collectSnapshots: no providers + polymarket off is a no-op", async () => {
   const db = seed();
   const n = await collectSnapshots(db, { env: {}, now: () => "2026-07-09T20:57:00Z" });

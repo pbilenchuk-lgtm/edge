@@ -91,12 +91,21 @@ async function polymarketSnapshot(db: Database, m: Match, cfg: PolymarketConfig,
   if (!markets.length) return null;
   const rows = await Promise.all(markets.map(async (mk) => {
     const token = mk.external_ref as string;
-    const [mid, bid, ask] = await Promise.all([
+    // Two CLOB side quotes. NOTE: the observed prod data had spreadCents negative on 100% of
+    // snapshots — the `side=buy`/`side=sell` prices don't map to ask/bid the way the naive
+    // `ask − bid` assumed, so every book printed crossed. A real book is NEVER crossed
+    // (bid ≤ ask), so derive them order-agnostically: bid = the lower side, ask = the higher.
+    // This is correct regardless of which /price side returns which, and keeps the Анализ-tab
+    // book (and the calibration consumers that read bidCents) from ingesting an inverted spread.
+    const [mid, sideA, sideB] = await Promise.all([
       fetchMidpointCents(token, cfg, { fetchImpl: deps.fetchImpl }).catch(() => null),
       pmSideCents(cfg, token, "sell", deps),
       pmSideCents(cfg, token, "buy", deps),
     ]);
-    const spread = bid != null && ask != null ? round1(ask - bid) : null;
+    const both = sideA != null && sideB != null;
+    const bid = both ? Math.min(sideA as number, sideB as number) : (sideA ?? sideB);
+    const ask = both ? Math.max(sideA as number, sideB as number) : (sideA ?? sideB);
+    const spread = both ? round1((ask as number) - (bid as number)) : null;
     return { label: mk.label, token, midCents: mid, bidCents: bid, askCents: ask, spreadCents: spread, storedPriceCents: mk.price, aiProb: mk.ai_prob };
   }));
   return { markets: rows };
