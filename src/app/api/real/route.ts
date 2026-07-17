@@ -18,6 +18,13 @@ export async function GET(req: Request) {
       const { buildDryFillWatch } = await import("@/lib/executor/dryFillWatch");
       return NextResponse.json({ ok: true, watch: buildDryFillWatch(db, process.env) });
     }
+    // ?report=phase_f_readiness[&strategy=…] → the mechanical go/hold gate over the accumulated dry
+    // data before flipping to real money on ONE strategy (default prematch_value). Read-only.
+    if (new URL(req.url).searchParams.get("report") === "phase_f_readiness") {
+      const { buildPhaseFReadiness } = await import("@/lib/executor/phaseFReadiness");
+      const strat = new URL(req.url).searchParams.get("strategy") || undefined;
+      return NextResponse.json({ ok: true, readiness: buildPhaseFReadiness(db, process.env, Date.now(), strat) });
+    }
     const { realView } = await import("@/lib/executor/realView");
     return NextResponse.json({ ok: true, view: realView(db, process.env) });
   } catch (e) {
