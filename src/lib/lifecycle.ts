@@ -39,6 +39,7 @@ import { loadShadowConfig, shadowOnEntries, shadowOnExit, type ShadowEntryReques
 import { collectSnapshots } from "./snapshots.js";
 import { collectTennisSnapshots, recordTennisBreakMarks, tennisScoutSilence } from "./tennisScout.js";
 import { tennisTradingTick, tennisSetValueTick, tennisExitTick, settleTennisBets, finishTennisMatches, tennisScoutInPlay, tennisFinalResult, pollTennisFinals } from "./tennisTrading.js";
+import { sweepAbandonedMatches } from "./staleSweep.js";
 import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
 import { overreactionShouldCall } from "./reassessGate.js";
 import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
@@ -1537,6 +1538,10 @@ export async function runAutoCycle(
   if (readTradingMode(deps.env) !== "off") await step("dryExitSweep", () => sweepDryExits(db, { env: deps.env ?? process.env, poly: deps.polymarket ?? loadPolymarketConfig(deps.env), deps, now: () => nowFn(deps)(), bookCache: new Map() }), 0);
   stepSync("prune", () => R.pruneMarketSnapshots(db), 0); // keep the snapshot history bounded (persistent DB)
   stepSync("pruneProviderSnapshots", () => { const cut = new Date((Date.parse(nowFn(deps)()) || Date.now()) - SNAPSHOT_RETENTION_DAYS * 86400_000).toISOString(); R.pruneSnapshots(db, cut); R.pruneTennisSnapshots(db, cut); R.capTennisSnapshots(db); R.capTennisMapLog(db); return 0; }, 0); // snapshot retention + hard row-caps — a burst once bloated tennis_snapshots to 1.2 GB and starved boot
+  // A match that passed kickoff but never went live (scout never saw the court / ESPN never delivered)
+  // is stuck in upcoming/lineup — give it a terminal state so it leaves «Актуальные» within a tick
+  // (voids its open bets, flags it «поломан» for the «Поломанные» bucket) instead of lingering 3 days.
+  stepSync("sweepAbandoned", () => { const r = sweepAbandonedMatches(db, Date.parse(nowFn(deps)()) || Date.now()); return r.abandoned + r.fixed; }, 0);
   // Bound the matches table: drop finished/stale matches that carry NO bets (the
   // Polymarket discovery flood). Never touches a match with betting history, so
   // metrics/P&L are preserved. Keeps buildAppData's per-poll scan bounded (§502).

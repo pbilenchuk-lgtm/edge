@@ -752,15 +752,18 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
               const koMs = (mid: string) => { const k = matchDb[mid].kickoffAt; const t = k ? Date.parse(k) : NaN; return isNaN(t) ? Infinity : t; };
               const active = ids.filter((mid) => matchDb[mid].state !== "finished")
                 .sort((a, b) => (RANK[matchDb[a].state] ?? 3) - (RANK[matchDb[b].state] ?? 3) || koMs(a) - koMs(b));
-              const finished = ids.filter((mid) => matchDb[mid].state === "finished").reverse();
-              const shown = matchTab === "finished" ? finished : active;
+              // «Поломанные» = помечены sweep'ом как abandoned; держим их ОТДЕЛЬНО от настоящих завершённых.
+              const finished = ids.filter((mid) => matchDb[mid].state === "finished" && !matchDb[mid].broken).reverse();
+              const broken = ids.filter((mid) => matchDb[mid].state === "finished" && matchDb[mid].broken).reverse();
+              const shown = matchTab === "finished" ? finished : matchTab === "broken" ? broken : active;
               return (
                 <>
                   <div style={S.matchTabs}>
                     <button style={{ ...S.matchTab, ...(matchTab === "active" ? S.matchTabOn : {}) }} onClick={() => setMatchTab("active")}>Актуальные{active.length ? ` · ${active.length}` : ""}</button>
                     <button style={{ ...S.matchTab, ...(matchTab === "finished" ? S.matchTabOn : {}) }} onClick={() => setMatchTab("finished")}>Завершённые{finished.length ? ` · ${finished.length}` : ""}</button>
+                    {broken.length > 0 && <button style={{ ...S.matchTab, ...(matchTab === "broken" ? S.matchTabOn : {}) }} onClick={() => setMatchTab("broken")}>Поломанные{` · ${broken.length}`}</button>}
                   </div>
-                  {shown.length === 0 && <div style={S.empty}>{matchTab === "finished" ? "Завершённых матчей пока нет." : "Актуальных матчей нет — появятся, когда подтянутся будущие или начнутся текущие."}</div>}
+                  {shown.length === 0 && <div style={S.empty}>{matchTab === "finished" ? "Завершённых матчей пока нет." : matchTab === "broken" ? "Поломанных матчей нет." : "Актуальных матчей нет — появятся, когда подтянутся будущие или начнутся текущие."}</div>}
                   {shown.map((mid) => (
                     <ErrorBoundary key={mid} label={`${matchDb[mid].home}–${matchDb[mid].away}`}>
                       <MatchCard match={matchDb[mid]} catalog={catalog} comp={comp} compBudget={compBudget} shares={shares} shareRows={shareRows} riskProfiles={riskProfiles} onRefreshOdds={refreshOdds} onReassess={doReassess} onAnalyze={doAnalyze} onResumeAnalyze={pollAnalyze} oddsErrKey={oddsErr[mid] || 0} />
@@ -829,7 +832,9 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
   // reads «ЖДЁМ КОРТ» (waiting for the scout to confirm play began), never a stuck lineup.
   const tennisPreLive = cardIsTennis && (match.state === "lineup" || match.state === "upcoming");
   const pastKickoff = !!match.kickoffAt && Date.parse(match.kickoffAt) < Date.now();
-  const meta = match.liveNoData
+  const meta = match.broken
+    ? { label: "ПОЛОМАН", color: "#ff6b6b", bg: "#2e1a1a" }
+    : match.liveNoData
     ? { label: "ЖДЁМ ДАННЫЕ", color: "#e8a838", bg: "#2e2a1a" }
     : tennisPreLive
       ? (pastKickoff ? { label: "ЖДЁМ КОРТ", color: "#e8a838", bg: "#2e2a1a" } : { label: "СКОРО", color: "#8b95a5", bg: "#232a35" })
@@ -983,7 +988,7 @@ function MatchCard({ match, catalog, comp, compBudget, shares, shareRows, riskPr
       <div style={S.cardHead}>
         <div>
           <div style={S.matchup}>{match.home}{(match.state === "live" && !match.liveNoData) || match.state === "finished" ? <span style={S.score}> {match.scoreHome}:{match.scoreAway} </span> : <span style={S.vs}> — </span>}{match.away}</div>
-          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && <>{match.kickoff}{tennisPreLive && pastKickoff && <span style={{ color: "#e8a838" }}> · ждём выхода на корт (скаут ещё не видит игру live)</span>}</>}{match.state === "live" && (match.liveNoData ? "ждём данные провайдера — матч не торгуется" : `LIVE · ${match.clock || (match.minute != null ? `${match.minute}'` : "")}`)}{match.state === "finished" && (match.endLabel || match.endTime ? `завершён ${match.endLabel ?? match.endTime}` : "финал")}{hasLineups && (() => { const out = match.lineupsReady || match.state === "live" || match.state === "finished"; return <>{"  ·  "}<span style={{ color: out ? "#70b56a" : "#e8a838" }}>{out ? "✓ состав" : "○ ждём состав — анализ позже"}</span></>; })()}</div>
+          <div style={S.timing}>{(match.state === "upcoming" || match.state === "lineup") && <>{match.kickoff}{tennisPreLive && pastKickoff && <span style={{ color: "#e8a838" }}> · ждём выхода на корт (скаут ещё не видит игру live)</span>}</>}{match.state === "live" && (match.liveNoData ? "ждём данные провайдера — матч не торгуется" : `LIVE · ${match.clock || (match.minute != null ? `${match.minute}'` : "")}`)}{match.state === "finished" && (match.broken ? (match.endNote ?? "поломан — нет live-данных провайдера") : (match.endLabel || match.endTime ? `завершён ${match.endLabel ?? match.endTime}` : "финал"))}{hasLineups && (() => { const out = match.lineupsReady || match.state === "live" || match.state === "finished"; return <>{"  ·  "}<span style={{ color: out ? "#70b56a" : "#e8a838" }}>{out ? "✓ состав" : "○ ждём состав — анализ позже"}</span></>; })()}</div>
           {match.state === "finished" && match.duration && <div style={S.finishTiming}>{match.kickoffTime}–{match.endTime} · длительность {match.duration}{match.endNote && ` · ${match.endNote}`}</div>}
         </div>
         <div style={{ ...S.stateBadge, background: meta.bg, color: meta.color }}>{match.state === "live" && !match.liveNoData && <span style={S.pulse} />}{meta.label}</div>
