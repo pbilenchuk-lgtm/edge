@@ -16,6 +16,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit } from "./shadow.js";
+import { recordPmvShadowSignal, PMV_SHADOW_EPOCH } from "./tennisPmvShadow.js";
 import { tennisFinalResult, flagTennisManual } from "./tennisTrading.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
@@ -563,7 +564,7 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
 
   // PASS 1: scan every pending in-scope match; collect the scans + accumulate per-FAMILY side counts
   // across the WHOLE slate for the uniformity guard (a lean is a property of the family, not one match).
-  const pending: { comp: string; matchId: string; players: { p1: string; p2: string }; scan: PmvMatchScan }[] = [];
+  const pending: { comp: string; matchId: string; players: { p1: string; p2: string }; scan: PmvMatchScan; tour: "atp" | "wta"; tournament: string | null }[] = [];
   for (const c of R.listCompetitions(db)) {
     if (c.sport_id !== "tennis") continue;
     const tour = pmvTour(c);
@@ -577,7 +578,7 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
       if (isBestOfFive(null, c.name)) { R.metaSet(db, PMV_ACTED + m.id, "bo5_skip", now); continue; }
       const scan = scanMatchProps(db, m.id, { p1: m.home, p2: m.away }, tour, c.name);
       if (!scan.tradeable) continue;
-      pending.push({ comp: c.id, matchId: m.id, players: { p1: m.home, p2: m.away }, scan });
+      pending.push({ comp: c.id, matchId: m.id, players: { p1: m.home, p2: m.away }, scan, tour, tournament: c.name });
     }
   }
   // UNIFORMITY GUARD: per family, if > PMV_UNIFORM_SHARE of the PASSING deviations lean the same SIDE
@@ -598,7 +599,7 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
   }
 
   // PASS 2: act per match.
-  for (const { comp, matchId, players, scan } of pending) {
+  for (const { comp, matchId, players, scan, tour, tournament } of pending) {
     const c = { id: comp };
     const m = { id: matchId, home: players.p1, away: players.p2 };
     {
@@ -612,8 +613,16 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
       if (!enters.length) { R.metaSet(db, PMV_ACTED + m.id, "no_edge", now); continue; }
       // FLAG-ONLY (default until re-calibrated): log the would-be entries, place NO bets.
       if (pmvFlagOnly()) {
-        for (const cand of enters)
-          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `flag_only «${cand.label}»: theo ${cand.theoCents}¢ vs mid ${cand.midCents}¢ (dev +${cand.deviation}¢, δ=${scan.delta}, книга $${cand.bookUsd}) — ставка НЕ размещена (калибровка ядра)`, created_at: now });
+        for (const cand of enters) {
+          // Freeze a scoreable would-be entry (dedup by (match,prop); repeats bump hits) — this is what
+          // makes flag-only calibrate instead of being a mute zero. Then keep the human-readable log line.
+          recordPmvShadowSignal(db, {
+            matchId: m.id, label: cand.label, family: cand.family, side: cand.side, firstIsP1: cand.firstIsP1,
+            theoCents: cand.theoCents, midCents: cand.midCents, deviation: cand.deviation, delta: scan.delta ?? 0,
+            bookUsd: cand.bookUsd, tour, surface: surfaceOf(tournament), epoch: `${codeVer}·${PMV_SHADOW_EPOCH}`, at: now,
+          });
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `flag_only «${cand.label}»: theo ${cand.theoCents}¢ vs mid ${cand.midCents}¢ (dev +${cand.deviation}¢, δ=${scan.delta}, книга $${cand.bookUsd}) — ставка НЕ размещена, записана в shadow-калибровку`, created_at: now });
+        }
         R.metaSet(db, PMV_ACTED + m.id, `flag_only:${enters.length}`, now);
         continue;
       }

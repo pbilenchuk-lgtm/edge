@@ -15,6 +15,12 @@ export async function GET(req: Request) {
       const { buildPmvOriginCut } = await import("@/lib/pmvOriginCut");
       return NextResponse.json({ ok: true, cut: buildPmvOriginCut(db) });
     }
+    // ?report=pmv_shadow_calibration → tennis PMV flag-only shadow scoring (Brier markov vs implied on
+    // frozen-mid, win%-vs-theo, unresolved share) — the «немой ноль» fix. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "pmv_shadow_calibration") {
+      const { buildPmvShadowCalibration } = await import("@/lib/tennisPmvShadow");
+      return NextResponse.json({ ok: true, calibration: buildPmvShadowCalibration(db) });
+    }
     return NextResponse.json({ ok: false, error: "unknown report" }, { status: 400 });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });

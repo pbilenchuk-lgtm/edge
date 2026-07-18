@@ -597,6 +597,33 @@ CREATE TABLE IF NOT EXISTS tennis_break_marks (
 );
 CREATE INDEX IF NOT EXISTS idx_tennis_break_event ON tennis_break_marks(event_key);
 
+-- PMV flag-only «shadow» would-be entries: a scoreable calibration dataset with ZERO money movement
+-- (no bet, no portfolio, no treasury). ONE FROZEN row per (match, prop) at signal time — theo/mid/
+-- orientation captured as FIELDS, never re-inferred at resolution; repeats bump `hits` (dedup by rule).
+-- Resolved post-match by the SAME prop settlement code (resolveTennisProp). Only won/lost feed Brier;
+-- void/unresolved are EXCLUDED but counted (the unresolved share is pipeline diagnostics). CLV is NOT
+-- computed (no closing-book snapshot for shadow) — win%-vs-theo + Brier only.
+CREATE TABLE IF NOT EXISTS pmv_shadow_signals (
+  id            TEXT PRIMARY KEY,
+  match_id      TEXT NOT NULL,
+  market_label  TEXT NOT NULL,
+  family        TEXT,
+  side          TEXT,
+  first_is_p1   INTEGER,            -- persistent orientation, FROZEN (not re-inferred at resolution)
+  theo_cents    REAL NOT NULL,      -- model theo at signal
+  mid_cents     REAL NOT NULL,      -- market mid at signal — implied source, SAME timestamp as theo
+  deviation     REAL, delta REAL, book_usd REAL,
+  tour          TEXT, surface TEXT,
+  epoch         TEXT NOT NULL,      -- shadow codeVersion·epoch (criterion clock starts at deploy)
+  hits          INTEGER NOT NULL DEFAULT 1,   -- how many times this signal re-fired (dedup counter)
+  status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','won','lost','void','unresolved')),
+  resolve_note  TEXT,
+  created_at    TEXT NOT NULL,
+  resolved_at   TEXT,
+  UNIQUE(match_id, market_label)
+);
+CREATE INDEX IF NOT EXISTS idx_pmv_shadow_status ON pmv_shadow_signals(status);
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- REAL-TRADING contour (spec §2.3). Build != enable: these tables exist so the
 -- dry-run/real executor has a book of record; NOTHING writes here until
