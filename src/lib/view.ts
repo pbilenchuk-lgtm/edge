@@ -104,8 +104,30 @@ export interface StrategyStats {
   inMatchMinus: number;   // in-match predictions currently/finally negative
 }
 
+export interface BankCurvePoint { at: string; equity: number }
+export interface BankCurve { points: BankCurvePoint[]; base: number; current: number; realized: number }
+
+/** Global bankroll equity over time: start at the base bankroll (current − total realized), then walk
+ *  every SETTLED bet by its settle day, accumulating realized P&L → one end-of-day equity point. Ends
+ *  exactly at the current treasury balance. Void bets contribute 0 (refund). Read-only. */
+export function treasuryBankCurve(db: Database): BankCurve {
+  const current = R.getTreasury(db).total_balance;
+  const settled = R.allBets(db).filter((b) => R.isSettled(b.status) && b.settled_at && /^\d{4}-\d\d-\d\dT/.test(b.settled_at as string));
+  const pnlOf = (b: { payout?: number | null; stake?: number | null }) => Math.round((((b.payout ?? 0) - (b.stake ?? 0))) * 100) / 100;
+  const realized = Math.round(settled.reduce((s, b) => s + pnlOf(b), 0) * 100) / 100;
+  const base = Math.round((current - realized) * 100) / 100;
+  settled.sort((a, b) => ((a.settled_at as string) < (b.settled_at as string) ? -1 : (a.settled_at as string) > (b.settled_at as string) ? 1 : 0));
+  const byDay = new Map<string, number>();
+  let eq = base;
+  for (const b of settled) { eq = Math.round((eq + pnlOf(b)) * 100) / 100; byDay.set((b.settled_at as string).slice(0, 10), eq); }
+  const points: BankCurvePoint[] = [{ at: "старт", equity: base }, ...[...byDay.entries()].map(([at, equity]) => ({ at, equity }))];
+  return { points, base, current, realized };
+}
+
 export interface AppData {
   treasuryTotal: number;
+  /** global bankroll equity over time: base → current, cumulative realized P&L by settle day */
+  bankCurve: BankCurve;
   sports: { id: string; label: string }[];
   competitions: { id: string; sport: string; name: string; matches: string[]; inScope: boolean }[];
   compBudget: Record<string, number>;
@@ -451,7 +473,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
     })),
   };
 
-  const payload: AppData = { treasuryTotal: treasury.total_balance, sports, competitions, compBudget, shares, shareRows, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskProfiles: listRiskProfileViews(db), shadow };
+  const payload: AppData = { treasuryTotal: treasury.total_balance, bankCurve: treasuryBankCurve(db), sports, competitions, compBudget, shares, shareRows, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskProfiles: listRiskProfileViews(db), shadow };
   // node:sqlite rows have a null prototype; React Server Components can't pass
   // those to a client component. A JSON round-trip yields plain objects.
   return JSON.parse(JSON.stringify(payload));

@@ -305,6 +305,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [QUALITY, setQuality] = useState(initial.quality);
   const [EVENT_FEED, setEventFeed] = useState(initial.eventFeed);
   const [strategyStats, setStrategyStats] = useState(initial.strategyStats);
+  const [bankCurve, setBankCurve] = useState(initial.bankCurve);
   const [shadow, setShadow] = useState(initial.shadow);
 
   const [screen, setScreen] = useState("matches");
@@ -494,6 +495,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     if (app.riskProfiles) setRiskProfiles(app.riskProfiles);
     if (typeof app.treasuryTotal === "number") setTotalBalance(app.treasuryTotal);
     if (app.strategyStats) setStrategyStats(app.strategyStats);
+    if (app.bankCurve) setBankCurve(app.bankCurve);
     if (app.eventFeed) setEventFeed(app.eventFeed);
     if (app.quality) setQuality(app.quality);
   };
@@ -785,7 +787,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
         <FeedScreen feed={EVENT_FEED} />
       ) : screen === "metrics" ? (
         <MetricsScreen catalog={catalog} quality={QUALITY} stats={strategyStats}
-          treasury={{ effectiveBalance, allocatedSum, freeBalance, totalRealized }} />
+          treasury={{ effectiveBalance, allocatedSum, freeBalance, totalRealized }} bankCurve={bankCurve} />
       ) : screen === "profiles" ? (
         <ProfilesScreen />
       ) : screen === "shadow" ? (
@@ -1849,7 +1851,42 @@ function EquitySpark({ data }: any) {
   );
 }
 
-function MetricsScreen({ catalog, quality, stats, treasury }: any) {
+function BankCurve({ curve }: any) {
+  const pts = curve?.points ?? [];
+  if (pts.length < 2) return <div style={{ background: "#1a2029", border: "1px solid #2c3543", borderRadius: 10, padding: 14, marginBottom: 14, color: MUTE, fontSize: 12.5 }}>Кривая банкролла появится после первых расчётов.</div>;
+  const w = 600, h = 120, padY = 10;
+  const vals = pts.map((p: any) => p.equity);
+  const min = Math.min(...vals, curve.base), max = Math.max(...vals, curve.base), range = max - min || 1;
+  const X = (i: number) => (i / (pts.length - 1)) * w;
+  const Y = (v: number) => padY + (h - 2 * padY) * (1 - (v - min) / range);
+  const line = pts.map((p: any, i: number) => `${X(i).toFixed(1)},${Y(p.equity).toFixed(1)}`).join(" ");
+  const up = curve.current >= curve.base, col = up ? "#5fd08a" : "#ff6b6b";
+  const growth = curve.base ? ((curve.current - curve.base) / curve.base) * 100 : 0;
+  const firstDay = pts.find((p: any) => p.at !== "старт")?.at, lastDay = pts[pts.length - 1]?.at;
+  return (
+    <div style={{ background: "#1a2029", border: "1px solid #2c3543", borderRadius: 10, padding: 14, marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8, flexWrap: "wrap", gap: 6 }}>
+        <div style={S.trLbl}>Кривая банкролла <span style={{ color: MUTE, fontWeight: 400 }}>· база → сейчас</span></div>
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13 }}>
+          <span style={{ color: MUTE }}>{fmtMoney0(curve.base)} → </span>
+          <span style={{ color: col, fontWeight: 700 }}>{fmtMoney0(curve.current)}</span>
+          <span style={{ color: col }}> ({up ? "+" : ""}{growth.toFixed(1)}%)</span>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ width: "100%", height: 120, display: "block" }}>
+        <line x1="0" y1={Y(curve.base)} x2={w} y2={Y(curve.base)} stroke={LINE} strokeWidth="1" strokeDasharray="4 4" vectorEffect="non-scaling-stroke" />
+        <polyline points={line} fill="none" stroke={col} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: MUTE, marginTop: 4 }}>
+        <span>старт{firstDay ? ` · ${firstDay}` : ""}</span>
+        <span>реализовано {curve.realized >= 0 ? "+" : ""}{fmtMoney0(curve.realized)} · пунктир = база</span>
+        <span>{lastDay}</span>
+      </div>
+    </div>
+  );
+}
+
+function MetricsScreen({ catalog, quality, stats, treasury, bankCurve }: any) {
   const S0 = { matches: 0, predictions: 0, won: 0, lost: 0, openPlus: 0, openMinus: 0, openPnl: 0, earned: 0, lostMoney: 0, inMatch: 0, inMatchPlus: 0, inMatchMinus: 0 };
   const t = treasury ?? { effectiveBalance: 0, allocatedSum: 0, freeBalance: 0, totalRealized: 0 };
   return (
@@ -1870,6 +1907,7 @@ function MetricsScreen({ catalog, quality, stats, treasury }: any) {
           </div>
         ))}
       </div>
+      <BankCurve curve={bankCurve} />
       <div style={S.metricExplain}>
         <div style={S.metricExplainItem}><b style={{ color: "#7fb4e8" }}>Brier</b> — точность вероятностей (ниже = лучше). Насколько «70%» ИИ реально значит 70%.</div>
         <div style={S.metricExplainItem}><b style={{ color: "#70b56a" }}>CLV</b> — closing line value. Двигался ли рынок в твою сторону после входа. Лучший ранний признак реального эджа.</div>
