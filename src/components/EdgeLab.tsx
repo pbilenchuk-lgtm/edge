@@ -1888,32 +1888,60 @@ function BankCurve({ curve }: any) {
   );
 }
 
-function CapacityTable({ cap }: any) {
-  if (!cap || !cap.rows?.length) return null;
+function CapacityRows({ rows }: any) {
   const cell = { textAlign: "right" as const, padding: "5px 12px", whiteSpace: "nowrap" as const };
   return (
+    <div style={{ overflowX: "auto", marginTop: 8 }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'JetBrains Mono', monospace", fontSize: 12.5 }}>
+        <thead><tr>{["банк", "×", "доход %", "net $", "ср. вход"].map((h) => <th key={h} style={{ ...cell, color: MUTE, fontWeight: 600, borderBottom: "1px solid #2c3543" }}>{h}</th>)}</tr></thead>
+        <tbody>{rows.map((r: any, i: number) => {
+          const beyond = r.beyondObserved;
+          const col = beyond ? MUTE : r.returnPct == null ? TEXT : r.returnPct >= 0 ? "#5fd08a" : "#ff6b6b";
+          return (
+            <tr key={i} style={{ background: i === 0 ? "#20283350" : undefined, opacity: beyond ? 0.55 : 1 }}>
+              <td style={{ ...cell, color: beyond ? MUTE : TEXT, fontWeight: 700 }}>${r.bank / 1000}k</td>
+              <td style={{ ...cell, color: MUTE }}>×{r.mult}</td>
+              <td style={{ ...cell, color: col, fontWeight: 700 }}>{r.returnPct == null ? "—" : `${r.returnPct >= 0 ? "+" : ""}${r.returnPct}%`}{beyond ? " ⚠" : ""}</td>
+              <td style={{ ...cell, color: col }}>{r.netPnl >= 0 ? "+" : "−"}{fmtMoney0(Math.abs(r.netPnl))}</td>
+              <td style={{ ...cell, color: MUTE }}>{r.avgEntryCents == null ? "—" : `${r.avgEntryCents}¢`}</td>
+            </tr>
+          );
+        })}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function CapacityTable({ cap }: any) {
+  if (!cap) return null;
+  const v = cap.verdict;
+  const srcBadge = (s: string) => s === "own" ? { t: "замер", c: "#5fd08a" } : s === "own_thin" ? { t: "тонко", c: "#e8a838" } : { t: "нет данных", c: "#ff6b6b" };
+  return (
     <div style={{ background: "#1a2029", border: "1px solid #2c3543", borderRadius: 10, padding: 14, marginBottom: 14 }}>
-      <div style={S.trLbl}>Ёмкость по ликвидности <span style={{ color: MUTE, fontWeight: 400 }}>· доход при разном банке (МОДЕЛЬ, не замер)</span></div>
-      <div style={{ overflowX: "auto", marginTop: 8 }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'JetBrains Mono', monospace", fontSize: 12.5 }}>
-          <thead><tr>{["банк", "×", "доход %", "net $", "ср. вход"].map((h) => <th key={h} style={{ ...cell, color: MUTE, fontWeight: 600, borderBottom: "1px solid #2c3543" }}>{h}</th>)}</tr></thead>
-          <tbody>{cap.rows.map((r: any, i: number) => {
-            const col = r.returnPct == null ? TEXT : r.returnPct >= 0 ? "#5fd08a" : "#ff6b6b";
-            return (
-              <tr key={i} style={{ background: i === 0 ? "#20283350" : undefined }}>
-                <td style={{ ...cell, color: TEXT, fontWeight: 700 }}>${r.bank / 1000}k</td>
-                <td style={{ ...cell, color: MUTE }}>×{r.mult}</td>
-                <td style={{ ...cell, color: col, fontWeight: 700 }}>{r.returnPct == null ? "—" : `${r.returnPct >= 0 ? "+" : ""}${r.returnPct}%`}</td>
-                <td style={{ ...cell, color: col }}>{r.netPnl >= 0 ? "+" : "−"}{fmtMoney0(Math.abs(r.netPnl))}</td>
-                <td style={{ ...cell, color: MUTE }}>{r.avgEntryCents == null ? "—" : `${r.avgEntryCents}¢`}</td>
-              </tr>
-            );
-          })}</tbody>
-        </table>
-      </div>
+      <div style={S.trLbl}>Ёмкость по ликвидности <span style={{ color: MUTE, fontWeight: 400 }}>· Overreaction (real-whitelist) · МОДЕЛЬ, не замер</span></div>
+      {v ? (
+        <>
+          <div style={{ fontSize: 11.5, color: MUTE, marginTop: 4 }}>
+            вердикт: <span style={{ color: TEXT }}>{v.strategyId}·{v.epoch}</span> · n={v.betsModeled} · c из {v.cN} замеров{" "}
+            <span style={{ color: srcBadge(v.cSource).c, fontWeight: 700 }}>[{srcBadge(v.cSource).t}]</span>
+            {v.cMedPer1k != null && <span> · c≈{v.cMedPer1k}¢/$1k{v.cN > 1 ? ` [${v.cLoPer1k}…${v.cHiPer1k}]` : ""}</span>}
+          </div>
+          <CapacityRows rows={v.rows} />
+        </>
+      ) : <div style={{ ...S.mgmtNeutral, marginTop: 8 } as any}>Вердиктной ёмкости пока нет (нет расчётных Overreaction на текущей эпохе). Копится.</div>}
       <div style={{ fontSize: 10.5, color: MUTE, marginTop: 8, lineHeight: 1.5 }}>
-        {cap.note}<br />⚠ {cap.caveats?.[0]} {cap.caveats?.[2]}
+        {cap.note}<br />⚠ строки с «⚠» — экстраполяция за наблюдённые размеры (не прогноз). Только вход; выход Overreaction (выкуп→тейк) на масштабе портит вторую ногу.
       </div>
+      {cap.segments?.length > 0 && (
+        <details style={{ marginTop: 10 }}>
+          <summary style={{ ...S.trLbl, cursor: "pointer", fontSize: 11 }}>Диагностика: прочие сегменты (стратегия·эпоха) — не вердикт</summary>
+          <div style={{ fontSize: 11, color: MUTE, marginTop: 6, fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.6 }}>
+            {cap.segments.map((s: any) => (
+              <div key={s.key}>{s.key} — n={s.betsModeled}, c={s.cMedPer1k == null ? "—" : `${s.cMedPer1k}¢/$1k`} ({s.cN} замеров · {srcBadge(s.cSource).t})</div>
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   );
 }
