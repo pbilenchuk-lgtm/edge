@@ -64,15 +64,19 @@ export async function captureBookDepth(db: Database, deps: EngineDeps = {}, nowM
   const targets = bookDepthTargets(db, MAX_TOKENS(env));
   const bookCache = new Map<string, OrderBookFetch>();
   const nowIso = new Date(nowMs).toISOString();
-  let saved = 0;
+  let ok = 0, empty = 0, unavail = 0;
   for (const t of targets) {
     try {
       const res = await classifyOrderBook(t.token, poly, deps, bookCache);
-      if (res.status !== "ok") continue;
-      saveBookDepth(db, t, res.book, "periodic", nowIso);
-      saved++;
-    } catch { /* a book fetch must never break the tick */ }
+      if (res.status === "ok") { saveBookDepth(db, t, res.book, "periodic", nowIso); ok++; }
+      // An EMPTY book (offers absent) is a capacity FACT — «couldn't fill here» — recorded as zero depth.
+      // An UNAVAILABLE book is a fetch failure, NOT a liquidity fact — skip it (never poison depth with it).
+      else if (res.status === "empty") { saveBookDepth(db, t, { bids: [], asks: [] }, "periodic_empty", nowIso); empty++; }
+      else unavail++;
+    } catch { unavail++; } // a book fetch must never break the tick
   }
+  // Self-diagnosing tally: ok vs empty (dust) vs unavailable (fetch broken) — so a zero isn't mute.
+  try { R.metaSet(db, "book_depth_tally", JSON.stringify({ targets: targets.length, ok, empty, unavail, at: nowIso }), nowIso); } catch { /* ignore */ }
   try { db.prepare(`DELETE FROM book_depth_snapshots WHERE at < ?`).run(new Date(nowMs - RETENTION_DAYS * 86400_000).toISOString()); } catch { /* ignore */ }
-  return saved;
+  return ok + empty;
 }
