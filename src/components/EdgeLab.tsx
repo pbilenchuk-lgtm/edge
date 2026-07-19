@@ -306,6 +306,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [EVENT_FEED, setEventFeed] = useState(initial.eventFeed);
   const [strategyStats, setStrategyStats] = useState(initial.strategyStats);
   const [bankCurve, setBankCurve] = useState(initial.bankCurve);
+  const [capacity, setCapacity] = useState(initial.capacity);
   const [shadow, setShadow] = useState(initial.shadow);
 
   const [screen, setScreen] = useState("matches");
@@ -496,6 +497,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
     if (typeof app.treasuryTotal === "number") setTotalBalance(app.treasuryTotal);
     if (app.strategyStats) setStrategyStats(app.strategyStats);
     if (app.bankCurve) setBankCurve(app.bankCurve);
+    if (app.capacity) setCapacity(app.capacity);
     if (app.eventFeed) setEventFeed(app.eventFeed);
     if (app.quality) setQuality(app.quality);
   };
@@ -787,7 +789,7 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
         <FeedScreen feed={EVENT_FEED} />
       ) : screen === "metrics" ? (
         <MetricsScreen catalog={catalog} quality={QUALITY} stats={strategyStats}
-          treasury={{ effectiveBalance, allocatedSum, freeBalance, totalRealized }} bankCurve={bankCurve} />
+          treasury={{ effectiveBalance, allocatedSum, freeBalance, totalRealized }} bankCurve={bankCurve} capacity={capacity} />
       ) : screen === "profiles" ? (
         <ProfilesScreen />
       ) : screen === "shadow" ? (
@@ -1886,7 +1888,37 @@ function BankCurve({ curve }: any) {
   );
 }
 
-function MetricsScreen({ catalog, quality, stats, treasury, bankCurve }: any) {
+function CapacityTable({ cap }: any) {
+  if (!cap || !cap.rows?.length) return null;
+  const cell = { textAlign: "right" as const, padding: "5px 12px", whiteSpace: "nowrap" as const };
+  return (
+    <div style={{ background: "#1a2029", border: "1px solid #2c3543", borderRadius: 10, padding: 14, marginBottom: 14 }}>
+      <div style={S.trLbl}>Ёмкость по ликвидности <span style={{ color: MUTE, fontWeight: 400 }}>· доход при разном банке (МОДЕЛЬ, не замер)</span></div>
+      <div style={{ overflowX: "auto", marginTop: 8 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'JetBrains Mono', monospace", fontSize: 12.5 }}>
+          <thead><tr>{["банк", "×", "доход %", "net $", "ср. вход"].map((h) => <th key={h} style={{ ...cell, color: MUTE, fontWeight: 600, borderBottom: "1px solid #2c3543" }}>{h}</th>)}</tr></thead>
+          <tbody>{cap.rows.map((r: any, i: number) => {
+            const col = r.returnPct == null ? TEXT : r.returnPct >= 0 ? "#5fd08a" : "#ff6b6b";
+            return (
+              <tr key={i} style={{ background: i === 0 ? "#20283350" : undefined }}>
+                <td style={{ ...cell, color: TEXT, fontWeight: 700 }}>${r.bank / 1000}k</td>
+                <td style={{ ...cell, color: MUTE }}>×{r.mult}</td>
+                <td style={{ ...cell, color: col, fontWeight: 700 }}>{r.returnPct == null ? "—" : `${r.returnPct >= 0 ? "+" : ""}${r.returnPct}%`}</td>
+                <td style={{ ...cell, color: col }}>{r.netPnl >= 0 ? "+" : "−"}{fmtMoney0(Math.abs(r.netPnl))}</td>
+                <td style={{ ...cell, color: MUTE }}>{r.avgEntryCents == null ? "—" : `${r.avgEntryCents}¢`}</td>
+              </tr>
+            );
+          })}</tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 10.5, color: MUTE, marginTop: 8, lineHeight: 1.5 }}>
+        {cap.note}<br />⚠ {cap.caveats?.[0]} {cap.caveats?.[2]}
+      </div>
+    </div>
+  );
+}
+
+function MetricsScreen({ catalog, quality, stats, treasury, bankCurve, capacity }: any) {
   const S0 = { matches: 0, predictions: 0, won: 0, lost: 0, openPlus: 0, openMinus: 0, openPnl: 0, earned: 0, lostMoney: 0, inMatch: 0, inMatchPlus: 0, inMatchMinus: 0 };
   const t = treasury ?? { effectiveBalance: 0, allocatedSum: 0, freeBalance: 0, totalRealized: 0 };
   return (
@@ -1908,6 +1940,7 @@ function MetricsScreen({ catalog, quality, stats, treasury, bankCurve }: any) {
         ))}
       </div>
       <BankCurve curve={bankCurve} />
+      <CapacityTable cap={capacity} />
       <div style={S.metricExplain}>
         <div style={S.metricExplainItem}><b style={{ color: "#7fb4e8" }}>Brier</b> — точность вероятностей (ниже = лучше). Насколько «70%» ИИ реально значит 70%.</div>
         <div style={S.metricExplainItem}><b style={{ color: "#70b56a" }}>CLV</b> — closing line value. Двигался ли рынок в твою сторону после входа. Лучший ранний признак реального эджа.</div>

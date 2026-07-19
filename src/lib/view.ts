@@ -15,6 +15,7 @@ import { resolveFootballMarket, matchPhase } from "./settlement.js";
 import { maxLiveMinutes, liveDelivering } from "./lifecycle.js";
 import { listRiskProfileViews, type RiskProfileView } from "./riskConfig.js";
 import { loadShadowConfig, shadowPoolState, shadowAnalytics, buildReplayEntries, shadowProject, type ShadowConfig, type ShadowPoolState, type ShadowAnalytics, type ProjectionSummary } from "./shadow.js";
+import { buildCapacityCurve } from "./capacityCurve.js";
 import { budgetPosition, type BudgetPosition } from "./budgetPosition.js";
 import type { StrategyParams, Match, Bet } from "./types.js";
 
@@ -128,6 +129,8 @@ export interface AppData {
   treasuryTotal: number;
   /** global bankroll equity over time: base → current, cumulative realized P&L by settle day */
   bankCurve: BankCurve;
+  /** liquidity-capacity model: net P&L + return% re-priced at several bankroll sizes */
+  capacity: import("./capacityCurve.js").CapacityCurve;
   sports: { id: string; label: string }[];
   competitions: { id: string; sport: string; name: string; matches: string[]; inScope: boolean }[];
   compBudget: Record<string, number>;
@@ -473,7 +476,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
     })),
   };
 
-  const payload: AppData = { treasuryTotal: treasury.total_balance, bankCurve: treasuryBankCurve(db), sports, competitions, compBudget, shares, shareRows, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskProfiles: listRiskProfileViews(db), shadow };
+  const payload: AppData = { treasuryTotal: treasury.total_balance, bankCurve: treasuryBankCurve(db), capacity: buildCapacityCurve(db, env), sports, competitions, compBudget, shares, shareRows, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskProfiles: listRiskProfileViews(db), shadow };
   // node:sqlite rows have a null prototype; React Server Components can't pass
   // those to a client component. A JSON round-trip yields plain objects.
   return JSON.parse(JSON.stringify(payload));
