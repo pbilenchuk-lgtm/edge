@@ -73,6 +73,41 @@ function Tile({ label, value, sub, color }: { label: string; value: React.ReactN
   return <div style={S.tile}><div style={S.tLbl}>{label}</div><div style={{ ...S.tVal, color: color ?? TEXT }}>{value}</div>{sub && <div style={S.tSub}>{sub}</div>}</div>;
 }
 
+function BankCurve({ curve }: { curve?: { points: { at: string; equity: number }[]; base: number; current: number; realized: number } }) {
+  const pts = curve?.points ?? [];
+  if (!curve || pts.length < 2) return <div style={{ ...S.hint, marginTop: 10 }}>Кривая банка появится после первых расчётов.</div>;
+  const w = 600, h = 110, padY = 10;
+  const vals = pts.map((p) => p.equity);
+  const min = Math.min(...vals, curve.base), max = Math.max(...vals, curve.base), range = max - min || 1;
+  const X = (i: number) => (i / (pts.length - 1)) * w;
+  const Y = (v: number) => padY + (h - 2 * padY) * (1 - (v - min) / range);
+  const line = pts.map((p, i) => `${X(i).toFixed(1)},${Y(p.equity).toFixed(1)}`).join(" ");
+  const up = curve.current >= curve.base, col = up ? GREEN : RED;
+  const growth = curve.base ? ((curve.current - curve.base) / curve.base) * 100 : 0;
+  const firstDay = pts.find((p) => p.at !== "старт")?.at, lastDay = pts[pts.length - 1]?.at;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6, flexWrap: "wrap", gap: 6 }}>
+        <div style={S.secLbl}>Кривая банка · база → сейчас</div>
+        <div style={{ fontFamily: "monospace", fontSize: 13 }}>
+          <span style={{ color: MUTE }}>{usd(curve.base)} → </span>
+          <span style={{ color: col, fontWeight: 700 }}>{usd(curve.current)}</span>
+          <span style={{ color: col }}> ({up ? "+" : ""}{growth.toFixed(1)}%)</span>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ width: "100%", height: 110, display: "block" }}>
+        <line x1="0" y1={Y(curve.base)} x2={w} y2={Y(curve.base)} stroke={LINE} strokeWidth="1" strokeDasharray="4 4" vectorEffect="non-scaling-stroke" />
+        <polyline points={line} fill="none" stroke={col} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: MUTE, marginTop: 4 }}>
+        <span>старт{firstDay ? ` · ${firstDay}` : ""}</span>
+        <span>реализовано {curve.realized >= 0 ? "+" : ""}{usd2(curve.realized)} · пунктир = банк</span>
+        <span>{lastDay}</span>
+      </div>
+    </div>
+  );
+}
+
 function Meter({ name, used, cap }: { name: string; used: number; cap: number }) {
   const frac = cap > 0 ? Math.min(1, used / cap) : 0;
   const col = frac >= 0.9 ? RED : frac >= 0.7 ? AMBER : BLUE;
@@ -175,6 +210,7 @@ export default function ShadowScreen({ data, onSave, onReplay }: { data: ShadowV
             <Tile label="капитал сейчас" value={usd2(m.equity)} sub="баланс + нереализованное (mark-to-market)" color={PURPLE} />
             <Tile label="издержки" value={usd2(m.costTotal)} sub={`комиссии ${usd2(m.fees)} · слип ${usd2(m.slippage)}`} color={RED} />
           </div>
+          <BankCurve curve={m.curve} />
           <div style={{ ...S.hint, marginTop: 10 }}>
             Это наш РЕАЛЬНЫЙ банк ${usd(m.bank)} и что с ним происходит: сколько свободно, вложено в открытые позиции,
             заработано/потеряно на закрытых, и «в процессе» — нереализованный P&amp;L открытых по свежей котировке.

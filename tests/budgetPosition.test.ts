@@ -78,6 +78,31 @@ test("budgetPosition: partial fixation — realised P&L sums the closed slice + 
   assert.equal(p.slippage, 1);
 });
 
+test("budgetPosition: bank equity curve accumulates realised P&L by settle day, ends at balance", () => {
+  const { db, comp, strat, mid } = setup();
+  const ev = (betId: string, reserved: number) => R.insertShadowEvent(db, { id: R.uid(), bet_id: betId, match_id: mid, competition_id: comp.id, strategy_id: strat.id, profile_id: "medium", size_requested: reserved, size_reserved: reserved, verdict: "allowed", reason: null, is_live: 0, edge: 0.05, contention: 0, free_at: null, pool_snapshot: null, config_snapshot: null, intensity: 0.02, created_at: "t" });
+  // day 1: winner, committed 50, stake 100 → payout 150 (ratio 1.5) → bank +$25
+  const w = R.uid();
+  R.insertBet(db, bet({ id: w, match_id: mid, strategy_id: strat.id, market_label: "W", status: "settled_won", entry_price: 50, stake: 100, result: "won", payout: 150, settled_at: "2026-07-16T12:00:00Z" }));
+  ev(w, 50);
+  // day 2: loser, committed 20, stake 40 → payout 0 → bank −$20
+  const l = R.uid();
+  R.insertBet(db, bet({ id: l, match_id: mid, strategy_id: strat.id, market_label: "L", status: "settled_lost", entry_price: 50, stake: 40, result: "lost", payout: 0, settled_at: "2026-07-17T12:00:00Z" }));
+  ev(l, 20);
+
+  const p = budgetPosition(db, "2026-07-18T00:00:00Z");
+  assert.equal(p.netRealized, 5);
+  const c = p.curve;
+  assert.equal(c.base, p.bank, "curve base = the bank");
+  assert.equal(c.current, p.balance, "curve ends at the balance");
+  assert.equal(c.realized, 5);
+  assert.equal(c.points.length, 3, "старт + 2 settle days");
+  assert.equal(c.points[0].equity, p.bank, "no untimed realised → start at bank");
+  assert.equal(c.points[1].equity, p.bank + 25, "after day 1: +25");
+  assert.equal(c.points[2].equity, p.bank + 5, "after day 2: −20 → net +5");
+  assert.equal(c.points.at(-1)!.equity, p.balance, "last point = balance");
+});
+
 test("budgetPosition: no shadow activity → bank intact, all P&L zero", () => {
   const { db } = setup();
   const p = budgetPosition(db, "2026-07-13T16:00:00Z");

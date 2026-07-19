@@ -30,6 +30,8 @@ export interface BudgetPosition {
   openPlus: number; openPlusPnl: number; openMinus: number; openMinusPnl: number;
   // Execution drag on the bank (fees + slippage), scaled to the bank's commitment.
   fees: number; slippage: number; costTotal: number;
+  // Bank equity over settle time: base ($5000) → balance, cumulative bank-scaled realised P&L by day.
+  curve: { points: { at: string; equity: number }[]; base: number; current: number; realized: number };
 }
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -68,6 +70,7 @@ export function budgetPosition(db: Database, nowIso?: string): BudgetPosition {
 
   // Realised P&L of the bank, per funded position, summed across its settled slices.
   let earned = 0, lostMoney = 0, settled = 0, won = 0, lost = 0;
+  const timed: { at: string; pnl: number }[] = []; let untimedPnl = 0; // bank-scaled realised, for the equity curve
   const ratioByBet = new Map<string, number>(); // committed / original stake — reused for cost scaling
   for (const [betId, committed] of committedByBet) {
     const b = parentBet.get(betId);
@@ -85,6 +88,8 @@ export function budgetPosition(db: Database, nowIso?: string): BudgetPosition {
     for (const s of slices) {
       const pnl = r * ((s.payout ?? 0) - (s.stake ?? 0));
       if (pnl >= 0) earned += pnl; else lostMoney += -pnl;
+      const at = s.settled_at ?? null; // same bank-scaled pnl, placed on its settle day for the curve
+      if (at && /^\d{4}-\d\d-\d\dT/.test(at)) timed.push({ at, pnl }); else untimedPnl += pnl;
     }
     if (parentSettled && b.settled_by == null) { settled++; if (b.result === "won") won++; else lost++; }
   }
@@ -127,6 +132,16 @@ export function budgetPosition(db: Database, nowIso?: string): BudgetPosition {
   // the fixed bank base and used only for the allocator's caps/live-buffer mechanics).
   const balance = bank + netRealized;
   const free = Math.max(0, balance - invested - pool.settling);
+
+  // Bank equity curve: fold any realised-without-timestamp into the start, then walk the timed slices by
+  // settle day. Ends at `balance` (bank + netRealized) by construction. Dashed reference sits at `bank`.
+  const curveStart = r2(bank + untimedPnl);
+  timed.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  const byDay = new Map<string, number>();
+  let eq = curveStart;
+  for (const t of timed) { eq = r2(eq + t.pnl); byDay.set(t.at.slice(0, 10), eq); }
+  const curve = { points: [{ at: "старт", equity: curveStart }, ...[...byDay.entries()].map(([at, equity]) => ({ at, equity }))], base: r2(bank), current: r2(balance), realized: r2(netRealized) };
+
   return {
     bank: r2(bank), balance: r2(balance), equity: r2(balance + openPnl),
     free: r2(free), invested: r2(invested), settling: r2(pool.settling),
@@ -135,5 +150,6 @@ export function budgetPosition(db: Database, nowIso?: string): BudgetPosition {
     openCount, openMarkValue: r2(openMarkValue), openPnl: r2(openPnl),
     openPlus, openPlusPnl: r2(openPlusPnl), openMinus, openMinusPnl: r2(openMinusPnl),
     fees: fc.feeUsd, slippage: fc.slipUsd, costTotal: fc.totalUsd,
+    curve,
   };
 }
