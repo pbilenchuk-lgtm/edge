@@ -42,6 +42,7 @@ import { tennisTradingTick, tennisSetValueTick, tennisExitTick, settleTennisBets
 import { sweepAbandonedMatches } from "./staleSweep.js";
 import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
 import { resolvePmvShadowSignals } from "./tennisPmvShadow.js";
+import { captureBookDepth } from "./bookDepthCapture.js";
 import { overreactionShouldCall } from "./reassessGate.js";
 import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
@@ -1741,6 +1742,7 @@ export async function runLiveCycle(
   stepSyncLive("stats", () => recordMatchStats(db, deps), 0); // 5-min match-stats snapshot into the events feed
   stepSyncLive("captureLiveOpens", () => captureLiveOpens(db, deps), undefined); // snapshot kickoff prices the first time a match is live
   await stepLive("snapshots", () => collectSnapshots(db, deps), 0); // raw provider + Polymarket capture on the live cadence
+  await stepLive("bookDepth", () => captureBookDepth(db, deps), 0); // MEASURED capacity: throttled book-depth snapshots on live matches
   await stepLive("tennisScout", () => collectTennisSnapshots(db, deps), 0); // tennis scouting on the fast (~20s) cadence — dense break-lag data
   stepSyncLive("tennisBreakMarks", () => recordTennisBreakMarks(db, deps), 0); // passive break marker (§4)
   await stepLive("tennisTrade", () => tennisTradingTick(db, deps), 0); // §6 paper: break-triggered Overreaction entry (isolated, budget-0 comps)

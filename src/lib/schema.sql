@@ -624,6 +624,24 @@ CREATE TABLE IF NOT EXISTS pmv_shadow_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_pmv_shadow_status ON pmv_shadow_signals(status);
 
+-- Order-book DEPTH snapshots for MEASURED liquidity-capacity (vs the parametric model). Periodic (every
+-- N min on live in-scope matches) + on-fill, storing the top-N bid/ask levels so a future capacity curve
+-- can re-VWAP any scaled size against the REAL book — including skip moments («сколько мы НЕ смогли бы
+-- налить»). Data-gated: history can't be captured, so it accrues from deploy. Bounded + pruned.
+CREATE TABLE IF NOT EXISTS book_depth_snapshots (
+  id             TEXT PRIMARY KEY,
+  match_id       TEXT NOT NULL,
+  token_id       TEXT NOT NULL,
+  label          TEXT,
+  source         TEXT NOT NULL DEFAULT 'periodic',  -- 'periodic' | 'fill'
+  best_bid_cents REAL, best_ask_cents REAL,
+  bid_depth_usd  REAL, ask_depth_usd  REAL,          -- total $ across captured levels
+  bids_json      TEXT, asks_json      TEXT,          -- [[priceCents,shares],…] top-N levels
+  at             TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_book_depth_match ON book_depth_snapshots(match_id);
+CREATE INDEX IF NOT EXISTS idx_book_depth_at ON book_depth_snapshots(at);
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- REAL-TRADING contour (spec §2.3). Build != enable: these tables exist so the
 -- dry-run/real executor has a book of record; NOTHING writes here until
