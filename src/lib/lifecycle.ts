@@ -671,6 +671,24 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
         if (!ex.retry) R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, ex.note) });
         continue;
       }
+      // P0.2 MIN-DEPTH FLOOR: the book absorbed a CLAMPED fill below the floor — the depth to trade
+      // meaningfully isn't there. Skip (don't open a dust position, Bohemian $80→$14). Feeds unfillable_edge.
+      const MIN_DEPTH = Math.max(1, Number((deps.env ?? process.env).FOOTBALL_MIN_DEPTH_USD ?? 50));
+      if (ex.clamped && ex.stake < MIN_DEPTH) {
+        R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `depth_floor_skip: книга дала лишь $${ex.stake} < floor $${MIN_DEPTH} — глубины нет`) });
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `depth_floor_skip «${b.market_label}»: клэмп $${ex.stake} < floor $${MIN_DEPTH} — вход отклонён`, created_at: now });
+        continue;
+      }
+      // P0.2 STALE-PROPOSAL: the fill landed far from the price the decision was sized on (Bohemian
+      // 11¢→4¢) — the quote was stale / the market moved, so the fill no longer matches the decision.
+      // Block. Same runtime invariant as the tennis band-re-check («исполнение соответствует решению»).
+      const proposedC = b.proposed_price ?? quote;
+      const drift = Math.abs(ex.priceCents - proposedC);
+      if (proposedC > 0 && drift > Math.max(5, 0.25 * proposedC)) {
+        R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `stale_proposal: филл ${ex.priceCents}¢ vs предложение ${proposedC}¢ (Δ${drift.toFixed(0)}¢)`) });
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `stale_proposal «${b.market_label}»: филл ${ex.priceCents}¢ vs предложение ${proposedC}¢ (Δ${drift.toFixed(0)}¢) — рынок ушёл, вход отклонён`, created_at: now });
+        continue;
+      }
 
       R.updateBet(db, b.id, { status: "open", entry_price: ex.priceCents, current_price: ex.priceCents, stake: ex.stake, entered_minute: minuteLabel(m) });
       openKey.add(key);

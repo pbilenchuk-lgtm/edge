@@ -40,6 +40,23 @@ test("autoEnter fills proposed bets at the current price", async () => {
   assert.ok(R.tradeLogForMatch(db, "m-lineup").some((l) => l.type === "enter"));
 });
 
+test("P0.2 autoEnter: a fill clamped below the $50 depth floor is skipped (depth_floor_skip), not opened as dust", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const proposed = R.betsForMatch(db, "m-lineup").filter((b) => b.status === "proposed")[0];
+  R.updateBet(db, proposed.id, { stake: 80 }); // ask a real size so a thin book must clamp
+  const mk = R.latestMarkets(db, "m-lineup").find((x) => x.label === proposed.market_label)!;
+  const ask = (mk.price / 100).toFixed(2);
+  // Book has only ~20 shares on the ask (~$10 at a ~50¢ price) → the $80 request clamps far below $50.
+  const fetchImpl = (async (url: any) => String(url).includes("/book")
+    ? ({ ok: true, status: 200, json: async () => ({ bids: [{ price: ((mk.price - 3) / 100).toFixed(2), size: "1000" }], asks: [{ price: ask, size: "20" }] }) } as any)
+    : ({ ok: false, status: 404, json: async () => ({}) } as any)) as unknown as typeof fetch;
+  await autoEnter(db, { now: () => "t", env: { POLYMARKET_ENABLED: "true" }, fetchImpl });
+  const b = R.getBet(db, proposed.id)!;
+  assert.equal(b.status, "not_filled", "clamped below the depth floor → not filled (no dust position)");
+  assert.ok(R.tradeLogForMatch(db, "m-lineup").some((l) => /depth_floor_skip/.test(l.text ?? "")), "depth_floor_skip logged (feeds unfillable_edge)");
+});
+
 test("autoEnter holds a football bet until lineups are out (no pre-lineup entry)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
