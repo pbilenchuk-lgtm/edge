@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { serializeEntryMeta } from "../src/lib/betMeta.js";
+import { serializeEntryMeta, parseEntryMeta } from "../src/lib/betMeta.js";
+import { isStaleProposal } from "../src/lib/thresholds.js";
 import { setValueGate, isBestOfFive, SET_VALUE_ARMED } from "../src/lib/tennisSetValue.js";
 import { tennisSetValueTick, tennisExitTick, tennisSetValueEntryMeta } from "../src/lib/tennisTrading.js";
 import { runLiveCycle } from "../src/lib/lifecycle.js";
@@ -97,6 +98,28 @@ test("P0.5: a fill outside the band is blocked (band_violation_at_fill), money m
   assert.equal(opened, 0, "fill above the band → blocked");
   assert.equal(R.betsForMatch(db, mid, "tennis_set_value").filter((b) => b.status === "open").length, 0);
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /band_violation_at_fill/.test(l.text ?? "")), "band violation logged");
+});
+
+test("T4 isStaleProposal: shared drift threshold (5¢ abs OR 25% rel), config-overridable", () => {
+  assert.equal(isStaleProposal(40, 43, {}), false, "3¢ drift under both thresholds");
+  assert.equal(isStaleProposal(40, 55, {}), true, "15¢ drift > max(5, 10)");
+  assert.equal(isStaleProposal(10, 16, {}), true, "6¢ drift > max(5, 2.5) — abs binds at low prices");
+  assert.equal(isStaleProposal(0, 44, {}), false, "no positive decision price → nothing to compare");
+  assert.equal(isStaleProposal(40, 44, { STALE_PROPOSAL_ABS_CENTS: "2", STALE_PROPOSAL_REL_FRAC: "0.05" }), true, "tightened config catches a 4¢ drift");
+});
+
+test("T4 edge-recompute: a set_value bet records edge FROM THE FILL price, not the proposal", async () => {
+  const db = openDb(":memory:");
+  const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins", startPrice: 80 });
+  lostSet1(db, mid, "Vitoria Zuccon", "Carolina Martins"); // arms the DECISION at 38¢ → const edge 12%
+  // book ask 0.44 → the fill lands IN-band at ~44¢ (drift 6¢ < the 9.5¢ threshold, so it opens) — but the
+  // recorded edge must be comebackProb(0.5) − 0.44 ≈ 6%, NOT 0.5 − 0.38 = 12%.
+  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true", TENNIS_SV_FLAG_ONLY: "false" }, fetchImpl: bookAndLLM("Vitoria Zuccon", { bids: [{ price: "0.42", size: "1000" }], asks: [{ price: "0.44", size: "1000" }] }) });
+  assert.ok(opened >= 1, "opens in-band");
+  const b = R.betsForMatch(db, mid, "tennis_set_value").find((x) => x.status === "open")!;
+  const edge = parseEntryMeta(b.entry_meta)?.edge ?? 0;
+  assert.ok(edge <= 0.075 && edge >= 0.045, `edge recorded from the ~44¢ fill (~6%), not the 38¢ proposal (12%) — got ${edge}`);
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => /от филла/.test(l.text ?? "")), "enter log states edge is from the fill");
 });
 
 // ── P0.2: boot-grace EXITS-ONLY protective pass ────────────────────────────

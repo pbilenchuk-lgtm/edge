@@ -29,6 +29,7 @@ import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
 import { sizePrematch, impliedProbs } from "./strategist.js";
+import { isStaleProposal, proposalDrift } from "./thresholds.js";
 import { getProfileConfig, RISK_PROFILE_DEFS } from "./riskConfig.js";
 import { shadowOnEntries, type ShadowEntryRequest } from "./shadow.js";
 import { getStrategy } from "./repo.js";
@@ -1099,7 +1100,15 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       }
       const fillCents = ack.avgFillPriceCents ?? entryCents; // REAL book fill price
       const fillStake = ack.filledSizeUsd;                    // depth-aware size (thin book → smaller)
-      const meta = tennisEntryMeta({ favPrice: fillCents, prePrice, edge: r.edge, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: br.setNum, favSide: charge.favSide, firstIsP1: ml.firstIsP1, panicDropCents, panicThresholdCents: minDrop });
+      // T4: fill-vs-decision guard (shared stale_proposal mechanism/config) — an entry that filled far from the
+      // decision price is not the trade that was sized (the panic depth / edge were computed on entryCents).
+      if (isStaleProposal(entryCents, fillCents, env)) {
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `[${profile}] stale_proposal: филл ${fillCents}¢ vs решение ${entryCents}¢ (Δ${proposalDrift(entryCents, fillCents).toFixed(1)}¢ > порога) — рынок ушёл, вход ЗАБЛОКИРОВАН`, created_at: now });
+        continue;
+      }
+      // T4: record edge FROM THE FILL price (prePrice-based fair − fill), not the proposal — no flattering ledger.
+      const edgeAtFill = Math.round((ourProb - fillCents / 100) * 1000) / 1000;
+      const meta = tennisEntryMeta({ favPrice: fillCents, prePrice, edge: edgeAtFill, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: br.setNum, favSide: charge.favSide, firstIsP1: ml.firstIsP1, panicDropCents, panicThresholdCents: minDrop });
       const betId = R.uid();
       R.insertBet(db, {
         id: betId, match_id: m.id, strategy_id: TENNIS_STRATEGY, risk_profile_id: profile, market_label: favName,
@@ -1108,8 +1117,8 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
         entered_minute: `сет ${br.setNum}`, result: null, payout: null, settled_by: null, settled_at: null,
         entry_meta: serializeEntryMeta(meta), code_version: codeVer, decision_id: decisionId, created_at: now,
       });
-      try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: fillStake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(r.edge * 100).toFixed(1)}%, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${Math.round((fillCents - TENNIS_CATASTROPHIC_FLOOR) * 10) / 10}¢, пороги:${TENNIS_ARMED_EPOCH})${cohortTag}`, created_at: now });
+      try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: fillStake, edge: edgeAtFill, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(edgeAtFill * 100).toFixed(1)}% от филла, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${Math.round((fillCents - TENNIS_CATASTROPHIC_FLOOR) * 10) / 10}¢, пороги:${TENNIS_ARMED_EPOCH})${cohortTag}`, created_at: now });
       opened++;
     }
   }
@@ -1349,7 +1358,17 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `[${profile}] band_violation_at_fill: филл ${fillCents}¢ вне полосы ${SET_VALUE_ARMED.bandLowCents}-${SET_VALUE_ARMED.bandHighCents}¢ (предложение ${Math.round(entryCents)}¢) — вход ЗАБЛОКИРОВАН`, created_at: now });
         continue;
       }
-      const meta = tennisSetValueEntryMeta({ favPrice: fillCents, edge: r.edge, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: last.set_num ?? 2, favSide, firstIsP1: ml.firstIsP1 });
+      // T4: fill-vs-decision guard (ONE mechanism/config with football stale_proposal). The band check catches
+      // OUT-of-band fills; this catches IN-band drift the size/edge was NOT computed on (Luz 38.5→43.1: both in
+      // 30-45¢, but edge collapsed 11.5%→~6.9%). «Исполнение соответствует решению».
+      if (isStaleProposal(entryCents, fillCents, env)) {
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `[${profile}] stale_proposal: филл ${fillCents}¢ vs решение ${Math.round(entryCents)}¢ (Δ${proposalDrift(entryCents, fillCents).toFixed(1)}¢ > порога) — рынок ушёл, вход ЗАБЛОКИРОВАН`, created_at: now });
+        continue;
+      }
+      // T4: the recorded edge is recomputed FROM THE FILL PRICE, not the proposal — else the edge ledger
+      // systematically flatters (r.edge was sized on entryCents). comebackProb − fill.
+      const edgeAtFill = Math.round((ourProb - fillCents / 100) * 1000) / 1000;
+      const meta = tennisSetValueEntryMeta({ favPrice: fillCents, edge: edgeAtFill, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: last.set_num ?? 2, favSide, firstIsP1: ml.firstIsP1 });
       const betId = R.uid();
       R.insertBet(db, {
         id: betId, match_id: m.id, strategy_id: SET_VALUE_STRATEGY, risk_profile_id: profile, market_label: favName,
@@ -1358,8 +1377,8 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
         entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null,
         entry_meta: serializeEntryMeta(meta), code_version: codeVer, decision_id: decisionId, created_at: now,
       });
-      try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: SET_VALUE_STRATEGY, profileId: profile, size: fillStake, edge: r.edge, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "enter", text: `[${profile}] SET-VALUE «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(r.edge * 100).toFixed(1)}%, тейк 50% @ ${SET_VALUE_ARMED.takeLowCents}¢ / стоп брейк-невозврат K${SET_VALUE_ARMED.thesisStopReceiverGames} / floor ${Math.round((fillCents - SET_VALUE_ARMED.floorBelowEntryCents) * 10) / 10}¢, пороги:${SET_VALUE_EPOCH})`, created_at: now });
+      try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: SET_VALUE_STRATEGY, profileId: profile, size: fillStake, edge: edgeAtFill, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "enter", text: `[${profile}] SET-VALUE «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(edgeAtFill * 100).toFixed(1)}% от филла, тейк 50% @ ${SET_VALUE_ARMED.takeLowCents}¢ / стоп брейк-невозврат K${SET_VALUE_ARMED.thesisStopReceiverGames} / floor ${Math.round((fillCents - SET_VALUE_ARMED.floorBelowEntryCents) * 10) / 10}¢, пороги:${SET_VALUE_EPOCH})`, created_at: now });
       opened++;
     }
   }

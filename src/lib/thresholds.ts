@@ -285,6 +285,26 @@ export function winsOnEventOccurrence(label: string): boolean {
 export const DEFAULT_TAKE_PROFIT = 0.5; // +50% of position value
 export const DEFAULT_EXIT_STOP = 0.5;   // −50%
 
+// ── STALE-PROPOSAL / fill-vs-decision guard (ONE mechanism for football autoEnter AND tennis entry) ──
+// The runtime invariant «исполнение соответствует решению»: a fill that drifted from the price the size/edge
+// was computed on is NOT the trade that was decided. Config is shared so both sports move together.
+export interface StaleProposalCfg { absCents: number; relFrac: number }
+export function staleProposalCfg(env: Record<string, string | undefined> = process.env): StaleProposalCfg {
+  const a = Number(env.STALE_PROPOSAL_ABS_CENTS), r = Number(env.STALE_PROPOSAL_REL_FRAC);
+  return { absCents: Number.isFinite(a) && a > 0 ? a : 5, relFrac: Number.isFinite(r) && r > 0 ? r : 0.25 };
+}
+/** Drift (cents) between the sized DECISION price and the actual FILL price. */
+export function proposalDrift(proposedCents: number, fillCents: number): number {
+  return Math.abs((fillCents ?? 0) - (proposedCents ?? 0));
+}
+/** True when the fill drifted beyond the allowed band (absolute OR relative-to-price), i.e. the decision is
+ *  stale for this fill. False for a non-positive proposal (nothing to compare against). */
+export function isStaleProposal(proposedCents: number, fillCents: number, env: Record<string, string | undefined> = process.env): boolean {
+  if (!(proposedCents > 0)) return false;
+  const { absCents, relFrac } = staleProposalCfg(env);
+  return proposalDrift(proposedCents, fillCents) > Math.max(absCents, relFrac * proposedCents);
+}
+
 /**
  * Deterministic exit rule (code, not LLM — §9.6). A prediction-market position
  * bought at `entry` is worth stake·(current/entry) if sold now, so P&L% is

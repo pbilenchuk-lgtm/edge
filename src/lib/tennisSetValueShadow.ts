@@ -101,12 +101,26 @@ export function resolveSvShadowSignals(db: Database, deps: EngineDeps = {}): { r
   return { resolved, unresolved };
 }
 
+// T5: net-EV of a bin by the ACTUAL payout structure — the re-enable criterion is structural (the
+// «take half / floor whole» asymmetry is IN the number), not a win% remark. All params measured; fees +
+// fill-drift subtracted. Reported next to P(comeback) so the verdict reads mechanically.
+export interface SvBinEv {
+  entryMedianCents: number | null;   // median set-2 trigger price of the bin's SHADOW rows (EV basis)
+  nEvBasis: number;                  // shadow rows with a trigger price (the EV is computed on these)
+  pComeback: number | null;          // P(won set 2)
+  pWinGivenComeback: number | null;  // P(won match | won set 2)
+  takeCents: number; floorCents: number | null; feeCents: number; fillDriftCents: number;
+  evPerShareCents: number | null;    // expected P&L per share (price units), net of fees + drift
+  evReturnPct: number | null;        // evPerShare / entry — the margin the ≥3pp threshold reads
+  verdict: "reenable" | "hold" | "insufficient";
+}
 export interface SvCohortBin {
   label: string; n: number;
   comebackSet2Pct: number | null;  // P(favourite won set 2 | lost set 1) — the thesis
   winMatchPct: number | null;      // P(favourite won the match) — the P&L terminal
   meanDrawdownCents: number | null; // mean of (trigger − min) — how far it fell before resolving
   meanTakeAvailCents: number | null;// mean of (max − trigger) — how much take was on the table
+  ev?: SvBinEv | null;             // T5 net-EV (present on verdict bins that have a shadow entry basis)
 }
 
 // ── P1.1: RETRO cohort — reconstruct the comeback rate from EXISTING snapshot history ──────────────
@@ -236,9 +250,37 @@ export interface SvCohort {
 /** P1.1: the combined cohort — retro (backfilled from snapshot history) + shadow (frozen forward). Both are
  *  prices, not decisions, so retro is not poisoned by the 0.5 constant. Measured P(comeback set 2) and
  *  P(win match) per frozen favourite-strength bin × ATP/WTA — the number that replaces 0.5 at re-enable. */
-export function buildSvCohort(db: Database): SvCohort {
+// T5 net-EV of a bin, in PRICE units (cents/share), by the real set_value payout structure:
+//   EV = P·[takeFrac·(take−e) + (1−takeFrac)·EV_rem] + (1−P)·(floor−e),  EV_rem = pWin·(1−e) − (1−pWin)·e,
+// remainder held to settlement (win→1, loss→0). Net of round-trip taker fees + a fill-drift haircut.
+export function svComputeEv(
+  entryMedianCents: number | null, nEvBasis: number, pComebackPct: number | null, pWinGivenComebackPct: number | null,
+  env: Record<string, string | undefined> = process.env,
+): SvBinEv {
+  const takeCents = Math.max(1, Number(env.TENNIS_SV_TAKE_LOW_CENTS ?? 55));
+  const floorBelow = Math.max(0, Number(env.TENNIS_SV_FLOOR_BELOW_CENTS ?? 12));
+  const feeRate = Math.max(0, Number(env.POLYMARKET_TAKER_FEE_RATE ?? 0.02));
+  const fillDriftCents = Math.max(0, Number(env.SV_EV_FILL_DRIFT_CENTS ?? 0)); // flag-only → no fills yet; T4 logs feed this later
+  const takeFrac = Math.min(1, Math.max(0.1, Number(env.TENNIS_SV_TAKE_FRACTION ?? 0.5)));
+  const base: SvBinEv = { entryMedianCents, nEvBasis, pComeback: pComebackPct == null ? null : pComebackPct / 100, pWinGivenComeback: pWinGivenComebackPct == null ? null : pWinGivenComebackPct / 100, takeCents, floorCents: entryMedianCents == null ? null : Math.round((entryMedianCents - floorBelow) * 10) / 10, feeCents: 0, fillDriftCents, evPerShareCents: null, evReturnPct: null, verdict: "insufficient" };
+  if (entryMedianCents == null || pComebackPct == null || pWinGivenComebackPct == null) return base;
+  const e = entryMedianCents / 100, take = takeCents / 100, floor = (entryMedianCents - floorBelow) / 100;
+  const P = pComebackPct / 100, pw = pWinGivenComebackPct / 100;
+  const evRem = pw * (1 - e) - (1 - pw) * e;                 // remainder held to settle
+  const perShare = P * (takeFrac * (take - e) + (1 - takeFrac) * evRem) + (1 - P) * (floor - e);
+  const feeCents = Math.round(2 * feeRate * entryMedianCents * 10) / 10; // round-trip taker, in cents
+  const perShareNet = perShare - feeCents / 100 - fillDriftCents / 100;
+  const evReturnPct = e > 0 ? Math.round((perShareNet / e) * 1000) / 10 : null;
+  const marginPp = Math.max(0, Number(env.SV_EV_MARGIN_PP ?? 3));
+  const verdict: SvBinEv["verdict"] = nEvBasis < VERDICT_BIN_N ? "insufficient" : (evReturnPct != null && evReturnPct >= marginPp ? "reenable" : "hold");
+  return { ...base, feeCents, evPerShareCents: Math.round(perShareNet * 1000) / 10, evReturnPct, verdict };
+}
+
+export function buildSvCohort(db: Database, env: Record<string, string | undefined> = process.env): SvCohort {
   const retro = svRetroCohort(db);
   const shadowRows = db.prepare(`SELECT tour, event_type, prematch_ml_cents pm, set2_outcome s2, match_outcome mo FROM sv_shadow_signals WHERE status='resolved'`).all() as any[];
+  // T5: shadow rows WITH the set-2 trigger (entry) price — the EV basis (retro rows have no set-2 entry).
+  const evShadow = db.prepare(`SELECT tour, event_type, prematch_ml_cents pm, trigger_cents trig, set2_outcome s2, match_outcome mo FROM sv_shadow_signals WHERE status='resolved' AND set2_outcome IN ('won','lost') AND trigger_cents IS NOT NULL AND prematch_ml_cents >= 60`).all() as any[];
   const shadow: SvCohortRow[] = shadowRows.map((r) => ({ tour: r.tour, eventType: r.event_type, prematchCents: r.pm ?? 0, set2: r.s2 ?? null, match: r.mo ?? null, source: "shadow" as const }));
   const all = [...retro, ...shadow].filter((r) => r.set2 === "won" || r.set2 === "lost"); // scoreable rows only
 
@@ -254,25 +296,39 @@ export function buildSvCohort(db: Database): SvCohort {
   });
 
   const verdictRows = all.filter((r) => r.prematchCents >= 60);
+  // T5 EV plumbing: median entry + P(win|comeback) per bin, from the shadow subset that carries a trigger.
+  const isWtaR = (r: any) => /wta|women|itf.*w|\bw\b/i.test(`${r.tour ?? ""} ${r.event_type ?? ""}`);
+  const median = (xs: number[]) => (xs.length ? [...xs].sort((a, b) => a - b)[Math.floor((xs.length - 1) / 2)] : null);
+  const attachEv = (b: SvCohortBin, rs: SvCohortRow[], evRs: any[]): SvCohortBin => {
+    const trigs = evRs.map((r) => r.trig).filter((x: number) => Number.isFinite(x));
+    const comeback = rs.filter((r) => r.set2 === "won");
+    const pWinGivenComeback = comeback.length ? Math.round((1000 * comeback.filter((r) => r.match === "won").length) / comeback.length) / 10 : null;
+    b.ev = svComputeEv(median(trigs), trigs.length, b.comebackSet2Pct, pWinGivenComeback, env);
+    return b;
+  };
   const bins: SvCohortBin[] = [];
   for (const tourKey of ["ATP", "WTA"]) {
     const tr = verdictRows.filter((r) => (tourKey === "WTA") === isWta(r));
     for (const sb of ["60-70", "70-80", "80+"]) {
       const rs = tr.filter((r) => strengthBin(r.prematchCents) === sb);
-      if (rs.length) bins.push(bin(`${tourKey} · фаворит ${sb}¢`, rs));
+      if (rs.length) bins.push(attachEv(bin(`${tourKey} · фаворит ${sb}¢`, rs), rs, evShadow.filter((r) => (tourKey === "WTA") === isWtaR(r) && strengthBin(r.pm) === sb)));
     }
   }
   const quar = all.filter((r) => r.prematchCents < 60);
   const quarantine = quar.length ? bin("Чувствительная полоса 55-60¢ (не в вердикте)", quar) : null;
-  const overall = verdictRows.length ? bin("Всего (вердиктные, ≥60¢)", verdictRows) : null;
+  const overall = verdictRows.length ? attachEv(bin("Всего (вердиктные, ≥60¢)", verdictRows), verdictRows, evShadow) : null;
+  const reenable = bins.filter((b) => b.ev?.verdict === "reenable").map((b) => b.label);
 
   const biggest = bins.reduce<SvCohortBin | null>((a, b) => (a && a.n >= b.n ? a : b), null);
   const verdictBinMet = (biggest?.n ?? 0) >= VERDICT_BIN_N;
   const totalMet = verdictRows.length >= TOTAL_N;
   const verdict: SvCohort["verdict"] = verdictBinMet && totalMet ? "measured" : "insufficient";
-  const note = verdict === "measured"
+  const evNote = reenable.length
+    ? ` T5 net-EV: бин(ы) под ре-включение (EV ≥ ${Math.max(0, Number(env.SV_EV_MARGIN_PP ?? 3))}пп, n≥${VERDICT_BIN_N}): ${reenable.join("; ")}.`
+    : ` T5 net-EV: ни один бин пока не проходит (EV ≥ ${Math.max(0, Number(env.SV_EV_MARGIN_PP ?? 3))}пп при n≥${VERDICT_BIN_N}) — держим flag-only.`;
+  const note = (verdict === "measured"
     ? `ИЗМЕРЕНО (retro ${retro.length} + shadow ${shadow.length}): заменяй 0.5 на P(камбэк) по бину. Крупнейший «${biggest?.label}» n=${biggest?.n} P=${biggest?.comebackSet2Pct}% vs константа 50%.`
-    : `копим: крупнейший бин ${biggest?.n ?? 0}/${VERDICT_BIN_N}, всего вердиктных ${verdictRows.length}/${TOTAL_N} (retro ${retro.length} + shadow ${shadow.length}). Retro даёт мгновенный n из истории марок; shadow растёт вперёд.`;
+    : `копим: крупнейший бин ${biggest?.n ?? 0}/${VERDICT_BIN_N}, всего вердиктных ${verdictRows.length}/${TOTAL_N} (retro ${retro.length} + shadow ${shadow.length}). Retro даёт мгновенный n из истории марок; shadow растёт вперёд.`) + evNote;
 
   return {
     criteria: [

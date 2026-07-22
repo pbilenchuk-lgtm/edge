@@ -109,3 +109,16 @@ test("T1 cap: capTennisSnapshots never evicts snapshots of a match with a PENDIN
   const left = db.prepare(`SELECT DISTINCT pm_match_id AS m FROM tennis_snapshots`).all().map((r: any) => r.m).sort();
   assert.ok(left.includes("m-pending"), "the pending-shadow match's final snapshot survives (resolve can still read it)");
 });
+
+test("T5 svComputeEv: even 50/50 at 40¢ bleeds after fees (hold); 60/60 at 35¢ clears +3pp (reenable)", async () => {
+  const { svComputeEv } = await import("../src/lib/tennisSetValueShadow.js");
+  const a = svComputeEv(40, 50, 50, 50, {}); // entry 40¢, P=0.5, P(win|comeback)=0.5, n=50
+  assert.ok(a.evReturnPct != null && a.evReturnPct < 0, `take-half/floor-whole asymmetry: ~50/50 is net-negative after fees, got ${a.evReturnPct}%`);
+  assert.equal(a.verdict, "hold", "n≥40 but EV below +3pp → hold, not reenable");
+  const b = svComputeEv(35, 50, 60, 60, {}); // stronger comeback + win rate, cheaper entry
+  assert.ok(b.evReturnPct != null && b.evReturnPct >= 3, `positive EV with margin, got ${b.evReturnPct}%`);
+  assert.equal(b.verdict, "reenable");
+  const c = svComputeEv(35, 20, 60, 60, {}); // same EV but thin sample
+  assert.equal(c.verdict, "insufficient", "n<40 never reenables regardless of EV");
+  assert.equal(svComputeEv(null, 50, 60, 60, {}).evReturnPct, null, "no entry basis → no EV");
+});

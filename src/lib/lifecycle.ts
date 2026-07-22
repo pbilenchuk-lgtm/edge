@@ -28,7 +28,7 @@ import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCor
 import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
 import { classifyZombie, notationSpreads, loadZombieConfig, type ZombieReason } from "./zombieMarket.js";
 import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
-import { exitDecision, winsOnEventOccurrence } from "./thresholds.js";
+import { exitDecision, winsOnEventOccurrence, isStaleProposal, proposalDrift } from "./thresholds.js";
 import { underThesisMarginGoals } from "./settlement.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
@@ -696,8 +696,8 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       // 11¢→4¢) — the quote was stale / the market moved, so the fill no longer matches the decision.
       // Block. Same runtime invariant as the tennis band-re-check («исполнение соответствует решению»).
       const proposedC = b.proposed_price ?? quote;
-      const drift = Math.abs(ex.priceCents - proposedC);
-      if (proposedC > 0 && drift > Math.max(5, 0.25 * proposedC)) {
+      const drift = proposalDrift(proposedC, ex.priceCents);
+      if (isStaleProposal(proposedC, ex.priceCents, deps.env ?? process.env)) {
         R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `stale_proposal: филл ${ex.priceCents}¢ vs предложение ${proposedC}¢ (Δ${drift.toFixed(0)}¢)`) });
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `stale_proposal «${b.market_label}»: филл ${ex.priceCents}¢ vs предложение ${proposedC}¢ (Δ${drift.toFixed(0)}¢) — рынок ушёл, вход отклонён`, created_at: now });
         continue;
