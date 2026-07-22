@@ -51,8 +51,10 @@ export async function GET(req: Request) {
     // ?report=schedule_gaps → scheduler sleep-window monitor: recorded gaps (count, longest, last, recent list)
     // where the in-process loop was down and deterministic stops sat unmanaged / ran at the gap bottom on wake.
     if (new URL(req.url).searchParams.get("report") === "schedule_gaps") {
-      const { scheduleGapSummary } = await import("@/lib/scheduleGap");
-      return NextResponse.json({ ok: true, gaps: scheduleGapSummary(db) });
+      const { scheduleGapSummary, gapRepriceSummary } = await import("@/lib/scheduleGap");
+      // gaps = the recorded sleep windows; reprice = the P0.6 protective-exit window's SELF-MEASUREMENT
+      // (delta saved/cost vs the gap bottom, with the pre-set verdict criterion).
+      return NextResponse.json({ ok: true, gaps: scheduleGapSummary(db), reprice: gapRepriceSummary(db) });
     }
     return NextResponse.json({ ok: false, error: "unknown report" }, { status: 400 });
   } catch (e) {

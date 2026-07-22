@@ -20,11 +20,41 @@ import * as R from "./repo.js";
 export const GAP_COUNT_KEY = "schedule_gap_count";
 export const GAP_LONGEST_KEY = "schedule_gap_longest_sec";
 export const GAP_LAST_KEY = "schedule_gap_last"; // JSON of the most recent ScheduleGap
+export const GAP_WAKE_UNTIL_KEY = "gap_wake_until_ms"; // P0.6: a firing protective stop before this arms a deferral
 
 /** A sleep shorter than this (seconds) is a missed tick or two, not a "gap" — the catch-up handles it. */
 export function gapAlertSec(env: Record<string, string | undefined> = process.env): number {
   const n = Number(env.SCHEDULE_GAP_ALERT_SEC);
   return Number.isFinite(n) && n > 0 ? n : 300; // 5 min
+}
+
+// P0.6 reprice-window design constants — INTERIM, to be calibrated from the self-measurement below, NOT tuned
+// to today's cases. GAP_WAKE_START_SEC bounds how long after wake a firing stop may START a deferral (keeps
+// the trigger to the immediate post-gap dislocation, not normal time). A deferral then lasts ≤ repriceSec OR
+// repriceTicks, whichever comes first — it can only DELAY the stop, never cancel it.
+export function gapWakeStartSec(env: Record<string, string | undefined> = process.env): number {
+  const n = Number(env.GAP_WAKE_START_SEC); return Number.isFinite(n) && n > 0 ? n : 45;
+}
+export function gapRepriceConfig(env: Record<string, string | undefined> = process.env): { repriceSec: number; repriceTicks: number } {
+  const s = Number(env.GAP_WAKE_REPRICE_SEC), t = Number(env.GAP_WAKE_REPRICE_TICKS);
+  return { repriceSec: Number.isFinite(s) && s > 0 ? s : 90, repriceTicks: Number.isFinite(t) && t > 0 ? t : 2 };
+}
+/** Arm the post-wake window: a protective stop firing before untilMs enters the three-step. Carries the gap
+ *  length so a deferral it spawns can record which sleep caused it. */
+export function markGapWake(db: Database, nowMs: number, gapSec: number, env: Record<string, string | undefined> = process.env): void {
+  try { R.metaSet(db, GAP_WAKE_UNTIL_KEY, JSON.stringify({ untilMs: nowMs + gapWakeStartSec(env) * 1000, gapSec }), new Date(nowMs).toISOString()); } catch { /* best-effort */ }
+}
+function readGapWake(db: Database): { untilMs: number; gapSec: number } {
+  try { const s = R.metaGet(db, GAP_WAKE_UNTIL_KEY); if (s) { const o = JSON.parse(s); return { untilMs: Number(o.untilMs ?? 0), gapSec: Number(o.gapSec ?? 0) }; } } catch { /* ignore */ }
+  return { untilMs: 0, gapSec: 0 };
+}
+/** Are we within the immediate post-gap window (so a NEW deferral may be armed)? */
+export function gapWakeActive(db: Database, nowMs: number): boolean {
+  return nowMs < readGapWake(db).untilMs;
+}
+/** Length (seconds) of the sleep that armed the current post-wake window — stamped onto a deferral it spawns. */
+export function gapWakeGapSec(db: Database): number {
+  return readGapWake(db).gapSec;
 }
 
 export interface ScheduleGap { startMs: number; endMs: number; sec: number; liveInPlay: boolean }
@@ -54,7 +84,36 @@ export function recordScheduleGap(
     if (sec > Number(R.metaGet(db, GAP_LONGEST_KEY) ?? 0)) R.metaSet(db, GAP_LONGEST_KEY, String(sec), at);
     R.metaSet(db, GAP_LAST_KEY, JSON.stringify(gap), at);
   } catch { /* meta best-effort */ }
+  // P0.6: only a HARMFUL gap (a live match at wake) arms the protective-exit reprice window.
+  if (inPlay) markGapWake(db, nowMs, sec, env);
   return gap;
+}
+
+export interface GapRepriceSummary {
+  used: number; recovered: number; expired: number;
+  medianDeltaCents: number | null; meanDeltaCents: number | null;
+  verdict: string;
+  recent: { betId: string; gapSec: number; wakeCents: number; execCents: number; outcome: string; deltaCents: number }[];
+}
+
+/** Self-measurement verdict for the reprice window: over the deferrals that actually USED the window
+ *  (recovered/expired), the delta «сэкономлено/стоило» vs an immediate stop at the gap bottom. Criterion set in
+ *  advance — a NEGATIVE median means waiting hurts on balance → the window should be removed. */
+export function gapRepriceSummary(db: Database): GapRepriceSummary {
+  const rows = R.gapRepriceMeasurements(db, 200);
+  const deltas = rows.map((r) => Number(r.delta_cents ?? 0)).filter((n) => Number.isFinite(n));
+  const median = deltas.length ? [...deltas].sort((a, b) => a - b)[Math.floor((deltas.length - 1) / 2)] : null;
+  const mean = deltas.length ? Math.round((deltas.reduce((s, n) => s + n, 0) / deltas.length) * 100) / 100 : null;
+  const recovered = rows.filter((r) => r.outcome === "recovered").length;
+  const expired = rows.filter((r) => r.outcome === "expired").length;
+  const verdict = median == null ? "нет данных — окно ещё не срабатывало"
+    : median < 0 ? `МЕДИАННАЯ ДЕЛЬТА ${median}¢ < 0 — ожидание в среднем ВРЕДИТ, окно под снятие (критерий задан заранее)`
+    : `медианная дельта +${median}¢ ≥ 0 — окно окупается; держим, добираем данные для калибровки 90с/2-тика`;
+  return {
+    used: rows.length, recovered, expired,
+    medianDeltaCents: median, meanDeltaCents: mean, verdict,
+    recent: rows.slice(0, 20).map((r) => ({ betId: r.bet_id, gapSec: r.gap_sec, wakeCents: r.wake_price_cents, execCents: Number(r.exec_price_cents ?? 0), outcome: r.outcome ?? "", deltaCents: Number(r.delta_cents ?? 0) })),
+  };
 }
 
 export interface ScheduleGapSummary {

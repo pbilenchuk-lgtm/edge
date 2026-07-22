@@ -292,6 +292,44 @@ export function recentCronLog(db: Database, limit = 20): CronLogRow[] {
   return db.prepare(`SELECT * FROM cron_log ORDER BY created_at DESC LIMIT ?`).all(limit) as CronLogRow[];
 }
 
+// ---------- gap-wake protective-exit watch (P0.6) ----------
+export interface GapRepriceRow {
+  bet_id: string; match_id: string; strategy_id: string; profile: string | null; gap_sec: number;
+  wake_price_cents: number; floor_cents: number; deadline_at: string; ticks: number;
+  outcome: string | null; exec_price_cents: number | null; delta_cents: number | null;
+  created_at: string; resolved_at: string | null;
+}
+/** Open a deferral watch for a position (idempotent — first write wins so a re-fire doesn't reset the clock). */
+export function openGapReprice(db: Database, r: Omit<GapRepriceRow, "ticks" | "outcome" | "exec_price_cents" | "delta_cents" | "resolved_at">): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO gap_reprice(bet_id,match_id,strategy_id,profile,gap_sec,wake_price_cents,floor_cents,deadline_at,ticks,outcome,exec_price_cents,delta_cents,created_at,resolved_at)
+     VALUES(?,?,?,?,?,?,?,?,0,NULL,NULL,NULL,?,NULL)`,
+  ).run(r.bet_id, r.match_id, r.strategy_id, r.profile ?? null, r.gap_sec, r.wake_price_cents, r.floor_cents, r.deadline_at, r.created_at);
+}
+/** The OPEN (still-watching) deferral for a bet, or null. */
+export function getOpenGapReprice(db: Database, betId: string): GapRepriceRow | null {
+  return (db.prepare(`SELECT * FROM gap_reprice WHERE bet_id=? AND outcome IS NULL`).get(betId) as GapRepriceRow | undefined) ?? null;
+}
+/** All open (watching) deferrals — the sweep walks these. */
+export function openGapReprices(db: Database): GapRepriceRow[] {
+  return db.prepare(`SELECT * FROM gap_reprice WHERE outcome IS NULL`).all() as GapRepriceRow[];
+}
+export function bumpGapRepriceTick(db: Database, betId: string): number {
+  db.prepare(`UPDATE gap_reprice SET ticks=ticks+1 WHERE bet_id=? AND outcome IS NULL`).run(betId);
+  const r = db.prepare(`SELECT ticks FROM gap_reprice WHERE bet_id=?`).get(betId) as { ticks: number } | undefined;
+  return r?.ticks ?? 0;
+}
+export function resolveGapReprice(db: Database, betId: string, res: { outcome: "recovered" | "expired"; execCents: number; deltaCents: number; at: string }): void {
+  db.prepare(`UPDATE gap_reprice SET outcome=?, exec_price_cents=?, delta_cents=?, resolved_at=? WHERE bet_id=? AND outcome IS NULL`)
+    .run(res.outcome, res.execCents, res.deltaCents, res.at, betId);
+  // keep the table bounded — retain the most recent 200 resolved rows (+ all open ones).
+  db.exec(`DELETE FROM gap_reprice WHERE outcome IS NOT NULL AND bet_id NOT IN (SELECT bet_id FROM gap_reprice WHERE outcome IS NOT NULL ORDER BY resolved_at DESC LIMIT 200)`);
+}
+/** Resolved deferrals (for the self-measurement verdict in the schedule_gaps report). */
+export function gapRepriceMeasurements(db: Database, limit = 200): GapRepriceRow[] {
+  return db.prepare(`SELECT * FROM gap_reprice WHERE outcome IS NOT NULL ORDER BY resolved_at DESC LIMIT ?`).all(limit) as GapRepriceRow[];
+}
+
 // ---------- provider keys (optional, entered via UI; server-side only) ----------
 export function getProviderKeys(db: Database): Partial<Record<string, string>> {
   const rows = db.prepare(`SELECT provider, api_key FROM provider_keys`).all() as { provider: string; api_key: string }[];

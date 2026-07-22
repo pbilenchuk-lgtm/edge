@@ -677,6 +677,29 @@ CREATE TABLE IF NOT EXISTS book_depth_snapshots (
 CREATE INDEX IF NOT EXISTS idx_book_depth_match ON book_depth_snapshots(match_id);
 CREATE INDEX IF NOT EXISTS idx_book_depth_at ON book_depth_snapshots(at);
 
+-- P0.6 gap-wake protective-exit watch + self-measurement. A protective STOP that would fire on the first
+-- tick after a scheduler sleep window is DEFERRED (≤90s / 2 ticks) to give the gapped book one chance to
+-- unclench — never cancelled, only delayed. One row per deferred position (open while outcome IS NULL),
+-- resolved to recovered/expired with the delta «сэкономлено/стоило» vs immediate execution so the feature
+-- self-measures its own verdict. Transient — pruned on resolution age-out.
+CREATE TABLE IF NOT EXISTS gap_reprice (
+  bet_id           TEXT PRIMARY KEY,
+  match_id         TEXT NOT NULL,
+  strategy_id      TEXT NOT NULL,
+  profile          TEXT,
+  gap_sec          INTEGER NOT NULL,
+  wake_price_cents REAL NOT NULL,      -- executable bid at wake (what an immediate stop would have realized)
+  floor_cents      REAL NOT NULL,      -- the stop-trigger price at wake (recovery = the stop no longer fires)
+  deadline_at      TEXT NOT NULL,      -- wake + reprice seconds; execution is unconditional past it
+  ticks            INTEGER NOT NULL DEFAULT 0,
+  outcome          TEXT,               -- NULL = watching; 'recovered' | 'expired'
+  exec_price_cents REAL,               -- price the stop actually filled at (expired) / recovered mark
+  delta_cents      REAL,               -- exec/recovered − wake (positive = waiting SAVED vs the gap bottom)
+  created_at       TEXT NOT NULL,
+  resolved_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_gap_reprice_open ON gap_reprice(outcome);
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- REAL-TRADING contour (spec §2.3). Build != enable: these tables exist so the
 -- dry-run/real executor has a book of record; NOTHING writes here until

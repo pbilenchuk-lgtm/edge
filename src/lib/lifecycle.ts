@@ -27,6 +27,7 @@ import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
 import { classifyZombie, notationSpreads, loadZombieConfig, type ZombieReason } from "./zombieMarket.js";
+import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
 import { exitDecision, winsOnEventOccurrence } from "./thresholds.js";
 import { underThesisMarginGoals } from "./settlement.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
@@ -814,17 +815,83 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
   return { pnl, partial: true };
 }
 
+/**
+ * P0.6 GAP-WAKE reprice sweep — resolves the deferrals armed at the stop-point. Runs before the main exit
+ * loop, independent of match-delivering state (a watched position in a now-lagging match must still resolve).
+ * Per open watch: (a) the position's declared thesis INVALIDATOR now met on fresh state → execute the stop
+ * immediately; (b) price back at/above the wake floor → RECOVERED, normal management resumes (no forced stop);
+ * (c) window expired (≤repriceSec OR repriceTicks) and price still below floor → execute the stop
+ * UNCONDITIONALLY at the current price (never cancelled, only delayed). Each resolution records the delta vs
+ * the gap-bottom wake price so the window self-measures its own verdict. B8 preserved: no slippage cap on the
+ * protective fill — we give the book ONE short chance to unclench, we don't cap the price.
+ */
+async function gapRepriceSweep(db: Database, deps: EngineDeps, poly: PolymarketConfig, bookCache: Map<string, OrderBookFetch>, nowMs: number, now: string): Promise<ExitItem[]> {
+  const out: ExitItem[] = [];
+  const watches = R.openGapReprices(db);
+  if (!watches.length) return out;
+  const { repriceTicks } = gapRepriceConfig(deps.env ?? process.env);
+  const touched = new Set<string>();
+  for (const w of watches) {
+    const b = R.getBet(db, w.bet_id);
+    if (!b || b.status !== "open") { // closed elsewhere (settled / manual) → GC, no measurement
+      R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: w.wake_price_cents, deltaCents: 0, at: now }); continue;
+    }
+    const m = R.getMatch(db, w.match_id);
+    if (!m) continue;
+    const mk = R.latestMarkets(db, m.id).find((x) => x.label === b.market_label);
+    if (!mk || mk.price == null || b.entry_price == null) continue;
+    const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price, bookCache);
+    const minNum = m.minute != null ? m.minute : (isIsoTs(m.kickoff_at) ? Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at as string)) / 60_000)) : 0);
+    const strat = R.getStrategy(db, b.strategy_id);
+    const prof = b.risk_profile_id ?? "medium";
+    const fill = (reasonTag: string) => {
+      const pnl = closeBetEarly(db, b, sell.cents, reasonTag, minuteLabel(m), now);
+      if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: prof }, sell.cost, now);
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reasonTag}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+      out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason: reasonTag, pnl });
+      touched.add(b.strategy_id);
+    };
+    // (a) invalidator materialised during the wait → immediate unconditional exit.
+    if (strat && gapWakeInvalidatorMet(db, m, strat.name, prof, b.market_label, minNum)) {
+      R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: sell.cents, deltaCents: round1(sell.cents - w.wake_price_cents), at: now });
+      fill(`gap-wake стоп: инвалидатор тезиса сработал за время ожидания — немедленный выход (gap_wake_invalidator)`); continue;
+    }
+    // (b) the protective stop no longer fires on the fresh executable price → the dislocation eased; drop the
+    //     deferral and keep the position under normal management (recovered).
+    const rex = getProfileConfig(db, prof).exits;
+    const rd = exitDecision({ params: { takeProfit: rex.take_profit_pct, exitStop: rex.hard_stop_pct, edgeExit: false }, aiProb: b.ai_prob ?? 1, entryPriceCents: b.entry_price, currentPriceCents: sell.cents });
+    if (!(rd.exit && rd.kind === "stop")) {
+      R.resolveGapReprice(db, w.bet_id, { outcome: "recovered", execCents: sell.cents, deltaCents: round1(sell.cents - w.wake_price_cents), at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text: `gap-wake: стоп по «${b.market_label}» снят — цена ${sell.cents}¢ вернулась выше уровня стопа, книга разжалась, штатное управление (gap_wake_recovered)`, created_at: now });
+      continue;
+    }
+    // (c) window: count this tick; execute unconditionally once expired (≤repriceSec OR repriceTicks).
+    const ticks = R.bumpGapRepriceTick(db, w.bet_id);
+    if (nowMs >= Date.parse(w.deadline_at) || ticks >= repriceTicks) {
+      R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: sell.cents, deltaCents: round1(sell.cents - w.wake_price_cents), at: now });
+      fill(`gap-wake стоп: окно репрайса истекло (${ticks} тик(ов)), цена ${sell.cents}¢ не вернулась выше ${Math.round(w.floor_cents)}¢ — исполняю безусловно (gap_wake_expired)`);
+    }
+  }
+  for (const sid of touched) recomputeMetrics(db, sid, deps);
+  return out;
+}
+
 export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promise<ExitItem[]> {
   const now = nowFn(deps)();
   const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
   const out: ExitItem[] = [];
   const touched = new Set<string>();
+  // One order-book fetch per TOKEN per cycle — shared by the gap-wake sweep and the main loop.
+  const bookCacheShared = new Map<string, OrderBookFetch>();
+  // P0.6: resolve any gap-wake deferrals FIRST (execute expired / clear recovered), so a position the sweep
+  // just closed is skipped by the main loop below.
+  out.push(...await gapRepriceSweep(db, deps, poly, bookCacheShared, Date.parse(now) || Date.now(), now));
   // Degraded-mode: when the strategist layer is in an active outage, the price-stop exemption
   // for melting-option markets is UNSAFE (nothing else manages those positions) — restore the
   // stop for this pass. Computed once per cycle. See strategistDegraded / the OPTIONALITY GATE.
   const degraded = strategistDegraded(db, Date.parse(now) || Date.now());
-  // One order-book fetch per TOKEN per cycle — profiles sharing a market reuse it.
-  const bookCache = new Map<string, OrderBookFetch>();
+  // One order-book fetch per TOKEN per cycle — profiles sharing a market reuse it (shared with the sweep above).
+  const bookCache = bookCacheShared;
   for (const { sport, match: m } of activeMatches(db)) {
     // Price-driven exits (take-profit / stop / edge-gone) are LIVE management —
     // per ТЗ §3.3 mark-to-market and price triggers belong to the live phase. A
@@ -971,6 +1038,25 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
         holdOnce(`выход отклонён по ${holdKey}: марк ${mk.price}¢, но лучший бид ${sell.bestBidCents}¢ (Δ−${Math.round((mk.price - sell.bestBidCents) * 10) / 10}¢) — книга неликвидна, цена оторвана от стоимости, не слом тезиса (${d.reason}); держим до реального рынка/сеттла (exit_illiquid_mark_gap)`);
         continue;
       }
+      // P0.6 GAP-WAKE protective-exit invariant — ONLY a protective stop, ONLY right after a scheduler sleep
+      // window. Normal-time stops and take-profits are untouched (this whole block is gated on gapWakeActive).
+      // The stop is NEVER cancelled — at most delayed ≤repriceSec / repriceTicks so a gapped book can unclench;
+      // a declared thesis invalidator exits immediately; the sweep above executes an expired window. This is
+      // the exit-side twin of the stale-proposal entry guard: «исполнение соответствует решению».
+      if (d.kind === "stop") {
+        const nowMs = Date.parse(now) || Date.now();
+        if (R.getOpenGapReprice(db, b.id)) continue; // an active deferral — the sweep owns its resolution
+        if (gapWakeActive(db, nowMs)) {
+          if (gapWakeInvalidatorMet(db, m, strat.name, b.risk_profile_id ?? "medium", b.market_label, minNum)) {
+            d = { ...d, reason: `${d.reason} · gap-wake: инвалидатор тезиса на свежем состоянии — немедленный выход (gap_wake_invalidator)` };
+          } else {
+            const cfg = gapRepriceConfig(deps.env ?? process.env);
+            R.openGapReprice(db, { bet_id: b.id, match_id: m.id, strategy_id: b.strategy_id, profile: b.risk_profile_id ?? "medium", gap_sec: gapWakeGapSec(db), wake_price_cents: sell.cents, floor_cents: sell.cents, deadline_at: new Date(nowMs + cfg.repriceSec * 1000).toISOString(), created_at: now });
+            holdOnce(`gap-wake: ценовой стоп по ${holdKey} отложен ≤${cfg.repriceSec}с/${cfg.repriceTicks} тика — даю книге разжаться после сна планировщика (gap_wake_reprice); стоп НЕ отменён`);
+            continue;
+          }
+        }
+      }
       const pnl = closeBetEarly(db, b, sell.cents, d.reason, minuteLabel(m), now);
       if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, sell.cost, now);
       R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${d.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
@@ -1005,6 +1091,36 @@ function plannedTimeStop(
   } catch { /* free-text plan → no structured time_stop */ }
   return null;
 }
+
+/** The strategy's pre-registered counter_scenario_stop CONDITION for a market (from the pair's battle sheet) —
+ *  the same field csCondByMarket reads in reassess. Used by the P0.6 gap-wake INVALIDATOR: a hard, declared
+ *  thesis-break condition, not one invented from data. Returns the raw condition text, or null. */
+function plannedCounterScenario(db: Database, matchId: string, stratName: string, profile: string, marketLabel: string): string | null {
+  const sheet = R.artifactsForMatch(db, matchId).find((x) => x.kind === "battle_sheet" && x.label === `${stratName} · ${profile}`)?.content;
+  if (!sheet) return null;
+  try {
+    const bs = JSON.parse(sheet);
+    for (const p of bs?.positions ?? []) {
+      if (typeof p?.market !== "string" || norm(p.market) !== norm(marketLabel)) continue;
+      const c = p?.exit?.counter_scenario_stop;
+      if (typeof c === "string" && c.trim()) return c;
+    }
+  } catch { /* free-text plan → no structured condition */ }
+  return null;
+}
+
+/** P0.6 gap-wake INVALIDATOR: has the position's OWN declared counter_scenario condition objectively
+ *  materialised on the fresh (post-gap) state? Exact score + minute-reached, via the same parser
+ *  verifyExitTrigger uses. A met invalidator → exit immediately, no reprice window (the thesis is broken, not
+ *  the book dislocated). No parseable condition / not met → null (fall to the bounded reprice window). */
+function gapWakeInvalidatorMet(db: Database, m: Match, stratName: string, profile: string, marketLabel: string, minNum: number): boolean {
+  const cond = plannedCounterScenario(db, m.id, stratName, profile, marketLabel);
+  if (!cond || m.score_home == null || m.score_away == null) return false;
+  const pc = parseScoreMinuteCondition(cond);
+  return !!pc && m.score_home === pc.home && m.score_away === pc.away && minNum >= pc.minute;
+}
+
+const round1 = (n: number) => Math.round(n * 10) / 10;
 
 /** Snapshot each live match's current prices as its kickoff baseline (first
  *  write wins), so the odds column shows in-match movement, not pre-match drift. */
