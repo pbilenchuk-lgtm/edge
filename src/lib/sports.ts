@@ -52,6 +52,9 @@ export interface SportsProvider {
   scoreboard(sport: string, league: string): Promise<SportsMatchStatus[]>;
   /** Lineups + key events for one event (ESPN summary). Optional per provider. */
   matchDetail?(sport: string, league: string, eventId: string): Promise<MatchDetail | null>;
+  /** The ISO kickoff date of one event by id — used by the P0.1 fixture-date backfill to re-fetch and
+   *  freeze the identity key for historical bindings. Optional per provider (ESPN summary carries it). */
+  eventDate?(sport: string, league: string, eventId: string): Promise<string | null>;
   /** The leagues/feeds to poll for a sport (e.g. ESPN: ["nba","wnba"]). Lets the
    *  enrichment loop stay provider-agnostic — a unified paid provider can return
    *  a single "" feed per sport instead of ESPN's per-league slugs. */
@@ -180,6 +183,26 @@ export class EspnSportsProvider implements SportsProvider {
       if (!res.ok) return null;
       const s = (await res.json()) as any;
       return parseEspnSummary(s);
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** ISO kickoff date of one event (P0.1 backfill). ESPN summary carries it under header.competitions[0]. */
+  async eventDate(sport: string, league: string, eventId: string): Promise<string | null> {
+    const espnSport = ESPN_SPORT[sport];
+    if (!espnSport) return null;
+    const url = `${this.cfg.espnBase}/${espnSport}/${league}/summary?event=${encodeURIComponent(eventId)}`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs);
+    try {
+      const res = await this.fetchImpl(url, { signal: ctrl.signal });
+      if (!res.ok) return null;
+      const s = (await res.json()) as any;
+      const d = s?.header?.competitions?.[0]?.date ?? s?.header?.competitions?.[0]?.startDate ?? null;
+      return typeof d === "string" ? d : null;
     } catch {
       return null;
     } finally {
@@ -390,6 +413,10 @@ export class CompositeSportsProvider implements SportsProvider {
   matchDetail(sport: string, league: string, eventId: string): Promise<MatchDetail | null> {
     if (league.startsWith(SP_TAG)) return this.statpal.matchDetail ? this.statpal.matchDetail(sport, "", eventId) : Promise.resolve(null);
     return this.espn.matchDetail ? this.espn.matchDetail(sport, league, eventId) : Promise.resolve(null);
+  }
+  eventDate(sport: string, league: string, eventId: string): Promise<string | null> {
+    if (league.startsWith(SP_TAG)) return Promise.resolve(null); // StatPal path — no ESPN summary
+    return this.espn.eventDate ? this.espn.eventDate(sport, league, eventId) : Promise.resolve(null);
   }
 }
 

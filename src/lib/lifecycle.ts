@@ -43,6 +43,7 @@ import { sweepAbandonedMatches } from "./staleSweep.js";
 import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
 import { resolvePmvShadowSignals } from "./tennisPmvShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
+import { backfillEspnEventDates } from "./footballIntegrity.js";
 import { captureBookDepth } from "./bookDepthCapture.js";
 import { overreactionShouldCall } from "./reassessGate.js";
 import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
@@ -1487,6 +1488,9 @@ export async function runAutoCycle(
   // Pull real lineups + live events (ESPN) — this feeds matchContext and, via
   // its fresh events, arms the strategist's in-match reassessment triggers.
   const enrich = provider ? await step("enrich", () => enrichFromEspn(db, provider!, deps), { enriched: 0, newEvents: [] }) : { enriched: 0, newEvents: [] };
+  // P0.1 backfill (slow cadence, bounded): re-fetch the ESPN date for historically-bound matches with no
+  // frozen espn_event_date, then CLEAR settle_suspect on the ones proven clean (|Δkickoff| ≤ 1 day).
+  if (provider) await step("fixtureDateBackfill", async () => { const r = await backfillEspnEventDates(db, provider!, deps); return r.dated; }, 0);
   const labelFor = new Map<string, ReassessTrigger>();
   for (const e of enrich.newEvents) if (!labelFor.has(e.matchId)) labelFor.set(e.matchId, LIVE_TRIGGER_TYPES.has(e.type) ? (e.type as ReassessTrigger) : "price_move");
   const triggers = new Set(enrich.newEvents.map((e) => e.matchId));

@@ -10,7 +10,7 @@ import {
 } from "../src/lib/engine.js";
 import { matchContext } from "../src/lib/analysis.js";
 import type { SportsMatchStatus, SportsProvider, MatchDetail } from "../src/lib/sports.js";
-import { markUefaSettleSuspect, settleSuspectCount } from "../src/lib/footballIntegrity.js";
+import { markUefaSettleSuspect, settleSuspectCount, backfillEspnEventDates } from "../src/lib/footballIntegrity.js";
 import { betRecords } from "../src/lib/profileAnalytics.js";
 
 const CFG = { config: { reassessGapMinutes: 5, priceMoveThreshold: 5 } };
@@ -270,6 +270,27 @@ test("P0.1 settle_suspect: settled bets on a UEFA two-leg comp are quarantined o
   assert.equal(settleSuspectCount(db), 1);
   const after = betRecords(db).filter((r: any) => r.matchId === mid).length;
   assert.equal(after, 0, "quarantined bet no longer feeds the verdict cut");
+});
+
+test("P0.1 backfill: re-fetched ESPN date freezes the field and CLEARS suspect on a proven-clean match", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertCompetition(db, { id: "pm-ucl", sport_id: "football", name: "UEFA Champions League", budget: 8000, external_league: "uefa.champions", created_at: "t" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-ucl", home: "Bohemian", away: "Ballkani", state: "finished", lineup_out: true, kickoff_at: "2026-07-22T18:00:00Z", minute: null, score_home: 2, score_away: 1, final_score: "2:1", kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: mid });
+  // an OLD binding with no frozen date, and a settled (conservatively-quarantined) bet on it
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "E9", league: "uefa.champions_qual", espn_event_date: null, home_lineup: null, away_lineup: null, stats: null, updated_at: "t" });
+  const strat = R.listStrategies(db).find((s) => s.sport_id === "football")!.id;
+  R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: strat, risk_profile_id: null, market_label: "Bohemian — Yes", status: "settled_won", proposed_price: 40, entry_price: 40, current_price: 100, closing_price: 100, ai_prob: 0.6, stake: 50, rationale: "x", entered_minute: "23'", result: "won", payout: 125, settled_by: null, settled_at: "t", entry_meta: null, code_version: "e5", decision_id: null, created_at: "t" } as any);
+  markUefaSettleSuspect(db);
+  assert.equal(settleSuspectCount(db), 1, "quarantined first");
+  // provider returns the event's TRUE date = the same day as kickoff → the match is clean.
+  const provider: SportsProvider = { name: "mock", async scoreboard() { return []; }, async eventDate() { return "2026-07-22T18:00:00Z"; } };
+  const r = await backfillEspnEventDates(db, provider, {});
+  assert.ok(r.dated >= 1, "date fetched + frozen");
+  assert.equal(r.cleared, 1, "clean match → suspect cleared");
+  assert.equal(settleSuspectCount(db), 0, "no longer quarantined");
+  assert.equal(R.getMatchLive(db, mid)!.espn_event_date, "2026-07-22T18:00:00Z", "date frozen on match_live");
 });
 
 test("enrichFromEspn stores lineups, records new events, reports triggers, and feeds matchContext", async () => {
