@@ -44,6 +44,8 @@ export interface MatchView {
   broken: boolean;
   lineupOut: boolean; lineupsReady: boolean; kickoff: string | null; kickoffAt: string | null; oddsUpdated: string | null;
   finalScore: string | null; kickoffTime: string | null; endTime: string | null; endLabel: string | null;
+  /** raw ISO of the match end (for chronological sort on the Логи page); null until finished */
+  endIso: string | null;
   duration: string | null; endNote: string | null;
   /** a per-match LLM analyze run is in flight (durable; survives reload) */
   analyzing: boolean;
@@ -358,7 +360,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
         // Finish/kickoff clocks shown in Warsaw everywhere: an ISO value formats to
         // HH:MM, a value already stored as a Warsaw string passes straight through.
         kickoffTime: warsawClock(m.kickoff_time) ?? m.kickoff_time,
-        endTime: warsawClock(m.end_time) ?? m.end_time, endLabel: warsawLabel(m.end_time), duration: m.duration, endNote: m.end_note,
+        endTime: warsawClock(m.end_time) ?? m.end_time, endLabel: warsawLabel(m.end_time), endIso: m.end_time ?? null, duration: m.duration, endNote: m.end_note,
         analyzing: jobActive(R.getAnalysisJob(db, m.id), nowMs),
         preLineup: pre ? view(pre) : null, postLineup: post ? view(post) : null,
         assessmentHistory,

@@ -5,7 +5,7 @@
 // persists money/strategy/analytics edits via /api/mutations, and refreshes
 // the odds column live via /api/quotes (Polymarket).
 // ============================================================
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import type { AppData } from "@/lib/view";
 import ShadowScreen from "./ShadowScreen";
 import ProfilesScreen from "./ProfilesScreen";
@@ -264,6 +264,29 @@ function collectClosed(competitions: any[], matchDb: any, catalog: any[]) {
   return positions;
 }
 
+// Flat, cross-category list of match logs for the «Логи» page — one row per FINISHED
+// event (the only ones with a complete, reviewable log: analysis → bets → settlement).
+// Broken finals are INCLUDED — they're exactly the ones worth downloading to hunt bugs.
+// Sorted newest-first by finish time (endIso), kickoff as the fallback key. Whether a log
+// was already downloaded is a per-browser mark (localStorage), resolved in the component.
+function collectLogEvents(competitions: any[], matchDb: any) {
+  const sportLabel: Record<string, string> = { football: "Футбол", tennis: "Теннис" };
+  const out: any[] = [];
+  for (const comp of competitions) {
+    for (const mid of comp.matches || []) {
+      const m = matchDb[mid];
+      if (!m || m.state !== "finished") continue;   // a log is only complete once the event is over
+      const sortKey = Date.parse(m.endIso || m.kickoffAt || "") || 0;
+      out.push({
+        id: m.id, match: `${m.home}–${m.away}`, finalScore: m.finalScore,
+        sport: comp.sport, sportLabel: sportLabel[comp.sport] ?? comp.sport, compName: comp.name,
+        broken: !!m.broken, endLabel: m.endLabel, endNote: m.endNote, sortKey,
+      });
+    }
+  }
+  return out.sort((a, b) => b.sortKey - a.sortKey);   // newest event on top
+}
+
 // Contain render crashes so one bad screen / match card can't blank the whole
 // app with Next's generic "Application error: a client-side exception has
 // occurred". The real error + component stack are logged to the console (tagged
@@ -318,6 +341,16 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [riskProfiles, setRiskProfiles] = useState<any[]>(initial.riskProfiles || []);
   const [analysis, setAnalysis] = useState(initial.analysis);
   const [matchDb, setMatchDb] = useState(initial.matchDb);
+  // «Логи» page: flat, newest-first list of finished events with a reviewable log, plus a
+  // per-browser "not yet downloaded" count that drives the nav badge. localStorage is only
+  // touched in an effect (never during render) to avoid a hydration mismatch.
+  const logEvents = useMemo(() => collectLogEvents(COMPETITIONS, matchDb), [COMPETITIONS, matchDb]);
+  const [logsUnread, setLogsUnread] = useState(0);
+  const recountLogs = useCallback(() => {
+    try { setLogsUnread(logEvents.filter((e: any) => localStorage.getItem(`mlog_dl_${e.id}`) !== "1").length); }
+    catch { setLogsUnread(0); }
+  }, [logEvents]);
+  useEffect(() => { recountLogs(); }, [recountLogs]);
   const [providers, setProviders] = useState(initial.providers);
   const PROVIDERS = providers;
   // Real-trading contour (Phase G, read-only): loaded on demand from /api/real.
@@ -654,9 +687,11 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       </div>
 
       <div style={S.screenSwitch} className="el-screen-switch">
-        {[["matches", "Матчи"], ["feed", "Лента"], ["portfolio", "Портфель"], ["metrics", "Метрики"], ["profiles", "Профили"], ["shadow", "Бюджет (shadow)"], ["strategies", "Стратегии"], ["models", "Настройки"]].map(([k, lbl]) => {
+        {[["matches", "Матчи"], ["feed", "Лента"], ["logs", "Логи"], ["portfolio", "Портфель"], ["metrics", "Метрики"], ["profiles", "Профили"], ["shadow", "Бюджет (shadow)"], ["strategies", "Стратегии"], ["models", "Настройки"]].map(([k, lbl]) => {
           const alert = k === "shadow" && screen !== "shadow" && ((shadow?.analytics?.blocked ?? 0) + (shadow?.analytics?.trimmed ?? 0) > 0 || (shadow?.projection?.blocked ?? 0) > 0);
-          return <button key={k} onClick={() => setScreen(k)} style={{ ...S.screenBtn, ...(screen === k ? S.screenOn : {}) }} title={alert ? "капитал упирался в лимит — загляни" : undefined}>{lbl}{alert && <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#ff6b6b", marginLeft: 6, verticalAlign: "middle" }} />}</button>;
+          // «Логи» badge = how many finished events' logs are not yet downloaded in THIS browser.
+          const badge = k === "logs" && logsUnread > 0 ? String(logsUnread) : null;
+          return <button key={k} onClick={() => setScreen(k)} style={{ ...S.screenBtn, ...(screen === k ? S.screenOn : {}) }} title={alert ? "капитал упирался в лимит — загляни" : badge ? `${logsUnread} логов ещё не скачано` : undefined}>{lbl}{alert && <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#ff6b6b", marginLeft: 6, verticalAlign: "middle" }} />}{badge && <span style={{ display: "inline-block", minWidth: 15, padding: "0 4px", marginLeft: 6, fontSize: 10, lineHeight: "15px", textAlign: "center", borderRadius: 8, background: "#e8a838", color: "#12161d", fontWeight: 700, verticalAlign: "middle" }}>{badge}</span>}</button>;
         })}
       </div>
 
@@ -787,6 +822,8 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
         <PortfolioScreen open={collectPortfolio(COMPETITIONS, matchDb, catalog)} closed={collectClosed(COMPETITIONS, matchDb, catalog)} onGoMatches={() => setScreen("matches")} />
       ) : screen === "feed" ? (
         <FeedScreen feed={EVENT_FEED} />
+      ) : screen === "logs" ? (
+        <LogsScreen events={logEvents} onDownloaded={recountLogs} onGoMatches={() => setScreen("matches")} />
       ) : screen === "metrics" ? (
         <MetricsScreen catalog={catalog} quality={QUALITY} stats={strategyStats}
           treasury={{ effectiveBalance, allocatedSum, freeBalance, totalRealized }} bankCurve={bankCurve} capacity={capacity} />
@@ -1821,6 +1858,101 @@ function FeedScreen({ feed }: any) {
             {e.pnl != null && <div style={{ ...S.feedPnl, color: e.pnl >= 0 ? "#5fd08a" : "#ff6b6b" }}>{e.pnl >= 0 ? "+" : ""}{fmtMoney(e.pnl)}</div>}
           </div>
         ))}
+      </div>
+    </main>
+  );
+}
+// ── «Логи» — one place to grab match logs for offline bug-review ──────────────
+// Finished events across ALL categories, newest on top. Shows which logs this browser
+// has already pulled (localStorage mark, shared with the per-match button), defaults to
+// the "ещё не скачано" filter, and can bulk-download the whole backlog in one go.
+function LogsScreen({ events, onDownloaded, onGoMatches }: any) {
+  const [downloaded, setDownloaded] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState("todo");         // default view: what I haven't grabbed yet
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [bulk, setBulk] = useState<{ done: number; total: number } | null>(null);
+  // localStorage is client-only — resolve the "already downloaded" marks in an effect, not
+  // during render (avoids a hydration mismatch). Re-run when the event list changes so a
+  // newly-finished match is counted immediately.
+  useEffect(() => {
+    try { setDownloaded(new Set(events.filter((e: any) => localStorage.getItem(`mlog_dl_${e.id}`) === "1").map((e: any) => e.id))); }
+    catch { /* no storage */ }
+  }, [events]);
+
+  const pull = async (e: any): Promise<boolean> => {
+    try {
+      const r = await fetch("/api/engine", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "matchLog", matchId: e.id }) }).then((x) => x.json());
+      if (!r.ok) { alert(r.error || `не удалось собрать лог: ${e.match}`); return false; }
+      const url = URL.createObjectURL(new Blob([r.markdown], { type: "text/markdown" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = `match-log-${String(e.match).replace(/[^\w-]+/g, "_")}.md`; a.click();
+      URL.revokeObjectURL(url);
+      try { localStorage.setItem(`mlog_dl_${e.id}`, "1"); } catch { /* no storage */ }
+      setDownloaded((s) => new Set(s).add(e.id));
+      onDownloaded?.();
+      return true;
+    } catch { alert("ошибка сети"); return false; }
+  };
+  const download = async (e: any) => { setBusyId(e.id); try { await pull(e); } finally { setBusyId(null); } };
+  // Manual toggle — mark reviewed/unreviewed without re-downloading (e.g. already looked at it elsewhere).
+  const mark = (e: any, got: boolean) => {
+    try { got ? localStorage.setItem(`mlog_dl_${e.id}`, "1") : localStorage.removeItem(`mlog_dl_${e.id}`); } catch { /* no storage */ }
+    setDownloaded((s) => { const n = new Set(s); got ? n.add(e.id) : n.delete(e.id); return n; });
+    onDownloaded?.();
+  };
+
+  const todo = events.filter((e: any) => !downloaded.has(e.id));
+  const downloadAll = async () => {
+    if (!todo.length) return;
+    setBulk({ done: 0, total: todo.length });
+    for (let i = 0; i < todo.length; i++) { await pull(todo[i]); setBulk({ done: i + 1, total: todo.length }); }
+    setBulk(null);
+  };
+
+  const shown = filter === "todo" ? todo : filter === "done" ? events.filter((e: any) => downloaded.has(e.id)) : events;
+  const filters = [["todo", `Не скачано${todo.length ? ` (${todo.length})` : ""}`], ["all", `Все (${events.length})`], ["done", `Скачано (${events.length - todo.length})`]];
+
+  return (
+    <main style={S.main}>
+      <div style={S.feedHead}>
+        <div>
+          <div style={S.feedTitle}>Логи</div>
+          <div style={S.feedSub}>Логи завершённых событий по всем категориям — новые сверху. Скачивай для разбора на баги; отметка «скачан» хранится в этом браузере.</div>
+        </div>
+        {todo.length > 0 && (
+          <button onClick={downloadAll} disabled={!!bulk} style={{ ...S.artifactBtn, opacity: bulk ? 0.6 : 1, whiteSpace: "nowrap" }} title="Скачать по очереди все ещё не скачанные логи (браузер может спросить разрешение на несколько файлов)">
+            {bulk ? `Качаю ${bulk.done}/${bulk.total}…` : `📥 Скачать все не скачанные (${todo.length})`}
+          </button>
+        )}
+      </div>
+      <div style={S.feedFilters}>
+        {filters.map(([k, lbl]) => <button key={k} onClick={() => setFilter(k)} style={{ ...S.feedFilterBtn, ...(filter === k ? S.feedFilterOn : {}) }}>{lbl}</button>)}
+      </div>
+      <div style={S.feedList}>
+        {events.length === 0 && <div style={S.noPos}>завершённых событий пока нет — логи появятся, когда матчи закончатся. <button onClick={onGoMatches} style={{ ...S.linkBtn }}>к матчам →</button></div>}
+        {events.length > 0 && shown.length === 0 && <div style={S.noPos}>{filter === "todo" ? "всё скачано — новых логов нет 🎉" : "пусто"}</div>}
+        {shown.map((e: any) => {
+          const got = downloaded.has(e.id);
+          return (
+            <div key={e.id} style={{ ...S.feedItem, alignItems: "center" }}>
+              <div style={{ ...S.logDot, background: got ? "#5fd08a" : "#e8a838" }} title={got ? "скачан" : "не скачан"} />
+              <div style={S.feedBody}>
+                <div style={S.feedItemTop}>
+                  <span style={S.feedMatch}>{e.sportLabel} · {e.compName}</span>
+                  {e.broken && <span style={{ fontSize: 10, color: "#ff6b6b", border: "1px solid #ff6b6b55", borderRadius: 4, padding: "0 5px" }}>ПОЛОМАН</span>}
+                </div>
+                <div style={{ ...S.feedText, fontWeight: 600 }}>{e.match}{e.finalScore && <span style={{ color: MUTE, fontWeight: 400 }}> · {e.finalScore}</span>}</div>
+                <div style={{ fontSize: 11, color: MUTE }}>{e.endLabel || "—"}{e.endNote && !e.broken && ` · ${e.endNote}`}</div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                <button onClick={() => mark(e, !got)} title={got ? "снять отметку «скачан»" : "отметить как скачанный вручную"} style={{ fontSize: 11, color: got ? "#5fd08a" : MUTE, background: "transparent", border: "none", cursor: "pointer" }}>{got ? "✓ скачан" : "не скачан"}</button>
+                <button onClick={() => download(e)} disabled={busyId === e.id || !!bulk} style={{ ...S.artifactBtn, fontSize: 11, padding: "3px 10px", opacity: (busyId === e.id || bulk) ? 0.6 : 1 }} title="Полный лог матча одним .md — анализ, стратеги, ставки, переоценки, трейд-лог, события, снимки провайдеров">
+                  {busyId === e.id ? "собираю…" : got ? "📥 снова" : "📥 скачать"}
+                </button>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </main>
   );
@@ -3110,6 +3242,8 @@ const S: Record<string, React.CSSProperties> = {
   logStratBtn: { background: "transparent", border: `1px solid ${LINE}`, color: MUTE, borderRadius: 20, padding: "4px 12px", fontSize: 12, cursor: "pointer" },
   logList: { display: "flex", flexDirection: "column", gap: 7 },
   noPos: { fontSize: 12, color: MUTE, fontStyle: "italic", padding: "8px 0" },
+  logDot: { width: 9, height: 9, borderRadius: "50%", flexShrink: 0 },
+  linkBtn: { fontSize: 12, color: "#7fb4e8", background: "transparent", border: "none", cursor: "pointer", padding: 0, textDecoration: "underline" },
   logEntry: { display: "grid", gridTemplateColumns: "44px 46px 68px 1fr", gap: 8, fontSize: 12, alignItems: "baseline" },
   logAt: { fontFamily: "'JetBrains Mono', monospace", color: "#e8a838", fontSize: 11, fontWeight: 600 },
   logMin: { fontFamily: "'JetBrains Mono', monospace", color: MUTE, fontSize: 11 },
