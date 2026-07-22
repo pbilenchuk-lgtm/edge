@@ -218,7 +218,7 @@ function mapStrategy(r: any): Strategy {
 }
 
 // ---------- match live (ESPN link + lineups) & events ----------
-export interface MatchLive { match_id: string; espn_event_id: string | null; league: string | null; home_lineup: string | null; away_lineup: string | null; stats: string | null; updated_at: string }
+export interface MatchLive { match_id: string; espn_event_id: string | null; league: string | null; espn_event_date?: string | null; home_lineup: string | null; away_lineup: string | null; stats: string | null; updated_at: string }
 export function getMatchLive(db: Database, matchId: string): MatchLive | undefined {
   return db.prepare(`SELECT * FROM match_live WHERE match_id=?`).get(matchId) as MatchLive | undefined;
 }
@@ -257,11 +257,12 @@ export function awaitingLineup(db: Database, match: { id: string; state: string;
 }
 export function upsertMatchLive(db: Database, m: MatchLive): void {
   db.prepare(
-    `INSERT INTO match_live(match_id,espn_event_id,league,home_lineup,away_lineup,stats,updated_at)
-     VALUES(?,?,?,?,?,?,?)
+    `INSERT INTO match_live(match_id,espn_event_id,league,espn_event_date,home_lineup,away_lineup,stats,updated_at)
+     VALUES(?,?,?,?,?,?,?,?)
      ON CONFLICT(match_id) DO UPDATE SET espn_event_id=excluded.espn_event_id, league=excluded.league,
+       espn_event_date=COALESCE(excluded.espn_event_date, match_live.espn_event_date),
        home_lineup=excluded.home_lineup, away_lineup=excluded.away_lineup, stats=excluded.stats, updated_at=excluded.updated_at`,
-  ).run(m.match_id, m.espn_event_id, m.league, m.home_lineup, m.away_lineup, m.stats ?? null, m.updated_at);
+  ).run(m.match_id, m.espn_event_id, m.league, m.espn_event_date ?? null, m.home_lineup, m.away_lineup, m.stats ?? null, m.updated_at);
 }
 export interface MatchEventRow { id: string; match_id: string; event_key: string; minute: number | null; type: string; team: string | null; text: string; created_at: string }
 /** Insert a match event; returns true if it was new (deduped by match+key). */

@@ -879,7 +879,15 @@ export interface EnrichResult { enriched: number; newEvents: { matchId: string; 
 export async function enrichFromEspn(db: Database, provider: SportsProvider, deps: EngineDeps = {}): Promise<EnrichResult> {
   if (!provider.matchDetail) return { enriched: 0, newEvents: [] };
   const now = nowFn(deps)();
-  const compSport = new Map(R.listCompetitions(db).map((c) => [c.id, c.sport_id]));
+  const comps0 = R.listCompetitions(db);
+  const compSport = new Map(comps0.map((c) => [c.id, c.sport_id]));
+  const compLeague = new Map(comps0.map((c) => [c.id, c.external_league]));
+  // P0.1 fixture-identity date gate config + tally. LEG_GAP_H: how far the ESPN event date may sit from the
+  // record's kickoff before it's treated as ANOTHER leg / a reschedule (not this match). ~30h clears
+  // same-match timezone jitter yet catches a 2-day reschedule and a week-apart second leg.
+  const LEG_GAP_MS = Math.max(1, Number(deps.env?.FOOTBALL_LEG_GAP_HOURS ?? process.env.FOOTBALL_LEG_GAP_HOURS ?? 30)) * 3_600_000;
+  const legTally = { dateGap: 0, suffix: 0 };
+  const qualBase = (lg: string | null | undefined) => String(lg ?? "").replace(/_qual$/i, "");
   // Build the (sport, league) scoreboards to poll. Football (and any other
   // ESPN-linked competition) contributes its mapped league; the provider also
   // declares fixed leagues per sport (nba/nhl/mlb…). Deduped per sport.
@@ -901,8 +909,31 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
     for (const s of board) {
       // Same-sport only — otherwise "Poland vs Netherlands" basketball could
       // match a soccer fixture of the same nations.
-      const m = dbMatches.find((dm) => compSport.get(dm.competition_id) === sport && sameTeams(dm.home, dm.away, s.home, s.away));
-      if (!m) continue;
+      // P0.1 FIXTURE-IDENTITY DATE GATE (blocking). A two-leg tie plays the SAME teams twice a week apart,
+      // so team names alone bind either leg — the settle-contamination root. Among the team-matched records,
+      // pick the one whose kickoff is within LEG_GAP of the ESPN event date; a bigger gap on ALL of them
+      // means this event is another leg / a reschedule → do NOT bind, loud + counted (reason date_gap,
+      // distinct from a league-suffix mismatch). No event date OR a record without a kickoff → can't gate,
+      // fall back to the first team match (legacy behaviour, unchanged for single-leg fixtures).
+      const candidates = dbMatches.filter((dm) => compSport.get(dm.competition_id) === sport && sameTeams(dm.home, dm.away, s.home, s.away));
+      if (!candidates.length) continue;
+      const evMs = s.date ? Date.parse(s.date) : NaN;
+      let m: typeof candidates[number] | undefined;
+      if (Number.isFinite(evMs)) {
+        m = candidates.find((c) => { const ko = c.kickoff_at ? Date.parse(c.kickoff_at) : NaN; return Number.isFinite(ko) && Math.abs(evMs - ko) <= LEG_GAP_MS; })
+          ?? candidates.find((c) => !c.kickoff_at); // a record with no kickoff can't be date-checked → allow
+        if (!m) {
+          legTally.dateGap++;
+          const c0 = candidates[0];
+          console.warn(`[enrich] fixture_leg_mismatch date_gap: «${c0.home}–${c0.away}» запись ${c0.kickoff_at} vs ESPN ${s.date} (${league}) — НЕ привязано (чужой круг/перенос)`);
+          continue; // the date says this event is not any of these records — never wire a foreign leg
+        }
+      } else {
+        m = candidates[0]; // no event date → can't gate; legacy team-name binding
+      }
+      // Suffix mismatch (record league vs board league) is LEGAL — PM files quals under the main league and
+      // we cross-poll _qual on purpose. Count at INFO for traceability; NEVER blocks (only the date does).
+      if (qualBase(compLeague.get(m.competition_id)) === qualBase(league) && compLeague.get(m.competition_id) !== league) legTally.suffix++;
       // sameTeams is order-insensitive: the DB match's home/away orientation
       // (from the Polymarket title) may be the reverse of ESPN's. Align scores
       // and lineups to the DB match's home/away so nothing gets mirrored.
@@ -933,7 +964,7 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       // which have no lineup/stat detail. Its existence IS the "provider covers
       // this fixture / we have live data" signal the entry gate + uncovered-match
       // pruning rely on; without it a covered tennis match would read as blind.
-      R.upsertMatchLive(db, { match_id: m.id, espn_event_id: s.externalRef, league, home_lineup: homeLineup ? JSON.stringify(homeLineup) : null, away_lineup: awayLineup ? JSON.stringify(awayLineup) : null, stats: statsJson, updated_at: now });
+      R.upsertMatchLive(db, { match_id: m.id, espn_event_id: s.externalRef, league, espn_event_date: s.date ?? null, home_lineup: homeLineup ? JSON.stringify(homeLineup) : null, away_lineup: awayLineup ? JSON.stringify(awayLineup) : null, stats: statsJson, updated_at: now });
       if (detail) {
         if (detail.lineupOut && !m.lineup_out) R.updateMatch(db, m.id, { lineup_out: true, state: s.state === "upcoming" ? "lineup" : s.state });
         for (const e of detail.events) {
@@ -945,6 +976,10 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       }
       out.enriched++;
     }
+  }
+  // P0.1: surface the leg-mismatch tally (blocking date_gap vs informational suffix) for ops/audit.
+  if (legTally.dateGap || legTally.suffix) {
+    try { R.metaSet(db, "fixture_leg_mismatch", JSON.stringify({ ...legTally, at: now }), now); } catch { /* never block on a marker */ }
   }
   return out;
 }

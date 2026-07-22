@@ -10,6 +10,8 @@ import {
 } from "../src/lib/engine.js";
 import { matchContext } from "../src/lib/analysis.js";
 import type { SportsMatchStatus, SportsProvider, MatchDetail } from "../src/lib/sports.js";
+import { markUefaSettleSuspect, settleSuspectCount } from "../src/lib/footballIntegrity.js";
+import { betRecords } from "../src/lib/profileAnalytics.js";
 
 const CFG = { config: { reassessGapMinutes: 5, priceMoveThreshold: 5 } };
 
@@ -206,6 +208,68 @@ test("enrichFromEspn: a UEFA comp finds its fixture in the qualifying-round boar
   assert.equal(m.score_away, 1, "live score synced from the qualifying board");
   const live = R.getMatchLive(db, mid);
   assert.ok(live && live.home_lineup && live.away_lineup, "lineups now present → football analysis is no longer gated");
+});
+
+test("P0.1 enrichFromEspn date gate: leg-1 event binds leg-1 record, is REJECTED for the leg-2 record (fixture_leg_mismatch)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertCompetition(db, { id: "pm-ucl", sport_id: "football", name: "UEFA Champions League", budget: 8000, external_league: "uefa.champions", created_at: "t" });
+  const leg1 = R.uid(), leg2 = R.uid();
+  // SAME teams, two legs a week apart (the two-leg tie). Leg 2 is listed first in the DB.
+  R.insertMatch(db, { id: leg2, competition_id: "pm-ucl", home: "Bohemian", away: "Ballkani", state: "upcoming", lineup_out: false, kickoff_at: "2026-07-29T18:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: leg2 });
+  R.insertMatch(db, { id: leg1, competition_id: "pm-ucl", home: "Bohemian", away: "Ballkani", state: "lineup", lineup_out: true, kickoff_at: "2026-07-22T18:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: leg1 });
+  const provider: SportsProvider = {
+    name: "mock",
+    async scoreboard(_sport: string, league: string) {
+      if (league !== "uefa.champions_qual") return [];
+      // ONE event — leg 1's date. It must bind ONLY the leg-1 record, never leg 2.
+      return [{ externalRef: "L1", home: "Bohemian", away: "Ballkani", state: "live", minute: 20, scoreHome: 2, scoreAway: 1, final: false, date: "2026-07-22T18:00:00Z" }] as SportsMatchStatus[];
+    },
+    async matchDetail() { return { lineupOut: true, lineups: { home: null, away: null }, events: [] } as MatchDetail; },
+  };
+  const res = await enrichFromEspn(db, provider, {});
+  assert.equal(res.enriched, 1, "the event bound exactly one record");
+  assert.equal(R.getMatch(db, leg1)!.score_home, 2, "leg-1 record got the score (date within 1 day)");
+  assert.equal(R.getMatch(db, leg2)!.state, "upcoming", "leg-2 record UNTOUCHED — the date gate chose the right leg");
+  assert.equal(R.getMatchLive(db, leg2), undefined, "no binding on the wrong leg — no cross-leg contamination");
+});
+
+test("P0.1 date gate: an event whose date matches NO record is REJECTED + counted (orphan foreign leg / reschedule)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertCompetition(db, { id: "pm-ucl", sport_id: "football", name: "UEFA Champions League", budget: 8000, external_league: "uefa.champions", created_at: "t" });
+  const mid = R.uid();
+  // The only record kicks off on the 22nd; the ESPN event is 6 days later (the other leg) — must NOT bind.
+  R.insertMatch(db, { id: mid, competition_id: "pm-ucl", home: "Bohemian", away: "Ballkani", state: "lineup", lineup_out: true, kickoff_at: "2026-07-22T18:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  const provider: SportsProvider = {
+    name: "mock",
+    async scoreboard(_sport: string, league: string) {
+      if (league !== "uefa.champions_qual") return [];
+      return [{ externalRef: "L2", home: "Bohemian", away: "Ballkani", state: "live", minute: 20, scoreHome: 0, scoreAway: 3, final: false, date: "2026-07-29T18:00:00Z" }] as SportsMatchStatus[];
+    },
+    async matchDetail() { return null; },
+  };
+  const res = await enrichFromEspn(db, provider, {});
+  assert.equal(res.enriched, 0, "the foreign leg was refused");
+  assert.equal(R.getMatch(db, mid)!.state, "lineup", "record untouched — no foreign-leg score wired");
+  const tally = JSON.parse(R.metaGet(db, "fixture_leg_mismatch") as string);
+  assert.ok(tally.dateGap >= 1, "the date_gap mismatch was counted");
+});
+
+test("P0.1 settle_suspect: settled bets on a UEFA two-leg comp are quarantined out of the verdict analytics", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertCompetition(db, { id: "pm-ucl", sport_id: "football", name: "UEFA Champions League", budget: 8000, external_league: "uefa.champions", created_at: "t" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-ucl", home: "Bohemian", away: "Ballkani", state: "finished", lineup_out: true, kickoff_at: "2026-07-22T18:00:00Z", minute: null, score_home: 2, score_away: 1, final_score: "2:1", kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: mid });
+  const strat = R.listStrategies(db).find((s) => s.sport_id === "football")!.id;
+  R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: strat, risk_profile_id: null, market_label: "Bohemian — Yes", status: "settled_won", proposed_price: 40, entry_price: 40, current_price: 100, closing_price: 100, ai_prob: 0.6, stake: 50, rationale: "x", entered_minute: "23'", result: "won", payout: 125, settled_by: null, settled_at: "t", entry_meta: null, code_version: "e5", decision_id: null, created_at: "t" } as any);
+  const before = betRecords(db).filter((r: any) => r.matchId === mid).length;
+  assert.equal(before, 1, "the settled bet is in the analytics before quarantine");
+  assert.equal(markUefaSettleSuspect(db), 1, "one settled UEFA bet tagged");
+  assert.equal(settleSuspectCount(db), 1);
+  const after = betRecords(db).filter((r: any) => r.matchId === mid).length;
+  assert.equal(after, 0, "quarantined bet no longer feeds the verdict cut");
 });
 
 test("enrichFromEspn stores lineups, records new events, reports triggers, and feeds matchContext", async () => {

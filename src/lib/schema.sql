@@ -289,13 +289,15 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
 -- lineups (starters JSON), refreshed each tick. Live scores/minute stay on the
 -- matches row; this holds what the scoreboard alone doesn't give.
 CREATE TABLE IF NOT EXISTS match_live (
-  match_id       TEXT PRIMARY KEY REFERENCES matches(id),
-  espn_event_id  TEXT,
-  league         TEXT,
-  home_lineup    TEXT,  -- json {team, formation, starters[]}
-  away_lineup    TEXT,
-  stats          TEXT,  -- json {home:{team,items[]}, away:{...}} — владение/удары/моменты
-  updated_at     TEXT NOT NULL
+  match_id        TEXT PRIMARY KEY REFERENCES matches(id),
+  espn_event_id   TEXT,
+  league          TEXT,
+  espn_event_date TEXT,  -- P0.1: the bound ESPN event's ISO kickoff date, FROZEN at bind time — the
+                         -- fixture-identity key that disambiguates the two legs of a qualification tie
+  home_lineup     TEXT,  -- json {team, formation, starters[]}
+  away_lineup     TEXT,
+  stats           TEXT,  -- json {home:{team,items[]}, away:{...}} — владение/удары/моменты
+  updated_at      TEXT NOT NULL
 );
 
 -- match_events — real in-match events (goal / card / sub) pulled from ESPN,

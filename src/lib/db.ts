@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy, migrateTennisSetValueStrategy, migrateTennisPmvStrategy, migrateVoidOutOfScopePmv, migrateVoidAllOpenPmv, migrateResettleExtraTimeVoids, migrateResetTennisMarks, migrateRetireFable, migrateBetOrigin } from "./seed.js";
+import { markUefaSettleSuspect } from "./footballIntegrity.js";
 import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
 import { migrateQuarantinePoisonedTennis } from "./tennisTrading.js";
@@ -235,11 +236,21 @@ export function initSchema(db: Database): void {
     // once by migrateBetOrigin below; new bets stamp it in insertBet.
     "ALTER TABLE bets ADD COLUMN origin TEXT",
     "ALTER TABLE bets ADD COLUMN origin_source TEXT",
+    // P0.1: the bound ESPN event's ISO date, frozen at bind time — the two-leg fixture-identity key.
+    "ALTER TABLE match_live ADD COLUMN espn_event_date TEXT",
+    // P0.1: settle-contamination quarantine — a bet whose match may have settled on ANOTHER leg's result.
+    "ALTER TABLE bets ADD COLUMN settle_suspect INTEGER NOT NULL DEFAULT 0",
+    // P0.5: football epoch tag on the bet (parallels tennis «пороги:…»); backfilled or epoch_unknown.
+    "ALTER TABLE bets ADD COLUMN football_epoch TEXT",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }
   // Backfill bets.origin once the columns exist (idempotent — only origin IS NULL rows).
   try { const n = migrateBetOrigin(db); if (n > 0) console.log(`[migrate] bets.origin backfilled: ${n} legacy rows (from entry_meta.phase or the frozen entered_minute inference)`); } catch { /* best-effort */ }
+  // P0.1: conservative settle-contamination quarantine — tag settled bets on UEFA two-leg comps
+  // `settle_suspect` so verdict cuts drop them NOW (no network); the ESPN date backfill clears the clean
+  // ones later. Idempotent (only settle_suspect=0 rows). Cheap boot query is safe here (not a full scan).
+  try { const n = markUefaSettleSuspect(db); if (n > 0) console.log(`[migrate] settle_suspect quarantine (UEFA two-leg): ${n} settled bets tagged — excluded from verdict cuts until the ESPN date backfill proves them clean`); } catch { /* best-effort */ }
   // strategy_shares gained risk_profile_id + a 3-part PK. SQLite can't ALTER a
   // PK, so recreate the table when the old (2-part) one is detected, backfilling
   // every existing allocation onto the MEDIUM profile. Guarded + row-preserving.

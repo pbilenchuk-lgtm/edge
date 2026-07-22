@@ -29,6 +29,10 @@ export interface SportsMatchStatus {
   /** raw ESPN display clock, e.g. "45'+2'" / "90'+4'" — preserves stoppage time
    *  that the integer `minute` drops. Shown in the UI / fed to reassessment. */
   clock?: string | null;
+  /** ISO kickoff date of THIS event (ESPN `event.date`). The fixture-identity key for two-leg ties:
+   *  the same two teams play twice a week apart, so the date — not the team names — disambiguates the
+   *  leg. Discarding it was the root of the leg-mismatch settle contamination (P0.1). */
+  date?: string | null;
 }
 
 export interface TeamLineup { team: string; formation: string | null; starters: string[] }
@@ -473,6 +477,7 @@ export function parseEspnEvent(e: any): SportsMatchStatus | null {
       final: !!st.completed,
       detail: st.detail,
       clock: (String(e.status?.displayClock ?? "").trim() || null),
+      date: (typeof e.date === "string" ? e.date : (typeof comp.date === "string" ? comp.date : null)),
     };
   } catch {
     return null;

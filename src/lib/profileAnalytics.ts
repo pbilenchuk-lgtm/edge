@@ -70,6 +70,7 @@ export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
   const out: BetRec[] = [];
   for (const b of R.allBets(db)) {
     if (b.status === "proposed" || b.status === "not_filled") continue; // only real predictions
+    if (b.settle_suspect) continue; // P0.1: a possibly-leg-contaminated settle never enters a verdict cut
     const m = getMatch(b.match_id);
     if (!m) continue;
     const comp = comps.get(m.competition_id);

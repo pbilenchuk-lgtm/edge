@@ -209,6 +209,11 @@ export interface Bet {
   /** Provenance of `origin`: 'decision' (stamped at entry) | 'meta_backfill' (lifted from entry_meta on
    *  an existing row) | 'inferred_backfill' (reconstructed from entered_minute — lower trust). */
   origin_source?: string | null;
+  /** P0.1: this bet's match may have settled on ANOTHER leg's result (two-leg fixture-identity bug) —
+   *  quarantined out of verdict cuts until the ESPN date backfill proves it clean. */
+  settle_suspect?: number | null;
+  /** P0.5: football strategy epoch tag (parallels tennis «пороги:…»); null/`epoch_unknown` excluded from cuts. */
+  football_epoch?: string | null;
 }
 
 export interface Reassessment {
