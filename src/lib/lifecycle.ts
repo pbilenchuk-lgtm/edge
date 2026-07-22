@@ -1351,20 +1351,28 @@ export async function strategistReassess(
       // будит. Fail-open: любая неоднозначность → зовём стратега. live_xg НЕ гейтим (вход по live-xG
       // потоку — нужно суждение LLM).
       if (!stratOpen.length) {
-        let skipReason: string | null = null;
+        let skipReason: string | null = null, skipTag: string | null = null;
         if (sid === "prematch_value") {
           // Live-роль Pre-match Value (футбол) — «защита открытого»; открытой позиции нет → защищать
           // нечего (P0.3 — входов в live нет). (Полное имя, а не «PMV» — чтобы не путать с теннисной PMV.)
           skipReason = "Pre-match Value live (футбол): пустой портфель — защищать нечего (детерминированный пропуск, без LLM)";
+          skipTag = "det_gate_skip:pmv_empty";
         } else if (sid === "overreaction") {
           // Вход overreaction возможен ТОЛЬКО через заряженный buyback-триггер; нет ни одного живого
           // (событие/глубина + окно) → пропуск с конкретной причиной разоружения.
           const g = overreactionGate(battleSheet ?? null, { totalGoals: (m.score_home ?? 0) + (m.score_away ?? 0), minute: m.minute ?? minuteApprox });
-          if (!g.call) skipReason = `Overreaction: ${g.reason} — детерминированный пропуск, без LLM`;
+          if (!g.call) { skipReason = `Overreaction: ${g.reason} — детерминированный пропуск, без LLM`; skipTag = "det_gate_skip:ovr_dormant"; }
         }
         if (skipReason) {
-          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "skip", text: skipReason, created_at: now });
+          // Count EVERY tick (the до/после metric), but LOG only once per continuous skip episode — the gate
+          // fires every ~20s tick on a quiet match, which flooded trade_log with hundreds of identical rows
+          // (Club Nacional: 420 in one match). Re-log only when this strategy's last det-gate line differs
+          // (a state flip, e.g. overreaction arms then goes dormant again) — like the exit holdOnce pattern.
           out.gateSkips = (out.gateSkips ?? 0) + 1;
+          const lastGate = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid && e.type === "skip" && (e.text ?? "").includes("det_gate_skip:")).slice(-1)[0];
+          if (!lastGate || !(lastGate.text ?? "").includes(skipTag!)) {
+            R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "skip", text: `${skipReason} [${skipTag}]`, created_at: now });
+          }
           continue;
         }
       }

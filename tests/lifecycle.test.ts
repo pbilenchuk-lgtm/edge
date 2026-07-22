@@ -852,6 +852,27 @@ test("strategistReassess deterministic gate: overreaction with no live trigger s
   assert.ok(R.tradeLogForMatch(db, mid).some((e) => e.type === "skip" && /разоружены|нет заряженных buyback/.test(e.text)), "deterministic skip logged with a disarm reason");
 });
 
+test("deterministic gate: the skip is LOGGED once per episode but COUNTED every tick (no trade_log flooding)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const pmv: any = { id: "prematch_value", sport_id: "football", name: "Pre-match Value", tag: "pmv", color: "#000", version: 1, prompt: "p", prompt_live: "pl", params: {}, model: "Claude Opus 4.8", model_live: "Claude Opus 4.8", created_at: "t" };
+  for (const t of ["trade_log","reassessments","bets","markets","assessments","analysis_jobs","match_events","match_live","market_open","matches","strategy_shares"]) db.exec(`DELETE FROM ${t}`);
+  R.insertStrategy(db, pmv);
+  R.setShare(db, { competition_id: comp.id, strategy_id: pmv.id, pct: 50 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  const failFetch = (async () => { throw new Error("no LLM"); }) as any;
+  const opts = { newEventMatchIds: new Set([mid]), labelFor: new Map([[mid, "goal" as const]]) };
+  const r1 = await strategistReassess(db, { fetchImpl: failFetch, env: { ANTHROPIC_API_KEY: "k" } }, opts);
+  const r2 = await strategistReassess(db, { fetchImpl: failFetch, env: { ANTHROPIC_API_KEY: "k" } }, opts);
+  const r3 = await strategistReassess(db, { fetchImpl: failFetch, env: { ANTHROPIC_API_KEY: "k" } }, opts);
+  assert.equal(r1.gateSkips! + r2.gateSkips! + r3.gateSkips!, 3, "every tick counted for the metric");
+  const gateLogs = R.tradeLogForMatch(db, mid).filter((e) => (e.text ?? "").includes("det_gate_skip:"));
+  assert.equal(gateLogs.length, 1, "but only ONE log line across the three identical ticks");
+});
+
 test("strategistReassess deterministic gate: a REAL event (goal) still runs overreaction even at empty portfolio", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
