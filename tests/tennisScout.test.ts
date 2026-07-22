@@ -224,6 +224,18 @@ test("tennisScoutSilence: alerts when the schedule says live but no snapshot lan
   assert.equal(tennisScoutSilence(db, { now: () => now }).silent, false, "finished match → nothing due-live → quiet, not an alert");
 });
 
+test("P1.3 stop-poll: an identical terminal snapshot stops being re-written after 3 (scout hygiene)", async () => {
+  const db = openDb(":memory:"); initSchema(db);
+  const feed = (async () => ({ ok: true, status: 200, json: async () => ({ success: 1, result: [apiRow({ event_key: "FIN", event_status: "Finished", event_live: "0" })] }) })) as any;
+  const run = () => collectTennisSnapshots(db, { env: { API_TENNIS_KEY: "k" }, now: () => new Date(Date.now() + Math.random()).toISOString(), fetchImpl: feed });
+  for (let i = 0; i < 3; i++) await run();
+  assert.equal((db.prepare(`SELECT COUNT(*) n FROM tennis_snapshots WHERE event_key='FIN'`).get() as any).n, 3, "first 3 terminal snapshots written");
+  await run(); // 4th identical terminal → skipped
+  assert.equal((db.prepare(`SELECT COUNT(*) n FROM tennis_snapshots WHERE event_key='FIN'`).get() as any).n, 3, "4th identical terminal snapshot NOT re-written");
+  const savings = JSON.parse(R.metaGet(db, "tennis_scout_savings") as string);
+  assert.ok(savings.finishedSkipped >= 1, "the skip is tallied for the savings estimate");
+});
+
 test("collectTennisSnapshots: stamps the OWN liveness marker on a completed run (independent of match.state)", async () => {
   const db = openDb(":memory:");
   const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => ({ success: 1, result: [] }) })) as any; // provider returns EMPTY

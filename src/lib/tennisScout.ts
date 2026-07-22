@@ -324,9 +324,22 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
   // since a match usually just vanishes from the live feed; this keeps the row when the feed does send it.)
   const live = raw.filter((m) => m.live === 1 || TENNIS_TERMINAL_RE.test(m.status ?? ""));
   const poly = deps.polymarket ?? loadPolymarketConfig(env);
-  let written = 0;
+  let written = 0, tierSkipped = 0, finishedSkipped = 0;
   const seenLog = new Set<string>(); // log a match's mapping verdict once per collection pass
+  // P1.3 scout hygiene. OUT-OF-SCOPE tiers (ITF / WTA 125 / Challenger / doubles) are never traded — apply
+  // the B3 scope decision to the SCOUT so we don't pay a per-tick CLOB midpoint call on them (the snapshot
+  // is still written cheaply; only the priced refresh is skipped).
+  const OUT_OF_SCOPE_TIER = /\bitf\b|challenger|\b125\b|doubles|\bdbl\b|\bmixed\b/i;
   for (const m of live) {
+    const isTerminal = TENNIS_TERMINAL_RE.test(m.status ?? "") || m.live === 0;
+    // STOP-POLL a finished match: once ≥3 snapshots already carry this exact terminal status for the match,
+    // the final result is captured — stop re-writing the identical «Finished» row every tick (the logs had
+    // 12+). Cheap COUNT, keyed on the same terminal status so a real state change still writes.
+    if (isTerminal) {
+      const done = (db.prepare(`SELECT COUNT(*) n FROM tennis_snapshots WHERE event_key=? AND status=?`).get(m.eventKey, m.status ?? "") as { n: number }).n;
+      if (done >= 3) { finishedSkipped++; continue; }
+    }
+    const outOfScope = OUT_OF_SCOPE_TIER.test(`${m.eventType ?? ""} ${m.tournament ?? ""}`);
     let pmMatchId: string | null = null, pmMid: number | null = null, p1c: number | null = null, p2c: number | null = null;
     try {
       // PROPER fuzzy mapping (translit/diacritics/initials) — only an AUTO verdict links + trades.
@@ -340,7 +353,9 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
         const ml = tennisMoneyline(db, res.matchId, { p1: m.p1, p2: m.p2 });
         if (ml) {
           let liveFirst: number | null = null;
-          if (poly.enabled && ml.token) liveFirst = await fetchMidpointCents(ml.token, poly, { fetchImpl: deps.fetchImpl }).catch(() => null);
+          // P1.3 tier filter: out-of-scope tiers use the stored moneyline, NOT a fresh per-tick CLOB call.
+          if (poly.enabled && ml.token && !outOfScope) liveFirst = await fetchMidpointCents(ml.token, poly, { fetchImpl: deps.fetchImpl }).catch(() => null);
+          else if (outOfScope && poly.enabled && ml.token) tierSkipped++;
           if (liveFirst != null) { p1c = ml.firstIsP1 ? liveFirst : Math.round((100 - liveFirst) * 10) / 10; p2c = Math.round((100 - p1c) * 10) / 10; }
           else { p1c = ml.p1Cents; p2c = ml.p2Cents; } // fall back to the stored discovery moneyline
           pmMid = p1c;
@@ -360,6 +375,8 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
   // scout-derived and dies WITH the scout). `written=0` while the schedule says a match should be
   // live is the "provider returned empty / nothing mapped" signature (a blind loop, not a dead one).
   try { R.metaSet(db, TENNIS_SCOUT_OK_KEY, `${nowMs}|${written}`, batchAt); } catch { /* never block on a marker */ }
+  // P1.3: make the savings legible (skipped CLOB fetches / redundant finished writes this pass).
+  try { R.metaSet(db, "tennis_scout_savings", JSON.stringify({ tierSkipped, finishedSkipped, written, at: batchAt }), batchAt); } catch { /* ignore */ }
   return written;
 }
 
