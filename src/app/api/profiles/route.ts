@@ -27,6 +27,12 @@ export async function GET(req: Request) {
       const { buildSvShadowCalibration } = await import("@/lib/tennisSetValueShadow");
       return NextResponse.json({ ok: true, calibration: buildSvShadowCalibration(db) });
     }
+    // ?report=sv_cohort → P1.1 measured comeback rate: retro (from snapshot history) + shadow (frozen
+    // forward), binned by frozen favourite strength × ATP/WTA — the number that replaces the 0.5 constant.
+    if (new URL(req.url).searchParams.get("report") === "sv_cohort") {
+      const { buildSvCohort } = await import("@/lib/tennisSetValueShadow");
+      return NextResponse.json({ ok: true, cohort: buildSvCohort(db) });
+    }
     // ?report=sv_sizing_audit → per-profile set_value sizing on one fixed setup (P0.6): the knobs +
     // stake each profile would size, with an inversion flag if a "lite" profile outsizes "aggressive".
     if (new URL(req.url).searchParams.get("report") === "sv_sizing_audit") {

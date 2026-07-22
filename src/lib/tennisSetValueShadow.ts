@@ -109,6 +109,44 @@ export interface SvCohortBin {
   meanTakeAvailCents: number | null;// mean of (max − trigger) — how much take was on the table
 }
 
+// ── P1.1: RETRO cohort — reconstruct the comeback rate from EXISTING snapshot history ──────────────
+// The shadow cohort (above) grows forward; this backfills the same measurement from tennis_snapshots we
+// already have, because MARKS ARE PRICES, not decisions poisoned by the 0.5 constant. Per match: a
+// verified pre-match favourite (≥55¢) who LOST set 1, with a readable set-2 / match outcome. Same two
+// outcomes as the shadow resolve. Pure read.
+export interface SvCohortRow { tour: string | null; eventType: string | null; prematchCents: number; set2: "won" | "lost" | null; match: "won" | "lost" | "void" | null; source: "retro" | "shadow" }
+
+export function svRetroCohort(db: Database): SvCohortRow[] {
+  const ids = db.prepare(`SELECT DISTINCT pm_match_id id FROM tennis_snapshots WHERE pm_match_id IS NOT NULL`).all() as { id: string }[];
+  const out: SvCohortRow[] = [];
+  for (const { id } of ids) {
+    const snaps = db.prepare(`SELECT sets_p1, sets_p2, pm_p1_cents, pm_p2_cents, tournament, event_type, live, status FROM tennis_snapshots WHERE pm_match_id=? AND sets_p1 IS NOT NULL ORDER BY batch_at`).all(id) as any[];
+    if (snaps.length < 3) continue;
+    const firstPriced = snaps.find((s) => s.pm_p1_cents != null && s.pm_p2_cents != null);
+    if (!firstPriced) continue;
+    const favSide: "first" | "second" = firstPriced.pm_p1_cents >= firstPriced.pm_p2_cents ? "first" : "second";
+    const prematch = favSide === "first" ? firstPriced.pm_p1_cents : firstPriced.pm_p2_cents;
+    if (prematch == null || prematch < 55) continue;                      // not a real pre-match favourite
+    const afterSet1 = snaps.find((s) => (s.sets_p1 ?? 0) + (s.sets_p2 ?? 0) >= 1);
+    if (!afterSet1) continue;
+    const favSet1 = favSide === "first" ? afterSet1.sets_p1 : afterSet1.sets_p2;
+    if (favSet1 !== 0) continue;                                          // favourite did NOT lose set 1
+    const last = snaps[snaps.length - 1];
+    const finished = last.live === 0 || /finish|retir|walk|cancel|def|w[/.]o/i.test(String(last.status ?? ""));
+    if (!finished) continue;
+    const row = { tour: firstPriced.tournament ?? null, eventType: firstPriced.event_type ?? null, prematchCents: prematch, source: "retro" as const };
+    if (/cancel|walkover/i.test(String(last.status ?? ""))) { out.push({ ...row, set2: null, match: "void" }); continue; }
+    const favFinal = favSide === "first" ? last.sets_p1 : last.sets_p2;
+    const oppFinal = favSide === "first" ? last.sets_p2 : last.sets_p1;
+    if (favFinal == null || oppFinal == null) continue;
+    const set2: "won" | "lost" = favFinal >= 1 ? "won" : "lost";
+    const match = favFinal >= 2 ? "won" : oppFinal >= 2 ? "lost" : null;
+    if (match == null) continue;                                         // no decisive set outcome
+    out.push({ ...row, set2, match });
+  }
+  return out;
+}
+
 export interface SvShadowCalibration {
   criteria: string[];
   counts: { total: number; pending: number; resolved: number; void: number; unresolved: number; repeats: number };
@@ -177,6 +215,75 @@ export function buildSvShadowCalibration(db: Database): SvShadowCalibration {
       "Вердикт только при n≥40 в вердиктном бине И n≥80 суммарно; бины — сила фаворита (60-70/70-80/80+) × ATP/WTA. Часы критерия с деплоя; денежные ставки под 0.5 — диагностика, не калибровка.",
     ],
     counts, bins, overall,
+    constComebackProb: 0.5,
+    criterion: { verdictBinN: VERDICT_BIN_N, totalN: TOTAL_N, verdictBinMet, totalMet },
+    verdict, note,
+  };
+}
+
+export interface SvCohort {
+  criteria: string[];
+  sources: { retro: number; shadow: number };
+  bins: SvCohortBin[];        // strength × tour, VERDICT bins (60-70/70-80/80+) only
+  quarantine: SvCohortBin | null; // the 55-60 «<60» sensitivity band, kept apart from the verdict
+  overall: SvCohortBin | null;
+  constComebackProb: number;
+  criterion: { verdictBinN: number; totalN: number; verdictBinMet: boolean; totalMet: boolean };
+  verdict: "insufficient" | "measured";
+  note: string;
+}
+
+/** P1.1: the combined cohort — retro (backfilled from snapshot history) + shadow (frozen forward). Both are
+ *  prices, not decisions, so retro is not poisoned by the 0.5 constant. Measured P(comeback set 2) and
+ *  P(win match) per frozen favourite-strength bin × ATP/WTA — the number that replaces 0.5 at re-enable. */
+export function buildSvCohort(db: Database): SvCohort {
+  const retro = svRetroCohort(db);
+  const shadowRows = db.prepare(`SELECT tour, event_type, prematch_ml_cents pm, set2_outcome s2, match_outcome mo FROM sv_shadow_signals WHERE status='resolved'`).all() as any[];
+  const shadow: SvCohortRow[] = shadowRows.map((r) => ({ tour: r.tour, eventType: r.event_type, prematchCents: r.pm ?? 0, set2: r.s2 ?? null, match: r.mo ?? null, source: "shadow" as const }));
+  const all = [...retro, ...shadow].filter((r) => r.set2 === "won" || r.set2 === "lost"); // scoreable rows only
+
+  const isWta = (r: SvCohortRow) => /wta|women|itf.*w|\bw\b/i.test(`${r.tour ?? ""} ${r.eventType ?? ""}`);
+  const strengthBin = (pm: number): string => (pm >= 80 ? "80+" : pm >= 70 ? "70-80" : pm >= 60 ? "60-70" : "<60");
+  const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+  const pct = (xs: number[]) => (xs.length ? Math.round(1000 * (mean(xs) ?? 0)) / 10 : null);
+  const bin = (label: string, rs: SvCohortRow[]): SvCohortBin => ({
+    label, n: rs.length,
+    comebackSet2Pct: pct(rs.map((r) => (r.set2 === "won" ? 1 : 0))),
+    winMatchPct: pct(rs.map((r) => (r.match === "won" ? 1 : 0))),
+    meanDrawdownCents: null, meanTakeAvailCents: null, // price path is shadow-only (retro doesn't re-walk it)
+  });
+
+  const verdictRows = all.filter((r) => r.prematchCents >= 60);
+  const bins: SvCohortBin[] = [];
+  for (const tourKey of ["ATP", "WTA"]) {
+    const tr = verdictRows.filter((r) => (tourKey === "WTA") === isWta(r));
+    for (const sb of ["60-70", "70-80", "80+"]) {
+      const rs = tr.filter((r) => strengthBin(r.prematchCents) === sb);
+      if (rs.length) bins.push(bin(`${tourKey} · фаворит ${sb}¢`, rs));
+    }
+  }
+  const quar = all.filter((r) => r.prematchCents < 60);
+  const quarantine = quar.length ? bin("Чувствительная полоса 55-60¢ (не в вердикте)", quar) : null;
+  const overall = verdictRows.length ? bin("Всего (вердиктные, ≥60¢)", verdictRows) : null;
+
+  const biggest = bins.reduce<SvCohortBin | null>((a, b) => (a && a.n >= b.n ? a : b), null);
+  const verdictBinMet = (biggest?.n ?? 0) >= VERDICT_BIN_N;
+  const totalMet = verdictRows.length >= TOTAL_N;
+  const verdict: SvCohort["verdict"] = verdictBinMet && totalMet ? "measured" : "insufficient";
+  const note = verdict === "measured"
+    ? `ИЗМЕРЕНО (retro ${retro.length} + shadow ${shadow.length}): заменяй 0.5 на P(камбэк) по бину. Крупнейший «${biggest?.label}» n=${biggest?.n} P=${biggest?.comebackSet2Pct}% vs константа 50%.`
+    : `копим: крупнейший бин ${biggest?.n ?? 0}/${VERDICT_BIN_N}, всего вердиктных ${verdictRows.length}/${TOTAL_N} (retro ${retro.length} + shadow ${shadow.length}). Retro даёт мгновенный n из истории марок; shadow растёт вперёд.`;
+
+  return {
+    criteria: [
+      "Ретро-когорта восстановлена из tennis_snapshots (марки — ЦЕНЫ, не решения под константой 0.5): верифицированный предматч-фаворит ≥55¢, проиграл 1-й сет, читаемый исход сет2/матча.",
+      "Shadow-когорта — замороженные вперёд would-be входы (те же два исхода).",
+      "Вердиктные бины — только ≥60¢ (60-70/70-80/80+) × ATP/WTA; полоса 55-60¢ в карантине, не в вердикте.",
+      "Достаточность (до данных): n≥40 в вердиктном бине И n≥80 суммарно вердиктных.",
+      "P(камбэк-сет2) — тезис; P(win-match) — терминал P&L. Оба на бин.",
+    ],
+    sources: { retro: retro.length, shadow: shadow.length },
+    bins, quarantine, overall,
     constComebackProb: 0.5,
     criterion: { verdictBinN: VERDICT_BIN_N, totalN: TOTAL_N, verdictBinMet, totalMet },
     verdict, note,

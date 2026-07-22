@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { recordSvShadowSignal, resolveSvShadowSignals, buildSvShadowCalibration, SV_SHADOW_EPOCH } from "../src/lib/tennisSetValueShadow.js";
+import { recordSvShadowSignal, resolveSvShadowSignals, buildSvShadowCalibration, svRetroCohort, buildSvCohort, SV_SHADOW_EPOCH } from "../src/lib/tennisSetValueShadow.js";
 
 const TRIG = "2026-07-22T18:14:00.000Z";  // set-2 trigger time
 const NOW = "2026-07-22T19:30:00.000Z";
@@ -58,6 +58,27 @@ test("resolve: collapse (fav loses 0-2) → set2 lost + match lost", () => {
   assert.equal(row.set2_outcome, "lost");
   assert.equal(row.match_outcome, "lost");
   assert.equal(row.min_cents, 9, "collapse captured as the drawdown");
+});
+
+test("P1.1 retro cohort: reconstructs a favourite-lost-set-1 comeback from snapshot history (prices, not decisions)", () => {
+  const db = openDb(":memory:");
+  initSchema(db);
+  // fav = first, prematch 66¢, lost set 1 (0-1), came back to win 2-1
+  seedMatch(db, "m1", { favIsP1: true, finalFavSets: 2, finalOppSets: 1, set2FavPrices: [33, 58] });
+  // fav = second, prematch 66¢, lost set 1, collapsed 0-2
+  seedMatch(db, "m2", { favIsP1: false, finalFavSets: 0, finalOppSets: 2, set2FavPrices: [33, 9] });
+  const rows = svRetroCohort(db);
+  assert.equal(rows.length, 2, "both matches reconstructed from history");
+  const m1 = rows.find((r) => r.set2 === "won")!;
+  assert.equal(m1.match, "won");
+  assert.equal(m1.prematchCents, 66, "frozen favourite strength from the pre-kickoff snapshot");
+  assert.ok(rows.some((r) => r.set2 === "lost" && r.match === "lost"), "the collapse is captured");
+
+  const cohort = buildSvCohort(db);
+  assert.equal(cohort.sources.retro, 2);
+  assert.equal(cohort.verdict, "insufficient", "2 << 40/80 thresholds");
+  assert.ok(cohort.overall, "an overall verdict bin (≥60¢) exists");
+  assert.equal(cohort.overall!.comebackSet2Pct, 50, "1 of 2 came back = 50% measured (vs the 0.5 guess)");
 });
 
 test("calibration: bins by favourite strength × tour; insufficient until n≥40; measured comeback% vs 0.5", () => {
