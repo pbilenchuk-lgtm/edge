@@ -257,14 +257,13 @@ test("migratePrematchValueV3: brings prompts to v3 once, bumps version, idempote
 
   migratePrematchValueV3(db);
   const s = R.getStrategy(db, "prematch_value")!;
-  assert.ok(s.prompt.includes("v3.3 · 6-branch"), "prematch prompt updated to v3.3");
-  assert.ok((s.prompt_live ?? "").includes("v3.3 · 6-branch"), "live prompt updated to v3.3");
   assert.ok(s.prompt.includes("outcome_scenarios"), "v3 references the 6-branch tree");
   assert.ok(s.prompt.includes("Edge НЕ может опираться на фактор, уже сидящий в базе"), "v3.2 self-attributed-edge guard retained");
-  // v3.3 (Fix 4): the live window tells the strategist to check live_prob_adjusted /
-  // set time_stop before cutting a melting option on price.
-  assert.ok((s.prompt_live ?? "").includes("live_prob_adjusted"), "live prompt references the game-state number");
-  assert.ok((s.prompt_live ?? "").includes("тающий опцион"), "live prompt names the melting-option case");
+  // v3.4 (P0.3): live window is DEFEND-ONLY — the entry exception was removed.
+  assert.ok((s.prompt_live ?? "").includes("ТОЛЬКО защита"), "live prompt bumped to the v3.4 defend-only header");
+  assert.ok(!(s.prompt_live ?? "").includes("ЕДИНСТВЕННОЕ ИСКЛЮЧЕНИЕ"), "the live-entry exception is gone");
+  assert.ok((s.prompt_live ?? "").includes("live_prob_adjusted"), "live prompt still references the game-state number");
+  assert.ok((s.prompt_live ?? "").includes("тающий опцион"), "live prompt still names the melting-option case");
   assert.equal(s.version, v0 + 1, "version bumped once (prior archived)");
 
   migratePrematchValueV3(db); // marker present now → no-op
@@ -280,9 +279,9 @@ test("migratePrematchValueV3: upgrades an existing v3.2 DB to v3.3 (real upgrade
   const v0 = R.getStrategy(db, "prematch_value")!.version;
   migratePrematchValueV3(db);
   const s = R.getStrategy(db, "prematch_value")!;
-  assert.ok((s.prompt_live ?? "").includes("v3.3 · 6-branch"), "v3.2 → v3.3 applied");
-  assert.ok((s.prompt_live ?? "").includes("live_prob_adjusted"), "melting-option guidance now present");
-  assert.equal(s.version, v0 + 1, "version bumped once on the v3.2→v3.3 upgrade");
+  assert.ok((s.prompt_live ?? "").includes("ТОЛЬКО защита"), "v3.2 → v3.4 applied");
+  assert.ok(!(s.prompt_live ?? "").includes("ЕДИНСТВЕННОЕ ИСКЛЮЧЕНИЕ"), "live-entry exception removed");
+  assert.equal(s.version, v0 + 1, "version bumped once on the upgrade");
 });
 
 test("migrateOverreactionV2: brings prompts to v2 once, bumps version, idempotent", () => {

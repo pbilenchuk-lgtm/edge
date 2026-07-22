@@ -1331,7 +1331,14 @@ export async function strategistReassess(
         // share was removed). Code sizes/gates via the profile's risk_config (§9.6,
         // module #3/#5); the strategist re-estimates the live prob, edge is off the
         // de-vigged price. Dedup against markets this pair already holds/proposed.
-        if (pct > 0 && dec.picks.length) {
+        // P0.3: prematch_value is DEFEND-ONLY in live — it never opens a new position, no exceptions. The
+        // prompt says so; this is the code belt behind it. Even a cached prompt or a stray LLM pick is
+        // refused here, and the refusal is logged (phantom accounting: the record reflects the ACTUAL
+        // pipeline outcome — «отклонён кодом», never a fictional «вошёл»).
+        if (sid === "prematch_value" && pct > 0 && dec.picks.length) {
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: `${m.minute ?? minuteApprox ?? "?"}'`, type: "skip", text: `[${profile}] prematch_value_live_entry_blocked: live = только защита, ${dec.picks.length} pick(s) отклонены кодом (P0.3 — exception удалён)`, created_at: now });
+        }
+        if (pct > 0 && dec.picks.length && sid !== "prematch_value") {
           const budget = stratBudget(c.budget, pct);
           const cfg = getProfileConfig(db, profile);
           const pairBets = R.betsForMatch(db, m.id, sid).filter((b) => (b.risk_profile_id ?? "medium") === profile);

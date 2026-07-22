@@ -545,16 +545,16 @@ distribution, котировки, risk_config. В distribution:
 
 Честно: тонкий/фантомный edge → «пропуск». Не создавай иллюзию предсказательной силы. На фаворитских ликвидных матчах чаще всего верный ответ — малый портфель в производных или полный пропуск.`;
 
-export const STRAT_PMVALUE_LIVE = `# [ОКНО: LIVE] СТРАТЕГ 2 — PRE-MATCH VALUE (v3.3 · 6-branch · защитная фаза)
+export const STRAT_PMVALUE_LIVE = `# [ОКНО: LIVE] СТРАТЕГ 2 — PRE-MATCH VALUE (v3.4 · 6-branch · ТОЛЬКО защита)
 
-Live-часть pre-match value. Live — НЕ источник альфы, а ЗАЩИТА открытых пред-матч позиций. Новых входов не ищешь (выкуп переоценки и xG-моментум — другие стратеги). Ведёшь открытое по ТОМУ ЖЕ дереву, по которому строился портфель. Не изобретаешь стратегию — исполняешь прописанные выходы.
+Live-часть pre-match value. Live — НЕ источник альфы, а ЗАЩИТА открытых пред-матч позиций. Новых входов НЕ ищешь ВООБЩЕ (выкуп переоценки и xG-моментум — другие стратеги с depth+price+time-гейтами). Ведёшь открытое по ТОМУ ЖЕ дереву, по которому строился портфель. Не изобретаешь стратегию — исполняешь прописанные выходы.
 
 ## ЧЕМ ЧИТАЕШЬ
 battle_sheet (pre_match_positions с exit-планами, portfolio_correlation), live-состояние (счёт, время, события), свежие котировки, открытые позиции, risk_config. Из distribution — то же дерево: \`outcome_scenarios\` (6 веток), \`scenarios\` (событийные узлы), \`match_shape\`.
 
 ## ЖЕЛЕЗНЫЕ ПРАВИЛА
 1. Предохранители первыми: устаревшая котировка → не действуй по рынку; разъехавшиеся суммы → флаг; лимиты банка → только закрытия.
-2. НЕ открывать новые позиции (кроме исключения ниже).
+2. НЕ открывать новые позиции. НИКОГДА — ни на новостях, ни на «тонкий рынок не отреагировал». open_new/add в live запрещены и будут отклонены кодом. Тонкость рынка И ЕСТЬ причина нереакции: это зомби-книга, а не край. Событийные live-неэффективности — территория Overreaction/live_xg с их гейтами.
 3. Стоп по ТЕЗИСУ, не по цене. Резать только СЛОМАННОЕ.
 4. Кэпы всегда. Строгий JSON.
 
@@ -585,8 +585,8 @@ battle_sheet (pre_match_positions с exit-планами, portfolio_correlation)
 - Shape A (класс-фаворит): вязкость до ~70' — норма, голы поздно. НЕ режь «мало голов» рано на статичном 0:0 при доминировании фаворита (матч в draw_0_0, но один поздний гол уводит в fav_clean — тотал ещё жив). Держи «фаворит забьёт» до ~70'.
 - Shape B (открытый): реагируй быстрее.
 
-## ЕДИНСТВЕННОЕ ИСКЛЮЧЕНИЕ ДЛЯ ВХОДА
-Live-событие создаёт ту же pre-match-неэффективность (тонкий производный рынок медленно отреагировал на подтверждённую новость и явно мисприсит) → можно добор по строгим правилам предматча (тонкий рынок, большой edge, высокая calibration, прошёл анти-фантом). Редко. Выкуп эмоциональной переоценки — НЕ твоя работа.
+## ВХОДОВ В LIVE НЕТ
+Никаких исключений. Если видишь «недооценку» на live-событии — это НЕ твоя работа: пустой портфель = защищать нечего, воздержись. Выкуп эмоциональной переоценки — Overreaction; xG-моментум — live_xg. Обе с depth+price+time-гейтами, которых у тебя в live нет.
 
 ## ВЫХОД (actions) — строгий JSON
 \`\`\`
@@ -827,13 +827,12 @@ const STRATEGIST_DEFS: Array<Pick<Parameters<typeof R.insertStrategy>[1], "id" |
 // never re-clobbers a later user edit that keeps the tag. Bumping the tag (e.g.
 // v3 → v3.1) re-applies once on the next boot. Archives the prior prompt via the
 // version bump, so the change is reversible.
-const PMVALUE_VERSION = "v3.3 · 6-branch";
+const PMVALUE_VERSION = "v3.4 · 6-branch · ТОЛЬКО защита"; // P0.3: live exception removed — defend-only
 export function migratePrematchValueV3(db: Database): void {
   const s = R.getStrategy(db, "prematch_value");
   if (!s) return;
-  const current = s.prompt.includes(PMVALUE_VERSION) && (s.prompt_live ?? "").includes(PMVALUE_VERSION);
-  if (current) return;
-  R.saveStrategyVersion(db, "prematch_value", STRAT_PMVALUE_PREMATCH, s.params, "prompts → v3.3 (melting-option exit: check live_prob_adjusted / set time_stop before cutting on price)");
+  if ((s.prompt_live ?? "").includes(PMVALUE_VERSION)) return; // only the LIVE prompt changed in v3.4
+  R.saveStrategyVersion(db, "prematch_value", STRAT_PMVALUE_PREMATCH, s.params, "live prompt → v3.4 (P0.3: removed the live-entry exception — defend-only)");
   R.updateStrategy(db, "prematch_value", { prompt_live: STRAT_PMVALUE_LIVE });
 }
 // Same pattern for Overreaction: marker-guarded on "OVERREACTION (v3)" (present in
