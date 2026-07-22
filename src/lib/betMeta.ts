@@ -44,6 +44,9 @@ export interface BetEntryMeta {
   marketThinnessUsd: number | null; // known book depth/liquidity at entry ($)
   winsOnEvent: boolean;             // melting option (bet ON an event) vs directional
   exitPlan: unknown | null;         // the pre-written exit plan (take_price/thesis/counter/time_stop)
+  // T6: data provenance FROZEN at the decision — which feed the entry was decided on and how stale that
+  // snapshot was (seconds) at decision time. Makes «на какой цене/данных решали» auditable per bet.
+  dataProvenance?: { source: string | null; snapshotAgeSec: number | null; snapshotAt?: string | null } | null;
   // Ground-truth model attribution for the A/B: which model produced THIS bet's
   // analysis + strategist decision. Optional (legacy/minimal paths omit it). The
   // epoch on `code_version` segments coarsely; this records exactly what ran.

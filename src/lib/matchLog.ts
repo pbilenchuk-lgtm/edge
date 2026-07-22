@@ -104,7 +104,9 @@ export function buildMatchLog(db: Database, matchId: string): string {
   // ── The entry-gate diagnosis (why bets did / didn't enter) ──
   h("Провайдер и live-данные (диагноз входа)");
   const lds = liveDataStatus(db, m.id);
-  L.push(`- **hasLiveData: ${lds.ok ? "ДА" : "НЕТ"}** — ${lds.via}`);
+  // T6: hasLiveData is evaluated NOW, at report generation — for a finished match its snapshots may already
+  // be pruned, so «НЕТ» here does not mean the entry lacked live data at decision time (see per-bet dataProvenance).
+  L.push(`- **hasLiveData: ${lds.ok ? "ДА" : "НЕТ"}** (на момент генерации отчёта) — ${lds.via}`);
   const isTennis = comp?.sport_id === "tennis";
   const live = R.getMatchLive(db, m.id);
   L.push(`- match_live: ${live ? `есть (espn_event_id=\`${live.espn_event_id ?? "null"}\`, league=\`${live.league ?? "null"}\`, обновлён ${live.updated_at})` : isTennis ? "**н/д для тенниса** — теннис не использует match_live (ESPN/StatPal); live идёт из скаута (tennis_snapshots), см. hasLiveData выше" : "**НЕТ** — ни ESPN, ни StatPal не привязали эту фикстуру (проверь совпадение имён команд и покрытие StatPal)"}`);

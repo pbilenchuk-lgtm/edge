@@ -1109,6 +1109,7 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       // T4: record edge FROM THE FILL price (prePrice-based fair − fill), not the proposal — no flattering ledger.
       const edgeAtFill = Math.round((ourProb - fillCents / 100) * 1000) / 1000;
       const meta = tennisEntryMeta({ favPrice: fillCents, prePrice, edge: edgeAtFill, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: br.setNum, favSide: charge.favSide, firstIsP1: ml.firstIsP1, panicDropCents, panicThresholdCents: minDrop });
+      meta.dataProvenance = svProvenance(snaps[snaps.length - 1], now); // T6: freeze the feed + snapshot age at decision
       const betId = R.uid();
       R.insertBet(db, {
         id: betId, match_id: m.id, strategy_id: TENNIS_STRATEGY, risk_profile_id: profile, market_label: favName,
@@ -1162,6 +1163,13 @@ function set1Games(db: Database, matchId: string, favSide: "first" | "second"): 
 }
 
 /** Decision-time entry_meta for a Set-Value paper bet — a PARTIAL-take, hold-to-settle exit plan. */
+/** T6: data-provenance stamp for a tennis entry — the scout feed + how stale the deciding snapshot was. */
+function svProvenance(snap: R.TennisSnapshotRow | undefined, nowIso: string): BetEntryMeta["dataProvenance"] {
+  if (!snap) return { source: null, snapshotAgeSec: null, snapshotAt: null };
+  const age = Number.isFinite(Date.parse(snap.batch_at)) && Number.isFinite(Date.parse(nowIso)) ? Math.max(0, Math.round((Date.parse(nowIso) - Date.parse(snap.batch_at)) / 1000)) : null;
+  return { source: snap.provider ?? null, snapshotAgeSec: age, snapshotAt: snap.batch_at };
+}
+
 export function tennisSetValueEntryMeta(o: { favPrice: number; edge: number; kelly: number; stake: number; thinnessUsd: number | null; setNum: number; favSide?: "first" | "second" | null; firstIsP1?: boolean | null }): BetEntryMeta {
   return {
     phase: "live", minute: null, scoreHome: null, scoreAway: null,
@@ -1369,6 +1377,7 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
       // systematically flatters (r.edge was sized on entryCents). comebackProb − fill.
       const edgeAtFill = Math.round((ourProb - fillCents / 100) * 1000) / 1000;
       const meta = tennisSetValueEntryMeta({ favPrice: fillCents, edge: edgeAtFill, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: last.set_num ?? 2, favSide, firstIsP1: ml.firstIsP1 });
+      meta.dataProvenance = svProvenance(last, now); // T6: freeze the feed + snapshot age at decision
       const betId = R.uid();
       R.insertBet(db, {
         id: betId, match_id: m.id, strategy_id: SET_VALUE_STRATEGY, risk_profile_id: profile, market_label: favName,

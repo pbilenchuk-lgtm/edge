@@ -120,6 +120,10 @@ test("T4 edge-recompute: a set_value bet records edge FROM THE FILL price, not t
   const edge = parseEntryMeta(b.entry_meta)?.edge ?? 0;
   assert.ok(edge <= 0.075 && edge >= 0.045, `edge recorded from the ~44¢ fill (~6%), not the 38¢ proposal (12%) — got ${edge}`);
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /от филла/.test(l.text ?? "")), "enter log states edge is from the fill");
+  // T6: the bet froze its data provenance (feed + snapshot age at decision).
+  const prov = parseEntryMeta(b.entry_meta)?.dataProvenance;
+  assert.ok(prov && typeof prov.snapshotAgeSec === "number", "dataProvenance frozen on the bet");
+  assert.equal(prov!.source, "apitennis", "provenance names the deciding feed");
 });
 
 // ── P0.2: boot-grace EXITS-ONLY protective pass ────────────────────────────
