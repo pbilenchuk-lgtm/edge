@@ -96,3 +96,16 @@ test("calibration: bins by favourite strength × tour; insufficient until n≥40
   assert.equal(cal.overall!.n, 2);
   assert.equal(cal.overall!.comebackSet2Pct, 50, "1 of 2 came back = 50% measured");
 });
+
+test("T1 cap: capTennisSnapshots never evicts snapshots of a match with a PENDING shadow signal", () => {
+  const db = openDb(":memory:");
+  const ins = (mid: string, at: string) => R.insertTennisSnapshot(db, { event_key: "E", provider: "apitennis", batch_at: at, p1: "A", p2: "B", tournament: "T", event_type: "ATP Singles", live: 1, status: "live", sets_p1: 0, sets_p2: 1, set_num: 2, games_p1: 1, games_p2: 0, game_points: null, server: "first", pm_match_id: mid, pm_mid_cents: 40, pm_p1_cents: 40, pm_p2_cents: 60, raw: "{}" });
+  ins("m-pending", "2026-07-20T10:00:00Z"); // OLD — but its shadow signal is unresolved
+  ins("m-other", "2026-07-21T10:00:00Z");
+  ins("m-other", "2026-07-22T10:00:00Z");
+  db.prepare(`INSERT INTO sv_shadow_signals(id,match_id,trigger_cents,epoch,status,created_at) VALUES(?,?,?,?,?,?)`).run("sig1", "m-pending", 40, SV_SHADOW_EPOCH, "pending", "2026-07-20T10:00:00Z");
+  // keep=1 would normally drop the 2 oldest — but the oldest belongs to a pending-shadow match.
+  R.capTennisSnapshots(db, 1);
+  const left = db.prepare(`SELECT DISTINCT pm_match_id AS m FROM tennis_snapshots`).all().map((r: any) => r.m).sort();
+  assert.ok(left.includes("m-pending"), "the pending-shadow match's final snapshot survives (resolve can still read it)");
+});

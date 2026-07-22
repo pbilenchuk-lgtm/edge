@@ -189,6 +189,47 @@ const brokenSeq = (db: ReturnType<typeof openDb>, mid: string) => {
 };
 const EXIT_NOW = { now: () => "2026-07-14T10:07:05Z" };
 
+function setValueBet(db: ReturnType<typeof openDb>, mid: string, id: string, plan: any) {
+  R.insertBet(db, { id, match_id: mid, strategy_id: "tennis_set_value", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "set-value", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: plan }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+}
+
+test("T2 latch: game_count_stop does NOT fire when a re-break returned the games delta (score even at execution)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  buybackBet(db, mid, "latch", { take_price: { at_cents: 90 }, catastrophic_floor: { at_cents: 10 }, game_count_stop: { receiver_games: 1 } });
+  // fav (first) broken to 3-4 (recvGames accrues), then a COVERAGE-GAP jump 3-4 → 5-5: da+dbb=3 registers NO
+  // break-back event, so the old event-only latch would still fire — but the CURRENT score is even.
+  snap(db, mid, { at: "2026-07-14T10:05:00Z", g1: 3, g2: 3, server: "second", p1c: 42 });
+  snap(db, mid, { at: "2026-07-14T10:06:00Z", g1: 3, g2: 4, server: "second", p1c: 42 }); // opp holds → fav receiving game
+  snap(db, mid, { at: "2026-07-14T10:07:00Z", g1: 5, g2: 5, server: "first", p1c: 42 });  // gap jump → even, no event
+  const n = await tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" });
+  assert.equal(n, 0, "latch reset by the current even score — no game_count_stop");
+  assert.equal(R.getBet(db, "latch")!.status, "open");
+});
+
+test("T2 latch: set_value thesis_stop does NOT fire at an even score (Marcondes) but DOES while still behind", async () => {
+  // RESET case — fav broken in set 2, one receiving game, then a gap jump to an even score.
+  const db1 = openDb(":memory:");
+  const mid1 = seedTennisMatch(db1, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  setValueBet(db1, mid1, "sv-reset", { take_price: { at_cents: 90, fraction: 0.5 }, catastrophic_floor: { at_cents: 10 }, thesis_stop: { receiver_games: 1 } });
+  // detectTennisEvents keys the finished game on the PRIOR snapshot's server.
+  snap(db1, mid1, { at: "2026-07-14T10:05:00Z", g1: 3, g2: 3, server: "first", p1c: 42 });  // fav serves next game
+  snap(db1, mid1, { at: "2026-07-14T10:06:00Z", g1: 3, g2: 4, server: "second", p1c: 42 }); // fav's serve broken → break
+  snap(db1, mid1, { at: "2026-07-14T10:06:30Z", g1: 3, g2: 5, server: "first", p1c: 42 });  // opp held → recvAfter=1
+  snap(db1, mid1, { at: "2026-07-14T10:07:00Z", g1: 6, g2: 6, server: "first", p1c: 42 });  // gap jump → even, no break-back event
+  assert.equal(await tennisExitTick(db1, { now: () => "2026-07-14T10:07:05Z" }), 0, "even score → latch reset, thesis_stop suppressed");
+  assert.equal(R.getBet(db1, "sv-reset")!.status, "open");
+
+  // FIRES case — same break + receiving game, but the fav is STILL behind at execution.
+  const db2 = openDb(":memory:");
+  const mid2 = seedTennisMatch(db2, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  setValueBet(db2, mid2, "sv-fire", { take_price: { at_cents: 90, fraction: 0.5 }, catastrophic_floor: { at_cents: 10 }, thesis_stop: { receiver_games: 1 } });
+  snap(db2, mid2, { at: "2026-07-14T10:05:00Z", g1: 3, g2: 3, server: "first", p1c: 42 });
+  snap(db2, mid2, { at: "2026-07-14T10:06:00Z", g1: 3, g2: 4, server: "second", p1c: 42 }); // fav broken
+  snap(db2, mid2, { at: "2026-07-14T10:07:00Z", g1: 3, g2: 5, server: "first", p1c: 42 });  // opp held → recvAfter=1, still behind
+  assert.equal(await tennisExitTick(db2, { now: () => "2026-07-14T10:07:05Z" }), 1, "still behind → break-no-return thesis_stop fires");
+});
+
 test("tennisExitTick (book-fill-m1): protective exit SELLS into the BID (38¢), not the ask (40¢)", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });

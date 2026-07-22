@@ -1778,7 +1778,11 @@ export async function runAutoCycle(
   // §5 real EXIT mirror: close dry positions whose paper twin has settled (gate-first: off → no-op).
   if (readTradingMode(deps.env) !== "off") await step("dryExitSweep", () => sweepDryExits(db, { env: deps.env ?? process.env, poly: deps.polymarket ?? loadPolymarketConfig(deps.env), deps, now: () => nowFn(deps)(), bookCache: new Map() }), 0);
   stepSync("prune", () => R.pruneMarketSnapshots(db), 0); // keep the snapshot history bounded (persistent DB)
-  stepSync("pruneProviderSnapshots", () => { const cut = new Date((Date.parse(nowFn(deps)()) || Date.now()) - SNAPSHOT_RETENTION_DAYS * 86400_000).toISOString(); R.pruneSnapshots(db, cut); R.pruneTennisSnapshots(db, cut); R.capTennisSnapshots(db); R.capTennisMapLog(db); return 0; }, 0); // snapshot retention + hard row-caps — a burst once bloated tennis_snapshots to 1.2 GB and starved boot
+  stepSync("pruneProviderSnapshots", () => { const cut = new Date((Date.parse(nowFn(deps)()) || Date.now()) - SNAPSHOT_RETENTION_DAYS * 86400_000).toISOString(); R.pruneSnapshots(db, cut); R.pruneTennisSnapshots(db, cut); R.capTennisSnapshots(db); R.capTennisMapLog(db);
+    // T1: record the ACTUAL retained tennis-snapshot window so the retro-cohort depth is visible (the 20k
+    // row-cap undercuts SNAPSHOT_RETENTION_DAYS when scouting is dense). Read by ops / the sv_cohort report.
+    try { const d = R.tennisSnapshotDepth(db); R.metaSet(db, "tennis_snapshot_depth", JSON.stringify(d), nowFn(deps)()); } catch { /* best-effort */ }
+    return 0; }, 0); // snapshot retention + hard row-caps — a burst once bloated tennis_snapshots to 1.2 GB and starved boot
   // A match that passed kickoff but never went live (scout never saw the court / ESPN never delivered)
   // is stuck in upcoming/lineup — give it a terminal state so it leaves «Актуальные» within a tick
   // (voids its open bets, flags it «поломан» for the «Поломанные» bucket) instead of lingering 3 days.

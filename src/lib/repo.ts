@@ -1188,10 +1188,24 @@ export function pruneTennisSnapshots(db: Database, olderThanIso: string): number
 // Hard row-cap backstop: if a burst (e.g. a catch-up storm) wrote far more snapshots than the
 // time-retention keeps, drop the oldest beyond `keep`. Prevents the table (with its big raw blobs)
 // from bloating the DB file — it hit 1.2 GB once, which starved boot. Cheap (uses the batch_at index).
+// T1: NEVER evict snapshots of a match with a PENDING sv_shadow_signal — resolveSvShadowSignals reads the
+// final set counts from tennis_snapshots, so evicting them before resolution (a real race during the hourly
+// cron sleeps) silently loses a cohort row — irreplaceable calibration raw material. The 5-day time-prune
+// (pruneTennisSnapshots) stays the absolute ceiling, so a stuck-pending signal can't pin snapshots forever.
 export function capTennisSnapshots(db: Database, keep = 20000): number {
   const n = tennisSnapshotCount(db);
   if (n <= keep) return 0;
-  return db.prepare(`DELETE FROM tennis_snapshots WHERE batch_at < (SELECT MIN(batch_at) FROM (SELECT batch_at FROM tennis_snapshots ORDER BY batch_at DESC LIMIT ?))`).run(keep).changes ?? 0;
+  return db.prepare(
+    `DELETE FROM tennis_snapshots WHERE batch_at < (SELECT MIN(batch_at) FROM (SELECT batch_at FROM tennis_snapshots ORDER BY batch_at DESC LIMIT ?))
+       AND (pm_match_id IS NULL OR pm_match_id NOT IN (SELECT match_id FROM sv_shadow_signals WHERE status='pending'))`,
+  ).run(keep).changes ?? 0;
+}
+
+/** T1 retained-depth diagnostic: makes the ACTUAL retro-cohort window visible (the 20k row-cap silently
+ *  undercuts the SNAPSHOT_RETENTION_DAYS setting when scouting is dense). Read by the prune step → app_meta. */
+export function tennisSnapshotDepth(db: Database): { count: number; oldest: string | null; newest: string | null } {
+  const r = db.prepare(`SELECT COUNT(*) n, MIN(batch_at) oldest, MAX(batch_at) newest FROM tennis_snapshots`).get() as { n: number; oldest: string | null; newest: string | null };
+  return { count: r.n, oldest: r.oldest, newest: r.newest };
 }
 // tennis_map_log is pure observability (mapping decisions) and is written every collection pass —
 // it accumulated 47k rows. Keep only the newest `keep`.

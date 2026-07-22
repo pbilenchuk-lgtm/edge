@@ -527,6 +527,15 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
     const evs = detectTennisEvents(snaps).filter((e) => (Date.parse(e.batchAt) || 0) > entryMs);
     const recvGames = evs.filter((e) => (e.type === "hold" || e.type === "break") && e.server === oppSide).length;
     const counterBreak = evs.some((e) => e.type === "break" && e.server === oppSide); // favourite broke opponent back
+    // T2 LATCH RESET — the «break without return for K receiving games» stops are re-evaluated against the
+    // CURRENT game score at execution, not a stale event chain. The event-derived break-back can desync from
+    // reality (missed scout ticks); the SCORE can't. If the favourite is NOT behind in the current set right
+    // now, the break was returned (a re-break brought the games delta back) → the latch is reset and no
+    // break-no-return stop fires (Marcondes: thesis_stop at games 2-2, приёмных 6). FAIL-OPEN toward holding:
+    // unreadable games → treat as "not proven behind" (the floor still catches a real collapse).
+    const favGamesNow = favSide === "first" ? (last.games_p1 ?? null) : (last.games_p2 ?? null);
+    const oppGamesNow = favSide === "first" ? (last.games_p2 ?? null) : (last.games_p1 ?? null);
+    const favBehindNow = favGamesNow != null && oppGamesNow != null && favGamesNow < oppGamesNow; // down ≥1 game in the current set
     // Game score for the exit log = the FRESHEST snapshot (current set/games), not the freshest
     // PRICED one — else a stale priced row prints the wrong set (e.g. "6-4" from set 1 while the
     // stop actually fires at 0-4 in set 2). `last` is always defined (snaps.length checked above).
@@ -559,8 +568,10 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
         const recvAfter = after.filter((e) => (e.type === "hold" || e.type === "break") && e.server === oppSide).length;
         const brokeBack = after.some((e) => e.type === "break" && e.server === oppSide); // favourite broke opponent back
         const K = Number.isFinite(plan?.thesis_stop?.receiver_games) ? Number(plan.thesis_stop.receiver_games) : SET_VALUE_ARMED.thesisStopReceiverGames;
-        if (!brokeBack && recvAfter >= K) {
-          closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "thesis_stop", `стоп тезиса: брейк во 2-м сете без возврата за ${recvAfter} приёмных`, ext, deps, now, { kind: "protective" });
+        // T2: fire ONLY if the break is unreturned BY THE CURRENT SCORE too — favBehindNow gates out a latch
+        // that the event chain left stuck after a re-break (games delta already back to even/ahead).
+        if (!brokeBack && favBehindNow && recvAfter >= K) {
+          closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "thesis_stop", `стоп тезиса: брейк во 2-м сете без возврата за ${recvAfter} приёмных (счёт ${favGamesNow}-${oppGamesNow}, брейк не отыгран)`, ext, deps, now, { kind: "protective" });
           continue;
         }
       }
@@ -597,8 +608,10 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
     }
     // #4 game_count_stop — the favourite has played ≥K receiving games since entry with NO break-back.
     const K = Number.isFinite(plan?.game_count_stop?.receiver_games) ? Number(plan.game_count_stop.receiver_games) : TENNIS_GAME_COUNT_STOP;
-    if (recvGames >= K && !counterBreak) {
-      closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "game_count_stop", `стоп по геймам: ${recvGames} приёмных без брейка назад`, ext, deps, now, { kind: "protective" });
+    // T2 latch reset (same class as set_value thesis_stop): a re-break that brought the games delta back
+    // resets the count — fire only if the favourite is STILL behind by the current score.
+    if (recvGames >= K && !counterBreak && favBehindNow) {
+      closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "game_count_stop", `стоп по геймам: ${recvGames} приёмных без брейка назад (счёт ${favGamesNow}-${oppGamesNow})`, ext, deps, now, { kind: "protective" });
       continue;
     }
     // #5 take_price — recovered to the pre-written take level (pre-break − buffer).
