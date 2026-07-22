@@ -821,6 +821,24 @@ export function latestMarkets(db: Database, matchId: string, closingOnly = false
   return out;
 }
 
+/** Minutes since a label's price last CHANGED (P1 zombie stale-book rule). Walks the label's snapshots
+ *  newest-first over the contiguous run at the current price; the oldest snapshot in that run is when the
+ *  current price was set. Returns null when the label has no history. A book re-snapshotted every tick at an
+ *  unchanged price yields a growing age — exactly the «стухшая книга» signal. */
+export function bookStaleMinutes(db: Database, matchId: string, label: string, currentPrice: number, nowIso: string): number | null {
+  const rows = db.prepare(
+    `SELECT price, snapshot_at FROM markets WHERE match_id=? AND label=? ORDER BY snapshot_at DESC, rowid DESC`,
+  ).all(matchId, label) as { price: number; snapshot_at: string }[];
+  if (!rows.length) return null;
+  let firstOfCurrent = rows[0].snapshot_at;
+  for (const r of rows) {
+    if (Math.abs((r.price ?? NaN) - currentPrice) < 0.6) firstOfCurrent = r.snapshot_at;
+    else break;
+  }
+  const ageMs = Date.parse(nowIso) - Date.parse(firstOfCurrent);
+  return Number.isFinite(ageMs) ? Math.max(0, ageMs / 60_000) : null;
+}
+
 /** Capture the KICKOFF price of each current market (first-write-wins), so the
  *  odds column shows in-match line movement rather than pre-match drift. Called
  *  the first time a match is seen live. Returns how many labels were captured. */

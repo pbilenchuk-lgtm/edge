@@ -57,6 +57,24 @@ test("P0.2 autoEnter: a fill clamped below the $50 depth floor is skipped (depth
   assert.ok(R.tradeLogForMatch(db, "m-lineup").some((l) => /depth_floor_skip/.test(l.text ?? "")), "depth_floor_skip logged (feeds unfillable_edge)");
 });
 
+test("P1 zombie quarantine: autoEnter refuses a fill on a resolved-price book (BTTS-Yes 50¢, both scored)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  // Live football, both teams have scored (1:1) → BTTS-Yes is game-state RESOLVED, yet the book still sits at
+  // 50¢ — a zombie. minute>0 so liveDelivering passes; the zombie block fires BEFORE any book fetch.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Vardar", away: "Din", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 1, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "BTTS — Yes", price: 50, ai_prob: 0.9, liquidity: "1000", external_ref: "TOKZ", snapshot_at: "t", is_closing: false });
+  const bid = R.uid();
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "BTTS — Yes", status: "proposed", proposed_price: 50, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.9, stake: 60, rationale: "r", entered_minute: null, result: null, payout: null, created_at: "t" });
+  await autoEnter(db, { now: () => "t", env: {}, fetchImpl: (async () => { throw new Error("no book fetch — the zombie is blocked before execution"); }) as any });
+  assert.equal(R.getBet(db, bid)!.status, "not_filled", "a resolved-price zombie book is never filled");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "skip" && /zombie_quarantine:resolved_price/.test(l.text)), "quarantine logged as a distinct reason (feeds P2)");
+});
+
 test("autoEnter holds a football bet until lineups are out (no pre-lineup entry)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
@@ -1029,7 +1047,9 @@ test("strategistReassess #3b MARTINGALE BLOCK: no re-add to a market this pair a
   const strat = R.listStrategies(db, "football")[0];
   R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
   const mid = R.uid();
-  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Courage", away: "Spirit", state: "live", lineup_out: true, kickoff_at: null, minute: 80, score_home: 0, score_away: 2, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  // Score 0:1 (NOT 0:2): "Spirit Over 1.5" still needs another goal, so it is not a game-state-resolved
+  // (P1 zombie) book — this test must exercise the MARTINGALE block, not the resolved-price quarantine.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Courage", away: "Spirit", state: "live", lineup_out: true, kickoff_at: null, minute: 80, score_home: 0, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   R.upsertMatchLive(db, { match_id: mid, espn_event_id: mid, league: "usa.nwsl", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { shots: 5 }, away: { shots: 3 } }), updated_at: "t" });
   R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Spirit Over 1.5", price: 60, ai_prob: 0.7, liquidity: "2000", external_ref: "TOK-A", snapshot_at: "t", is_closing: false });
   R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Spirit Over 2.5", price: 40, ai_prob: 0.6, liquidity: "2000", external_ref: "TOK-B", snapshot_at: "t", is_closing: false });

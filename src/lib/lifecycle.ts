@@ -26,6 +26,7 @@ import { readTradingMode } from "./executor/safety.js";
 import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
+import { classifyZombie, notationSpreads, loadZombieConfig, type ZombieReason } from "./zombieMarket.js";
 import { exitDecision, winsOnEventOccurrence } from "./thresholds.js";
 import { underThesisMarginGoals } from "./settlement.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
@@ -647,6 +648,10 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
     // how duplicate proposals were created.
     const pairMkt = (b: typeof bets[number]) => `${b.strategy_id}|${b.risk_profile_id ?? "medium"}|${b.market_label}`;
     const openKey = new Set(bets.filter((b) => b.status === "open").map(pairMkt));
+    // P1 ZOMBIE QUARANTINE at the single fill choke: every proposal (prematch + live-reassess) passes here, so
+    // blocking a quarantined book once here covers ALL entry consumers. No-op off football-live.
+    const zMinute = m.minute ?? (isIsoTs(m.kickoff_at) ? Math.min(maxLiveMinutes(sport), Math.max(0, Math.floor(((Date.parse(now) || Date.now()) - Date.parse(m.kickoff_at as string)) / 60_000))) : null);
+    const zombie = footballZombieMap(db, m, sport, markets, zMinute, deps.env ?? process.env, now);
     for (const b of bets) {
       if (b.status !== "proposed") continue;
       if (preLineupHold) continue; // preview only — keep it «предлагается» until lineups are out
@@ -656,6 +661,13 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       const mk = markets.find((x) => x.label === b.market_label);
       const quote = mk?.price ?? b.proposed_price ?? 0;
       if (quote <= 0) continue;
+      // P1: refuse a fill on a quarantined book — the quote isn't a real tradeable price (feeds unfillable_edge).
+      const zr = zombie.get(b.market_label);
+      if (zr) {
+        R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `zombie_quarantine:${zr.code} — ${zr.detail}`) });
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `zombie_quarantine:${zr.code} «${b.market_label}»: ${zr.detail} — вход отклонён`, created_at: now });
+        continue;
+      }
       const proposed = b.stake ?? 0;
 
       // Execute against the real order book: fill at VWAP (slippage), cap the size
@@ -1033,6 +1045,50 @@ function liveCalibration(db: Database, matchId: string, confidence: string): num
   return confidence === "высокая" ? 0.75 : confidence === "низкая" ? 0.3 : 0.5;
 }
 
+/**
+ * P1 ZOMBIE-MARKET map for a LIVE football match: label → the reason its book is not a live tradeable price
+ * (resolved_price / notation_desync / stale_book). Consumed by BOTH the strategist quote context and the
+ * autoEnter fill choke — a quarantined market is dropped from what the strategist sees and can never be
+ * entered. Quarantine is logged once per (match,label,code) per continuous zombie period (dedup vs the recent
+ * trade log) so it shows up in the match log and is countable by the P2 unfillable_edge report. Non-football
+ * or non-live → empty map (tennis has its own placeholder handling; §9.6 — a deterministic quote check).
+ */
+function footballZombieMap(
+  db: Database, m: Match, sport: string, markets: Market[], minute: number | null,
+  env: Record<string, string | undefined>, now: string, log = true,
+): Map<string, ZombieReason> {
+  const out = new Map<string, ZombieReason>();
+  if (sport !== "football" || m.state !== "live" || !markets.length) return out;
+  const cfg = loadZombieConfig(env);
+  // A game-state RESOLVED leg (both scored → BTTS-Yes; a team scored → its Over 0.5) is pure SCORE logic —
+  // liveAdjustedProb short-circuits to 1.0 before it touches xG — so a missing distribution (no core) must not
+  // blind the resolved-price rule. Use the real core when present, a neutral zero-core otherwise (an UNresolved
+  // leg then reads ≈0, never ≥0.995, so it's never falsely quarantined).
+  const core = footballCore(db, m.id) ?? { xg_home: 0, xg_away: 0, home_share_1h: 0.5, away_share_1h: 0.5 };
+  const lpCfg = loadLiveProbConfig(env);
+  const spreads = notationSpreads(markets.map((mk) => ({ label: mk.label, price: mk.price })));
+  // trade_log.strategy_id is FK-bound; the quarantine is match-level, so we attach the informational line to a
+  // real football strategy id (dedup keeps it to one line per label+code). No football strategy → don't log.
+  const logSid = log ? (R.listStrategies(db).find((s) => s.sport_id === "football")?.id ?? null) : null;
+  for (const mk of markets) {
+    const gs = minute != null
+      ? liveAdjustedProb(mk.label, { home: m.home, away: m.away, scoreHome: m.score_home, scoreAway: m.score_away, minute, core }, lpCfg)
+      : null;
+    const bookAge = R.bookStaleMinutes(db, m.id, mk.label, mk.price, now);
+    const z = classifyZombie({ label: mk.label, priceCents: mk.price, gsProb: gs?.prob ?? null, groupSpreadCents: spreads.get(mk.label) ?? null, bookAgeMin: bookAge, live: true }, cfg);
+    if (!z) continue;
+    out.set(mk.label, z);
+    if (logSid) {
+      // Dedup: one quarantine line per (label, code) within the recent tail — both consumers call this each
+      // tick, and the same zombie persists across ticks; we log the TRANSITION, not every tick.
+      const tag = `zombie_quarantine:${z.code}`;
+      const recent = R.tradeLogForMatch(db, m.id).slice(-14).some((e) => e.type === "skip" && e.text.includes(tag) && e.text.includes(`«${mk.label}»`));
+      if (!recent) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: logSid, minute: minuteLabel(m), type: "skip", text: `${tag} «${mk.label}»: ${z.detail} — рынок на карантине для всех потребителей (вход/контекст)`, created_at: now });
+    }
+  }
+  return out;
+}
+
 export async function strategistReassess(
   db: Database, deps: EngineDeps = {}, opts: { max?: number; newEventMatchIds?: Set<string>; triggeredOnly?: boolean; labelFor?: Map<string, ReassessTrigger>; onlyStrategyId?: string } = {},
 ): Promise<ReassessResult> {
@@ -1116,6 +1172,11 @@ export async function strategistReassess(
         if (adj) gsProbByLabel.set(mk.label, adj);
       }
     }
+    // P1 ZOMBIE QUARANTINE: markets whose quote isn't a live tradeable price (resolved/desynced/stale) are
+    // dropped from what the strategist SEES (context + entry candidates) so it never reasons on or opens into a
+    // phantom price. Exits still use the full `markets` (an open position must always be manageable).
+    const zombie = footballZombieMap(db, m, sport, markets, liveMinute, env, now);
+    const liveMarkets = zombie.size ? markets.filter((mk) => !zombie.has(mk.label)) : markets;
 
     // PAIRS to run (LIVE branch of the unified engine — same (strategy, profile)
     // unit as the prematch pass): pairs with an active share (can enter) plus any
@@ -1212,7 +1273,7 @@ export async function strategistReassess(
         strategyName: strat.name, strategyPrompt: strat.prompt_live ?? strat.prompt,
         match: { home: m.home, away: m.away, sport, state: m.state, minute: m.minute, scoreHome: m.score_home, scoreAway: m.score_away, minuteApprox },
         assessment: { confidence: assess?.confidence ?? "средняя", short: assess?.short ?? "", verdict: assess?.verdict ?? "" },
-        markets: markets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob, liquidity: mk.liquidity != null ? Number(mk.liquidity) : null, openCents: mk.label in opens ? opens[mk.label] : null, liveProbAdjusted: gsProbByLabel.get(mk.label) ?? null })),
+        markets: liveMarkets.map((mk) => ({ label: mk.label, priceCents: mk.price, aiProb: mk.ai_prob, liquidity: mk.liquidity != null ? Number(mk.liquidity) : null, openCents: mk.label in opens ? opens[mk.label] : null, liveProbAdjusted: gsProbByLabel.get(mk.label) ?? null })),
         openPositions: promptPositions.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
         context: [ctx, battleSheet ? `БОЕВОЙ ЛИСТ (план из предматча — исполняй его, не переизобретай):\n${battleSheet}` : null].filter(Boolean).join("\n\n") || undefined,
         // LIVE-переоценка исполняет уже сформированный боевой лист — держим её на
@@ -1391,6 +1452,10 @@ export async function strategistReassess(
           for (const pick of dec.picks) {
             const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
             if (!mk || mk.price == null) { unfilled.push(`«${pick.label}» — нет рынка`); continue; }
+            // P1: never open into a quarantined book (the strategist shouldn't even see it, but a cached
+            // plan / battle-sheet trigger could still name it) — belt behind the context filter.
+            const zr = zombie.get(mk.label);
+            if (zr) { unfilled.push(`«${mk.label}» — рынок на карантине (${zr.code}): ${zr.detail} (zombie_quarantine:${zr.code})`); continue; }
             // LIVE re-scoring: size off the strategist's OWN current probability (it
             // re-estimates from the live score/minute — a 0:2 game's "Over 1.5" is
             // ~1.0, not the stale pre-match prob). Fall back to the stored prob only
