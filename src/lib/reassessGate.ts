@@ -94,22 +94,40 @@ export interface LiveState {
  *    is, by definition, no panic to buy back → those triggers are dormant. Any single live
  *    trigger → call; every trigger dormant/expired → skip.
  */
-export function overreactionShouldCall(battleSheet: string | null | undefined, live: LiveState): boolean {
+export type GateDecision = { call: true } | { call: false; reason: string };
+
+/**
+ * Reasoned form of overreactionShouldCall (P0.4): returns WHY the strategist is being skipped so the
+ * deterministic disarm is visible in the trade log. A trigger is DISARMED IN CODE the moment its window
+ * passes OR its event precondition is contradicted by the live state — a disarmed trigger never wakes the
+ * LLM. Fails OPEN (call:true) on any ambiguity.
+ */
+export function overreactionGate(battleSheet: string | null | undefined, live: LiveState): GateDecision {
   const a = armedTriggers(battleSheet);
-  if (a.kind === "unparsed") return true; // can't verify → don't risk skipping a real setup
-  if (a.kind === "none") return false;    // nothing armed → overreaction cannot enter
+  if (a.kind === "unparsed") return { call: true }; // can't verify → don't risk skipping a real setup
+  if (a.kind === "none") return { call: false, reason: "нет заряженных buyback-триггеров — вход невозможен" };
+  let expired = 0, dormant = 0;
   for (const t of a.list) {
     const blob = triggerBlob(t);
     const cap = parseMinuteCap(windowText(t));
     const withinWindow = cap == null || live.minute == null || live.minute <= cap + TIME_BUFFER_MIN;
-    if (!withinWindow) continue; // window has passed → this trigger can no longer fire
+    if (!withinWindow) { expired++; continue; } // window has passed → this trigger can no longer fire
     // Event precondition: a goal-panic buyback needs a goal on the board. At 0:0 only a
     // red-card-keyed trigger can be live (and red cards aren't in the score → fail open on them).
     if (live.totalGoals === 0) {
       const redCardKeyed = /удал|красн|red[\s_-]?card/i.test(blob);
-      if (!redCardKeyed) continue; // goal-keyed trigger, but no goal yet → dormant
+      if (!redCardKeyed) { dormant++; continue; } // goal-keyed trigger, but no goal yet → dormant
     }
-    return true; // at least one armed trigger is plausibly live → let the strategist judge
+    return { call: true }; // at least one armed trigger is plausibly live → let the strategist judge
   }
-  return false; // every armed trigger is expired or not yet triggerable → deterministic skip
+  // Every armed trigger is expired or not yet triggerable → deterministic skip (all disarmed by code).
+  const n = a.list.length;
+  const why = expired && dormant ? `окно истекло у ${expired}, событие не наступило у ${dormant}`
+    : expired ? `окно истекло (мин ${live.minute ?? "?"})`
+    : `нет матчащего события при счёте ${live.totalGoals}:0-типа`;
+  return { call: false, reason: `все ${n} заряженных триггер(ов) разоружены: ${why}` };
+}
+
+export function overreactionShouldCall(battleSheet: string | null | undefined, live: LiveState): boolean {
+  return overreactionGate(battleSheet, live).call;
 }

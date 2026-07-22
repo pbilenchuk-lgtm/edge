@@ -45,7 +45,7 @@ import { resolvePmvShadowSignals } from "./tennisPmvShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates } from "./footballIntegrity.js";
 import { captureBookDepth } from "./bookDepthCapture.js";
-import { overreactionShouldCall } from "./reassessGate.js";
+import { overreactionShouldCall, overreactionGate } from "./reassessGate.js";
 import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
 
@@ -1002,7 +1002,7 @@ function captureLiveOpens(db: Database, deps: EngineDeps): void {
 }
 
 export interface ReassessEntry { matchId: string; strategyId: string; market: string; stake: number }
-export interface ReassessResult { exits: ExitItem[]; entries: ReassessEntry[]; llmCalls: number; llmFail: number }
+export interface ReassessResult { exits: ExitItem[]; entries: ReassessEntry[]; llmCalls: number; llmFail: number; gateSkips?: number }
 
 /**
  * Strategist-driven in-match reassessment. For funded matches that either hold
@@ -1047,7 +1047,7 @@ export async function strategistReassess(
   const analysisDuel = loadAnalysisDuel(env); // tag live bets with the match's analysis model
   const poly = deps.polymarket ?? loadPolymarketConfig(env);
   const comps = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
-  const out: ReassessResult = { exits: [], entries: [], llmCalls: 0, llmFail: 0 };
+  const out: ReassessResult = { exits: [], entries: [], llmCalls: 0, llmFail: 0, gateSkips: 0 };
   const touched = new Set<string>();
   let calls = 0;
   // Process on-pitch event triggers (goal / red card — anything NOT labelled
@@ -1166,25 +1166,28 @@ export async function strategistReassess(
       // доступный как представителя (LIVE-окно исполняет его, не переизобретает).
       const battleSheet = profiles.map((p) => R.artifactsForMatch(db, m.id).find((x) => x.kind === "battle_sheet" && x.label === `${strat.name} · ${p.profile}`)?.content).find(Boolean);
       // ── ДЕТЕРМИНИСТИЧЕСКИЙ ПРЕ-LLM ГЕЙТ (§9.6: не денежное решение — только «может ли
-      // стратег вообще действовать сейчас?»). На ПЕРИОДИЧЕСКОМ тике (heartbeat, не событие)
-      // с ПУСТЫМ портфелем пропускаем LLM, когда стратегу заведомо нечего делать — это
-      // live-близнец предматчевой «Модели Б». Реальное событие (isPeriodic=false: гол /
-      // красная / движение цены) всегда идёт в стратега как раньше. Fail-open: любая
-      // неоднозначность → зовём стратега.
-      if (isPeriodic(m.id) && !stratOpen.length) {
+      // стратег вообще действовать сейчас?»). P0.4: событийная переоценка зовёт LLM только если
+      // (открытые позиции > 0) ИЛИ (есть живой армед-триггер, чьи предусловия события совпали).
+      // Иначе — детерминированный skip. Раньше гейт стоял ТОЛЬКО на периодическом тике, и каждое
+      // событие (гол/красная/цена) на пустом портфеле жгло LLM-вызов «воздерживаюсь» (91 на 7 матчей):
+      // мёртвый триггер (окно истекло / счёт противоречит условию) разоружается КОДОМ здесь и LLM не
+      // будит. Fail-open: любая неоднозначность → зовём стратега. live_xg НЕ гейтим (вход по live-xG
+      // потоку — нужно суждение LLM).
+      if (!stratOpen.length) {
         let skipReason: string | null = null;
         if (sid === "prematch_value") {
           // Live-роль Pre-match Value (футбол) — «защита открытого»; открытой позиции нет → защищать
-          // нечего. (Пишем полное имя, а не «PMV» — чтобы не путать с теннисной стратегией PMV.)
+          // нечего (P0.3 — входов в live нет). (Полное имя, а не «PMV» — чтобы не путать с теннисной PMV.)
           skipReason = "Pre-match Value live (футбол): пустой портфель — защищать нечего (детерминированный пропуск, без LLM)";
-        } else if (sid === "overreaction" && !overreactionShouldCall(battleSheet ?? null, { totalGoals: (m.score_home ?? 0) + (m.score_away ?? 0), minute: m.minute ?? minuteApprox })) {
-          // Вход overreaction возможен ТОЛЬКО через заряженный buyback-триггер; нет ни одного
-          // с выполненными детерминированными предусловиями (событие/глубина + окно) → пропуск.
-          skipReason = "Overreaction: нет заряженного триггера с выполненными предусловиями (событие/окно) — детерминированный пропуск, без LLM";
+        } else if (sid === "overreaction") {
+          // Вход overreaction возможен ТОЛЬКО через заряженный buyback-триггер; нет ни одного живого
+          // (событие/глубина + окно) → пропуск с конкретной причиной разоружения.
+          const g = overreactionGate(battleSheet ?? null, { totalGoals: (m.score_home ?? 0) + (m.score_away ?? 0), minute: m.minute ?? minuteApprox });
+          if (!g.call) skipReason = `Overreaction: ${g.reason} — детерминированный пропуск, без LLM`;
         }
-        // live_xg здесь НЕ гейтим — он открывает по потоку live-xG (нужно суждение LLM).
         if (skipReason) {
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "skip", text: skipReason, created_at: now });
+          out.gateSkips = (out.gateSkips ?? 0) + 1;
           continue;
         }
       }
@@ -1328,9 +1331,24 @@ export async function strategistReassess(
             if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отложен по ${holdKey}: решение по ${mk.price}¢, книга уже ${sell.bestBidCents}¢ (Δ${Math.round(Math.abs(sell.bestBidCents - mk.price))}¢) — событие/сдвиг между решением и исполнением; переоценка на свежих данных (exit_staleness_reassess)`, created_at: now });
             continue;
           }
-          const { pnl, partial } = closeBetPortion(db, b, ex.fraction, sell.cents, minuteLabel(m), now);
+          // P0.4 PARTIAL-FILL ACCOUNTING (Bohemian «исполнено 20%»): the bid book may absorb only part
+          // of the requested exit size. Close ONLY the actually-filled fraction — the remainder stays
+          // open and is re-offered next cycle (the same fill invariant tennisTrading already applies).
+          // Before this, the full ex.fraction was booked at the thin-book VWAP, so a 20% fill recorded a
+          // near-full-position P&L (−$13.30 «полный» на филле 20%) with the other 80% silently vanished.
+          const fillFrac = sell.requestedShares > 0 ? Math.min(1, sell.filledShares / sell.requestedShares) : 1;
+          const effFraction = ex.fraction * fillFrac;
+          if (effFraction <= 1e-6) {
+            // The book gave nothing this cycle — hold the WHOLE position, retry on a deeper book. Never
+            // fall through to closeBetPortion (fraction 0 hits its closed<=0 → FULL-close fallback).
+            const holdKey = `«${b.market_label}»`;
+            const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
+            if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега по ${holdKey} не исполнен: бид не принял размер (0% филл, ${ex.reason}); держим до реального рынка/сеттла (exit_partial_zero)`, created_at: now });
+            continue;
+          }
+          const { pnl, partial } = closeBetPortion(db, b, effFraction, sell.cents, minuteLabel(m), now);
           if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: sid, profileId: profile }, sell.cost, now);
-          const tag = partial ? `частично ${Math.round(ex.fraction * 100)}%` : "полностью";
+          const tag = partial ? `частично ${Math.round(effFraction * 100)}%` : "полностью";
           // Trigger honesty: verify a counter_scenario tag against its pre-registered score/minute
           // condition (structured, from the plan) — objectively-unmet or unbacked defensive tags
           // are recorded as discretionary so stats aren't polluted with phantom firings.
@@ -1459,6 +1477,14 @@ export async function strategistReassess(
     }
   }
   for (const sid of touched) recomputeMetrics(db, sid, deps);
+  // P0.4 METRIC (до/после): cumulative LLM calls vs deterministic gate skips, so the operator can
+  // re-measure the «LLM-мельница» ratio (base was 91 calls / 7 matches, ~all «воздерживаюсь»). Cheap
+  // running counters in app_meta — read by ops; never a money decision.
+  if (out.llmCalls || (out.gateSkips ?? 0)) {
+    const bump = (k: string, by: number) => { if (by) R.metaSet(db, k, String(Number(R.metaGet(db, k) ?? 0) + by), now); };
+    bump("reassess_llm_calls_total", out.llmCalls);
+    bump("reassess_gate_skips_total", out.gateSkips ?? 0);
+  }
   return out;
 }
 

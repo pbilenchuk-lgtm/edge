@@ -831,7 +831,7 @@ test("strategistReassess deterministic gate: overreaction with no live trigger s
   const res = await strategistReassess(db, { fetchImpl: failFetch, env: { ANTHROPIC_API_KEY: "k" } }, { newEventMatchIds: new Set([mid]) });
   assert.equal(called, 0, "no HTTP/LLM call was made");
   assert.equal(res.llmCalls, 0, "no LLM call counted");
-  assert.ok(R.tradeLogForMatch(db, mid).some((e) => e.type === "skip" && /нет заряженного триггера/.test(e.text)), "deterministic skip logged");
+  assert.ok(R.tradeLogForMatch(db, mid).some((e) => e.type === "skip" && /разоружены|нет заряженных buyback/.test(e.text)), "deterministic skip logged with a disarm reason");
 });
 
 test("strategistReassess deterministic gate: a REAL event (goal) still runs overreaction even at empty portfolio", async () => {
@@ -851,6 +851,58 @@ test("strategistReassess deterministic gate: a REAL event (goal) still runs over
   const mock = (async () => { called++; return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [], note: "нет выкупа" }) }] }) }; }) as any;
   await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } }, { newEventMatchIds: new Set([mid]), labelFor: new Map([[mid, "goal"]]) });
   assert.ok(called > 0, "a real goal event runs the strategist despite the empty portfolio");
+});
+
+test("P0.4 event gate: PMV with an empty portfolio skips the LLM even on a GOAL event (stops the LLM mill)", async () => {
+  // Before P0.4 the deterministic gate ran ONLY on periodic ticks; an event (goal/red) on an empty
+  // portfolio always burned an LLM «воздерживаюсь» call. Now the gate covers events too: PMV can't
+  // enter in live (P0.3) and has nothing to defend → deterministic skip, no LLM, on the goal too.
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const pmv: any = { id: "prematch_value", sport_id: "football", name: "Pre-match Value", tag: "pmv", color: "#000", version: 1, prompt: "p", prompt_live: "pl", params: {}, model: "Claude Opus 4.8", model_live: "Claude Opus 4.8", created_at: "t" };
+  for (const t of ["trade_log","reassessments","bets","markets","assessments","analysis_jobs","match_events","match_live","market_open","matches","strategy_shares"]) db.exec(`DELETE FROM ${t}`);
+  R.insertStrategy(db, pmv);
+  R.setShare(db, { competition_id: comp.id, strategy_id: pmv.id, pct: 50 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: "t", is_closing: false });
+  let called = 0;
+  const failFetch = (async () => { called++; throw new Error("LLM must not be called for an empty PMV portfolio, even on a goal event"); }) as any;
+  const res = await strategistReassess(db, { fetchImpl: failFetch, env: { ANTHROPIC_API_KEY: "k" } }, { newEventMatchIds: new Set([mid]), labelFor: new Map([[mid, "goal"]]) });
+  assert.equal(called, 0, "no LLM call on the goal event");
+  assert.equal(res.gateSkips, 1, "the deterministic skip is counted for the до/после metric");
+  assert.equal(Number(R.metaGet(db, "reassess_gate_skips_total")), 1, "gate-skip counter persisted for ops");
+});
+
+test("P0.4 partial-fill: a full-close the book only 20%-fills closes 20% of the position, remainder stays open", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Bohemian", away: "Ballkani", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  // Decision snapshot 50¢, entry 50¢, stake $100 → wants to sell 200 shares. The bid book holds only
+  // ~40 shares at 50¢ (20% of the size) — a real, non-degenerate, non-stale book that just can't absorb
+  // the full exit. Best bid == mark → no phantom/slippage/staleness block; the ONLY effect is a 20% fill.
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 50, ai_prob: 0.6, liquidity: "2000", external_ref: "TOK", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "boh-bet", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Under 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  const fetchImpl = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book")
+    ? { bids: [{ price: "0.50", size: "40" }], asks: [{ price: "0.52", size: "500" }] }
+    : { content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Under 2.5", fraction: 1, reason: "тезис сломан — выхожу полностью", trigger: "thesis_stop" }] }) }] }) })) as unknown as typeof fetch;
+  await strategistReassess(db, { fetchImpl, polymarket: poly, env: { ANTHROPIC_API_KEY: "k" }, now: () => "t" }, { newEventMatchIds: new Set([mid]), max: 50 });
+  const bets = R.betsForMatch(db, mid);
+  const open = bets.find((b) => b.status === "open");
+  const settled = bets.filter((b) => b.status.startsWith("settled") && b.settled_by === "partial");
+  assert.ok(open, "the position is NOT fully closed on a 20% fill");
+  assert.ok(Math.abs((open!.stake ?? 0) - 80) < 0.5, `~80% remains open, got $${open!.stake}`);
+  assert.equal(settled.length, 1, "exactly one partial slice booked");
+  assert.ok(Math.abs((settled[0].stake ?? 0) - 20) < 0.5, `the booked slice is ~20% ($20), got $${settled[0].stake}`);
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "exit" && /частично 20%/.test(l.text)), "exit logged as a 20% partial, not a full close");
 });
 
 test("verifyExitTrigger: a defensive tag with only an echoed reason → discretionary + flagged; substantive kept", () => {
