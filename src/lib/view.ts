@@ -253,24 +253,37 @@ export function buildAppData(db: Database, env = process.env): AppData {
   for (const c of comps) {
     for (const m of matchesByComp.get(c.id) ?? []) {
       allMatches.push(m); matchById.set(m.id, m);
+      // COLD-START GUARD. buildAppData is a synchronous node:sqlite pass, and the ~12
+      // per-match detail queries below (assessments, markets, reassessments, trade log,
+      // ESPN live, artifacts…) are O(all matches ever) — that's the several-second freeze
+      // that starves Render's port probe on deploy (see page.tsx). Those queries only feed
+      // a match's DETAIL CARD, which is only opened for active or recently-finished matches.
+      // Old finished matches get a LIGHT record: identity + score + settled bets (from the
+      // already-bulk-loaded betsByMatch, no extra query) — enough for the competition cards,
+      // Портфель history, stats, and the «Логи» list. The full log of any old match is still
+      // available on demand via the Логи download (rebuilt server-side). Window tunable via
+      // APP_FULL_DETAIL_DAYS (default 5); active matches are always full.
+      const FULL_MS = Math.max(0, Number(env.APP_FULL_DETAIL_DAYS ?? 5)) * 86_400_000;
+      const endRefMs = (() => { const t = Date.parse(m.end_time ?? ""); return Number.isFinite(t) ? t : (Date.parse(m.kickoff_at ?? "") || 0); })();
+      const fullDetail = m.state !== "finished" || nowMs - endRefMs < FULL_MS;
       // Only surface completed assessments; a failed run (§6) is reported to
       // the user via the analyze poll, not as an empty analysis card.
-      const assessments = R.assessmentsForMatch(db, m.id).filter((a) => a.status !== "failed");
+      const assessments = fullDetail ? R.assessmentsForMatch(db, m.id).filter((a) => a.status !== "failed") : [];
       const pre = assessments.find((a) => a.stage === "pre_lineup");
       const post = assessments.find((a) => a.stage === "post_lineup");
       // History of past analyses: newest first, dropping the single most-recent
       // row per stage (that one is already surfaced as the current pre/post).
       const stageLabel: Record<string, string> = { pre_lineup: "до состава", post_lineup: "после состава" };
       const seenStage = new Set<string>();
-      const assessmentHistory = R.assessmentHistoryForMatch(db, m.id).filter((h) => {
+      const assessmentHistory = fullDetail ? R.assessmentHistoryForMatch(db, m.id).filter((h) => {
         if (!seenStage.has(h.stage)) { seenStage.add(h.stage); return false; } // skip current
         return true;
       }).map((h) => ({
         stage: h.stage, label: stageLabel[h.stage] ?? h.stage, at: warsawLabel(h.created_at),
         confidence: h.confidence, short: h.short, text: h.body, verdict: h.verdict,
-      }));
-      const kickoff = R.openOddsFor(db, m.id); // price at kickoff (empty pre-match)
-      const latest = R.latestMarkets(db, m.id);
+      })) : [];
+      const kickoff = fullDetail ? R.openOddsFor(db, m.id) : {}; // price at kickoff (empty pre-match)
+      const latest = fullDetail ? R.latestMarkets(db, m.id) : [];
       const prices: Record<string, number> = {}; // freshest quote per label (for stats)
       for (const mk of latest) if (!(mk.label in prices)) prices[mk.label] = mk.price;
       pricesByMatch.set(m.id, prices);
@@ -319,23 +332,27 @@ export function buildAppData(db: Database, env = process.env): AppData {
       // also carries a wall-clock timestamp (`at`, Warsaw HH:MM) beside the
       // match-minute label. (SQL order is left ascending — the engine relies on it.)
       const reassessByStrat: MatchView["reassessByStrat"] = {};
-      for (const r of R.reassessmentsForMatch(db, m.id))
-        (reassessByStrat[r.strategy_id] ||= []).push({ min: r.minute, at: warsawClock(r.created_at), text: r.body, conf: r.confidence });
-      for (const k in reassessByStrat) reassessByStrat[k].reverse();
+      if (fullDetail) {
+        for (const r of R.reassessmentsForMatch(db, m.id))
+          (reassessByStrat[r.strategy_id] ||= []).push({ min: r.minute, at: warsawClock(r.created_at), text: r.body, conf: r.confidence });
+        for (const k in reassessByStrat) reassessByStrat[k].reverse();
+      }
       const logByStrat: MatchView["logByStrat"] = {};
-      for (const l of R.tradeLogForMatch(db, m.id))
-        (logByStrat[l.strategy_id] ||= []).push({ min: l.minute, at: warsawClock(l.created_at), text: l.text, type: l.type });
-      for (const k in logByStrat) logByStrat[k].reverse();
+      if (fullDetail) {
+        for (const l of R.tradeLogForMatch(db, m.id))
+          (logByStrat[l.strategy_id] ||= []).push({ min: l.minute, at: warsawClock(l.created_at), text: l.text, type: l.type });
+        for (const k in logByStrat) logByStrat[k].reverse();
+      }
 
       // real lineups + events from ESPN enrichment (if any)
-      const live = R.getMatchLive(db, m.id);
+      const live = fullDetail ? R.getMatchLive(db, m.id) : null;
       const parseLineup = (j: string | null): LineupView | null => { if (!j) return null; try { const l = JSON.parse(j); return { team: l.team ?? "?", formation: l.formation ?? null, starters: Array.isArray(l.starters) ? l.starters : [] }; } catch { return null; } };
       const lineups = live && (live.home_lineup || live.away_lineup)
         ? { home: parseLineup(live.home_lineup), away: parseLineup(live.away_lineup) } : null;
       // NEWEST event first (repo returns oldest→newest) — easier to read the
       // «События матча» tab without scrolling to the bottom for the latest.
-      const events = R.eventsForMatch(db, m.id).filter((e) => e.type !== "other")
-        .map((e) => ({ minute: e.minute, type: e.type, team: e.team, text: e.text })).reverse();
+      const events = fullDetail ? R.eventsForMatch(db, m.id).filter((e) => e.type !== "other")
+        .map((e) => ({ minute: e.minute, type: e.type, team: e.team, text: e.text })).reverse() : [];
       // For a clock-driven live match (no ESPN minute) show how long it's been
       // going, computed from kickoff — so the card reads "LIVE · N'" instead of a
       // bare "LIVE". ESPN-driven matches keep their real match minute.
@@ -355,18 +372,19 @@ export function buildAppData(db: Database, env = process.env): AppData {
         minute: liveNoData ? null : liveMinute, clock: m.clock ?? null, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
         // Real starting XI published (provider), NOT the ~1h timer flip — this is
         // what actually gates football analysis, so the UI badge must track it.
-        lineupsReady: R.hasLineups(db, m.id),
+        // Light record falls back to the stored lineup_out flag (no extra query).
+        lineupsReady: fullDetail ? R.hasLineups(db, m.id) : m.lineup_out,
         kickoff: warsawLabel(m.kickoff_at), kickoffAt: m.kickoff_at, oddsUpdated: null, finalScore: m.final_score,
         // Finish/kickoff clocks shown in Warsaw everywhere: an ISO value formats to
         // HH:MM, a value already stored as a Warsaw string passes straight through.
         kickoffTime: warsawClock(m.kickoff_time) ?? m.kickoff_time,
         endTime: warsawClock(m.end_time) ?? m.end_time, endLabel: warsawLabel(m.end_time), endIso: m.end_time ?? null, duration: m.duration, endNote: m.end_note,
-        analyzing: jobActive(R.getAnalysisJob(db, m.id), nowMs),
+        analyzing: fullDetail ? jobActive(R.getAnalysisJob(db, m.id), nowMs) : false,
         preLineup: pre ? view(pre) : null, postLineup: post ? view(post) : null,
         assessmentHistory,
-        artifacts: R.artifactsForMatch(db, m.id).map((x) => ({ kind: x.kind, label: x.label, stage: x.stage, model: x.model, at: x.created_at, content: x.content })),
+        artifacts: fullDetail ? R.artifactsForMatch(db, m.id).map((x) => ({ kind: x.kind, label: x.label, stage: x.stage, model: x.model, at: x.created_at, content: x.content })) : [],
         markets: orderMarkets(markets), bets, reassessByStrat, logByStrat, settledBets, result, lineups, events,
-        snapshotCount: R.snapshotCount(db, m.id),
+        snapshotCount: fullDetail ? R.snapshotCount(db, m.id) : 0,
       };
     }
   }
