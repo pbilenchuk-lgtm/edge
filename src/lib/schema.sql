@@ -624,6 +624,39 @@ CREATE TABLE IF NOT EXISTS pmv_shadow_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_pmv_shadow_status ON pmv_shadow_signals(status);
 
+-- Set-Value flag-only SHADOW cohort. set_value was ratified to flag-only (net −$415/day on a hardcoded
+-- comebackProb=0.5). Every would-be entry is frozen HERE with ZERO money movement, so the real comeback
+-- rate can be MEASURED and replace the constant. Frozen at trigger (never re-inferred): prematch favourite
+-- moneyline (P0.3), trigger price, set-1 game score FROM SNAPSHOTS (P0.4 — no price-move inference),
+-- tour/tier, token+orientation. Resolved to BOTH outcomes (won set 2; won match) + the price path
+-- (min→drawdown, max→available take) for own-cohort stop calibration. Dedup: one row per match, repeats
+-- bump hits. Epoch clock starts at deploy.
+CREATE TABLE IF NOT EXISTS sv_shadow_signals (
+  id              TEXT PRIMARY KEY,
+  match_id        TEXT NOT NULL,
+  tour            TEXT, event_type TEXT,
+  fav_side        TEXT,               -- 'first' | 'second' — FROZEN orientation (favTokenOf resolver)
+  fav_token       TEXT, first_is_p1 INTEGER,
+  prematch_ml_cents REAL,             -- P0.3: favourite moneyline BEFORE kickoff (frozen field)
+  prematch_src    TEXT,               -- 'prematch' (pre-kickoff snapshot) | 'first_snapshot' (fallback, tagged)
+  trigger_cents   REAL NOT NULL,      -- favourite price at the lost-set-1 trigger
+  set1_games_fav  INTEGER, set1_games_opp INTEGER,   -- lost-set-1 score FROM SNAPSHOTS (P0.4)
+  set_num         INTEGER,
+  edge_const      REAL,               -- the (poisoned) 0.5−price edge that WOULD have sized the bet — diagnostic
+  epoch           TEXT NOT NULL,
+  hits            INTEGER NOT NULL DEFAULT 1,
+  -- resolution: two independent outcomes + the price path over set 2
+  set2_outcome    TEXT,               -- 'won' | 'lost' | null (fav won/lost set 2)
+  match_outcome   TEXT,               -- 'won' | 'lost' | 'void' | null (fav won the match)
+  min_cents       REAL, max_cents REAL,   -- favourite price path trigger→end-of-set-2 (drawdown / take)
+  status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','resolved','void','unresolved')),
+  resolve_note    TEXT,
+  created_at      TEXT NOT NULL,
+  resolved_at     TEXT,
+  UNIQUE(match_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sv_shadow_status ON sv_shadow_signals(status);
+
 -- Order-book DEPTH snapshots for MEASURED liquidity-capacity (vs the parametric model). Periodic (every
 -- N min on live in-scope matches) + on-fill, storing the top-N bid/ask levels so a future capacity curve
 -- can re-VWAP any scaled size against the REAL book — including skip moments («сколько мы НЕ смогли бы

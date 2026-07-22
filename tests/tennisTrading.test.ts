@@ -400,10 +400,10 @@ test("tennisSetValueTick F: a transient strategist failure does NOT burn the mat
   R.insertTennisSnapshot(db, { ...base, event_key: "SV", batch_at: "2026-07-14T10:00:00Z", status: "Set 1", sets_p1: 0, sets_p2: 0, set_num: 1, games_p1: 2, games_p2: 1, server: "first", pm_p1_cents: 67, pm_p2_cents: 33 });
   R.insertTennisSnapshot(db, { ...base, event_key: "SV", batch_at: "2026-07-14T10:40:00Z", status: "Set 2", sets_p1: 0, sets_p2: 1, set_num: 2, games_p1: 3, games_p2: 2, server: "first", pm_p1_cents: 39, pm_p2_cents: 61 });
   const failFetch = (async () => ({ ok: false, status: 500, json: async () => ({}), text: async () => "" })) as unknown as typeof fetch;
-  assert.equal(await tennisSetValueTick(db, { now: () => "2026-07-14T10:40:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: failFetch }), 0, "transient failure → no entry");
+  assert.equal(await tennisSetValueTick(db, { now: () => "2026-07-14T10:40:05Z", env: { ANTHROPIC_API_KEY: "k", TENNIS_SV_FLAG_ONLY: "false" }, fetchImpl: failFetch }), 0, "transient failure → no entry");
   const okBody = { content: [{ text: JSON.stringify({ picks: [{ label: "Aleksandar Vukic", prob: 0.5, reason: "конкурентный сет" }] }) }] };
   const okFetch = (async () => ({ ok: true, status: 200, json: async () => okBody })) as unknown as typeof fetch;
-  const opened2 = await tennisSetValueTick(db, { now: () => "2026-07-14T10:40:15Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: okFetch });
+  const opened2 = await tennisSetValueTick(db, { now: () => "2026-07-14T10:40:15Z", env: { ANTHROPIC_API_KEY: "k", TENNIS_SV_FLAG_ONLY: "false" }, fetchImpl: okFetch });
   assert.ok(opened2 >= 1, "the match's Set-Value shot survived the transient failure — retry entered");
 });
 

@@ -17,7 +17,8 @@ import type { Bet } from "./types.js";
 import { settleBet, resolveTennisWinner } from "./settlement.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { chargeTennisTriggers, tennisReassessShouldCall, type TennisCharge } from "./tennisOverreaction.js";
-import { SET_VALUE_STRATEGY, SET_VALUE_ARMED, SET_VALUE_EPOCH, setValueGate } from "./tennisSetValue.js";
+import { SET_VALUE_STRATEGY, SET_VALUE_ARMED, SET_VALUE_EPOCH, setValueGate, setValueFlagOnly } from "./tennisSetValue.js";
+import { recordSvShadowSignal, SV_SHADOW_EPOCH } from "./tennisSetValueShadow.js";
 import { detectBreaks, detectTennisEvents, tennisMoneyline, favTokenOf, tennisTourOf, fetchTennisFixtures, trimRaw, TENNIS_TERMINAL_RE, loadTennisConfig } from "./tennisScout.js";
 import { loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
 import { classifyOrderBook, paperSellFill } from "./executor/paperFill.js";
@@ -1113,6 +1114,26 @@ function startPrices(db: Database, matchId: string): { p1: number | null; p2: nu
   return { p1: r?.pm_p1_cents ?? null, p2: r?.pm_p2_cents ?? null };
 }
 
+// P0.3: the FROZEN prematch favourite moneyline for the shadow cohort. Prefer the latest snapshot BEFORE
+// kickoff (a true prematch price); else the earliest snapshot, TAGGED `first_snapshot` (already-live, may be
+// depressed) so the cohort report can quarantine it. Never inferred.
+function prematchFavPrice(db: Database, matchId: string, favSide: "first" | "second", kickoffAt: string | null): { cents: number | null; src: string } {
+  const col = favSide === "first" ? "pm_p1_cents" : "pm_p2_cents";
+  if (kickoffAt) {
+    const pre = db.prepare(`SELECT ${col} c FROM tennis_snapshots WHERE pm_match_id=? AND batch_at < ? AND ${col} IS NOT NULL ORDER BY batch_at DESC LIMIT 1`).get(matchId, kickoffAt) as { c?: number } | undefined;
+    if (pre?.c != null) return { cents: pre.c, src: "prematch" };
+  }
+  const first = db.prepare(`SELECT ${col} c FROM tennis_snapshots WHERE pm_match_id=? AND ${col} IS NOT NULL ORDER BY batch_at ASC LIMIT 1`).get(matchId) as { c?: number } | undefined;
+  return { cents: first?.c ?? null, src: "first_snapshot" };
+}
+
+// P0.4: the lost-set-1 game score FROM SNAPSHOTS (newest set-1 snapshot) — never inferred from price move.
+function set1Games(db: Database, matchId: string, favSide: "first" | "second"): { fav: number | null; opp: number | null } {
+  const row = db.prepare(`SELECT games_p1 g1, games_p2 g2 FROM tennis_snapshots WHERE pm_match_id=? AND set_num=1 AND games_p1 IS NOT NULL ORDER BY batch_at DESC LIMIT 1`).get(matchId) as { g1?: number; g2?: number } | undefined;
+  if (!row) return { fav: null, opp: null };
+  return favSide === "first" ? { fav: row.g1 ?? null, opp: row.g2 ?? null } : { fav: row.g2 ?? null, opp: row.g1 ?? null };
+}
+
 /** Decision-time entry_meta for a Set-Value paper bet — a PARTIAL-take, hold-to-settle exit plan. */
 export function tennisSetValueEntryMeta(o: { favPrice: number; edge: number; kelly: number; stake: number; thinnessUsd: number | null; setNum: number; favSide?: "first" | "second" | null; firstIsP1?: boolean | null }): BetEntryMeta {
   return {
@@ -1232,6 +1253,27 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
           continue;
         }
       }
+    }
+    // P0.1: set_value is FLAG-ONLY (owner-ratified). The would-be entry (post-gate, post-LLM-competitive,
+    // post-orientation/book checks — the exact population a real bet would have entered) is FROZEN to the
+    // shadow cohort with ZERO money movement, then the money path is skipped. Measures the real comeback
+    // rate to replace the hardcoded 0.5 (§P1.1). One row per match (dedup); repeats bump hits.
+    if (setValueFlagOnly(env)) {
+      const pre = prematchFavPrice(db, m.id, favSide, m.kickoff_at);
+      const s1 = set1Games(db, m.id, favSide);
+      const edgeConst = Math.round((ourProb - implied) * 1000) / 1000;
+      try {
+        recordSvShadowSignal(db, {
+          matchId: m.id, tour: last.tournament ?? null, eventType: last.event_type ?? null,
+          favSide, favToken, firstIsP1: ml.firstIsP1,
+          prematchMlCents: pre.cents, prematchSrc: pre.src,
+          triggerCents: Math.round(entryCents), set1GamesFav: s1.fav, set1GamesOpp: s1.opp, setNum: last.set_num ?? null,
+          edgeConst, epoch: SV_SHADOW_EPOCH, at: now,
+        });
+      } catch { /* observe-only — a shadow write must never break the tick */ }
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip",
+        text: `[flag_only] SET-VALUE «${favName}» @ ${Math.round(entryCents)}¢ — ставка НЕ размещена (set_value в shadow: измеряем реальный камбэк вместо константы 0.5). предматч ${pre.cents ?? "?"}¢ (${pre.src}) · сет1 ${s1.fav ?? "?"}-${s1.opp ?? "?"} · edge-const ${(edgeConst * 100).toFixed(1)}% · epoch:${SV_SHADOW_EPOCH}`, created_at: now });
+      break; // one shadow record per match — do NOT enter the money path for any profile
     }
     for (const profile of freeProfiles) {
       // Race guard (see Overreaction): freeProfiles predates the awaited LLM call — re-check the

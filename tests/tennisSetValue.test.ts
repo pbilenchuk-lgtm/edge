@@ -52,11 +52,27 @@ test("tennisSetValueTick: favourite lost a competitive set 1, price in band → 
   const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins", startPrice: 80 });
   svSnap(db, mid, { at: "2026-07-14T10:00:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 0, setNum: 1, g1: 5, g2: 3, server: "first", p1c: 80 }); // start: favourite 80¢
   svSnap(db, mid, { at: "2026-07-14T10:05:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 1, setNum: 2, g1: 0, g2: 0, server: "first", p1c: 38 }); // lost set 1, now 38¢
-  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: okLLM("Vitoria Zuccon") });
+  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", TENNIS_SV_FLAG_ONLY: "false" }, fetchImpl: okLLM("Vitoria Zuccon") });
   assert.ok(opened >= 1, "opened at least one profile");
   const bets = R.betsForMatch(db, mid, "tennis_set_value").filter((b) => b.status === "open");
   assert.ok(bets.length >= 1 && bets.every((b) => b.market_label === "Vitoria Zuccon" && (b.stake ?? 0) > 0), "favourite name, sized");
   assert.ok(bets.every((b) => b.code_version?.includes("token-fix-m1")), "token-fix-m1 epoch (hard break: favourite's own token)");
+});
+
+test("tennisSetValueTick: FLAG-ONLY by default → NO bet, a shadow cohort row is frozen (P0.1)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins", startPrice: 80 });
+  svSnap(db, mid, { at: "2026-07-14T10:00:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 0, setNum: 1, g1: 5, g2: 3, server: "first", p1c: 80 });
+  svSnap(db, mid, { at: "2026-07-14T10:05:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 1, setNum: 2, g1: 0, g2: 0, server: "first", p1c: 38 });
+  // No TENNIS_SV_FLAG_ONLY in env → flag-only ON (owner-ratified default).
+  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: okLLM("Vitoria Zuccon") });
+  assert.equal(opened, 0, "flag-only: no money bet opened");
+  assert.equal(R.betsForMatch(db, mid, "tennis_set_value").filter((b) => b.status === "open").length, 0, "zero open bets");
+  const shadow = db.prepare(`SELECT trigger_cents, prematch_ml_cents, prematch_src, status FROM sv_shadow_signals WHERE match_id=?`).get(mid) as any;
+  assert.ok(shadow, "a shadow cohort row was frozen");
+  assert.equal(shadow.status, "pending");
+  assert.equal(shadow.prematch_ml_cents, 80, "prematch favourite ML frozen from the pre-trigger snapshot");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => /flag_only.*ставка НЕ размещена/.test(l.text ?? "")), "flag-only skip logged");
 });
 
 // Combined fetch: CLOB /book requests get an order book; everything else is the LLM strategist.
@@ -73,7 +89,7 @@ test("tennisSetValueTick (book-fill-m1): execution ON + EMPTY book → honest no
   const db = openDb(":memory:");
   const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins", startPrice: 80 });
   lostSet1(db, mid, "Vitoria Zuccon", "Carolina Martins");
-  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl: bookAndLLM("Vitoria Zuccon", { bids: [], asks: [] }) });
+  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true", TENNIS_SV_FLAG_ONLY: "false" }, fetchImpl: bookAndLLM("Vitoria Zuccon", { bids: [], asks: [] }) });
   assert.equal(opened, 0, "no book → no entry (the deliberate book-fill-m1 fix: no fabricated fill)");
   assert.equal(R.betsForMatch(db, mid, "tennis_set_value").filter((b) => b.status === "open").length, 0);
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /no_book_liquidity/.test(l.text ?? "")), "typed no_book_liquidity skip logged");
@@ -83,7 +99,7 @@ test("tennisSetValueTick (book-fill-m1): execution ON + real book → fills at t
   const db = openDb(":memory:");
   const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins", startPrice: 80 });
   lostSet1(db, mid, "Vitoria Zuccon", "Carolina Martins");
-  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true" }, fetchImpl: bookAndLLM("Vitoria Zuccon", { bids: [{ price: "0.36", size: "1000" }], asks: [{ price: "0.40", size: "1000" }] }) });
+  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true", TENNIS_SV_FLAG_ONLY: "false" }, fetchImpl: bookAndLLM("Vitoria Zuccon", { bids: [{ price: "0.36", size: "1000" }], asks: [{ price: "0.40", size: "1000" }] }) });
   assert.ok(opened >= 1, "real book → fills");
   const b = R.betsForMatch(db, mid, "tennis_set_value").find((x) => x.status === "open")!;
   assert.ok((b.entry_price ?? 0) >= 40, `filled at the 40¢ ask (+fee), not the 38¢ quote — got ${b.entry_price}`);
@@ -95,7 +111,7 @@ test("tennisSetValueTick: a blowout / retire-risk (strategist abstains) → no e
   const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins", startPrice: 80 });
   svSnap(db, mid, { at: "2026-07-14T10:00:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 0, setNum: 1, g1: 1, g2: 6, server: "first", p1c: 80 });
   svSnap(db, mid, { at: "2026-07-14T10:05:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 1, setNum: 2, g1: 0, g2: 0, server: "first", p1c: 38 });
-  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: abstainLLM() });
+  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", TENNIS_SV_FLAG_ONLY: "false" }, fetchImpl: abstainLLM() });
   assert.equal(opened, 0);
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /воздержался/.test(l.text)), "abstention logged");
 });
@@ -108,7 +124,7 @@ test("DIVORCE: an OPEN Overreaction position on the match BLOCKS Set-Value (wait
   // Overreaction holds an open buyback on EVERY default profile → all blocked.
   for (const profile of ["aggressive", "medium", "conservative"])
     R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: profile, market_label: "Vitoria Zuccon", status: "open", proposed_price: 45, entry_price: 45, current_price: 45, closing_price: null, ai_prob: 0.6, stake: 50, rationale: "выкуп", entered_minute: "сет 1", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: null, code_version: "e·interim", created_at: "2026-07-14T10:02:00Z" } as any);
-  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: okLLM("Vitoria Zuccon") });
+  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", TENNIS_SV_FLAG_ONLY: "false" }, fetchImpl: okLLM("Vitoria Zuccon") });
   assert.equal(opened, 0, "cross-strategy block: one buyback per match across BOTH strategies");
   assert.ok(R.tradeLogForMatch(db, mid).some((l) => /blocked_cross_strategy/.test(l.text)), "the block is logged");
   assert.equal(R.metaGet(db, "tennis_sv_acted:" + mid), null, "NOT marked acted — it waits for the block to clear");
@@ -121,7 +137,7 @@ test("DIVORCE: Overreaction CLOSED → Set-Value enters on the same match", asyn
   svSnap(db, mid, { at: "2026-07-14T10:05:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 1, setNum: 2, g1: 0, g2: 0, server: "first", p1c: 38 });
   // A CLOSED (K-stop) Overreaction bet leaves the profiles free.
   R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Vitoria Zuccon", status: "settled_won", proposed_price: 45, entry_price: 45, current_price: 55, closing_price: 55, ai_prob: 0.6, stake: 50, rationale: "стоп по геймам", entered_minute: "сет 1", result: "won", payout: 61, settled_by: "early", settled_at: "2026-07-14T10:04:00Z", entry_meta: null, code_version: "e·interim", created_at: "2026-07-14T10:02:00Z" } as any);
-  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: okLLM("Vitoria Zuccon") });
+  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", TENNIS_SV_FLAG_ONLY: "false" }, fetchImpl: okLLM("Vitoria Zuccon") });
   assert.ok(opened >= 1, "the closed Overreaction position no longer blocks Set-Value");
 });
 

@@ -21,6 +21,12 @@ export async function GET(req: Request) {
       const { buildPmvShadowCalibration } = await import("@/lib/tennisPmvShadow");
       return NextResponse.json({ ok: true, calibration: buildPmvShadowCalibration(db) });
     }
+    // ?report=sv_shadow_calibration → set_value flag-only cohort: measured P(comeback) vs the 0.5 constant,
+    // binned by frozen favourite strength × ATP/WTA, price-path drawdown/take. Read-only (§P1.1).
+    if (new URL(req.url).searchParams.get("report") === "sv_shadow_calibration") {
+      const { buildSvShadowCalibration } = await import("@/lib/tennisSetValueShadow");
+      return NextResponse.json({ ok: true, calibration: buildSvShadowCalibration(db) });
+    }
     return NextResponse.json({ ok: false, error: "unknown report" }, { status: 400 });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });

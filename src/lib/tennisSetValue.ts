@@ -39,6 +39,14 @@ export const SET_VALUE_ARMED = {
   comebackProb: Math.min(0.95, Math.max(0.05, num(process.env.TENNIS_SV_COMEBACK_PROB, 0.5))),
 };
 
+// FLAG-ONLY (owner-ratified, 2026-07-22): set_value places NO bets — its edge was a hardcoded
+// comebackProb=0.5 (net −$415/day). Every would-be entry is recorded to the shadow cohort instead, so the
+// REAL comeback rate can replace the constant (§P1.1 re-enable checklist). Default ON (unset → flag-only);
+// only TENNIS_SV_FLAG_ONLY=false — set AFTER the §6 re-enable checklist — turns money back on.
+export function setValueFlagOnly(env: Record<string, string | undefined> = process.env): boolean {
+  return (env.TENNIS_SV_FLAG_ONLY ?? "true").toLowerCase() !== "false";
+}
+
 // Armed-threshold epoch. token-fix-m1: Set-Value now transacts the FAVOURITE's OWN winner token
 // (favTokenOf) behind the orientation invariant. Pre-fix bets with a second-outcome favourite held the
 // WRONG token (quarantined) — incomparable, a hard break with no cross-epoch aggregate.
