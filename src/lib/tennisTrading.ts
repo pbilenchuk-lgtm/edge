@@ -378,7 +378,13 @@ function closeTennisBetPortion(db: Database, betId: string, fraction: number, cu
   return pnl;
 }
 
-interface TennisSellCtx { poly: PolymarketConfig; bookCache: Map<string, OrderBookFetch> }
+interface TennisSellCtx {
+  poly: PolymarketConfig; bookCache: Map<string, OrderBookFetch>;
+  // T3: per-token blended exit price for the tick — the whole twin cluster (all profiles on one market) is
+  // priced as ONE aggregate order, so every twin exits at the same per-share price + fill fraction, instead
+  // of each walking the book on its own size (on real, sequential twins get progressively worse prices).
+  exitCache?: Map<string, { cents: number; fromBook: boolean; filledFrac: number; note: string }>;
+}
 interface TennisSellQuote { exitCents: number; fromBook: boolean; filledFrac: number; note: string; stale: boolean; blocked?: "token_side_unavailable" | "token_orientation_mismatch" }
 
 // ── token-fix-m1 RUNTIME INVARIANT — the belt behind the token fix (kept FOREVER) ───────────────
@@ -430,8 +436,18 @@ async function resolveTennisSell(db: Database, ctx: TennisSellCtx, b: Bet, playe
   // A flipped side bids at ~100−price → blocked before we can realize a loss on the opponent's token.
   const mm = orientationMismatch(bookRes, "sell", midCents);
   if (mm) return { exitCents: midCents, fromBook: false, filledFrac: 0, note: `бид токена ${mm.tokenCents}¢ vs ожидаемая сторона ${Math.round(midCents)}¢ (Δ${Math.round(mm.gap)}¢) — держим НЕ ТОТ исход`, stale: true, blocked: "token_orientation_mismatch" };
-  const r = paperSellFill(bookRes, shares, stake, midCents, ml?.liquidity ?? 0, ctx.poly.exec);
+  // T3 twin batching: price the WHOLE cluster of this market's open twins (all profiles) as ONE order, once
+  // per (token) per tick, and reuse the blended per-share price + fill fraction for every twin — so late
+  // twins never get a worse fill than the first. Falls back to this bet's own size when nothing is cached.
+  const cacheKey = `${b.match_id}|${b.strategy_id}|${favToken}`;
+  const cached = ctx.exitCache?.get(cacheKey);
+  if (cached) return { exitCents: cached.cents, fromBook: cached.fromBook, filledFrac: cached.filledFrac, note: cached.note, stale: !cached.fromBook };
+  const sibs = R.betsForMatch(db, b.match_id, b.strategy_id).filter((x) => x.status === "open" && x.market_label === b.market_label);
+  const aggStake = sibs.reduce((s, x) => s + (x.stake ?? 0), 0) || stake;
+  const aggShares = sibs.reduce((s, x) => s + ((x.entry_price ?? 0) > 0 ? (x.stake ?? 0) / ((x.entry_price as number) / 100) : 0), 0) || shares;
+  const r = paperSellFill(bookRes, aggShares, aggStake, midCents, ml?.liquidity ?? 0, ctx.poly.exec);
   const filledFrac = r.requestedShares > 0 ? r.filledShares / r.requestedShares : 1;
+  ctx.exitCache?.set(cacheKey, { cents: r.cents, fromBook: r.fromBook, filledFrac, note: r.note ?? "" });
   return { exitCents: r.cents, fromBook: r.fromBook, filledFrac, note: r.note ?? "", stale: !r.fromBook };
 }
 
@@ -494,7 +510,7 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
   let closed = 0;
   // book-fill-m1: exits sell into the live BID book (VWAP), symmetric to entries. One book fetch per
   // token per tick (cached). Exec model off → midpoint (legacy paper, tests). §9.6 all deterministic.
-  const sellCtx: TennisSellCtx = { poly: deps.polymarket ?? loadPolymarketConfig(deps.env ?? process.env), bookCache: new Map<string, OrderBookFetch>() };
+  const sellCtx: TennisSellCtx = { poly: deps.polymarket ?? loadPolymarketConfig(deps.env ?? process.env), bookCache: new Map<string, OrderBookFetch>(), exitCache: new Map() };
   const tennisMatchIds = new Set(R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => m.id)));
   for (const b of R.openBets(db)) {
     if (!TENNIS_STRATEGIES.has(b.strategy_id) || !tennisMatchIds.has(b.match_id)) continue;

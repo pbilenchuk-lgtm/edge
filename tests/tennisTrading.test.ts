@@ -193,6 +193,25 @@ function setValueBet(db: ReturnType<typeof openDb>, mid: string, id: string, pla
   R.insertBet(db, { id, match_id: mid, strategy_id: "tennis_set_value", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "set-value", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: plan }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
 }
 
+test("T3 twin batching: 3 profiles firing one exit signal all close at ONE blended price (thin book)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  // Three twins on the SAME market, DIFFERENT sizes — priced individually they'd get different VWAPs on a
+  // thin book (the late twin worst); T3 prices the cluster as one order → one price for all.
+  const plan = { take_price: { at_cents: 90 }, catastrophic_floor: { at_cents: 10 }, game_count_stop: { receiver_games: 1 } };
+  for (const [id, prof, stake] of [["t-agg", "aggressive", 40], ["t-med", "medium", 80], ["t-con", "conservative", 120]] as const) {
+    R.insertBet(db, { id, match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: prof, market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: plan }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+  }
+  brokenSeq(db, mid); // fav (first) broken to 3-4 → game_count_stop (K=1) fires for ALL three this tick
+  // 2-level bid book: size matters (a bigger order walks into the cheaper 34¢ level) — priced per-twin the
+  // large one would net a worse VWAP than the small one; batched, all share the blended price. Deep enough
+  // to FULLY fill the ~545-share cluster so each original closes (closing_price set).
+  const n = await tennisExitTick(db, { ...EXIT_NOW, env: { POLYMARKET_ENABLED: "true" }, fetchImpl: bookFetch({ bids: [{ price: "0.40", size: "150" }, { price: "0.34", size: "2000" }], asks: [] }) });
+  assert.equal(n, 3, "all three twins exited on the one signal");
+  const prices = ["t-agg", "t-med", "t-con"].map((id) => R.getBet(db, id)!.closing_price);
+  assert.ok(prices.every((p) => p != null && p === prices[0]), `one blended price for every twin — got ${prices.join(", ")}`);
+});
+
 test("T2 latch: game_count_stop does NOT fire when a re-break returned the games delta (score even at execution)", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
