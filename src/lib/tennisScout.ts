@@ -66,7 +66,18 @@ export function currentSet(scores: unknown): { setNum: number | null; gamesP1: n
   let best: any = null, bestN = -1;
   for (const s of scores) { const n = Number(s?.score_set); if (Number.isFinite(n) && n > bestN) { bestN = n; best = s; } }
   if (!best) return { setNum: null, gamesP1: null, gamesP2: null };
-  return { setNum: bestN, gamesP1: Number(best.score_first), gamesP2: Number(best.score_second) };
+  return { setNum: bestN, gamesP1: intGames(best.score_first), gamesP2: intGames(best.score_second) };
+}
+
+// P1.4: GAMES ARE ALWAYS WHOLE. During a tiebreak api-tennis encodes the tiebreak-point score as a DECIMAL
+// («6.3» = 6 games, 3 tiebreak points → the «геймы 6.3-7.7» in the logs). The break detector tolerates it
+// (a fractional delta fails the unit-game check and is skipped), but the ===6 tiebreak guard misses a
+// «6.3-6.6» state and the recorded set-1 game score is polluted. Truncate to integer games here so every
+// downstream consumer (break/hold/tiebreak_set detection, K-count stop, set_value's set-1 score) sees whole
+// games; the tiebreak-point detail stays recoverable from the stored raw JSON.
+function intGames(v: unknown): number | null {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
 }
 
 export interface TennisLive {

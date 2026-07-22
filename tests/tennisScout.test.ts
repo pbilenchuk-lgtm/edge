@@ -115,6 +115,8 @@ test("field parsers: server side, pair, current set", () => {
   assert.deepEqual(parsePair("1 - 0"), [1, 0]);
   assert.deepEqual(parsePair("nope"), [null, null]);
   assert.deepEqual(currentSet([{ score_first: "6", score_second: "2", score_set: "1" }, { score_first: "2", score_second: "1", score_set: "2" }]), { setNum: 2, gamesP1: 2, gamesP2: 1 });
+  // P1.4: a tiebreak encodes points as a decimal («6.3» = 6 games, 3 TB points) — games truncate to whole.
+  assert.deepEqual(currentSet([{ score_first: "6.3", score_second: "7.7", score_set: "3" }]), { setNum: 3, gamesP1: 6, gamesP2: 7 }, "tiebreak decimals truncated to integer games");
 });
 
 test("normalizeLive maps the API-Tennis row to the internal shape", () => {
