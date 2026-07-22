@@ -86,8 +86,19 @@ export function buildMatchLog(db: Database, matchId: string): string {
 
   L.push(`# Лог матча: ${m.home} — ${m.away}`);
   L.push(`- Матч ID: \`${m.id}\``);
-  L.push(`- Категория: ${comp?.name ?? "?"} (\`${comp?.id}\`, external_league=\`${comp?.external_league ?? "null"}\`, бюджет $${comp?.budget ?? 0})`);
-  L.push(`- Состояние: **${m.state}**${m.lineup_out ? " · составы: out" : ""} · счёт ${m.score_home ?? "?"}:${m.score_away ?? "?"}${m.final_score ? ` (итог ${m.final_score})` : ""}${m.minute != null ? ` · ${m.minute}'` : ""}${m.clock ? ` (${m.clock})` : ""}`);
+  // P2.3: tennis comps are budget-0 in the table (funded by the tennis loop, not the comp budget) — show
+  // the real paper engine, not a dead «бюджет $0».
+  const tennisComp = comp?.sport_id === "tennis";
+  const budgetNote = tennisComp ? `движок: теннис-петля (paper $${Number(process.env.TENNIS_PAPER_BUDGET_USD) || 1000})` : `бюджет $${comp?.budget ?? 0}`;
+  L.push(`- Категория: ${comp?.name ?? "?"} (\`${comp?.id}\`, external_league=\`${comp?.external_league ?? "null"}\`, ${budgetNote})`);
+  // P2.4: tennis score lives in the scout snapshots (sets), not m.score_home/away — resolve it from the
+  // terminal snapshot so a finished tennis match reads «сеты 2-1», not «?:?».
+  let scoreStr = `${m.score_home ?? "?"}:${m.score_away ?? "?"}`;
+  if (tennisComp) {
+    const s = db.prepare(`SELECT sets_p1, sets_p2, set_num, games_p1, games_p2 FROM tennis_snapshots WHERE pm_match_id=? AND sets_p1 IS NOT NULL ORDER BY batch_at DESC LIMIT 1`).get(matchId) as { sets_p1: number | null; sets_p2: number | null; set_num: number | null; games_p1: number | null; games_p2: number | null } | undefined;
+    if (s && s.sets_p1 != null) scoreStr = `сеты ${s.sets_p1}-${s.sets_p2}${m.state !== "finished" && s.set_num ? ` · сет ${s.set_num} геймы ${s.games_p1 ?? "?"}-${s.games_p2 ?? "?"}` : ""}`;
+  }
+  L.push(`- Состояние: **${m.state}**${m.lineup_out ? " · составы: out" : ""} · счёт ${scoreStr}${m.final_score ? ` (итог ${m.final_score})` : ""}${m.minute != null ? ` · ${m.minute}'` : ""}${m.clock ? ` (${m.clock})` : ""}`);
   L.push(`- Kickoff: ${m.kickoff_at ?? "?"} · external_ref: \`${m.external_ref ?? "null"}\``);
 
   // ── The entry-gate diagnosis (why bets did / didn't enter) ──
