@@ -10,7 +10,7 @@ import {
 } from "../src/lib/engine.js";
 import { matchContext } from "../src/lib/analysis.js";
 import type { SportsMatchStatus, SportsProvider, MatchDetail } from "../src/lib/sports.js";
-import { markUefaSettleSuspect, settleSuspectCount, backfillEspnEventDates } from "../src/lib/footballIntegrity.js";
+import { markUefaSettleSuspect, settleSuspectCount, backfillEspnEventDates, migrateFootballEpochUnknown } from "../src/lib/footballIntegrity.js";
 import { betRecords } from "../src/lib/profileAnalytics.js";
 
 const CFG = { config: { reassessGapMinutes: 5, priceMoveThreshold: 5 } };
@@ -270,6 +270,27 @@ test("P0.1 settle_suspect: settled bets on a UEFA two-leg comp are quarantined o
   assert.equal(settleSuspectCount(db), 1);
   const after = betRecords(db).filter((r: any) => r.matchId === mid).length;
   assert.equal(after, 0, "quarantined bet no longer feeds the verdict cut");
+});
+
+test("P0.5 football epoch: new bets carry the clean epoch; pre-fix bets are epoch_unknown + dropped from cuts", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertCompetition(db, { id: "pm-f", sport_id: "football", name: "F", budget: 8000, external_league: "eng.1", created_at: "t" });
+  // seedDatabase seeds edge/flat/kelly; the real strategist ids (in FOOTBALL_STRATS) are seeded separately —
+  // add prematch_value here so insertBet stamps the football epoch.
+  R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "Pre-match Value", tag: "value", color: "#5b9bd5", version: 1, model: "m", model_live: "m", created_at: "t", prompt: "p", prompt_live: null, params: {} } as any);
+  const comp = "pm-f";
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp, home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t", minute: null, score_home: 1, score_away: 0, final_score: "1:0", kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: mid });
+  const mkBet = () => ({ id: R.uid(), match_id: mid, strategy_id: "prematch_value", risk_profile_id: null, market_label: "A — Yes", status: "settled_won", proposed_price: 40, entry_price: 40, current_price: 100, closing_price: 100, ai_prob: 0.6, stake: 50, rationale: "x", entered_minute: "23'", result: "won", payout: 125, settled_by: null, settled_at: "t", entry_meta: null, code_version: "e5", decision_id: null, created_at: "t" } as any);
+  const fresh = mkBet(); R.insertBet(db, fresh);
+  assert.equal(R.getBet(db, fresh.id)!.football_epoch, "f-clean-m1", "new football bet stamped with the clean epoch");
+  // an OLD row with no epoch (simulate pre-fix): NULL it, then migrate → epoch_unknown
+  const old = mkBet(); R.insertBet(db, old); R.updateBet(db, old.id, { football_epoch: null } as any);
+  assert.equal(migrateFootballEpochUnknown(db), 1, "one pre-fix football bet tagged");
+  assert.equal(R.getBet(db, old.id)!.football_epoch, "epoch_unknown");
+  const recs = betRecords(db).filter((r: any) => r.matchId === mid);
+  assert.equal(recs.length, 1, "the epoch_unknown bet is excluded; the clean one remains");
 });
 
 test("P0.1 backfill: re-fetched ESPN date freezes the field and CLEARS suspect on a proven-clean match", async () => {

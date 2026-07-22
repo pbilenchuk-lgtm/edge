@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy, migrateTennisSetValueStrategy, migrateTennisPmvStrategy, migrateVoidOutOfScopePmv, migrateVoidAllOpenPmv, migrateResettleExtraTimeVoids, migrateResetTennisMarks, migrateRetireFable, migrateBetOrigin } from "./seed.js";
-import { markUefaSettleSuspect } from "./footballIntegrity.js";
+import { markUefaSettleSuspect, migrateFootballEpochUnknown } from "./footballIntegrity.js";
 import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
 import { migrateQuarantinePoisonedTennis } from "./tennisTrading.js";
@@ -251,6 +251,8 @@ export function initSchema(db: Database): void {
   // `settle_suspect` so verdict cuts drop them NOW (no network); the ESPN date backfill clears the clean
   // ones later. Idempotent (only settle_suspect=0 rows). Cheap boot query is safe here (not a full scan).
   try { const n = markUefaSettleSuspect(db); if (n > 0) console.log(`[migrate] settle_suspect quarantine (UEFA two-leg): ${n} settled bets tagged — excluded from verdict cuts until the ESPN date backfill proves them clean`); } catch { /* best-effort */ }
+  // P0.5: tag pre-fix football bets epoch_unknown (clean era starts after P0.1-P0.3) — dropped from cuts.
+  try { const n = migrateFootballEpochUnknown(db); if (n > 0) console.log(`[migrate] football_epoch: ${n} pre-fix football bets tagged epoch_unknown (excluded from verdict cuts)`); } catch { /* best-effort */ }
   // strategy_shares gained risk_profile_id + a 3-part PK. SQLite can't ALTER a
   // PK, so recreate the table when the old (2-part) one is detected, backfilling
   // every existing allocation onto the MEDIUM profile. Guarded + row-preserving.

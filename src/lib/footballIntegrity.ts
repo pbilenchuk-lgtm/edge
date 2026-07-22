@@ -79,3 +79,14 @@ export async function backfillEspnEventDates(
 export function settleSuspectCount(db: Database): number {
   return Number((db.prepare(`SELECT COUNT(*) n FROM bets WHERE settle_suspect=1`).get() as { n: number }).n);
 }
+
+const FOOTBALL_STRATS = ["prematch_value", "overreaction", "live_xg"];
+
+/** P0.5: tag pre-fix football bets (no epoch) `epoch_unknown` so they drop out of verdict cuts — the clean
+ *  era starts after the P0.1-P0.3 fixes and old rows are contaminated (leg-mismatch / exception branch).
+ *  New bets stamp FOOTBALL_EPOCH in insertBet. Idempotent (only football_epoch IS NULL rows). */
+export function migrateFootballEpochUnknown(db: Database): number {
+  const ph = FOOTBALL_STRATS.map(() => "?").join(",");
+  const r = db.prepare(`UPDATE bets SET football_epoch='epoch_unknown' WHERE football_epoch IS NULL AND strategy_id IN (${ph})`).run(...FOOTBALL_STRATS);
+  return Number(r.changes ?? 0);
+}

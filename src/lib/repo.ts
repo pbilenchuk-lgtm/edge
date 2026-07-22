@@ -24,6 +24,10 @@ import type {
 } from "./types.js";
 
 export const uid = () => randomUUID();
+// P0.5 football epoch — the clean era after the P0.1-P0.3 fixes (fixture date gate, prematch_value
+// defend-only, depth/stale guards). New football bets carry it; pre-fix rows are epoch_unknown.
+export const FOOTBALL_EPOCH = process.env.FOOTBALL_EPOCH || "f-clean-m1";
+const FOOTBALL_STRATS = new Set(["prematch_value", "overreaction", "live_xg"]);
 export const nowIso = () => new Date().toISOString();
 
 // ---------- treasury ----------
@@ -855,6 +859,10 @@ export function insertBet(db: Database, b: Bet): void {
   // (visible in the report's diagnostic line, NOT a silent 'prematch' default) and warn, so it can't
   // become a quiet fourth "empty" class.
   let origin = b.origin ?? null, originSource = b.origin_source ?? null;
+  // P0.5: stamp the football epoch on any new football-strategy bet (parallels tennis «пороги:…»). The
+  // clean era begins after the P0.1-P0.3 fixes; pre-fix rows are migrated to epoch_unknown and dropped
+  // from verdict cuts. Explicit b.football_epoch wins (tests / backfill).
+  const footballEpoch = b.football_epoch ?? (FOOTBALL_STRATS.has(b.strategy_id) ? FOOTBALL_EPOCH : null);
   if (origin == null) {
     const r = resolveBetOrigin(b.entry_meta, b.entered_minute, true);
     origin = r.origin; originSource = r.source;
@@ -865,12 +873,12 @@ export function insertBet(db: Database, b: Bet): void {
   }
   db.prepare(
     `INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,proposed_price,entry_price,
-       current_price,closing_price,ai_prob,stake,rationale,entered_minute,result,payout,settled_by,settled_at,entry_meta,code_version,decision_id,origin,origin_source,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       current_price,closing_price,ai_prob,stake,rationale,entered_minute,result,payout,settled_by,settled_at,entry_meta,code_version,decision_id,origin,origin_source,football_epoch,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     b.id, b.match_id, b.strategy_id, b.risk_profile_id ?? null, b.market_label, b.status, b.proposed_price, b.entry_price,
     b.current_price, b.closing_price, b.ai_prob, b.stake, b.rationale, b.entered_minute,
-    b.result, b.payout, b.settled_by ?? null, b.settled_at ?? null, b.entry_meta ?? null, b.code_version ?? null, decisionId, origin, originSource, b.created_at,
+    b.result, b.payout, b.settled_by ?? null, b.settled_at ?? null, b.entry_meta ?? null, b.code_version ?? null, decisionId, origin, originSource, footballEpoch, b.created_at,
   );
 }
 export function updateBet(db: Database, id: string, patch: Partial<Bet>): void {
