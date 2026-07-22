@@ -60,6 +60,45 @@ test("tennisSetValueTick: favourite lost a competitive set 1, price in band → 
   assert.ok(bets.every((b) => b.code_version?.includes("token-fix-m1")), "token-fix-m1 epoch (hard break: favourite's own token)");
 });
 
+// ── P0.3 / P0.4 / P0.5: entry-quality gates (clean the shadow cohort + block bad fills) ──
+test("P0.4: a STALE scout snapshot fails closed → no arm, no shadow, no_score_data_skip", async () => {
+  const db = openDb(":memory:");
+  const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins", startPrice: 80 });
+  svSnap(db, mid, { at: "2026-07-14T10:00:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 0, setNum: 1, g1: 5, g2: 3, server: "first", p1c: 80 });
+  svSnap(db, mid, { at: "2026-07-14T10:05:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 1, setNum: 2, g1: 0, g2: 0, server: "first", p1c: 38 });
+  // now is 30 min after the newest snapshot (> the 15-min stale window) → the score is unverified.
+  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:35:00Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: okLLM("Vitoria Zuccon") });
+  assert.equal(opened, 0);
+  assert.equal((db.prepare(`SELECT COUNT(*) c FROM sv_shadow_signals`).get() as any).c, 0, "stale → not even a shadow record");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => /no_score_data_skip/.test(l.text ?? "")), "loud stale-data skip");
+});
+
+test("P0.3: the FROZEN favourite strength is the PRE-KICKOFF price, not the depressed first-live snapshot", async () => {
+  const db = openDb(":memory:");
+  const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins", startPrice: 66 });
+  // a real PRE-KICKOFF snapshot (before the 09:00 kickoff) — favourite firm at 66¢
+  svSnap(db, mid, { at: "2026-07-14T08:50:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 0, setNum: 0, g1: 0, g2: 0, server: "first", p1c: 66 });
+  // first LIVE snapshots — already depressed to 62 mid-set-1, then 38 after losing it
+  svSnap(db, mid, { at: "2026-07-14T10:00:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 0, setNum: 1, g1: 5, g2: 3, server: "first", p1c: 62 });
+  svSnap(db, mid, { at: "2026-07-14T10:05:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 1, setNum: 2, g1: 0, g2: 0, server: "first", p1c: 38 });
+  await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k" }, fetchImpl: okLLM("Vitoria Zuccon") }); // flag-only default → shadow
+  const shadow = db.prepare(`SELECT prematch_ml_cents, prematch_src FROM sv_shadow_signals WHERE match_id=?`).get(mid) as any;
+  assert.ok(shadow, "recorded");
+  assert.equal(shadow.prematch_ml_cents, 66, "frozen the 66¢ PRE-KICKOFF price, not the 62/38 live price");
+  assert.equal(shadow.prematch_src, "prematch", "tagged as a true pre-kickoff source");
+});
+
+test("P0.5: a fill outside the band is blocked (band_violation_at_fill), money mode", async () => {
+  const db = openDb(":memory:");
+  const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins", startPrice: 80 });
+  lostSet1(db, mid, "Vitoria Zuccon", "Carolina Martins"); // arms at 38¢ (in band 30-45)
+  // book ask at 48¢ → the fill lands at 48¢, ABOVE the 45¢ band ceiling.
+  const opened = await tennisSetValueTick(db, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", POLYMARKET_ENABLED: "true", TENNIS_SV_FLAG_ONLY: "false" }, fetchImpl: bookAndLLM("Vitoria Zuccon", { bids: [{ price: "0.44", size: "1000" }], asks: [{ price: "0.48", size: "1000" }] }) });
+  assert.equal(opened, 0, "fill above the band → blocked");
+  assert.equal(R.betsForMatch(db, mid, "tennis_set_value").filter((b) => b.status === "open").length, 0);
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => /band_violation_at_fill/.test(l.text ?? "")), "band violation logged");
+});
+
 // ── P0.2: boot-grace EXITS-ONLY protective pass ────────────────────────────
 test("P0.2 runLiveCycle exitsOnly: a stopped position IS cut (protective stop lives during boot-grace)", async () => {
   const db = openDb(":memory:");

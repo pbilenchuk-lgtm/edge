@@ -1105,6 +1105,11 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
 
 const SV_ACTED = "tennis_sv_acted:"; // per-match idempotency (the lost-set-1 event is singular)
 const SV_WAIT = "tennis_sv_wait:";   // one-shot "waiting for the cross-strategy block to clear" log guard
+// P0.3/P0.4 gate thresholds (env-tunable). SNAP_STALE: fail-closed if the scout's newest snapshot is older
+// than this — the set score is unverified. PREMATCH_MIN: the frozen prematch favourite must be ≥ this (a
+// real favourite); 55-60¢ is a sensitivity band recorded but quarantined by the report (<60 bin).
+const SV_SNAP_STALE_MIN = (() => { const n = Number(process.env.TENNIS_SV_SNAP_STALE_MIN); return Number.isFinite(n) && n > 0 ? n : 15; })();
+const SV_PREMATCH_MIN = (() => { const n = Number(process.env.TENNIS_SV_PREMATCH_MIN); return Number.isFinite(n) && n > 0 ? n : 55; })();
 
 /** Both sides' winner price at the START of the match (first priced snapshot) — the CLEAN pre-match
  *  favourite reference. After the favourite loses set 1 its price drops into 30-45¢, which would
@@ -1182,6 +1187,15 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
     const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(m.id) as R.TennisSnapshotRow[];
     if (snaps.length < 2) continue;
     const last = snaps[snaps.length - 1];
+    // P0.4: fail-closed on STALE scout data. The set-1 score MUST come from a FRESH snapshot — never
+    // inferred (there is no price-move fallback, by design). A stale newest snapshot means the match may
+    // not be in the state we read (scout unbound / lagging), so do NOT arm. Loud + counted.
+    const snapAgeMin = (svNowMs - (Date.parse(last.batch_at) || 0)) / 60000;
+    if (snapAgeMin > SV_SNAP_STALE_MIN) {
+      const warned = R.tradeLogForMatch(db, m.id).some((l) => l.strategy_id === SET_VALUE_STRATEGY && (l.text ?? "").includes("no_score_data_skip"));
+      if (!warned) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `no_score_data_skip: снапшот скаута устарел (${Math.round(snapAgeMin)}м > ${SV_SNAP_STALE_MIN}м) — счёт не подтверждён, триггер НЕ армится (fail-closed, диагностика привязки скаута)`, created_at: now });
+      continue; // do NOT mark acted — a fresh snapshot may arrive next tick
+    }
     const players = { p1: last.p1 ?? "", p2: last.p2 ?? "" };
     // Favourite ID from the MATCH-START price (the post-set price is depressed into the band, which
     // would flip the favourite to the opponent). Book gate reuses the moneyline depth.
@@ -1192,6 +1206,24 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
     const gate = setValueGate({ favSide: charge.favSide, tradeable: charge.tradeable, favPriceCents: favPrice, favSetsWon, favSetsLost, setNum: last.set_num, eventType: last.event_type, tournament: last.tournament });
     if (!gate.armed) continue; // transient (price not in band / set not yet lost) OR terminal — re-checked cheaply each tick; never mark acted until we actually decide
     const favSide = charge.favSide; if (!favSide) continue; // gate.armed already implies a favourite; narrow for the token resolver
+
+    // P0.3: frozen-favourite precondition — set_value is "a REAL pre-match favourite oversold after one
+    // lost set", not "whoever is cheap now". Freeze the prematch moneyline and gate on it. No frozen price
+    // → fail-closed (the favourite ID came from the first LIVE snapshot, which may already be depressed —
+    // we can't confirm a pre-match favourite, so don't arm). <PREMATCH_MIN¢ → not a favourite, skip. The
+    // 55-60¢ sensitivity band is armed but the cohort report quarantines it into the <60 bin (never the
+    // verdict). One query, reused by the shadow record below.
+    const preFav = prematchFavPrice(db, m.id, favSide, m.kickoff_at);
+    if (preFav.cents == null) {
+      const warned = R.tradeLogForMatch(db, m.id).some((l) => l.strategy_id === SET_VALUE_STRATEGY && (l.text ?? "").includes("no_frozen_favourite"));
+      if (!warned) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `no_frozen_favourite: нет замороженной предматч-цены фаворита — триггер НЕ армится (fail-closed)`, created_at: now });
+      continue; // do NOT mark acted — a backfilled pre-kickoff snapshot may arrive
+    }
+    if (preFav.cents < SV_PREMATCH_MIN) {
+      R.metaSet(db, SV_ACTED + m.id, "not_prematch_favourite", now);
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `не предматч-фаворит: ${preFav.cents}¢ < ${SV_PREMATCH_MIN}¢ (${preFav.src}) — set_value не для аутсайдеров, скип`, created_at: now });
+      continue;
+    }
 
     const favName = favSide === "first" ? players.p1 : players.p2;
     const ml = tennisMoneyline(db, m.id, players);
@@ -1259,7 +1291,7 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
     // shadow cohort with ZERO money movement, then the money path is skipped. Measures the real comeback
     // rate to replace the hardcoded 0.5 (§P1.1). One row per match (dedup); repeats bump hits.
     if (setValueFlagOnly(env)) {
-      const pre = prematchFavPrice(db, m.id, favSide, m.kickoff_at);
+      const pre = preFav; // P0.3 frozen favourite, already validated ≥ SV_PREMATCH_MIN above
       const s1 = set1Games(db, m.id, favSide);
       const edgeConst = Math.round((ourProb - implied) * 1000) / 1000;
       try {
@@ -1297,6 +1329,13 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
       }
       const fillCents = ack.avgFillPriceCents ?? entryCents;
       const fillStake = ack.filledSizeUsd;
+      // P0.5: re-check the entry band on the FILL price, not just the proposal. A fill outside the band
+      // (Holmgren: proposed 42.5¢ → filled 48.2¢ vs band 30-45¢) means we bought at a price the strategy
+      // never sanctioned — block it. Same runtime-invariant class as token_orientation_mismatch.
+      if (fillCents > SET_VALUE_ARMED.bandHighCents || fillCents < SET_VALUE_ARMED.bandLowCents) {
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `[${profile}] band_violation_at_fill: филл ${fillCents}¢ вне полосы ${SET_VALUE_ARMED.bandLowCents}-${SET_VALUE_ARMED.bandHighCents}¢ (предложение ${Math.round(entryCents)}¢) — вход ЗАБЛОКИРОВАН`, created_at: now });
+        continue;
+      }
       const meta = tennisSetValueEntryMeta({ favPrice: fillCents, edge: r.edge, kelly: r.kellyFraction, stake: fillStake, thinnessUsd: ml.liquidity || null, setNum: last.set_num ?? 2, favSide, firstIsP1: ml.firstIsP1 });
       const betId = R.uid();
       R.insertBet(db, {
