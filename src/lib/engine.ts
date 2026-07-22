@@ -330,8 +330,8 @@ export function settleStaleOpenBets(db: Database, deps: EngineDeps = {}): number
   let settled = 0;
   for (const mid of matchIds) {
     const m = R.getMatch(db, mid);
-    if (m && m.state === "finished" && m.score_home != null && m.score_away != null) {
-      settled += settleMatch(db, m, deps).settled;
+    if (m && m.state === "finished" && m.score_home != null && m.score_away != null && !isStateSuspect(db, mid)) {
+      settled += settleMatch(db, m, deps).settled; // F2: never settle a state_suspect finish (feed died early)
     }
   }
   return settled;
@@ -342,6 +342,27 @@ function resolveOutcome(bet: Bet, match: Match, overrides: Record<string, boolea
   if (match.score_home == null || match.score_away == null) return null;
   return resolveFootballMarket(bet.market_label, match.score_home, match.score_away, { home: match.home, away: match.away }, matchPhase(match));
 }
+
+// ------------------------------------------------------------
+// F2: terminal-state validity. A football finish is VALID only when the clock reached full time
+// (≥ FOOTBALL_FINISH_MIN_CLOCK, default 80') OR the provider flagged an early terminal
+// (abandoned/awarded/forfeit/walkover/void). A finish at 46' with a live score (Toluca: the feed died at
+// half-time and the state machine accepted it) is STATE_SUSPECT — settlement is FROZEN so positions are
+// never resolved on a match that isn't really over. Marked in app_meta; the settle sweeps skip it; a later
+// VALID finish clears the mark and the sweep settles it then.
+const FINISH_ABANDON_AWARD = /abandon|awarded|forfeit|walk\s?over|\bw\.?o\b|cancel|void|no result|retired/i;
+function clockMinuteOf(status: SportsMatchStatus): number {
+  const c = String(status.clock ?? "").match(/(\d{1,3})/);
+  return Math.max(status.minute ?? 0, c ? Number(c[1]) : 0);
+}
+export function finishSuspectReason(status: SportsMatchStatus, env: Record<string, string | undefined> = process.env): string | null {
+  if (FINISH_ABANDON_AWARD.test(status.detail ?? "")) return null;            // a legitimate early terminal
+  const floor = Math.max(1, Number(env.FOOTBALL_FINISH_MIN_CLOCK ?? 80));
+  const min = clockMinuteOf(status);
+  return min >= floor ? null : `финиш на ${min || "?"}' (< ${floor}', без флага abandoned/awarded) — фид оборвался`;
+}
+const stateSuspectKey = (mid: string) => `state_suspect:${mid}`;
+export function isStateSuspect(db: Database, matchId: string): boolean { return !!(R.metaGet(db, stateSuspectKey(matchId)) || ""); }
 
 // ------------------------------------------------------------
 // Sync one match from a provider status
@@ -386,6 +407,24 @@ export async function syncMatchStatus(
   R.updateMatch(db, match.id, patch);
   const updated = { ...match, ...patch } as Match;
 
+  // F2: gate the finish. A premature/unflagged finish FREEZES settlement (state_suspect); a valid one clears
+  // any prior mark so the sweep can settle it.
+  let finishFrozen = false;
+  if (nextState === "finished") {
+    const now = nowFn(deps)();
+    const suspect = finishSuspectReason(status, deps.env ?? process.env);
+    if (suspect) {
+      finishFrozen = true;
+      if (!isStateSuspect(db, match.id)) {
+        R.metaSet(db, stateSuspectKey(match.id), suspect, now);
+        console.warn(`[state_suspect] ${match.home}–${match.away}: ${suspect} — сеттл ЗАМОРОЖЕН`);
+        try { R.insertCronLog(db, { id: R.uid(), at: now, kind: "state_suspect", ok: 0, summary: `[state_suspect] «${match.home}–${match.away}» ${suspect} — сеттл заморожен`, created_at: now }); } catch { /* journal best-effort */ }
+      }
+    } else if (isStateSuspect(db, match.id)) {
+      R.metaSet(db, stateSuspectKey(match.id), "", now); // a valid finish arrived → un-freeze; the sweep settles
+    }
+  }
+
   const reassessments: ReassessResult[] = [];
   let goals = 0;
 
@@ -401,7 +440,7 @@ export async function syncMatchStatus(
   }
 
   let settlement;
-  if (nextState === "finished" && from !== "finished") {
+  if (nextState === "finished" && from !== "finished" && !finishFrozen) {
     settlement = settleMatch(db, updated, deps, settlementOverrides);
   }
 

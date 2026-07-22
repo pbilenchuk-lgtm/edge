@@ -620,6 +620,27 @@ test("syncMatchStatus: finish settles open bets and recomputes metrics", async (
   assert.ok(q!.samples >= 2, "metrics recomputed from settled bets");
 });
 
+test("F2: a premature finish (46', no abandoned flag) FREEZES settlement (state_suspect); a valid finish settles", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.updateMatch(db, "m-live", { external_ref: "SIM1" });
+  // Feed dies at half-time and reports finished@46' — the state machine must NOT settle on the HT score.
+  const premature: SportsMatchStatus = { externalRef: "SIM1", home: "Бразилия", away: "Англия", state: "finished", minute: 46, scoreHome: 1, scoreAway: 0, final: true };
+  const r1 = await syncMatchStatus(db, premature, CFG, { "Advance Бразилия": true });
+  assert.equal(r1!.settlement, undefined, "no settlement on a suspect finish");
+  assert.ok(R.betsForMatch(db, "m-live").every((b) => !b.status.startsWith("settled")), "positions stay open (money not resolved)");
+  const { isStateSuspect } = await import("../src/lib/engine.js");
+  assert.equal(isStateSuspect(db, "m-live"), true, "match flagged state_suspect");
+  assert.equal(await import("../src/lib/engine.js").then((e) => e.settleStaleOpenBets(db, CFG)), 0, "the sweep also refuses to settle a suspect finish");
+  // The feed resumes and reports a VALID full-time finish → un-freeze, and the sweep settles it.
+  const valid: SportsMatchStatus = { externalRef: "SIM1", home: "Бразилия", away: "Англия", state: "finished", minute: 90, scoreHome: 3, scoreAway: 0, final: true };
+  await syncMatchStatus(db, valid, CFG, { "Advance Бразилия": true });
+  assert.equal(isStateSuspect(db, "m-live"), false, "valid finish clears the suspect mark");
+  const swept = await import("../src/lib/engine.js").then((e) => e.settleStaleOpenBets(db, CFG));
+  assert.ok(swept >= 1, "now the sweep settles it");
+  assert.ok(R.betsForMatch(db, "m-live").every((b) => b.status.startsWith("settled")), "positions settled on the real full-time result");
+});
+
 test("syncMatchStatus: first finish stamps a Warsaw end_time + Warsaw kickoff + duration", async () => {
   const { durationLabel } = await import("../src/lib/time.js");
   assert.equal(durationLabel("2026-07-11T14:00:00Z", "2026-07-11T16:01:00Z"), "2 ч 1 мин");

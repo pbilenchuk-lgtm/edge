@@ -18,8 +18,13 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import type { SportsProvider } from "./sports.js";
 
-// UEFA competitions that run two-leg qualification ties (main league and its _qual sibling both count).
-export const UEFA_TWO_LEG = new Set(["uefa.champions", "uefa.europa", "uefa.europa.conf", "uefa.wchampions"]);
+// Competitions that run TWO-LEG ties (main league and its _qual sibling both count) — the same two teams
+// play twice a week apart, so a settle can bind the OTHER leg's result. F2 expands this beyond UEFA to
+// CONMEBOL (Libertadores/Sudamericana knockouts are two-legged) and other two-leg cups.
+export const UEFA_TWO_LEG = new Set([
+  "uefa.champions", "uefa.europa", "uefa.europa.conf", "uefa.wchampions",
+  "conmebol.libertadores", "conmebol.sudamericana", "conmebol.recopa",
+]);
 const qualBase = (lg: string | null | undefined) => String(lg ?? "").replace(/_qual$/i, "");
 const LEG_GAP_MS = (env: Record<string, string | undefined>) => Math.max(1, Number(env.FOOTBALL_LEG_GAP_HOURS ?? 30)) * 3_600_000;
 
