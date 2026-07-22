@@ -18,6 +18,7 @@ import { loadSportsProvider, loadSportsConfig } from "./sports.js";
 import { loadPolymarketConfig } from "./polymarket.js";
 import { runAutoCycle, runLiveCycle, hasLiveMatchInPlay } from "./lifecycle.js";
 import { tryAcquireEngine, releaseEngine } from "./engineLock.js";
+import { recordScheduleGap } from "./scheduleGap.js";
 
 let started = false;
 
@@ -25,6 +26,18 @@ let started = false;
 // loop (fresh stamp → no-op) from a stalled one (stale stamp → drive a live cycle now).
 // DB-backed so it survives the process restart that kills the in-process loop.
 const LAST_LIVE_TICK_KEY = "last_live_tick_ms";
+
+// Advance the live-tick proof-of-life AND detect a scheduler sleep window: compare the new time against the
+// PREVIOUS stamp before overwriting — a delta far past the tick cadence means the loop was down that whole
+// time (redeploy/crash/blip with no health ping), and the gap monitor records it (flagged by whether a match
+// was live at wake — the "stops rode the gap bottom" case). Never throws into the caller.
+function stampLiveTick(db: ReturnType<typeof getDb>, nowMs: number, env: Record<string, string | undefined>): void {
+  try {
+    const prev = Number(R.metaGet(db, LAST_LIVE_TICK_KEY) ?? 0);
+    try { recordScheduleGap(db, prev, nowMs, hasLiveMatchInPlay(db), env); } catch { /* monitor best-effort */ }
+    R.metaSet(db, LAST_LIVE_TICK_KEY, String(nowMs), new Date(nowMs).toISOString());
+  } catch { /* stamp best-effort — a failed stamp just makes the next tick look overdue */ }
+}
 
 // QUIET BOOT WINDOW. For the first BOOT_GRACE_MS after the process starts, NO heavy
 // engine cycle runs — not the scheduler passes, not a health-ping-driven heartbeat
@@ -106,7 +119,7 @@ export async function heartbeat(
         try {
           const provider = loadSportsProvider(loadSportsConfig(env));
           const r = await runLiveCycle(db, provider, {});
-          R.metaSet(db, LAST_LIVE_TICK_KEY, String(nowMs), at);
+          stampLiveTick(db, nowMs, env);
           // Log only when the outage catch-up actually managed something (mirrors the live
           // loop's no-flood policy), tagged as a heartbeat-driven recovery.
           if (r.live > 0 && (r.triggers || r.exits || r.entries || r.llmFail)) {
@@ -129,7 +142,7 @@ export async function heartbeat(
   // (2) FULL-cycle catch-up — pre-match analysis/entries cadence for ALL matches.
   // Most recent FULL-cycle marker (tick/discover/heartbeat/manual) — the fast "live"
   // loop doesn't count, it doesn't do analysis/entries.
-  const last = R.recentCronLog(db, 30).find((r) => r.kind !== "live");
+  const last = R.recentCronLog(db, 30).find((r) => r.kind !== "live" && r.kind !== "gap");
   const lastMs = last ? Date.parse(last.created_at) : 0;
   if (lastMs && nowMs - lastMs < staleMs) return { ran: false, reason: "fresh" };
   const tok = tryAcquireEngine();
@@ -221,7 +234,8 @@ export function startScheduler(env: Record<string, string | undefined> = process
       db = getDb();
       // Prove the live loop is alive (DB-backed, survives restart) so the heartbeat can
       // tell a healthy loop from a stalled one and only drives a catch-up when this goes stale.
-      try { R.metaSet(db, LAST_LIVE_TICK_KEY, String(Date.now()), new Date().toISOString()); } catch {}
+      // Also detects a sleep window since the last stamp (gap monitor).
+      stampLiveTick(db, Date.now(), env);
       const provider = loadSportsProvider(loadSportsConfig(env));
       const r = await runLiveCycle(db, provider, {}, { exitsOnly: grace });
       // Log when something happened OR when the strategist was unreachable — an

@@ -48,6 +48,12 @@ export async function GET(req: Request) {
       const windowDays = Number.isFinite(daysRaw) && daysRaw > 0 ? daysRaw : undefined;
       return NextResponse.json({ ok: true, report: buildUnfillableEdge(db, { windowDays }) });
     }
+    // ?report=schedule_gaps → scheduler sleep-window monitor: recorded gaps (count, longest, last, recent list)
+    // where the in-process loop was down and deterministic stops sat unmanaged / ran at the gap bottom on wake.
+    if (new URL(req.url).searchParams.get("report") === "schedule_gaps") {
+      const { scheduleGapSummary } = await import("@/lib/scheduleGap");
+      return NextResponse.json({ ok: true, gaps: scheduleGapSummary(db) });
+    }
     return NextResponse.json({ ok: false, error: "unknown report" }, { status: 400 });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });

@@ -1,0 +1,57 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { openDb } from "../src/lib/db.js";
+import { seedDatabase } from "../src/lib/seed.js";
+import * as R from "../src/lib/repo.js";
+import { recordScheduleGap, scheduleGapSummary, gapAlertSec } from "../src/lib/scheduleGap.js";
+
+test("gapAlertSec: default 5 min, env override", () => {
+  assert.equal(gapAlertSec({}), 300);
+  assert.equal(gapAlertSec({ SCHEDULE_GAP_ALERT_SEC: "120" }), 120);
+});
+
+test("recordScheduleGap: a fresh marker or first-ever stamp is NOT a gap", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const now = Date.parse("2026-07-22T18:05:00Z");
+  assert.equal(recordScheduleGap(db, 0, now, false, {}), null, "no previous stamp → no gap");
+  assert.equal(recordScheduleGap(db, now - 20_000, now, true, {}), null, "20s since last tick → healthy, no gap");
+  assert.equal(scheduleGapSummary(db).count, 0);
+});
+
+test("recordScheduleGap: a 58-min sleep with a live match in play is recorded as a harmful gap", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const start = Date.parse("2026-07-22T17:07:00Z");
+  const end = Date.parse("2026-07-22T18:05:00Z"); // ~58 min later — the "дыра 17:05–18:05"
+  const gap = recordScheduleGap(db, start, end, true, {});
+  assert.ok(gap, "the sleep window is detected");
+  assert.equal(gap!.sec, 58 * 60);
+  assert.equal(gap!.liveInPlay, true);
+  const sum = scheduleGapSummary(db);
+  assert.equal(sum.count, 1);
+  assert.equal(sum.longestSec, 58 * 60);
+  assert.ok(sum.last && sum.last.sec === 58 * 60);
+  // recorded in the cron journal, flagged harmful (ok=0) because a match was live
+  const cron = R.recentCronLog(db, 10).filter((r) => r.kind === "gap");
+  assert.equal(cron.length, 1);
+  assert.equal(cron[0].ok, 0, "live-in-play gap is flagged as a failure in the journal");
+  assert.match(cron[0].summary, /планировщик спал ~58м/);
+  assert.equal(sum.recent[0].harmful, true);
+});
+
+test("recordScheduleGap: a sleep with NO live match is recorded but not flagged harmful; longest tracks the max", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const t0 = Date.parse("2026-07-22T03:00:00Z");
+  const g1 = recordScheduleGap(db, t0, t0 + 10 * 60_000, false, {}); // 10 min, nothing live
+  assert.ok(g1 && g1.liveInPlay === false);
+  const g2 = recordScheduleGap(db, t0 + 20 * 60_000, t0 + 95 * 60_000, true, {}); // 75 min, live
+  assert.ok(g2);
+  const sum = scheduleGapSummary(db);
+  assert.equal(sum.count, 2);
+  assert.equal(sum.longestSec, 75 * 60, "longest tracks the larger window");
+  const cron = R.recentCronLog(db, 10).filter((r) => r.kind === "gap");
+  const okByHarm = cron.map((c) => c.ok).sort();
+  assert.deepEqual(okByHarm, [0, 1], "the no-live gap ok=1, the live gap ok=0");
+});

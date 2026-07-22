@@ -11,10 +11,15 @@ export async function GET() {
   try {
     const { getDb } = await import("@/lib/db");
     const { listCompetitions, listStrategies, getTreasury } = await import("@/lib/repo");
+    const { scheduleGapSummary } = await import("@/lib/scheduleGap");
     const db = getDb();
     const comps = listCompetitions(db);
     const strats = listStrategies(db);
     const treasury = getTreasury(db);
+    // Scheduler sleep-window monitor: surface any recorded gaps so an external uptime monitor (or a glance at
+    // /api/health) sees when the in-process loop was down and stops sat unmanaged. Best-effort.
+    let scheduleGaps: ReturnType<typeof scheduleGapSummary> | null = null;
+    try { scheduleGaps = scheduleGapSummary(db); } catch { scheduleGaps = null; }
     // Turn Render's health pings into a deploy-independent cron heartbeat: if the
     // in-process scheduler has stalled (a redeploy/crash killed it), run a catch-up
     // auto-cycle. Fire-and-forget + internally locked/overdue-gated, so it never
@@ -25,6 +30,8 @@ export async function GET() {
       treasury: treasury.total_balance,
       competitions: comps.length,
       strategies: strats.length,
+      // count + longest recorded scheduler sleep window (0/none when the loop has stayed alive).
+      scheduleGaps: scheduleGaps ? { count: scheduleGaps.count, longestSec: scheduleGaps.longestSec, last: scheduleGaps.last } : null,
     });
   } catch (e) {
     return NextResponse.json(
