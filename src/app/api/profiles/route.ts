@@ -27,6 +27,12 @@ export async function GET(req: Request) {
       const { buildSvShadowCalibration } = await import("@/lib/tennisSetValueShadow");
       return NextResponse.json({ ok: true, calibration: buildSvShadowCalibration(db) });
     }
+    // ?report=sv_sizing_audit → per-profile set_value sizing on one fixed setup (P0.6): the knobs +
+    // stake each profile would size, with an inversion flag if a "lite" profile outsizes "aggressive".
+    if (new URL(req.url).searchParams.get("report") === "sv_sizing_audit") {
+      const { buildSvSizingAudit } = await import("@/lib/svSizingAudit");
+      return NextResponse.json({ ok: true, audit: buildSvSizingAudit(db) });
+    }
     return NextResponse.json({ ok: false, error: "unknown report" }, { status: 400 });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
