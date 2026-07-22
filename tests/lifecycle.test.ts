@@ -914,6 +914,33 @@ test("P0.4 event gate: PMV with an empty portfolio skips the LLM even on a GOAL 
   assert.equal(Number(R.metaGet(db, "reassess_gate_skips_total")), 1, "gate-skip counter persisted for ops");
 });
 
+test("F1: an unverified counter_scenario exit is BLOCKED (money held); a met one executes", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const mkMatch = (mid: string, sh: number, sa: number, minute: number) => {
+    R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute, score_home: sh, score_away: sa, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+    R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 40, ai_prob: 0.6, liquidity: "2000", external_ref: "T" + mid, snapshot_at: "t", is_closing: false });
+    R.insertBet(db, { id: "bet-" + mid, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Under 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 40, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" } as any);
+    // the plan registered the adverse condition «0:0 к 70'» for this market.
+    R.saveArtifact(db, { match_id: mid, kind: "battle_sheet", label: `${strat.name} · medium`, stage: "prematch", content: JSON.stringify({ positions: [{ market: "Under 2.5", exit: { counter_scenario_stop: "0:0 к 70'" } }] }), model: "m", created_at: "t" });
+  };
+  const csExit = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Under 2.5", fraction: 1, reason: "counter_scenario", trigger: "counter_scenario" }] }) }] }) }) as any);
+  // BLOCKED: score 2:0 at 78' — «0:0 к 70'» did NOT happen → the defensive exit is unverified.
+  const bad = R.uid(); mkMatch(bad, 2, 0, 78);
+  await strategistReassess(db, { fetchImpl: csExit, env: { ANTHROPIC_API_KEY: "k" }, now: () => "t" }, { newEventMatchIds: new Set([bad]), max: 50 });
+  assert.equal(R.getBet(db, "bet-" + bad)!.status, "open", "fabricated-condition defensive exit does not move money");
+  assert.ok(R.tradeLogForMatch(db, bad).some((l) => /unverified_exit_blocked/.test(l.text)), "block logged");
+  assert.equal(Number(R.metaGet(db, "unverified_exit_blocked_total")), 1, "counter bumped (feeds F4)");
+  // EXECUTES: score 0:0 at 72' — the registered condition «0:0 к 70'» IS met → the exit fires.
+  const good = R.uid(); mkMatch(good, 0, 0, 72);
+  await strategistReassess(db, { fetchImpl: csExit, env: { ANTHROPIC_API_KEY: "k" }, now: () => "t" }, { newEventMatchIds: new Set([good]), max: 50 });
+  assert.ok(R.getBet(db, "bet-" + good)!.status.startsWith("settled"), "a verified defensive exit executes");
+});
+
 test("P0.4 partial-fill: a full-close the book only 20%-fills closes 20% of the position, remainder stays open", async () => {
   const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
   const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });

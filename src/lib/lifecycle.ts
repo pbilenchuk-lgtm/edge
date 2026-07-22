@@ -167,6 +167,9 @@ export function strategistDegraded(db: Database, nowMs: number): boolean {
 // bid diverges from the decision snapshot by ≥ this many cents, don't execute — reassess on fresh
 // data next cycle. Normal drift is 0–5¢; only an event moves it this far. Env-tunable.
 export const EXIT_STALE_GAP = (() => { const n = Number(process.env.EXIT_STALE_GAP); return Number.isFinite(n) && n > 0 ? n : 20; })();
+// F1: cumulative count of strategist DEFENSIVE exits blocked because their registered condition wasn't met
+// (was executed-then-relabelled «discretionary»). Read by ops / the F4 counterfactual report.
+export const F1_UNVERIFIED_EXIT_KEY = "unverified_exit_blocked_total";
 
 /** Parse the OBJECTIVE part (score + minute) of a counter_scenario condition string like
  *  "0:0 к 60' и Аргентина полностью контролирует" → {home:0, away:0, minute:60}. The
@@ -1458,6 +1461,27 @@ export async function strategistReassess(
           // second would size off the already-shrunk stake → over-fixation.
           if (exitedIds.has(b.id)) continue;
           exitedIds.add(b.id);
+          // ── F1: UNVERIFIED DEFENSIVE EXIT → BLOCK (do not move money). A defensive-tagged exit
+          // (counter_scenario / thesis_stop) claims a PRE-REGISTERED adverse scenario materialised. It
+          // executes ONLY when that registered score/minute condition DETERMINISTICALLY matches the live
+          // fact. An unverified one (Vila Nova 78' «0:0 к 70'» at 2:0; Cruz Azul «закрыть при 3 голах» at 2)
+          // used to execute anyway and get relabelled «discretionary» — a decorative safeguard on a live
+          // money path for every prematch position. Now it is HELD; the deterministic layer + settlement
+          // manage the position. Counter feeds the F4 counterfactual report. (Non-defensive exits — take_price
+          // et al. — are unaffected; a met condition or a genuine take still executes below.)
+          {
+            const f1Min = m.minute != null ? m.minute : minuteApprox;
+            const ver = verifyExitTrigger(ex.trigger, ex.reason ?? "", { scoreHome: m.score_home, scoreAway: m.score_away, minute: f1Min, conditionText: csCondByMarket.get(norm(b.market_label)) ?? csCondByMarket.get(norm(ex.market ?? "")) });
+            if (ver.flagged) {
+              // The registered defensive condition is objectively UNMET (or the tag has no substance) — the
+              // old path executed then relabelled «discretionary»; now the money exit is BLOCKED.
+              R.metaSet(db, F1_UNVERIFIED_EXIT_KEY, String(Number(R.metaGet(db, F1_UNVERIFIED_EXIT_KEY) ?? 0) + 1), now);
+              const holdKey = `«${b.market_label}»`;
+              const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey) && e.text.includes("unverified_exit_blocked"));
+              if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега ЗАБЛОКИРОВАН по ${holdKey}: защитный тег «${ex.trigger}» не подтверждён фактом${ver.note ? ` (${ver.note})` : ""} (счёт ${m.score_home ?? 0}:${m.score_away ?? 0}, ${f1Min ?? "?"}') — деньги не двигаем, держим до сеттла/детерминированного слоя (unverified_exit_blocked)`, created_at: now });
+              continue;
+            }
+          }
           // Take-profit CHURN throttle: the periodic heartbeat, on a drifting price, provokes a
           // partial fixation every cycle (ten in 20 min). Cap it — one partial TAKE-PROFIT per
           // position per PARTIAL_TP_THROTTLE_MIN. A DEFENSIVE exit (stop / thesis_stop /
@@ -1534,15 +1558,11 @@ export async function strategistReassess(
           const { pnl, partial } = closeBetPortion(db, b, effFraction, sell.cents, minuteLabel(m), now);
           if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: sid, profileId: profile }, sell.cost, now);
           const tag = partial ? `частично ${Math.round(effFraction * 100)}%` : "полностью";
-          // Trigger honesty: verify a counter_scenario tag against its pre-registered score/minute
-          // condition (structured, from the plan) — objectively-unmet or unbacked defensive tags
-          // are recorded as discretionary so stats aren't polluted with phantom firings.
-          const curMin = m.minute != null ? m.minute : minuteApprox;
-          const ver = verifyExitTrigger(ex.trigger, ex.reason ?? "", { scoreHome: m.score_home, scoreAway: m.score_away, minute: curMin, conditionText: csCondByMarket.get(norm(b.market_label)) ?? csCondByMarket.get(norm(ex.market)) });
-          const trg = ver.trigger ? ` (${ver.trigger})` : ""; // which live trigger fired (verified)
-          const flagNote = ver.flagged ? ` · тег «${ex.trigger}» → discretionary (trigger_unverified${ver.note ? `: ${ver.note}` : " — без обоснования"})` : "";
-          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag})${trg} @ ${sell.cents}¢ · стратег: ${ex.reason}${flagNote}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
-          out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}${flagNote}`, pnl });
+          // F1: a defensive tag that reaches HERE is already condition-verified (unverified ones were blocked
+          // above) — no more «discretionary» demotion, the category is gone. Just name the fired trigger.
+          const trg = ex.trigger ? ` (${ex.trigger})` : "";
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag})${trg} @ ${sell.cents}¢ · стратег: ${ex.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+          out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}`, pnl });
           exitedMarkets.push(`${b.market_label} (${tag})`);
           touched.add(sid);
         }
