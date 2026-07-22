@@ -46,7 +46,7 @@ import { resolvePmvShadowSignals } from "./tennisPmvShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates } from "./footballIntegrity.js";
 import { captureBookDepth } from "./bookDepthCapture.js";
-import { overreactionShouldCall, overreactionGate } from "./reassessGate.js";
+import { overreactionGate } from "./reassessGate.js";
 import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
 
