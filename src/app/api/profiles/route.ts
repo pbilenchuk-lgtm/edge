@@ -39,6 +39,15 @@ export async function GET(req: Request) {
       const { buildSvSizingAudit } = await import("@/lib/svSizingAudit");
       return NextResponse.json({ ok: true, audit: buildSvSizingAudit(db) });
     }
+    // ?report=unfillable_edge → P2 execution diagnostic: how many football edge signals fired, how many were
+    // FILLABLE, and why the rest weren't (league × strategy × reason) + coverage-tier recommendation + the F3
+    // model-vs-market side check on non-zombie fills. Optional &days=N window (default 14). Read-only.
+    if (new URL(req.url).searchParams.get("report") === "unfillable_edge") {
+      const { buildUnfillableEdge } = await import("@/lib/unfillableEdge");
+      const daysRaw = Number(new URL(req.url).searchParams.get("days"));
+      const windowDays = Number.isFinite(daysRaw) && daysRaw > 0 ? daysRaw : undefined;
+      return NextResponse.json({ ok: true, report: buildUnfillableEdge(db, { windowDays }) });
+    }
     return NextResponse.json({ ok: false, error: "unknown report" }, { status: 400 });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
