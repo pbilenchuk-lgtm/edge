@@ -159,6 +159,7 @@ export function startScheduler(env: Record<string, string | undefined> = process
   const liveSec = Math.max(15, Number(env.LIVE_TICK_SEC ?? 20));
   const linkOdds = loadPolymarketConfig(env).enabled;
   let lastDiscover = 0;
+  let lastGraceExitMs = 0; // throttle for the boot-grace exits-only protective pass (P0.2)
   // One shared lock (engineLock): the slow full cycle, the fast live loop, AND
   // the manual HTTP triggers (discover/tick/refreshAllOdds) all touch
   // exits/reassessment/entries, so they must never run concurrently (a duplicate
@@ -200,7 +201,18 @@ export function startScheduler(env: Record<string, string | undefined> = process
   // Fast live loop — only does work while a match is in play; logs to the cron
   // journal only when something actually happened (so it doesn't flood it).
   const liveRun = async () => {
-    if (inBootGrace(env)) return; // stay quiet until the deploy's health check is green
+    // P0.2: during boot-grace the HEAVY cycle stays silent (port-probe protection), but if a match is in
+    // play we still run an EXITS-ONLY pass so protective stops don't go unmanaged for the whole grace —
+    // that blackout is what turned a 21¢ floor into a 9¢ realized loss on set_value. Throttled to ~60s
+    // (not every 20s) to keep event-loop pressure off the port scan; fully quiet when nothing is live.
+    const grace = inBootGrace(env);
+    if (grace) {
+      if (Date.now() - lastGraceExitMs < 60_000) return;    // throttle the boot-grace protective pass
+      let dbg: ReturnType<typeof getDb> | null = null;
+      try { dbg = getDb(); } catch { return; }
+      if (!hasLiveMatchInPlay(dbg)) return;                 // nothing live → stay fully quiet
+      lastGraceExitMs = Date.now();
+    }
     const tok = tryAcquireEngine();
     if (!tok) return;    // yield to a running full/live/manual pass
     const at = new Date(Date.now()).toISOString();
@@ -211,13 +223,13 @@ export function startScheduler(env: Record<string, string | undefined> = process
       // tell a healthy loop from a stalled one and only drives a catch-up when this goes stale.
       try { R.metaSet(db, LAST_LIVE_TICK_KEY, String(Date.now()), new Date().toISOString()); } catch {}
       const provider = loadSportsProvider(loadSportsConfig(env));
-      const r = await runLiveCycle(db, provider, {});
+      const r = await runLiveCycle(db, provider, {}, { exitsOnly: grace });
       // Log when something happened OR when the strategist was unreachable — an
       // outage during a live match is exactly what we need in the journal, even
       // though nothing was entered/exited that tick.
       if (r.live > 0 && (r.triggers || r.exits || r.entries || r.llmFail)) {
         const llmNote = r.llmFail > 0 ? ` · ИИ-сбои ${r.llmFail}/${r.llmCalls}` : "";
-        const summary = `live ${r.live} · триггеры ${r.triggers} · котировки ${r.oddsUpdated} · выходы ${r.exits} · входы ${r.entries}${llmNote}`;
+        const summary = `${grace ? "[boot-grace exits-only] " : ""}live ${r.live} · триггеры ${r.triggers} · котировки ${r.oddsUpdated} · выходы ${r.exits} · входы ${r.entries}${llmNote}`;
         console.log(`[scheduler:live] ${summary}`);
         try { R.insertCronLog(db, { id: R.uid(), at, kind: "live", ok: r.llmFail > 0 ? 0 : 1, summary, created_at: at }); } catch {}
       }

@@ -1724,7 +1724,7 @@ export interface LiveCycleResult { live: number; oddsUpdated: number; enriched: 
  * Returns quickly (and does ~nothing) when no match is in play.
  */
 export async function runLiveCycle(
-  db: Database, provider: SportsProvider | null, deps: EngineDeps = {},
+  db: Database, provider: SportsProvider | null, deps: EngineDeps = {}, opts: { exitsOnly?: boolean } = {},
 ): Promise<LiveCycleResult> {
   const stepLive = async <T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
     try { return await fn(); } catch (e) { console.error(`[liveCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
@@ -1734,6 +1734,25 @@ export async function runLiveCycle(
   };
   const inPlay = activeMatches(db).filter(({ match: m }) => m.state === "live" || m.state === "lineup" || m.lineup_out);
   if (!inPlay.length) { stepSyncLive("settleStale", () => settleStaleOpenBets(db, deps), 0); return { live: 0, oddsUpdated: 0, enriched: 0, triggers: 0, exits: 0, entries: 0, llmCalls: 0, llmFail: 0 }; }
+
+  // P0.2: EXITS-ONLY protective pass (boot-grace / post-restart). A restart mid-live-match kills the
+  // in-process loop, and the 300s boot-grace keeps the HEAVY cycle silent so the port probe stays free —
+  // but that left protective stops unmanaged for the whole grace (the Gorgodze/Vacherot floor overshoot:
+  // stop at 21¢ realized at 9¢ during a 27-min live blackout). This runs ONLY the price-refresh + the
+  // deterministic (no-LLM) exit/settle steps — bounded to live matches, no entries, no analysis, no
+  // reassessment, no discovery — so stops fire on fresh prices without the event-loop starvation that
+  // boot-grace exists to prevent.
+  if (opts.exitsOnly) {
+    const odds = await stepLive("odds", () => refreshActiveOdds(db, deps, { onlyLive: true }), [] as Awaited<ReturnType<typeof refreshActiveOdds>>);
+    stepSyncLive("advanceClocks", () => advanceClocks(db, deps), undefined);
+    stepSyncLive("settleStale", () => settleStaleOpenBets(db, deps), 0);
+    await stepLive("tennisScout", () => collectTennisSnapshots(db, deps), 0);   // fresh tennis prices for the stops
+    const tExit = await stepLive("tennisExit", () => tennisExitTick(db, deps), 0); // deterministic tennis stops (no LLM)
+    stepSyncLive("tennisFinish", () => finishTennisMatches(db, deps), 0);
+    stepSyncLive("tennisSettle", () => settleTennisBets(db, deps), 0);
+    const detExits = await stepLive("exits", () => evaluateExits(db, deps), [] as ExitItem[]); // deterministic football TP/stop
+    return { live: inPlay.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0), enriched: 0, triggers: 0, exits: detExits.length + tExit, entries: 0, llmCalls: 0, llmFail: 0 };
+  }
 
   // Each stage isolated: a transient throw in one (a DB/JSON error inside enrich,
   // a settleMatch throw) must NOT abort the deterministic exits / autoEnter below.

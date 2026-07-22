@@ -5,6 +5,7 @@ import * as R from "../src/lib/repo.js";
 import { serializeEntryMeta } from "../src/lib/betMeta.js";
 import { setValueGate, isBestOfFive, SET_VALUE_ARMED } from "../src/lib/tennisSetValue.js";
 import { tennisSetValueTick, tennisExitTick, tennisSetValueEntryMeta } from "../src/lib/tennisTrading.js";
+import { runLiveCycle } from "../src/lib/lifecycle.js";
 import { migrateTennisStrategy, migrateTennisSetValueStrategy } from "../src/lib/seed.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -57,6 +58,35 @@ test("tennisSetValueTick: favourite lost a competitive set 1, price in band → 
   const bets = R.betsForMatch(db, mid, "tennis_set_value").filter((b) => b.status === "open");
   assert.ok(bets.length >= 1 && bets.every((b) => b.market_label === "Vitoria Zuccon" && (b.stake ?? 0) > 0), "favourite name, sized");
   assert.ok(bets.every((b) => b.code_version?.includes("token-fix-m1")), "token-fix-m1 epoch (hard break: favourite's own token)");
+});
+
+// ── P0.2: boot-grace EXITS-ONLY protective pass ────────────────────────────
+test("P0.2 runLiveCycle exitsOnly: a stopped position IS cut (protective stop lives during boot-grace)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins" });
+  seedOpenSV(db, mid, 38);
+  // thesis_stop pattern (deterministic, game-based): favourite broken in set 2, no break-back over K=2 recv.
+  const P = { p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 1, setNum: 2 } as const;
+  svSnap(db, mid, { ...P, at: "2026-07-14T10:05:00Z", g1: 0, g2: 0, server: "first", p1c: 38 });
+  svSnap(db, mid, { ...P, at: "2026-07-14T10:06:00Z", g1: 0, g2: 1, server: "second", p1c: 35 }); // broken
+  svSnap(db, mid, { ...P, at: "2026-07-14T10:07:00Z", g1: 0, g2: 2, server: "first", p1c: 34 });  // recv #1
+  svSnap(db, mid, { ...P, at: "2026-07-14T10:08:00Z", g1: 1, g2: 2, server: "second", p1c: 36 });
+  svSnap(db, mid, { ...P, at: "2026-07-14T10:09:00Z", g1: 1, g2: 3, server: "first", p1c: 33 });  // recv #2, no break-back
+  const r = await runLiveCycle(db, null, { now: () => "2026-07-14T10:09:05Z" }, { exitsOnly: true });
+  assert.ok(r.exits >= 1, "protective exit fired in the exits-only pass");
+  assert.notEqual(R.getBet(db, "sv1")!.status, "open", "position cut without waiting for the full cycle");
+});
+
+test("P0.2 runLiveCycle exitsOnly: ENTRIES stay silent (armed trigger → no bet AND no shadow)", async () => {
+  const db = openDb(":memory:");
+  const mid = seedSV(db, { p1: "Vitoria Zuccon", p2: "Carolina Martins", startPrice: 80 });
+  svSnap(db, mid, { at: "2026-07-14T10:00:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 0, setNum: 1, g1: 5, g2: 3, server: "first", p1c: 80 });
+  svSnap(db, mid, { at: "2026-07-14T10:05:00Z", p1: "Vitoria Zuccon", p2: "Carolina Martins", s1: 0, s2: 1, setNum: 2, g1: 0, g2: 0, server: "first", p1c: 38 });
+  // Money on (flag-only off) AND an LLM that would confirm — yet exits-only must NOT run the entry tick.
+  const r = await runLiveCycle(db, null, { now: () => "2026-07-14T10:05:05Z", env: { ANTHROPIC_API_KEY: "k", TENNIS_SV_FLAG_ONLY: "false" }, fetchImpl: okLLM("Vitoria Zuccon") }, { exitsOnly: true });
+  assert.equal(r.entries, 0, "no entries in exits-only");
+  assert.equal(R.betsForMatch(db, mid, "tennis_set_value").length, 0, "the entry tick was skipped — no bet");
+  assert.equal((db.prepare(`SELECT COUNT(*) c FROM sv_shadow_signals`).get() as any).c, 0, "no shadow record either — the ENTRY path never ran");
 });
 
 test("tennisSetValueTick: FLAG-ONLY by default → NO bet, a shadow cohort row is frozen (P0.1)", async () => {
