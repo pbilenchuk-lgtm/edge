@@ -832,6 +832,33 @@ test("strategistReassess supports partial fixation (fraction)", async () => {
   assert.equal(settled!.risk_profile_id, "aggressive", "partial fixation keeps the profile");
 });
 
+test("T1.3 strategistReassess: defensive partial cuts are count-capped — 4 counter-cuts with no new event → only 2 fire", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.clearShares(db, comp.id);
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, risk_profile_id: "medium", pct: 50 });
+  const mid = R.uid();
+  // 0:1 (Under 2.5 currently winning by total, but the DEEP 40¢ bid > the T1.1 floor so that guard stands
+  // aside) — isolates the defensive-cut count cap. No goal/red events → the reset window never resets.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 44, score_home: 0, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 40, ai_prob: 0.6, liquidity: "3000", external_ref: "TOKU", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "cut", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Under 2.5", status: "open", proposed_price: 62, entry_price: 62, current_price: 40, closing_price: null, ai_prob: 0.6, stake: 200, rationale: "r", entered_minute: "4'", result: null, payout: null, created_at: "t" });
+  // A DEEP 40¢ bid so no phantom/slippage/T1.1 guard fires — only the T1.3 cap is under test.
+  const bookFetch = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? { asks: [{ price: "0.62", size: "500" }], bids: [{ price: "0.40", size: "100000" }] } : {}) })) as unknown as typeof fetch;
+  const csExit = (async (url: any) => { const u = String(url); if (u.includes("anthropic") || u.includes("/messages")) return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Under 2.5", fraction: 0.5, reason: "стоп -35% — тезис под давлением", trigger: "hard_stop" }] }) }] }) } as any; return { ok: true, status: 200, json: async () => (u.includes("/book") ? { asks: [{ price: "0.62", size: "500" }], bids: [{ price: "0.40", size: "100000" }] } : {}) } as any; }) as unknown as typeof fetch;
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true" });
+  // Four cycles, 9 min apart (clears the 8-min time throttle each time, so ONLY the count cap can block).
+  for (const t of ["2026-07-14T20:00:00Z", "2026-07-14T20:09:00Z", "2026-07-14T20:18:00Z", "2026-07-14T20:27:00Z"])
+    await strategistReassess(db, { fetchImpl: csExit, polymarket: poly, env: { ANTHROPIC_API_KEY: "k" }, now: () => t }, { max: 50 });
+  const defChildren = R.betsForMatch(db, mid).filter((b) => b.settled_by === "partial" && /\[defensive\]/.test(b.rationale ?? ""));
+  assert.equal(defChildren.length, 2, "count cap: only 2 defensive cuts fire, the 3rd and 4th are blocked");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "hold" && /defensive_cut_throttle/.test(l.text)), "the blocked cut is logged");
+});
+
 test("strategistReassess deterministic gate: PMV with an empty portfolio skips the LLM on a periodic tick", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

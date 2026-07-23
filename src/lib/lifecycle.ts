@@ -265,6 +265,14 @@ export function verifyExitTrigger(
 // BTTS-No, 38¢→55¢). ONLY throttles take-profit: a DEFENSIVE exit (stop / thesis_stop /
 // counter_scenario) and a FULL close are NEVER delayed. 0 disables. Env-tunable.
 export const PARTIAL_TP_THROTTLE_MIN = (() => { const n = Number(process.env.PARTIAL_TP_THROTTLE_MIN); return Number.isFinite(n) && n >= 0 ? n : 8; })();
+// T1.3: a DEFENSIVE partial cut (thesis_stop / counter_scenario) was never throttled — only take-profit was.
+// A cascade of them grinds a winner to a loss (León–Atlas: FOUR counter_scenario cuts in 46', a +$59
+// settle-winner realized as −$17). Cap defensive partials the same way: a minimum interval between cuts AND
+// a hard COUNT cap of defensive cuts between relevant game-state events (a new goal/red resets the window,
+// since that IS new information). ≤2 cuts leaves ≤75% of the original closed before the position must ride
+// to the next real event / settlement. Env-tunable.
+export const DEFENSIVE_CUT_THROTTLE_MIN = (() => { const n = Number(process.env.DEFENSIVE_CUT_THROTTLE_MIN); return Number.isFinite(n) && n >= 0 ? n : 8; })();
+export const DEFENSIVE_CUT_MAX = (() => { const n = Number(process.env.DEFENSIVE_CUT_MAX); return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 2; })();
 // An entry's edge was sized against the price the strategist EVALUATED. If the book
 // has since moved so the executable fill lands at a rail (≤2¢/≥98¢, effectively
 // resolved) or this far from the evaluated price, the market we sized is gone — the
@@ -835,7 +843,7 @@ function closeBetEarly(db: Database, bet: { id: string; stake: number | null; en
  * a full close; otherwise the closed slice is booked as a settled child bet and
  * the original open bet's stake shrinks by that slice, leaving the rest running.
  */
-function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceCents: number, minute: string, now: string): { pnl: number; partial: boolean } {
+function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceCents: number, minute: string, now: string, tag?: string): { pnl: number; partial: boolean } {
   if (fraction >= 1) return { pnl: closeBetEarly(db, bet, currentPriceCents, "", minute, now), partial: false };
   // Re-read: another flow may have already (partially) closed this position
   // during our LLM await. Skip if no longer open; size the slice off the FRESH
@@ -853,7 +861,7 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
     market_label: bet.market_label,
     status: pnl > 0 ? "settled_won" : pnl < 0 ? "settled_lost" : "settled_void", proposed_price: bet.proposed_price, entry_price: entry,
     current_price: currentPriceCents, closing_price: currentPriceCents, ai_prob: bet.ai_prob, stake: closed,
-    rationale: `частичная фиксация ${Math.round(fraction * 100)}%`, entered_minute: bet.entered_minute,
+    rationale: `частичная фиксация ${Math.round(fraction * 100)}%${tag ? ` [${tag}]` : ""}`, entered_minute: bet.entered_minute,
     result: pnl > 0 ? "won" : pnl < 0 ? "lost" : null, payout, settled_by: "partial", settled_at: now, created_at: now,
   });
   R.updateBet(db, bet.id, { stake: round2(stake - closed) }); // keep the remainder open
@@ -1554,6 +1562,30 @@ export async function strategistReassess(
               continue;
             }
           }
+          // T1.3 DEFENSIVE-cut throttle + count cap (León–Atlas cascade): a defensive PARTIAL cut must not
+          // repeat within DEFENSIVE_CUT_THROTTLE_MIN, and no more than DEFENSIVE_CUT_MAX defensive cuts may
+          // fire on a position BETWEEN relevant game-state events. A new goal/red card is new information —
+          // it resets the window (a full close and a genuine invalidator are unaffected; only partial nibbles).
+          if (ex.fraction < 1 && defensiveExit) {
+            const prof = b.risk_profile_id ?? "medium";
+            // Reset anchor: the most recent material event (goal / red card) for this match, in ms.
+            const lastEventMs = R.eventsForMatch(db, m.id)
+              .filter((e) => e.type === "goal" || e.type === "red_card")
+              .reduce((mx, e) => Math.max(mx, Date.parse(e.created_at) || 0), 0);
+            const defCuts = R.betsForMatch(db, m.id, sid).filter((x) => x.settled_by === "partial"
+              && (x.risk_profile_id ?? "medium") === prof && norm(x.market_label) === norm(b.market_label)
+              && /\[defensive\]/.test(x.rationale ?? "") && x.settled_at && (Date.parse(x.settled_at) || 0) > lastEventMs);
+            const lastDefMs = defCuts.reduce((mx, x) => Math.max(mx, Date.parse(x.settled_at as string) || 0), 0);
+            const tooSoon = lastDefMs > 0 && nowMs - lastDefMs < DEFENSIVE_CUT_THROTTLE_MIN * 60_000;
+            const tooMany = defCuts.length >= DEFENSIVE_CUT_MAX;
+            if (tooSoon || tooMany) {
+              const holdKey = `«${b.market_label}» защ-срез`;
+              const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
+              const why = tooMany ? `уже ${defCuts.length} защитных среза с последнего события (кэп ${DEFENSIVE_CUT_MAX})` : `последний ${Math.round((nowMs - lastDefMs) / 60_000)}м назад < ${DEFENSIVE_CUT_THROTTLE_MIN}м`;
+              if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `частичный защитный срез ${holdKey} отложен — ${why}; держим до нового события/сеттла (defensive_cut_throttle)`, created_at: now });
+              continue;
+            }
+          }
           // Fill the (partial) close against the real bid book — exit slippage into P&L.
           const basis = (b.stake ?? 0) * Math.min(ex.fraction, 1);
           const sell = await sellVwapCents(mk, b.entry_price, basis, poly, deps, mk.price);
@@ -1621,7 +1653,9 @@ export async function strategistReassess(
             if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега по ${holdKey} не исполнен: бид не принял размер (0% филл, ${ex.reason}); держим до реального рынка/сеттла (exit_partial_zero)`, created_at: now });
             continue;
           }
-          const { pnl, partial } = closeBetPortion(db, b, effFraction, sell.cents, minuteLabel(m), now);
+          // T1.3: tag a DEFENSIVE partial so the throttle/count-cap above can distinguish it from a take-profit
+          // partial (which is spaced by its own throttle). Only partial defensive cuts carry the marker.
+          const { pnl, partial } = closeBetPortion(db, b, effFraction, sell.cents, minuteLabel(m), now, defensiveExit && effFraction < 1 ? "defensive" : undefined);
           if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: sid, profileId: profile }, sell.cost, now);
           const tag = partial ? `частично ${Math.round(effFraction * 100)}%` : "полностью";
           // F1: a defensive tag that reaches HERE is already condition-verified (unverified ones were blocked
