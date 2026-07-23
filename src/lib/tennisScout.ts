@@ -486,7 +486,7 @@ export function recordTennisBreakMarks(db: Database, deps: EngineDeps = {}): num
       R.insertTennisBreakMark(db, {
         event_key: key, match_id: pmMatchId, players: `${first?.p1 ?? "?"} vs ${first?.p2 ?? "?"}`,
         tournament: first?.tournament ?? null, event_type: first?.event_type ?? null, set_num: setNum,
-        broken_side: br.server, broke_early, t_event: br.batchAt,
+        broken_side: br.server, broke_early, episode_n: idx, t_event: br.batchAt, // п.1: idx = this break's ordinal in the match (episode 1 / 2 / …)
         pre_cents: wm.panicAmplitudeCents != null && wm.priceFloorCents != null ? Math.round((wm.priceFloorCents + wm.panicAmplitudeCents) * 10) / 10 : null,
         floor_cents: wm.priceFloorCents, t_floor_sec: wm.tFloorSec, panic_cents: wm.panicAmplitudeCents,
         recovery_1: wm.recovery["1"], recovery_2: wm.recovery["2"], recovery_3: wm.recovery["3"], recovery_5: wm.recovery["5"],
@@ -931,7 +931,7 @@ export interface OvrCohortStats {
   verdict: "go" | "no_go" | "insufficient" | "degenerate" | "sensitivity";
 }
 export interface OvrCohortReport {
-  primary: OvrCohortStats; byTour: OvrCohortStats[]; sensitivity: OvrCohortStats;
+  primary: OvrCohortStats; byTour: OvrCohortStats[]; byEpisode: OvrCohortStats[]; sensitivity: OvrCohortStats;
   recoveryDef: string; orientation: string; note: string;
 }
 function ovrCohortStats(marks: R.TennisBreakMarkRow[], label: string, kind: "primary" | "tour" | "sensitivity"): OvrCohortStats {
@@ -962,13 +962,24 @@ export function buildTennisOverreactionCohort(db: Database): OvrCohortReport {
   const bandMarks = all.filter((m) => (m.pre_cents ?? 0) >= OVR_FAV_MIN_SENSITIVITY && (m.pre_cents ?? 0) < OVR_FAV_MIN_PRIMARY);
   const primary = ovrCohortStats(primaryMarks, `ATP+WTA, ранний брейк фаворита ≥${OVR_FAV_MIN_PRIMARY}¢`, "primary");
   const byTour = (["ATP", "WTA"] as const).map((tour) => ovrCohortStats(primaryMarks.filter((m) => ovrTour(m.event_type) === tour), `${tour} ≥${OVR_FAV_MIN_PRIMARY}¢`, "tour"));
+  // п.1 (batch-4): re-arm-after-take is a RATIFIED design (owner sign-off 23.07) — a 2nd break is a NEW panic,
+  // a legit new episode, not a duplicate to dedup away. episode_n (the break's ordinal in the match) lets the
+  // cohort SLICE episode-1 vs episode-2+ for free: they may carry a different recovery edge (the hypothesis the
+  // cut checks). NOTE: re-arm after a STOP stays forbidden (a confirmed thesis-break is a different strategy) —
+  // those episodes never enter live, so they don't distort this measurement. Marks without episode_n (pre-field
+  // history) fall into episode-1 by the ?? 1 default, a safe bucket for the older single-episode epoch.
+  const epOf = (m: R.TennisBreakMarkRow) => (m.episode_n ?? 1);
+  const byEpisode = [
+    ovrCohortStats(primaryMarks.filter((m) => epOf(m) <= 1), `эпизод 1 (первая паника) ≥${OVR_FAV_MIN_PRIMARY}¢`, "tour"),
+    ovrCohortStats(primaryMarks.filter((m) => epOf(m) >= 2), `эпизод 2+ (ре-арм после тейка) ≥${OVR_FAV_MIN_PRIMARY}¢`, "tour"),
+  ];
   const sensitivity = ovrCohortStats(bandMarks, `полоса ${OVR_FAV_MIN_SENSITIVITY}–${OVR_FAV_MIN_PRIMARY}¢ (sensitivity, не мержим)`, "sensitivity");
   const verdictNote = primary.verdict === "insufficient" ? `когорта n=${primary.n} < ${OVR_MIN_N_PRIMARY} — вердикт INSUFFICIENT, копим, не решаем`
     : primary.verdict === "degenerate" ? "уровни вырождены (T≤E или E≤S) — проверить данные, не калибровать"
       : primary.verdict === "go" ? `recovery ${(primary.recoveryShare * 100).toFixed(1)}% ≥ порога ${((primary.goThreshold ?? 0) * 100).toFixed(1)}% (breakeven ${((primary.breakevenPct ?? 0) * 100).toFixed(1)}% + маржа) → у когорты ЕСТЬ торгуемый edge, можно на Шаг 2 (калибровка)`
         : `recovery ${(primary.recoveryShare * 100).toFixed(1)}% < порога ${((primary.goThreshold ?? 0) * 100).toFixed(1)}% → edge НЕ покрывает безубыток+маржу, Overreaction парковать как PMV`;
   return {
-    primary, byTour, sensitivity,
+    primary, byTour, byEpisode, sensitivity,
     recoveryDef: "recovery = цена вернулась к тейк-уровню (pre−3¢) в пределах ≤2 мин ОТ ДНА (recovery_N меряется от floor: floorTime+N·60s), т.е. max(recovery_1,recovery_2) ≥ panic−3. Марки — mid без спреда/филла → верхняя граница торгуемости, отсюда обязательная маржа +5пп.",
     orientation: "цена — winner-манилайн СЛОМАННОЙ стороны (broken_side из детектора брейков по дельте геймов, не токен/first-named); фильтр pre≥60¢ сам отсекает перевёрнутые марки (у андердога winner-цена <40¢). Пятый ориентационный баг здесь не воспроизводится.",
     note: verdictNote,

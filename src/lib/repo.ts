@@ -1239,7 +1239,7 @@ export function tennisMapLog(db: Database, limit = 500): TennisMapLogRow[] {
 
 export interface TennisBreakMarkRow {
   id?: string; event_key: string; match_id: string | null; players: string | null; tournament: string | null; event_type: string | null;
-  set_num: number | null; broken_side: string | null; broke_early: number | null; t_event: string;
+  set_num: number | null; broken_side: string | null; broke_early: number | null; episode_n?: number | null; t_event: string;
   pre_cents: number | null; floor_cents: number | null; t_floor_sec: number | null; panic_cents: number | null;
   recovery_1: number | null; recovery_2: number | null; recovery_3: number | null; recovery_5: number | null;
   post_entry_min_cents?: number | null; post_entry_min_sec?: number | null;
@@ -1247,10 +1247,10 @@ export interface TennisBreakMarkRow {
 }
 export function insertTennisBreakMark(db: Database, r: TennisBreakMarkRow): void {
   db.prepare(
-    `INSERT INTO tennis_break_marks(id,event_key,match_id,players,tournament,event_type,set_num,broken_side,broke_early,t_event,
+    `INSERT INTO tennis_break_marks(id,event_key,match_id,players,tournament,event_type,set_num,broken_side,broke_early,episode_n,t_event,
        pre_cents,floor_cents,t_floor_sec,panic_cents,recovery_1,recovery_2,recovery_3,recovery_5,post_entry_min_cents,post_entry_min_sec,window_quotes,confidence_flags,code_version,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-  ).run(r.id ?? uid(), r.event_key, r.match_id, r.players, r.tournament, r.event_type, r.set_num, r.broken_side, r.broke_early, r.t_event,
+     VALUES(?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(r.id ?? uid(), r.event_key, r.match_id, r.players, r.tournament, r.event_type, r.set_num, r.broken_side, r.broke_early, r.episode_n ?? null, r.t_event,
     r.pre_cents, r.floor_cents, r.t_floor_sec, r.panic_cents, r.recovery_1, r.recovery_2, r.recovery_3, r.recovery_5, r.post_entry_min_cents ?? null, r.post_entry_min_sec ?? null, r.window_quotes, r.confidence_flags, r.code_version, r.created_at);
 }
 export function listTennisBreakMarks(db: Database): TennisBreakMarkRow[] {

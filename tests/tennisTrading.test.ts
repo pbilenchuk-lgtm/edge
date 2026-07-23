@@ -899,3 +899,20 @@ test("п.5-tail (batch-4): tennisLinkRateHealth flags degraded in-discovery link
   for (let i = 0; i < 12; i++) R.insertTennisMapLog(db2, { event_key: "h" + i, players: "h", verdict: "auto", match_id: "m", score: 0.9, candidates: "[]", created_at: now });
   assert.equal(tennisLinkRateHealth(db2, {}).degraded, false, "100% link-rate → healthy");
 });
+
+test("п.1 (batch-4): break-marks carry episode_n and the ovr cohort slices episode-1 vs episode-2+", async () => {
+  const { buildTennisOverreactionCohort } = await import("../src/lib/tennisScout.js");
+  const db = openDb(":memory:");
+  const mk = (ep: number, floor: number) => R.insertTennisBreakMark(db, {
+    event_key: "E" + ep + "_" + floor, match_id: null, players: "A vs B", tournament: "ATP Cordenons", event_type: "ATP Singles",
+    set_num: 1, broken_side: "first", broke_early: 1, episode_n: ep, t_event: "2026-07-14T10:00:00Z",
+    pre_cents: 65, floor_cents: floor, t_floor_sec: 60, panic_cents: 65 - floor, recovery_1: 50, recovery_2: 55, recovery_3: null, recovery_5: null,
+    window_quotes: 10, confidence_flags: null, code_version: "e5", created_at: "2026-07-14T10:00:00Z",
+  });
+  mk(1, 40); mk(1, 42); mk(2, 41); // two episode-1 breaks, one episode-2 (re-arm after take)
+  const rep = buildTennisOverreactionCohort(db);
+  assert.equal(rep.byEpisode.length, 2, "episode-1 and episode-2+ segments");
+  assert.equal(rep.byEpisode[0].n, 2, "two episode-1 marks");
+  assert.equal(rep.byEpisode[1].n, 1, "one episode-2+ mark (ratified re-arm-after-take)");
+  assert.match(rep.byEpisode[1].label, /эпизод 2\+/);
+});

@@ -224,6 +224,7 @@ export function initSchema(db: Database): void {
     "ALTER TABLE tennis_snapshots ADD COLUMN pm_p2_cents REAL",
     "ALTER TABLE tennis_break_marks ADD COLUMN post_entry_min_cents REAL",
     "ALTER TABLE tennis_break_marks ADD COLUMN post_entry_min_sec INTEGER",
+    "ALTER TABLE tennis_break_marks ADD COLUMN episode_n INTEGER",
     // real-trading columns added AFTER the real_* tables' first creation — self-heal a prod DB whose
     // real_orders/fills/positions/ledger were created at an earlier phase (CREATE IF NOT EXISTS won't
     // add columns to an existing table). Each is idempotent (duplicate-column throw is caught below).

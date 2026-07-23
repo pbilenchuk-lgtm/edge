@@ -923,6 +923,10 @@ export function tennisEntryMeta(o: { favPrice: number; prePrice: number; edge: n
 const TENNIS_PAPER_BUDGET = (() => { const n = Number(process.env.TENNIS_PAPER_BUDGET_USD); return Number.isFinite(n) && n > 0 ? n : 1000; })();
 
 const ACTED = "tennis_acted:"; // per (match, break) idempotency marker
+// п.1 (batch-4): re-arm policy. A 2nd break after a TAKE is a ratified new episode (fresh panic → re-enter).
+// A 2nd break after a STOP is FORBIDDEN — a confirmed broken thesis is a different strategy, not a re-buy.
+// The most-recent overreaction exit's trigger decides: a stop-class trigger blocks the next break's re-arm.
+const OVR_STOP_TRIGGER_RE = /\((?:thesis_stop|game_count_stop|catastrophic_floor|gap_wake_stop)\)/;
 
 // Recovery-take buffer (¢): the take fires when the favourite climbs back to within this many
 // cents of its pre-break price — the buyback has paid off, realize it. STRUCTURAL/interim; the
@@ -1125,6 +1129,17 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
     if (!freeProfiles.length) {
       R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "blocked_second_buyback", now);
       R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `второй выкуп заблокирован — все профили уже держат теннисную позицию по матчу (blocked_second_buyback)`, created_at: now });
+      continue;
+    }
+    // п.1: re-arm-after-STOP is forbidden (ratified). If the match's MOST RECENT overreaction exit was a
+    // stop-class trigger (broken thesis), this fresh break is NOT a legit new episode — block it. A take
+    // exit does not block (a fresh panic after a booked take is a ratified new episode).
+    const lastOvrExit = R.tradeLogForMatch(db, m.id)
+      .filter((l) => l.strategy_id === TENNIS_STRATEGY && l.type === "exit")
+      .reduce<{ at: string; text: string } | null>((acc, l) => (!acc || (l.created_at ?? "") > acc.at ? { at: l.created_at ?? "", text: l.text ?? "" } : acc), null);
+    if (lastOvrExit && OVR_STOP_TRIGGER_RE.test(lastOvrExit.text)) {
+      R.metaSet(db, ACTED + m.id + ":" + br.batchAt, "blocked_rearm_after_stop", now);
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `ре-арм после стопа запрещён — последний выход по матчу был стопом тезиса, не тейком; новый брейк не новый эпизод (blocked_rearm_after_stop)`, created_at: now });
       continue;
     }
 

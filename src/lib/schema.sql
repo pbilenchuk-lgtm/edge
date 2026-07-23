@@ -581,6 +581,8 @@ CREATE TABLE IF NOT EXISTS tennis_break_marks (
   set_num         INTEGER,
   broken_side     TEXT,            -- 'first' | 'second' (the server who was broken)
   broke_early     INTEGER,         -- 1 = 1st set / start of 2nd (the documented setup)
+  episode_n       INTEGER,         -- п.1: this break's ordinal within the match (1st panic, 2nd panic…) — re-arm-after-take is ratified, so episode-2+ is a legit new setup; cohort reports slice on it
+
   t_event         TEXT NOT NULL,   -- break detection wall-clock
   pre_cents       REAL,            -- broken player's winner price just before the break
   floor_cents     REAL,            -- min real bid in the window
