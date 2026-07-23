@@ -67,6 +67,8 @@ export interface MatchView {
   events: { minute: number | null; type: string; team: string | null; text: string }[];
   /** number of provider/Polymarket raw snapshots captured for this match (Анализ tab) */
   snapshotCount: number;
+  /** number of REAL entries (settled/open) this match carried — Логи feed «была ставка» flag */
+  betCount: number;
 }
 export interface LineupView { team: string; formation: string | null; starters: string[] }
 export interface StrategyView {
@@ -384,6 +386,9 @@ export function buildAppData(db: Database, env = process.env): AppData {
         assessmentHistory,
         artifacts: fullDetail ? R.artifactsForMatch(db, m.id).map((x) => ({ kind: x.kind, label: x.label, stage: x.stage, model: x.model, at: x.created_at, content: x.content })) : [],
         markets: orderMarkets(markets), bets, reassessByStrat, logByStrat, settledBets, result, lineups, events,
+        // Логи-page: how many REAL entries (settled/open, not proposed/not_filled) this match actually
+        // carried — so the log feed can flag «была ставка» and the operator skips the empty no-bet matches.
+        betCount: allBets.filter((b) => b.status !== "proposed" && b.status !== "not_filled").length,
         snapshotCount: fullDetail ? R.snapshotCount(db, m.id) : 0,
       };
     }

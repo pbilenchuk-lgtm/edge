@@ -1697,6 +1697,9 @@ export async function strategistReassess(
     const bump = (k: string, by: number) => { if (by) R.metaSet(db, k, String(Number(R.metaGet(db, k) ?? 0) + by), now); };
     bump("reassess_llm_calls_total", out.llmCalls);
     bump("reassess_gate_skips_total", out.gateSkips ?? 0);
+    // F5: anchor the counters so «LLM-calls-per-traded-match» has an honest denominator (bets since the
+    // anchor), not the all-time match count. Set once, on the first tick that touches the counters.
+    if (!R.metaGet(db, "reassess_counter_since")) R.metaSet(db, "reassess_counter_since", now, now);
   }
   return out;
 }

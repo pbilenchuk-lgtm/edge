@@ -280,7 +280,7 @@ function collectLogEvents(competitions: any[], matchDb: any) {
       out.push({
         id: m.id, match: `${m.home}–${m.away}`, finalScore: m.finalScore,
         sport: comp.sport, sportLabel: sportLabel[comp.sport] ?? comp.sport, compName: comp.name,
-        broken: !!m.broken, endLabel: m.endLabel, endNote: m.endNote, sortKey,
+        broken: !!m.broken, endLabel: m.endLabel, endNote: m.endNote, betCount: m.betCount ?? 0, sortKey,
       });
     }
   }
@@ -1909,8 +1909,9 @@ function LogsScreen({ events, onDownloaded, onGoMatches }: any) {
     setBulk(null);
   };
 
-  const shown = filter === "todo" ? todo : filter === "done" ? events.filter((e: any) => downloaded.has(e.id)) : events;
-  const filters = [["todo", `Не скачано${todo.length ? ` (${todo.length})` : ""}`], ["all", `Все (${events.length})`], ["done", `Скачано (${events.length - todo.length})`]];
+  const withBets = events.filter((e: any) => (e.betCount ?? 0) > 0);
+  const shown = filter === "todo" ? todo : filter === "done" ? events.filter((e: any) => downloaded.has(e.id)) : filter === "bets" ? withBets : events;
+  const filters = [["todo", `Не скачано${todo.length ? ` (${todo.length})` : ""}`], ["bets", `Со ставками${withBets.length ? ` (${withBets.length})` : ""}`], ["all", `Все (${events.length})`], ["done", `Скачано (${events.length - todo.length})`]];
 
   return (
     <main style={S.main}>
@@ -1939,6 +1940,9 @@ function LogsScreen({ events, onDownloaded, onGoMatches }: any) {
               <div style={S.feedBody}>
                 <div style={S.feedItemTop}>
                   <span style={S.feedMatch}>{e.sportLabel} · {e.compName}</span>
+                  {(e.betCount ?? 0) > 0
+                    ? <span style={{ fontSize: 10, color: "#5fd08a", border: "1px solid #5fd08a55", borderRadius: 4, padding: "0 5px", fontWeight: 700 }} title="на этом матче были реальные входы — есть что разбирать">💰 {e.betCount} {e.betCount === 1 ? "ставка" : "ставок"}</span>
+                    : <span style={{ fontSize: 10, color: MUTE, border: `1px solid ${LINE}`, borderRadius: 4, padding: "0 5px" }} title="ставок не было — матч пустой для разбора P&L">без ставок</span>}
                   {e.broken && <span style={{ fontSize: 10, color: "#ff6b6b", border: "1px solid #ff6b6b55", borderRadius: 4, padding: "0 5px" }}>ПОЛОМАН</span>}
                 </div>
                 <div style={{ ...S.feedText, fontWeight: 600 }}>{e.match}{e.finalScore && <span style={{ color: MUTE, fontWeight: 400 }}> · {e.finalScore}</span>}</div>

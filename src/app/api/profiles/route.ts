@@ -63,6 +63,12 @@ export async function GET(req: Request) {
       const { buildPmvExitCounterfactual } = await import("@/lib/pmvExitCounterfactual");
       return NextResponse.json({ ok: true, report: buildPmvExitCounterfactual(db) });
     }
+    // ?report=reassess_efficiency → F5: re-measure the P0.4 «LLM-мельница» ratio post-gate — cumulative
+    // strategist calls vs deterministic gate skips, calls per traded match against the 26–42 baseline band.
+    if (new URL(req.url).searchParams.get("report") === "reassess_efficiency") {
+      const { buildReassessEfficiency } = await import("@/lib/reassessEfficiency");
+      return NextResponse.json({ ok: true, report: buildReassessEfficiency(db) });
+    }
     return NextResponse.json({ ok: false, error: "unknown report" }, { status: 400 });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
