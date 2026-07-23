@@ -52,8 +52,9 @@ export interface CfBet {
 }
 
 /** Per-bet actual vs hold-to-settle for every early-closed, resolvable PMV bet. */
-export function pmvCounterfactualBets(db: Database): { bets: CfBet[]; excluded: { unresolvable: number; noEarlyExit: number; unfinished: number } } {
-  const recs: BetRec[] = betRecords(db, { strategyId: undefined }).filter((r) => r.strategyId === PMV_STRATEGY);
+export function pmvCounterfactualBets(db: Database, pmvRecs?: BetRec[]): { bets: CfBet[]; excluded: { unresolvable: number; noEarlyExit: number; unfinished: number } } {
+  // Accept a pre-loaded PMV slice so buildPmvExitCounterfactual scans the (large) bet log ONCE, not twice.
+  const recs: BetRec[] = pmvRecs ?? betRecords(db).filter((r) => r.strategyId === PMV_STRATEGY);
   const bets: CfBet[] = [];
   let unresolvable = 0, noEarlyExit = 0, unfinished = 0;
   for (const r of recs) {
@@ -110,9 +111,9 @@ export interface TwinDivergence {
 }
 /** Same pick (match × market) held by ≥2 PMV profiles that resolved to OPPOSITE outcomes — the audit signal
  *  that an early exit on one profile realized a loss the twin (held) turned into a win. */
-export function twinDivergences(db: Database, cf: CfBet[]): TwinDivergence[] {
+export function twinDivergences(pmvRecs: BetRec[]): TwinDivergence[] {
   // Group ALL settled PMV bets (not just early-closed) by match × market so a held twin joins its exited twin.
-  const recs = betRecords(db).filter((r) => r.strategyId === PMV_STRATEGY && r.outcome !== "open");
+  const recs = pmvRecs.filter((r) => r.outcome !== "open");
   const groups = new Map<string, BetRec[]>();
   for (const r of recs) { const k = `${r.matchId}|${r.market}`; (groups.get(k) ?? groups.set(k, []).get(k)!).push(r); }
   const out: TwinDivergence[] = [];
@@ -141,7 +142,8 @@ export interface PmvExitCounterfactual {
   note: string;
 }
 export function buildPmvExitCounterfactual(db: Database): PmvExitCounterfactual {
-  const { bets, excluded } = pmvCounterfactualBets(db);
+  const pmvRecs = betRecords(db).filter((r) => r.strategyId === PMV_STRATEGY); // ONE scan of the bet log, shared
+  const { bets, excluded } = pmvCounterfactualBets(db, pmvRecs);
   const turnover = bets.reduce((s, b) => s + b.stake, 0);
   const totalActualPnl = bets.reduce((s, b) => s + b.actualPnl, 0);
   const totalHoldPnl = bets.reduce((s, b) => s + b.holdPnl, 0);
@@ -155,7 +157,7 @@ export function buildPmvExitCounterfactual(db: Database): PmvExitCounterfactual 
     totalActualPnl: r2(totalActualPnl), totalHoldPnl: r2(totalHoldPnl), totalDelta: r2(totalDelta),
     deltaPctTurnover: turnover > 0 ? r2((totalDelta / turnover) * 100) : null,
     byReasonFamily, byReason, byFamily,
-    flaggedCells: byReasonFamily.filter((c) => c.flagged), twins: twinDivergences(db, bets),
+    flaggedCells: byReasonFamily.filter((c) => c.flagged), twins: twinDivergences(pmvRecs),
     excluded,
     note: "delta = hold-to-settle − actual (>0 → держать было лучше). Flagged: n≥минимум И delta/turnover ≥ порог. Только PMV, завершённые, разрешимые, чистая эпоха.",
   };
