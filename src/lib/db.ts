@@ -163,6 +163,10 @@ export function getDb(path = dbPath()): Database {
   // has to be re-read. Surfaces in the deploy log so it's readable without a shell.
   try { const n = migrateQuarantinePoisonedTennis(db, new Date().toISOString()); if (n > 0) console.log(`[migrate] token-flip quarantine: flagged=${n} pre-fix tennis bets held the wrong (second-outcome) token`); }
   catch { /* non-fatal */ }
+  // BOOT-END RSS: paired with the post-initSchema line above. If RSS jumped a lot BETWEEN the two, a boot
+  // migration is the memory spike; if it's ~flat, boot is cheap and any OOM is a RUNTIME spike (SSR / report /
+  // live cycle) — narrows the 2Gi OOM to boot-vs-runtime without a profiler.
+  try { console.log(`[db] boot migrations done · rss ${Math.round(process.memoryUsage().rss / 1e6)}MB`); } catch { /* never block boot on a log */ }
   _db = db;
   return db;
 }
