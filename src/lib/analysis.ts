@@ -313,6 +313,9 @@ export async function runStrategists(
     // from zero (see correlationKey / the cluster cap in sizePrematch).
     const clusterExp = new Map<string, number>();
     for (const b of openPos) { const k = correlationKey(b.market_label, match.home, match.away); if (k) clusterExp.set(k, (clusterExp.get(k) ?? 0) + (b.stake ?? 0)); }
+    // T3.2: a market the strategist listed in rejected[] must never be entered, even if it also appears in
+    // picks — rejected is authoritative over picks (Hammarby BTTS-Yes). The execution gate reads it.
+    const rejectedSet = new Set((dec.ok && dec.rejected ? dec.rejected : []).map((r) => norm(r.market)));
     let entries = 0, skipped = 0, flagged = 0;
     const battle: any[] = [];
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
@@ -322,6 +325,7 @@ export async function runStrategists(
       const pick = picksArr?.find((p) => sameMarketLabel(p.label, m.label));
       if (picksArr && !pick) { skipped++; continue; }
       if (pick?.hold) { skipped++; continue; } // T2.2: a hold ticket never opens — no-op prematch too
+      if (rejectedSet.has(norm(m.label))) { skipped++; battle.push({ market: m.label, status: "skip", reason: "в rejected — вход заблокирован (rejected_market_block)" }); continue; } // T3.2
       if (held.has(norm(m.label))) { skipped++; continue; }
       // Duplicate-outcome price conflict → never enter, even if the strategist picked
       // it: one of the twins is a data artifact, so its edge is phantom.

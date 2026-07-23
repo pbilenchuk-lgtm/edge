@@ -1204,6 +1204,27 @@ test("strategistReassess #3b MARTINGALE BLOCK: no re-add to a market this pair a
   assert.ok(R.reassessmentsForMatch(db, mid).some((r) => r.strategy_id === strat.id && /martingale_block/.test(r.body)), "the block is recorded in this pair's reassessment note");
 });
 
+test("T3.2 strategistReassess: a market in rejected[] is NOT entered even if it also appears in picks (rejected_market_block)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football").find((s) => s.id !== "prematch_value")!;
+  R.clearShares(db, comp.id);
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, risk_profile_id: "medium", pct: 50 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Hammarby", away: "Degerfors", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: mid, league: "swe.1", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { shots: 4 }, away: { shots: 2 } }), updated_at: "t" });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Both Teams to Score — Yes", price: 45, ai_prob: 0.75, liquidity: "3000", external_ref: "TOK-BY", snapshot_at: "t", is_closing: false });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 45, ai_prob: 0.7, liquidity: "3000", external_ref: "TOK-O", snapshot_at: "t", is_closing: false });
+  // The strategist CONTRADICTS itself: BTTS-Yes is in BOTH picks and rejected. Rejected must win.
+  const mock = (async (url: any) => { const u = String(url); if (u.includes("anthropic") || u.includes("/messages")) return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [{ label: "Both Teams to Score — Yes", prob: 0.75, reason: "выкуп" }, { label: "Over 2.5", prob: 0.7, reason: "ок" }], exits: [], rejected: [{ market: "Both Teams to Score — Yes", reason: "коррелирует против Under-тезиса" }] }) }] }) } as any; return { ok: true, status: 200, json: async () => (u.includes("/book") ? { bids: [], asks: [] } : {}) } as any; }) as unknown as typeof fetch;
+  await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => "2026-07-14T20:00:00Z" }, { newEventMatchIds: new Set([mid]), max: 50 });
+  const proposed = R.betsForMatch(db, mid, strat.id).filter((b) => b.status === "proposed").map((b) => b.market_label);
+  assert.ok(!proposed.some((l) => /both teams/i.test(l)), "BTTS-Yes was rejected → not entered");
+  assert.ok(proposed.some((l) => l === "Over 2.5"), "the clean control pick IS entered");
+});
+
 test("strategistReassess #4: an incoherent complementary pair (sum far from 100¢) is not traded live (prob_sum_block)", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

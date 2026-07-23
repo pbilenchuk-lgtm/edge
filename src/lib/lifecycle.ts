@@ -1730,11 +1730,17 @@ export async function strategistReassess(
           // a live add to a correlated market stacks against them (see correlationKey).
           const clusterExp = new Map<string, number>();
           for (const b of liveHeld) { const k = correlationKey(b.market_label, m.home, m.away); if (k) clusterExp.set(k, (clusterExp.get(k) ?? 0) + (b.stake ?? 0)); }
+          // T3.2: the strategist's OWN rejected[] is authoritative over its picks — a market it named as
+          // rejected («коррелирует против тезиса», «дубликат-конфликт», placeholder price) must NEVER be
+          // opened, even if it also (contradictorily) appears in picks/actions (Hammarby BTTS-Yes: rejected
+          // by every profile, still entered live). The execution gate reads the rejected set and hard-blocks.
+          const rejectedSet = new Set((dec.rejected ?? []).map((r) => norm(r.market)));
           for (const pick of dec.picks) {
             // T2.2: a HOLD ticket never opens. If the pair already holds this market, holding is the default
             // (nothing to do); if it holds NOTHING, a hold pick is a NO-OP — it must not manufacture a new
             // position (the Cruz Azul/Göteborg/Hammarby «hold, не новый вход» → phantom «вошёл» bug).
             if (pick.hold) { unfilled.push(`«${pick.label}» — hold-тикет, позиция не открывается (hold_no_op)`); continue; }
+            if (rejectedSet.has(norm(pick.label))) { unfilled.push(`«${pick.label}» — в rejected того же решения, вход заблокирован (rejected_market_block)`); continue; }
             const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
             if (!mk || mk.price == null) { unfilled.push(`«${pick.label}» — нет рынка`); continue; }
             // P1: never open into a quarantined book (the strategist shouldn't even see it, but a cached
