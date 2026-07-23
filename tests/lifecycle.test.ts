@@ -2127,14 +2127,17 @@ test("Z4 (batch-5): reassess audit — storm composition + conservative at-risk 
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Portland", away: "Dallas", state: "finished", lineup_out: true, kickoff_at: null, minute: 90, score_home: 0, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   const rs = (trg: string, at: string) => R.insertReassessment(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, minute: "50'", body: "b", confidence: null, trigger: trg as any, created_at: at });
   rs("time", "2026-07-23T02:00:00Z"); rs("time", "2026-07-23T02:05:00Z"); rs("price_move", "2026-07-23T02:08:00Z"); rs("goal", "2026-07-23T02:10:00Z");
-  // an exit right after a 'time' reassessment → conservatively at-risk (throttle might have skipped it)
-  R.insertTradeLog(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, minute: "50'", type: "exit", text: "выход X", created_at: "2026-07-23T02:05:30Z" });
+  // a DISCRETIONARY (strategist «стратег:») exit right after a 'time' reassessment → at-risk (throttle might skip it)
+  R.insertTradeLog(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, minute: "50'", type: "exit", text: "выход «X» (тайк) @ 40¢ · стратег: тезис сломан · P&L -$5", created_at: "2026-07-23T02:05:30Z" });
+  // a DETERMINISTIC-guard exit (no «стратег:») near the same reassessment → NOT at-risk (fires every tick anyway)
+  R.insertTradeLog(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, minute: "51'", type: "exit", text: "выход «X» @ 38¢ · edge_gone · P&L -$7", created_at: "2026-07-23T02:05:40Z" });
   const a = buildReassessAudit(db);
   const pm = a.perMatch.find((x) => x.match === "Portland — Dallas")!;
   assert.equal(pm.reassessments, 4, "this match's reassessments");
   assert.equal(pm.byTrigger["time"], 2);
   assert.equal(pm.byTrigger["goal"], 1);
-  assert.equal(pm.exits, 1);
-  assert.equal(pm.atRiskExits, 1, "the exit near a 'time' reassessment is counted at-risk");
-  assert.equal(a.verdict, "not_safe", "any at-risk exit → do not enable");
+  assert.equal(pm.exits, 2, "both exits counted in the total");
+  assert.equal(pm.discretionaryExits, 1, "only the «стратег:» exit is discretionary");
+  assert.equal(pm.atRiskExits, 1, "the discretionary exit near a 'time' reassessment is at-risk; the deterministic one is not");
+  assert.equal(a.verdict, "not_safe", "any at-risk discretionary exit → do not enable");
 });
