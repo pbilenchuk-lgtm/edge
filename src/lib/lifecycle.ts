@@ -29,7 +29,7 @@ import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
 import { classifyZombie, notationSpreads, loadZombieConfig, type ZombieReason } from "./zombieMarket.js";
 import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
 import { exitDecision, winsOnEventOccurrence, isStaleProposal, proposalDrift } from "./thresholds.js";
-import { underThesisMarginGoals } from "./settlement.js";
+import { underThesisMarginGoals, resolveFootballMarket } from "./settlement.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
@@ -103,6 +103,45 @@ export const UNDER_STOP_SUPPRESS_MARGIN = (() => { const n = Number(process.env.
 // and logged distinctly (exit_illiquid_mark_gap) so a week of firings can be calibrated. Env-tunable.
 export const EXIT_ILLIQUID_MARK_GAP = (() => { const n = Number(process.env.EXIT_ILLIQUID_MARK_GAP); return Number.isFinite(n) && n > 0 ? n : 20; })();
 export const EXIT_ILLIQUID_MARK_MIN = (() => { const n = Number(process.env.EXIT_ILLIQUID_MARK_MIN); return Number.isFinite(n) && n > 0 ? n : 60; })();
+// T1.1 STATE↔PRICE CONTRADICTION guard (batch-3). The three guards above key off the CURRENT mark/bid,
+// so they DEGRADE as the book decays — exactly when a phantom is worst (Cienciano: 32' slip 27¢ → blocked;
+// 35' bid fell to 17¢ → slip 12¢ → the −89% dump of a WINNING team-Under went through, −$141 on a bet that
+// paid +$212). The fix anchors on GAME STATE, not price: a protective STOP on a position that is CURRENTLY
+// WINNING by the score (resolveFootballMarket = true) yet would execute at a low bid FAR below its frozen
+// reference (entry price) is the market lying, not the thesis breaking — HOLD to settle. Melting options
+// that already resolved yes (winsOnEventOccurrence) can NEVER be legitimately stopped once won. Env-tunable.
+export const STATE_STOP_FLOOR = (() => { const n = Number(process.env.STATE_STOP_FLOOR); return Number.isFinite(n) && n > 0 ? n : 25; })();      // executable bid at/below this (¢)
+export const STATE_STOP_DECAY_GAP = (() => { const n = Number(process.env.STATE_STOP_DECAY_GAP); return Number.isFinite(n) && n > 0 ? n : 25; })(); // drop from the frozen reference (¢)
+export const STATE_STOP_THIN_SLIP = (() => { const n = Number(process.env.STATE_STOP_THIN_SLIP); return Number.isFinite(n) && n > 0 ? n : 3; })();  // bid↔VWAP gap that marks a thin book (¢)
+export interface StateStopSell { cents: number; fromBook: boolean; bestBidCents?: number | null; filledShares?: number; requestedShares?: number }
+/** T1.1: does a protective STOP contradict the game state? Returns a reason string to HOLD, or null to let
+ *  the stop fire. Fires ONLY on a currently-WINNING position (by score) dumped at a phantom-low bid on a THIN
+ *  book (partial fill / slippage) far below its frozen entry reference — or an already-won melting option at
+ *  any low bid (a won option can't trade low on a real book). A genuinely-fragile Under sold into a DEEP book
+ *  at a real low value still stops. Purely deterministic; never touches a genuinely LOSING position's stop. */
+export function stopContradictsGameState(
+  label: string, scoreHome: number | null, scoreAway: number | null, teams: { home: string; away: string },
+  entryCents: number | null, sell: StateStopSell,
+): string | null {
+  if (!sell.fromBook || entryCents == null) return null;               // modelled prices are a separate haircut
+  if (sell.cents > STATE_STOP_FLOOR) return null;                      // a healthy bid — no contradiction
+  const winsNow = resolveFootballMarket(label, scoreHome ?? 0, scoreAway ?? 0, teams);
+  if (winsNow !== true) return null;                                   // not currently winning → a real stop
+  const melting = winsOnEventOccurrence(label);                        // Over / BTTS-Yes: a win is PERMANENT
+  const decay = entryCents - sell.cents;
+  // A THIN book = the low price is not a genuine deep-book value: the stake didn't fully fill, or the top bid
+  // sits above the realized VWAP (the price decoupled). A DEEP book at a real low (fragile Under) is NOT thin.
+  const partial = (sell.requestedShares ?? 0) > 0 && (sell.filledShares ?? 0) < (sell.requestedShares as number) - 1e-6;
+  const slip = sell.bestBidCents != null ? sell.bestBidCents - sell.cents : 0;
+  const thin = partial || slip >= STATE_STOP_THIN_SLIP;
+  if (melting) {
+    // A won melting option trading ≤floor¢ is a phantom by definition (real book would be ~100¢) — always hold.
+    return `мелтинг-опцион уже выигран game-state, но бид ${sell.cents}¢ (вход ${entryCents}¢) — цена противоречит факту, книга-зомби; держим до сеттла (state_price_contradiction)`;
+  }
+  if (decay < STATE_STOP_DECAY_GAP) return null;                       // not a collapse from the frozen ref → allow
+  if (!thin) return null;                                              // deep-book genuine low value on a fragile Under → let the stop fire
+  return `позиция выигрывает по счёту ${scoreHome ?? 0}:${scoreAway ?? 0}, но бид ${sell.cents}¢ на тонкой книге (вход ${entryCents}¢) — цена противоречит факту, книга-зомби; держим до сеттла (state_price_contradiction)`;
+}
 // TIME-DECAY FLOOR for "wins on event occurrence" markets (Over, BTTS Yes, team-to-score),
 // which are EXEMPT from the price stop (their price is a melting option — see
 // winsOnEventOccurrence). Exempt ≠ hold the corpse to the whistle: an option that is BOTH
@@ -1017,6 +1056,15 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           continue;
         }
       }
+      // T1.1 STATE↔PRICE contradiction: a stop on a position that is CURRENTLY WINNING by the score, whose
+      // executable bid collapsed to a phantom low far below its frozen entry reference (or an already-won
+      // melting option at any low bid) — the book is a zombie, not a broken thesis. HOLD to settle. Anchored
+      // on game state (not the decayed mark), so it stays effective as the book bleeds — unlike the guards
+      // below, which weaken with it (Cienciano team-Under −$141 on a bet that settled +$212).
+      if (d.kind === "stop") {
+        const sc = stopContradictsGameState(b.market_label, m.score_home, m.score_away, { home: m.home, away: m.away }, b.entry_price, sell);
+        if (sc) { holdOnce(`выход отклонён по ${holdKey}: ${sc}`); continue; }
+      }
       // Phantom-bid guard: a stop firing on a degenerate bid (≤FLOOR¢) that sits far
       // below the mid is dumping into a momentarily-broken book, not managing risk —
       // HOLD, let it settle on the real result. (A take-profit can no longer fire on a
@@ -1509,6 +1557,20 @@ export async function strategistReassess(
           // Fill the (partial) close against the real bid book — exit slippage into P&L.
           const basis = (b.stake ?? 0) * Math.min(ex.fraction, 1);
           const sell = await sellVwapCents(mk, b.entry_price, basis, poly, deps, mk.price);
+          // T1.1 STATE↔PRICE contradiction, SYMMETRIC with evaluateExits: a strategist DEFENSIVE exit must
+          // not dump a position that is currently WINNING by the score into a phantom-low bid far below its
+          // entry (or an already-won melting option) — the book is a zombie, not a broken thesis. Only for a
+          // defensive exit (a take-profit sells into a HIGH bid and never reaches the floor). Anchored on game
+          // state so it stays effective as the book decays. Log once per continuous hold period.
+          if (defensiveExit) {
+            const sc = stopContradictsGameState(b.market_label, m.score_home, m.score_away, { home: m.home, away: m.away }, b.entry_price, sell);
+            if (sc) {
+              const holdKey = `«${b.market_label}»`;
+              const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
+              if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отклонён по ${holdKey}: ${sc}`, created_at: now });
+              continue;
+            }
+          }
           // Phantom-bid guard, SYMMETRIC with the deterministic exit path (evaluateExits):
           // a strategist exit (thesis_stop / counter_scenario) must NOT dump into a degenerate
           // bid (≤FLOOR¢) sitting ≥GAP¢ below the mark — that's a momentarily-broken book, not

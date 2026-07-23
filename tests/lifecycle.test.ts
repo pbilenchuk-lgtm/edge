@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase, migrateRetireFable } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision, winsOnEventOccurrence } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure, stopContradictsGameState } from "../src/lib/lifecycle.js";
 import { analyzeMatch, runStrategists } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
@@ -477,9 +477,10 @@ test("evaluateExits HOLDS a stop when the full stake would SLIP far below the be
   db.exec("DELETE FROM bets"); // isolate from seeded positions (the mock book applies to every token)
   const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
   const strat = R.listStrategies(db, "football")[0];
-  // 2:2 so the team-total "BK Hacken Under 2.5" is genuinely under threat (Hacken 2, margin 0.5 < 1)
-  // → the Under-thesis suppression does NOT apply and this test isolates the slippage guard.
-  const liveMatch = (id: string, ref: string) => R.insertMatch(db, { id, competition_id: comp.id, home: "Orgryte", away: "Hacken", state: "live", lineup_out: true, kickoff_at: null, minute: 38, score_home: 2, score_away: 2, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: ref });
+  // Hacken already scored 3 → "BK Hacken Under 2.5" is currently LOSING, which isolates the SLIPPAGE guard:
+  // the T1.1 state↔price contradiction guard only holds a currently-WINNING position, so here it stands
+  // aside and the slippage guard (which protects even a losing position from a thin-book dump) is under test.
+  const liveMatch = (id: string, ref: string) => R.insertMatch(db, { id, competition_id: comp.id, home: "Orgryte", away: "Hacken", state: "live", lineup_out: true, kickoff_at: null, minute: 38, score_home: 2, score_away: 3, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: ref });
   // Large $100 position entered at 52¢ (~192 shares) — enough to walk a thin book.
   const openBet = (id: string, mid: string) => R.insertBet(db, { id, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "BK Hacken Under 2.5", status: "open", proposed_price: 52, entry_price: 52, current_price: 40, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "35'", result: null, payout: null, created_at: "t" });
   const bookFetch = (book: any) => (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? book : {}) })) as unknown as typeof fetch;
@@ -502,6 +503,29 @@ test("evaluateExits HOLDS a stop when the full stake would SLIP far below the be
   const ex2 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.44", size: "500" }], bids: [{ price: "0.18", size: "100000" }] }) });
   assert.ok(ex2.some((e) => e.matchId === m2), "deep-book stop executes (guard doesn't over-block a genuine low value)");
   assert.ok(R.getBet(db, "deep-bet")!.status.startsWith("settled"), "deep-book stop settled at the real price");
+});
+
+test("T1.1 evaluateExits: a WINNING team-Under dumped on a THIN book is HELD (state_price_contradiction), not stopped into a zombie bid", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  // Cienciano scored 1 → "CS Cienciano Under 1.5" is currently WINNING (1 < 1.5). The book collapsed after
+  // the OPPONENT's (Melgar) penalty — a thin bid at 17¢ with a cliff — which cannot touch Cienciano's own
+  // total. Entry 45¢. A raw −% mark stop would dump it; the game state says it's winning → HOLD.
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "CS Cienciano", away: "FBC Melgar", state: "live", lineup_out: true, kickoff_at: null, minute: 35, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "CS Cienciano Under 1.5", price: 15, ai_prob: 0.6, liquidity: "2000", external_ref: "TOKC", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "cienc", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "CS Cienciano Under 1.5", status: "open", proposed_price: 45, entry_price: 45, current_price: 15, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "30'", result: null, payout: null, created_at: "t" });
+  // Thin book: a small 17¢ bid then a cliff to 3¢ — the full stake walks through it (partial/slip = thin).
+  const bookFetch = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? { asks: [{ price: "0.90", size: "500" }], bids: [{ price: "0.17", size: "20" }, { price: "0.03", size: "100000" }] } : {}) })) as unknown as typeof fetch;
+  const ex = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch });
+  assert.ok(!ex.some((e) => e.matchId === mid), "no exit — a winning position is not dumped into a zombie bid");
+  assert.equal(R.getBet(db, "cienc")!.status, "open", "position held to settlement");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "hold" && /state_price_contradiction/.test(l.text)), "state_price_contradiction hold logged");
 });
 
 test("winsOnEventOccurrence: Over / BTTS-Yes are melting options (exempt); Under / No / directional keep the stop", () => {
@@ -1143,6 +1167,29 @@ test("strategistReassess #4: an incoherent complementary pair (sum far from 100�
   const mine = R.betsForMatch(db, mid, strat.id).filter((b) => b.status === "proposed").map((b) => b.market_label.toLowerCase());
   assert.ok(!mine.includes("draw"), "the incoherent 200¢-sum twin is NOT traded (prob_sum_block)");
   assert.ok(R.reassessmentsForMatch(db, mid).some((r) => r.strategy_id === strat.id && /prob_sum_block/.test(r.body)), "the block is recorded in the reassessment note");
+});
+
+test("T1.1 stopContradictsGameState: a winning position dumped on a THIN book is held; a deep-book low value and a real losing stop still fire", () => {
+  const teams = { home: "CS Cienciano", away: "FBC Melgar" };
+  const thin = (cents: number, bid: number) => ({ cents, fromBook: true, bestBidCents: bid, filledShares: 42, requestedShares: 100 }); // partial fill = thin
+  const deep = (cents: number) => ({ cents, fromBook: true, bestBidCents: cents, filledShares: 100, requestedShares: 100 });            // full fill, no slip
+  // Cienciano team-Under 1.5, team scored 1 (still winning), bid collapsed to 5¢ from a 45¢ entry on a THIN
+  // book — the Melgar penalty crashed the book, not Cienciano's own total. CONTRADICTION → hold.
+  assert.ok(stopContradictsGameState("CS Cienciano Under 1.5", 1, 0, teams, 45, thin(5, 17)), "winning team-Under dumped at 5¢ on a thin book → held");
+  // Kristiansund BTTS-No at 0:0 (still winning), VWAP 12¢ vs bid 17¢ (slip 5 → thin), decay 27 ≥ 25 → hold.
+  assert.ok(stopContradictsGameState("Both Teams to Score — No", 0, 0, teams, 39, { cents: 12, fromBook: true, bestBidCents: 17, filledShares: 100, requestedShares: 100 }), "winning BTTS-No slipped on a thin book → held");
+  // An already-won melting option (Over 1.5 at total 2) at any low bid can NEVER legitimately stop.
+  assert.ok(stopContradictsGameState("Over 1.5", 2, 0, teams, 60, deep(8)), "won melting option at 8¢ → held even on a deep book");
+  // A GENUINELY-FRAGILE Under sold into a DEEP book at a real low value (full fill, no slip) still STOPS.
+  assert.equal(stopContradictsGameState("BK Hacken Under 2.5", 2, 2, { home: "Orgryte", away: "BK Hacken" }, 52, deep(18)), null, "deep-book genuine low value on a fragile Under → stop fires");
+  // A GENUINELY LOSING position (Cienciano scored 2 → Under 1.5 lost) — the stop is real, must fire.
+  assert.equal(stopContradictsGameState("CS Cienciano Under 1.5", 2, 0, teams, 45, thin(5, 17)), null, "a real losing stop is NOT blocked");
+  // A healthy bid (60¢ > floor) is no contradiction — normal management.
+  assert.equal(stopContradictsGameState("CS Cienciano Under 1.5", 1, 0, teams, 45, deep(60)), null, "healthy bid → stop path unchanged");
+  // A modelled (non-book) price is a separate haircut, never gated here.
+  assert.equal(stopContradictsGameState("CS Cienciano Under 1.5", 1, 0, teams, 45, { cents: 5, fromBook: false }), null, "modelled price not gated");
+  // Non-melting, still winning, thin, but only a small decay (45→24, Δ21 < 25) — not a collapse → allow.
+  assert.equal(stopContradictsGameState("CS Cienciano Under 1.5", 1, 0, teams, 45, thin(24, 30)), null, "small decay is not a collapse");
 });
 
 test("T2.2 strategistReassess: a HOLD ticket for a market the pair holds NOTHING in creates NO position (hold_no_op)", async () => {
