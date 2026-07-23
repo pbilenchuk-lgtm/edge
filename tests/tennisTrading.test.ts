@@ -880,3 +880,22 @@ test("П3 (batch-3): buildOvrRunnerBacktest runs read-only and returns INSUFFICI
   assert.equal(r.verdict, "insufficient", "n=1 < 80 → do not decide (Overreaction stays parked)");
   assert.ok(r.runnerEvPct != null && r.takeOnlyEvPct != null, "both structures priced on the mark");
 });
+
+test("п.5-tail (batch-4): tennisLinkRateHealth flags degraded in-discovery link-rate (cheap health signal)", async () => {
+  const { tennisLinkRateHealth } = await import("../src/lib/tennisScout.js");
+  const db = openDb(":memory:");
+  const now = new Date().toISOString();
+  const mk = (ev: string, verdict: string) => R.insertTennisMapLog(db, { event_key: ev, players: `${ev}`, verdict, match_id: verdict === "auto" ? "m" + ev : null, score: verdict === "auto" ? 0.9 : 0.7, candidates: "[]", created_at: now });
+  // 12 listable (auto|review); only 6 auto → 50% in-discovery, below the 85% floor, n≥10 → degraded.
+  for (let i = 0; i < 6; i++) mk("a" + i, "auto");
+  for (let i = 0; i < 6; i++) mk("r" + i, "review");
+  const h = tennisLinkRateHealth(db, {});
+  assert.equal(h.listable, 12);
+  assert.equal(h.linked, 6);
+  assert.equal(h.inDiscoveryLinkPct, 50);
+  assert.equal(h.degraded, true, "50% < 85% floor with n≥10 → alert");
+  // healthy case: all auto → 100%, not degraded.
+  const db2 = openDb(":memory:");
+  for (let i = 0; i < 12; i++) R.insertTennisMapLog(db2, { event_key: "h" + i, players: "h", verdict: "auto", match_id: "m", score: 0.9, candidates: "[]", created_at: now });
+  assert.equal(tennisLinkRateHealth(db2, {}).degraded, false, "100% link-rate → healthy");
+});

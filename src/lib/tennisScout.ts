@@ -754,6 +754,25 @@ export function buildTennisLinkRate(db: Database): TennisLinkRateReport {
         : `среди listable-матчей привязка ${inDiscoveryLinkPct}% (${auto}/${inDiscoveryEvents}); ${noCandidate} no-candidate (${doubles} пар/дабл) — матча нет в Polymarket-дискавери, это покрытие рынков, а не маппинг`;
   return { totalEvents: total, auto, review, skip, linkPct, grayZone, noCandidate, doubles, inDiscoveryEvents, inDiscoveryLinkPct, byDay, unlinkedExamples, betsWithProvenance, betsTotal, currentlyLinkedMatches, currentLiveTennisMatches, mapAuto: MAP_AUTO, mapReview: MAP_REVIEW, note };
 }
+// п.5-tail (batch-4): a CHEAP link-rate health signal for /api/health — degradation must ALERT, not be
+// discovered by a batch of logs a week later. One aggregate over the recent (persistent) map log: an event
+// is "linked" iff it ever auto-linked; "listable" iff it ever had a candidate (auto OR review). The
+// in-discovery rate = linked/listable. Env-tunable window + floor; degraded only once we have a quorum.
+export interface TennisLinkRateHealth { windowDays: number; listable: number; linked: number; inDiscoveryLinkPct: number | null; degraded: boolean; floorPct: number }
+export function tennisLinkRateHealth(db: Database, env: Record<string, string | undefined> = process.env): TennisLinkRateHealth {
+  const windowDays = (() => { const n = Number(env.TENNIS_LINKRATE_WINDOW_DAYS); return Number.isFinite(n) && n > 0 ? n : 7; })();
+  const floorPct = (() => { const n = Number(env.TENNIS_LINKRATE_FLOOR_PCT); return Number.isFinite(n) && n > 0 ? n : 85; })();
+  const minN = (() => { const n = Number(env.TENNIS_LINKRATE_MIN_N); return Number.isFinite(n) && n > 0 ? n : 10; })();
+  const row = db.prepare(
+    `SELECT COUNT(DISTINCT CASE WHEN verdict='auto' THEN event_key END) linked,
+            COUNT(DISTINCT CASE WHEN verdict IN ('auto','review') THEN event_key END) listable
+     FROM tennis_map_log WHERE created_at > datetime('now', ?)`,
+  ).get(`-${windowDays} days`) as { linked?: number; listable?: number } | undefined;
+  const linked = Number(row?.linked ?? 0), listable = Number(row?.listable ?? 0);
+  const inDiscoveryLinkPct = listable > 0 ? Math.round((linked / listable) * 1000) / 10 : null;
+  const degraded = listable >= minN && inDiscoveryLinkPct != null && inDiscoveryLinkPct < floorPct;
+  return { windowDays, listable, linked, inDiscoveryLinkPct, degraded, floorPct };
+}
 export function tennisLinkRateMarkdown(r: TennisLinkRateReport): string {
   const L: string[] = [];
   L.push(`# Теннис — link-rate скаута (API-Tennis ↔ Polymarket)`);

@@ -5,7 +5,7 @@
 // ============================================================
 
 import { randomUUID } from "node:crypto";
-import { resolveBetOrigin } from "./betMeta.js";
+import { resolveBetOrigin, CODE_VERSION } from "./betMeta.js";
 import type { Database } from "./db.js";
 import type {
   AnalysisJob,
@@ -938,10 +938,23 @@ export function insertBet(db: Database, b: Bet): void {
   );
 }
 export function updateBet(db: Database, id: string, patch: Partial<Bet>): void {
-  const keys = Object.keys(patch);
+  const p: Partial<Bet> = patch;
+  // п.2 (batch-4): stamp the EXIT epoch the first time a bet transitions to a settled state. code_version
+  // is the entry epoch; exit_code_version is the epoch at close. A deploy mid-position-life makes them
+  // differ (cross_epoch), which per-epoch verdict slices exclude. Single choke point: every settle path
+  // funnels its status change through updateBet. Only stamp once (first settled transition) and only when
+  // the caller didn't set it explicitly. Epoch computed inline to avoid a repo→codeEpoch import cycle.
+  if (typeof p.status === "string" && p.status.startsWith("settled") && p.exit_code_version === undefined) {
+    const row = db.prepare(`SELECT exit_code_version FROM bets WHERE id=?`).get(id) as { exit_code_version?: string | null } | undefined;
+    if (row && row.exit_code_version == null) {
+      const me = Number(metaGet(db, "model_epoch") ?? 1);
+      p.exit_code_version = `${CODE_VERSION}·m${Number.isFinite(me) && me >= 1 ? Math.floor(me) : 1}`;
+    }
+  }
+  const keys = Object.keys(p);
   if (!keys.length) return;
   const set = keys.map((k) => `${k}=?`).join(", ");
-  db.prepare(`UPDATE bets SET ${set} WHERE id=?`).run(...keys.map((k) => (patch as any)[k]), id);
+  db.prepare(`UPDATE bets SET ${set} WHERE id=?`).run(...keys.map((k) => (p as any)[k]), id);
 }
 export function betsForMatch(db: Database, matchId: string, strategyId?: string): Bet[] {
   const rows = strategyId

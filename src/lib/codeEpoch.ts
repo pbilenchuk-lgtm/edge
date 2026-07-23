@@ -32,6 +32,19 @@ export function effectiveCodeVersion(db: Database, modelTag?: string | null): st
   return modelTag ? `${base}·${modelTag}` : base;
 }
 
+/** The CODE-epoch part of an effective code_version label ("e5·m2·opus48" → "e5"). A DEPLOY that changes
+ *  what the numbers mean bumps this; the model-epoch (·mN) and duel tag do not. Used by cross_epoch. */
+export function codeEpochOf(cv: string | null | undefined): string { return cv ? String(cv).split("·")[0] : ""; }
+
+/** п.2 (batch-4): a bet whose life spanned a deploy — its ENTRY code-epoch (code_version) differs from its
+ *  EXIT code-epoch (exit_code_version, stamped at settle). Such cycles must be QUARANTINED from per-epoch
+ *  verdict slices and exit-rule comparisons (the position was governed by two different rule-sets). Returns
+ *  false when the exit epoch is unknown (never settled, or a pre-field historical bet) — safe default. */
+export function crossEpoch(bet: { code_version?: string | null; exit_code_version?: string | null }): boolean {
+  const inE = codeEpochOf(bet.code_version), outE = codeEpochOf(bet.exit_code_version);
+  return inE !== "" && outE !== "" && inE !== outE;
+}
+
 /** Advance the model epoch (call once per model-assignment change). Returns the new
  *  epoch. Idempotent per change site — callers should only invoke it when a model
  *  value ACTUALLY changed, so the «Профили» dropdown doesn't fill with empty epochs. */

@@ -20,6 +20,10 @@ export async function GET() {
     // /api/health) sees when the in-process loop was down and stops sat unmanaged. Best-effort.
     let scheduleGaps: ReturnType<typeof scheduleGapSummary> | null = null;
     try { scheduleGaps = scheduleGapSummary(db); } catch { scheduleGaps = null; }
+    // п.5-tail: cheap tennis scout link-rate signal so a mapping degradation ALERTS here (external monitor)
+    // rather than being found in a batch of logs a week later. Best-effort; never blocks the health response.
+    let tennisLinkRate: { inDiscoveryLinkPct: number | null; listable: number; degraded: boolean; windowDays: number } | null = null;
+    try { const { tennisLinkRateHealth } = await import("@/lib/tennisScout"); const h = tennisLinkRateHealth(db); tennisLinkRate = { inDiscoveryLinkPct: h.inDiscoveryLinkPct, listable: h.listable, degraded: h.degraded, windowDays: h.windowDays }; } catch { tennisLinkRate = null; }
     // Turn Render's health pings into a deploy-independent cron heartbeat: if the
     // in-process scheduler has stalled (a redeploy/crash killed it), run a catch-up
     // auto-cycle. Fire-and-forget + internally locked/overdue-gated, so it never

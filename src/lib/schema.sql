@@ -224,6 +224,7 @@ CREATE TABLE IF NOT EXISTS bets (
   entry_meta     TEXT,             -- JSON snapshot at decision time (edge/kelly/probs/calibration/
                                    -- phase/score/thinness/exitPlan/…) for risk-profile analytics
   code_version   TEXT,             -- system epoch at entry — segregate pre/post-fix eras in analysis
+  exit_code_version TEXT,          -- п.2: system epoch at EXIT (settle); ≠ code_version ⇒ cross_epoch cycle
   decision_id    TEXT,             -- stable id of the decision (twin link paper↔real order, spec §0.1)
   origin         TEXT,             -- 'prematch'|'live' — decision context (before/after kickoff), fixed at entry
   origin_source  TEXT,             -- 'decision'|'meta_backfill'|'inferred_backfill' — provenance of `origin`

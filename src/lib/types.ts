@@ -199,6 +199,7 @@ export interface Bet {
   entry_meta?: string | null;
   /** System epoch string at entry — lets analytics segregate pre/post-fix eras. */
   code_version?: string | null;
+  exit_code_version?: string | null; // п.2: system epoch at EXIT (settle) — cross_epoch iff ≠ code_version
   /** Stable id of the STRATEGY DECISION behind this bet (spec §0.1). The twin link:
    *  a real Polymarket order carries the same decision_id as its paper bet, so paper
    *  and real can be compared 1:1. Auto-generated at insert when absent. */
