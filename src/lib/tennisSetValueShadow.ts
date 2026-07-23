@@ -23,6 +23,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { tennisFinalResult } from "./tennisTrading.js";
+import { tennisTourOf } from "./tennisScout.js";
 
 export const SV_SHADOW_EPOCH = "sv-shadow-m1"; // bump when the shadow-record/resolve logic changes
 
@@ -59,6 +60,26 @@ function pricePath(db: Database, matchId: string, favSide: "first" | "second", s
   let min = Infinity, max = -Infinity;
   for (const r of rows) { if (r.c < min) min = r.c; if (r.c > max) max = r.c; }
   return { min, max };
+}
+
+// T5: coverage of the set-2 price path — how many snapshots it had and the largest gap between consecutive
+// ones. A path holed by a scheduler sleep systematically UNDER-estimates drawdown/take (the min/max miss the
+// extreme that fell in the hole), so a sparse row's floor/take calibration is degraded. This flags such rows
+// (a diagnostic count) instead of silently trusting min/max over a handful of samples. Pure read.
+const SV_PATH_MIN_SNAPS = 4;          // fewer than this over set 2 → too thin to trust the min/max
+const SV_PATH_MAX_GAP_SEC = 300;      // a ≥5-min hole (a scheduler sleep) over set 2 → an extreme may be missing
+export function set2PathCoverage(db: Database, matchId: string, favSide: "first" | "second", sinceIso: string): { snaps: number; maxGapSec: number; sparse: boolean } {
+  const col = favSide === "first" ? "pm_p1_cents" : "pm_p2_cents";
+  const rows = db.prepare(
+    `SELECT batch_at t FROM tennis_snapshots WHERE pm_match_id=? AND batch_at>=? AND ${col} IS NOT NULL AND (set_num IS NULL OR set_num<=2) ORDER BY batch_at`,
+  ).all(matchId, sinceIso) as { t: string }[];
+  let maxGapSec = 0;
+  for (let i = 1; i < rows.length; i++) {
+    const g = ((Date.parse(rows[i].t) || 0) - (Date.parse(rows[i - 1].t) || 0)) / 1000;
+    if (g > maxGapSec) maxGapSec = Math.round(g);
+  }
+  const sparse = rows.length < SV_PATH_MIN_SNAPS || maxGapSec > SV_PATH_MAX_GAP_SEC;
+  return { snaps: rows.length, maxGapSec, sparse };
 }
 
 /** Resolve pending Set-Value shadow signals against finished matches. BOTH outcomes from the final sets;
@@ -132,8 +153,18 @@ export interface SvCohortRow { tour: string | null; eventType: string | null; pr
 
 export function svRetroCohort(db: Database): SvCohortRow[] {
   const ids = db.prepare(`SELECT DISTINCT pm_match_id id FROM tennis_snapshots WHERE pm_match_id IS NOT NULL`).all() as { id: string }[];
+  // T1: authoritative tour scope. The retro cohort used to iterate ALL mapped snapshot matches with NO
+  // scope gate, so ITF/Challenger/doubles snapshots (confirmed: ITF Seidman/Stephenson) leaked into the
+  // ATP/WTA comeback calibration that replaces the 0.5 constant. Resolve pm_match_id → competition and gate
+  // on tennisTourOf — the SAME source the forward path uses — and stamp the CANONICAL tour ("atp"/"wta") so
+  // binning no longer leans on the fragile isWta string regex.
+  const comps = new Map(R.listCompetitions(db, "tennis").map((c) => [c.id, c] as const));
   const out: SvCohortRow[] = [];
   for (const { id } of ids) {
+    const m = R.getMatch(db, id);
+    const comp = m ? comps.get(m.competition_id) : null;
+    const tour = comp ? tennisTourOf(comp) : null;
+    if (tour == null) continue;                                          // out of scope (ITF/challenger/doubles)
     const snaps = db.prepare(`SELECT sets_p1, sets_p2, pm_p1_cents, pm_p2_cents, tournament, event_type, live, status FROM tennis_snapshots WHERE pm_match_id=? AND sets_p1 IS NOT NULL ORDER BY batch_at`).all(id) as any[];
     if (snaps.length < 3) continue;
     const firstPriced = snaps.find((s) => s.pm_p1_cents != null && s.pm_p2_cents != null);
@@ -148,7 +179,7 @@ export function svRetroCohort(db: Database): SvCohortRow[] {
     const last = snaps[snaps.length - 1];
     const finished = last.live === 0 || /finish|retir|walk|cancel|def|w[/.]o/i.test(String(last.status ?? ""));
     if (!finished) continue;
-    const row = { tour: firstPriced.tournament ?? null, eventType: firstPriced.event_type ?? null, prematchCents: prematch, source: "retro" as const };
+    const row = { tour, eventType: firstPriced.event_type ?? null, prematchCents: prematch, source: "retro" as const };
     if (/cancel|walkover/i.test(String(last.status ?? ""))) { out.push({ ...row, set2: null, match: "void" }); continue; }
     const favFinal = favSide === "first" ? last.sets_p1 : last.sets_p2;
     const oppFinal = favSide === "first" ? last.sets_p2 : last.sets_p1;
@@ -163,7 +194,7 @@ export function svRetroCohort(db: Database): SvCohortRow[] {
 
 export interface SvShadowCalibration {
   criteria: string[];
-  counts: { total: number; pending: number; resolved: number; void: number; unresolved: number; repeats: number };
+  counts: { total: number; pending: number; resolved: number; void: number; unresolved: number; repeats: number; firstSnapQuarantined: number; sparsePath: number };
   bins: SvCohortBin[];                 // by frozen favourite strength × tour
   overall: SvCohortBin | null;
   constComebackProb: number;           // the hardcoded 0.5 being replaced — shown against measured
@@ -179,15 +210,24 @@ const VERDICT_BIN_N = 40, TOTAL_N = 80;
  *  before the data). This is what replaces the constant at re-enable (§P1.1). */
 export function buildSvShadowCalibration(db: Database): SvShadowCalibration {
   const rows = db.prepare(
-    `SELECT tour, event_type, prematch_ml_cents pm, trigger_cents trig, set2_outcome s2, match_outcome mo, min_cents mn, max_cents mx, status, hits FROM sv_shadow_signals`,
-  ).all() as { tour: string | null; event_type: string | null; pm: number | null; trig: number; s2: string | null; mo: string | null; mn: number | null; mx: number | null; status: string; hits: number }[];
+    `SELECT match_id mid, fav_side fs, created_at ct, tour, event_type, prematch_ml_cents pm, prematch_src src, trigger_cents trig, set2_outcome s2, match_outcome mo, min_cents mn, max_cents mx, status, hits FROM sv_shadow_signals`,
+  ).all() as { mid: string; fs: "first" | "second"; ct: string; tour: string | null; event_type: string | null; pm: number | null; src: string | null; trig: number; s2: string | null; mo: string | null; mn: number | null; mx: number | null; status: string; hits: number }[];
 
-  const counts = { total: rows.length, pending: 0, resolved: 0, void: 0, unresolved: 0, repeats: 0 };
+  const counts = { total: rows.length, pending: 0, resolved: 0, void: 0, unresolved: 0, repeats: 0, firstSnapQuarantined: 0, sparsePath: 0 };
   for (const r of rows) { (counts as any)[r.status] = ((counts as any)[r.status] ?? 0) + 1; counts.repeats += Math.max(0, (r.hits ?? 1) - 1); }
 
-  // Only rows with a real set-2 outcome feed the comeback rate.
-  const scored = rows.filter((r) => r.status === "resolved" && (r.s2 === "won" || r.s2 === "lost"));
-  const isWta = (r: { tour: string | null; event_type: string | null }) => /wta|women|itf.*w|\bw\b/i.test(`${r.tour ?? ""} ${r.event_type ?? ""}`);
+  // T1: only rows with a real set-2 outcome AND a TRUE prematch favourite price feed the comeback rate.
+  // `first_snapshot`-sourced rows froze an already-LIVE (possibly depressed) price as the "prematch"
+  // favourite — using it would bias the strength bin (a depressed fav reads weaker than it was), so quarantine
+  // them out of the verdict entirely (the tag exists precisely for this; it was written but never consumed).
+  const resolvedScoreable = rows.filter((r) => r.status === "resolved" && (r.s2 === "won" || r.s2 === "lost"));
+  const scored = resolvedScoreable.filter((r) => r.src !== "first_snapshot");
+  counts.firstSnapQuarantined = resolvedScoreable.length - scored.length;
+  // T5: flag scored rows whose set-2 price path was too sparse (few snapshots / a scheduler-sleep hole) to
+  // trust min/max — their floor/take numbers are degraded. A count for now; not excluded from the verdict.
+  counts.sparsePath = scored.filter((r) => set2PathCoverage(db, r.mid, r.fs, r.ct).sparse).length;
+  // ITF is scoped OUT upstream, so tier is a clean ATP/WTA split on an explicit token.
+  const isWta = (r: { tour: string | null; event_type: string | null }) => /wta|women/i.test(`${r.tour ?? ""} ${r.event_type ?? ""}`);
   const strengthBin = (pm: number | null): string | null => (pm == null ? null : pm >= 80 ? "80+" : pm >= 70 ? "70-80" : pm >= 60 ? "60-70" : "<60");
   const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
   const pct = (xs: number[]) => (xs.length ? Math.round(1000 * (mean(xs) ?? 0)) / 10 : null);
@@ -278,13 +318,15 @@ export function svComputeEv(
 
 export function buildSvCohort(db: Database, env: Record<string, string | undefined> = process.env): SvCohort {
   const retro = svRetroCohort(db);
-  const shadowRows = db.prepare(`SELECT tour, event_type, prematch_ml_cents pm, set2_outcome s2, match_outcome mo FROM sv_shadow_signals WHERE status='resolved'`).all() as any[];
+  // T1: quarantine `first_snapshot`-sourced rows (a depressed already-live price frozen as the "prematch"
+  // favourite would bias the strength bin) — only a TRUE prematch price feeds the verdict cohort.
+  const shadowRows = db.prepare(`SELECT tour, event_type, prematch_ml_cents pm, set2_outcome s2, match_outcome mo FROM sv_shadow_signals WHERE status='resolved' AND prematch_src != 'first_snapshot'`).all() as any[];
   // T5: shadow rows WITH the set-2 trigger (entry) price — the EV basis (retro rows have no set-2 entry).
-  const evShadow = db.prepare(`SELECT tour, event_type, prematch_ml_cents pm, trigger_cents trig, set2_outcome s2, match_outcome mo FROM sv_shadow_signals WHERE status='resolved' AND set2_outcome IN ('won','lost') AND trigger_cents IS NOT NULL AND prematch_ml_cents >= 60`).all() as any[];
+  const evShadow = db.prepare(`SELECT tour, event_type, prematch_ml_cents pm, trigger_cents trig, set2_outcome s2, match_outcome mo FROM sv_shadow_signals WHERE status='resolved' AND prematch_src != 'first_snapshot' AND set2_outcome IN ('won','lost') AND trigger_cents IS NOT NULL AND prematch_ml_cents >= 60`).all() as any[];
   const shadow: SvCohortRow[] = shadowRows.map((r) => ({ tour: r.tour, eventType: r.event_type, prematchCents: r.pm ?? 0, set2: r.s2 ?? null, match: r.mo ?? null, source: "shadow" as const }));
   const all = [...retro, ...shadow].filter((r) => r.set2 === "won" || r.set2 === "lost"); // scoreable rows only
 
-  const isWta = (r: SvCohortRow) => /wta|women|itf.*w|\bw\b/i.test(`${r.tour ?? ""} ${r.eventType ?? ""}`);
+  const isWta = (r: SvCohortRow) => /wta|women/i.test(`${r.tour ?? ""} ${r.eventType ?? ""}`);
   const strengthBin = (pm: number): string => (pm >= 80 ? "80+" : pm >= 70 ? "70-80" : pm >= 60 ? "60-70" : "<60");
   const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
   const pct = (xs: number[]) => (xs.length ? Math.round(1000 * (mean(xs) ?? 0)) / 10 : null);
@@ -297,7 +339,7 @@ export function buildSvCohort(db: Database, env: Record<string, string | undefin
 
   const verdictRows = all.filter((r) => r.prematchCents >= 60);
   // T5 EV plumbing: median entry + P(win|comeback) per bin, from the shadow subset that carries a trigger.
-  const isWtaR = (r: any) => /wta|women|itf.*w|\bw\b/i.test(`${r.tour ?? ""} ${r.event_type ?? ""}`);
+  const isWtaR = (r: any) => /wta|women/i.test(`${r.tour ?? ""} ${r.event_type ?? ""}`);
   const median = (xs: number[]) => (xs.length ? [...xs].sort((a, b) => a - b)[Math.floor((xs.length - 1) / 2)] : null);
   const attachEv = (b: SvCohortBin, rs: SvCohortRow[], evRs: any[]): SvCohortBin => {
     const trigs = evRs.map((r) => r.trig).filter((x: number) => Number.isFinite(x));

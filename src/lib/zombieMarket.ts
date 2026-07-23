@@ -21,7 +21,7 @@
 // only on unambiguous contradictions; anything it can't classify is left tradeable (fail-open on ambiguity).
 // ============================================================
 
-export type ZombieCode = "resolved_price" | "notation_desync" | "stale_book";
+export type ZombieCode = "resolved_price" | "notation_desync" | "placeholder_mid" | "stale_book";
 export interface ZombieReason { code: ZombieCode; detail: string }
 
 export interface ZombieConfig {
@@ -31,6 +31,17 @@ export interface ZombieConfig {
   notationSpreadCents: number;
   /** (a) a game-state-RESOLVED (P≈1) leg priced at or below (100 − margin)¢ contradicts the event. */
   resolvedMarginCents: number;
+  /** F4: half-width (cents) of the mid-placeholder band — a book within 50±this is a mid-placeholder CANDIDATE.
+   *  It only counts as a placeholder if it has ALSO sat unchanged ≥ placeholderStaleMin (an untraded default
+   *  never moves) — so a fresh, legitimately-neutral 50¢ market is NOT falsely blocked. */
+  placeholderBandCents: number;
+  /** F4: minutes a mid-band book must sit UNCHANGED to count as an untraded placeholder (shorter than the
+   *  general staleBookMin — an exact-50 book that never moves is a stronger placeholder signal). */
+  placeholderStaleMin: number;
+  /** F5: prices at/below this or at/above (100−this) are terminal/efficient — exempt from the stale_book rule
+   *  (a book that "doesn't move" because it's ~0/~100¢ resolved is not a dead placeholder; quarantining it
+   *  only hides an efficient quote from the strategist and flaps quarantine↔lift every tick). */
+  staleExtremeCents: number;
 }
 
 export function loadZombieConfig(env: Record<string, string | undefined> = process.env): ZombieConfig {
@@ -39,12 +50,19 @@ export function loadZombieConfig(env: Record<string, string | undefined> = proce
     staleBookMin: num("FOOTBALL_ZOMBIE_STALE_MIN", 30),
     notationSpreadCents: num("FOOTBALL_ZOMBIE_NOTATION_SPREAD", 12),
     resolvedMarginCents: num("FOOTBALL_ZOMBIE_RESOLVED_MARGIN", 12),
+    placeholderBandCents: num("FOOTBALL_ZOMBIE_PLACEHOLDER_BAND", 0.5),
+    placeholderStaleMin: num("FOOTBALL_ZOMBIE_PLACEHOLDER_STALE_MIN", 10),
+    staleExtremeCents: num("FOOTBALL_ZOMBIE_STALE_EXTREME", 2),
   };
 }
 
 export interface ZombieInput {
   label: string;
   priceCents: number;
+  /** F6: live EXECUTABLE ask (cents) from the fresh book, or null when there's no live book. The resolved_price
+   *  rule evaluates against THIS (what a buy would actually pay), not the possibly-stale stored mid — so a
+   *  resolved leg whose live ask has already caught up to ~100¢ isn't falsely quarantined off a lagging mid. */
+  askCents?: number | null;
   /** game-state live probability for this leg (liveAdjustedProb), or null when it's not a melting option. */
   gsProb: number | null;
   /** max−min price (cents) across the same-outcome notation group, or null when this label is a singleton. */
@@ -58,15 +76,31 @@ export interface ZombieInput {
 /** Classify a single market. Returns the FIRST matching zombie reason (a → b → c), or null if tradeable. */
 export function classifyZombie(inp: ZombieInput, cfg: ZombieConfig): ZombieReason | null {
   // (a) price contradicts a completed event: the leg is game-state-resolved yes but priced far below 100¢.
-  if (inp.gsProb != null && inp.gsProb >= 0.995 && inp.priceCents <= 100 - cfg.resolvedMarginCents) {
-    return { code: "resolved_price", detail: `game-state P≈1 (событие свершилось), но цена ${Math.round(inp.priceCents)}¢ ≤ ${100 - cfg.resolvedMarginCents}¢ — книга не догнала исход` };
+  // F6: compare against the live executable ask when we have one — a resolved leg whose real book already sits
+  // at ~100¢ (only the stored mid lagged) is NOT a phantom and must not flap-quarantine; only quarantine when
+  // the price a buy would actually pay is itself below the margin (stale/no-book → fall back to the stored mid).
+  const resolvedPx = inp.askCents ?? inp.priceCents;
+  if (inp.gsProb != null && inp.gsProb >= 0.995 && resolvedPx <= 100 - cfg.resolvedMarginCents) {
+    return { code: "resolved_price", detail: `game-state P≈1 (событие свершилось), но исполнимая цена ${Math.round(resolvedPx)}¢ ≤ ${100 - cfg.resolvedMarginCents}¢ — книга не догнала исход` };
   }
   // (b) duplicate notations of one outcome desynced beyond tolerance.
   if (inp.groupSpreadCents != null && inp.groupSpreadCents >= cfg.notationSpreadCents) {
     return { code: "notation_desync", detail: `нотации одного исхода разошлись на ${Math.round(inp.groupSpreadCents)}¢ (≥ ${cfg.notationSpreadCents}¢) — несогласованный дублированный рынок` };
   }
-  // (c) stale/dead book on a live match.
-  if (inp.live && inp.bookAgeMin != null && inp.bookAgeMin >= cfg.staleBookMin) {
+  // (b2 = F4) mid-placeholder: an UNTRADED default book parked at 50±band AND unchanged ≥ placeholderStaleMin.
+  // Football had no equivalent of the tennisPmv mid-50 filter, so a 50¢/ai_prob-90% parked book reached the
+  // strategist as a fake 40% "edge". The staleness clause is essential: it fires only on a book that has SAT at
+  // the mid (an untraded default never moves), so a fresh, legitimately-neutral 50¢ market is not falsely
+  // blocked — and the empty-book/retry entry gate still owns brand-new books. Checked AFTER
+  // resolved_price/notation_desync so a resolved or desynced 50¢ member keeps its more specific code.
+  if (Math.abs(inp.priceCents - 50) <= cfg.placeholderBandCents && inp.bookAgeMin != null && inp.bookAgeMin >= cfg.placeholderStaleMin) {
+    return { code: "placeholder_mid", detail: `книга у мид-плейсхолдера (${Math.round(inp.priceCents * 10) / 10}¢ ≈ 50¢, не менялась ${Math.round(inp.bookAgeMin)}м) — недоразмеченный дефолт, любой edge против неё фантом` };
+  }
+  // (c) stale/dead book on a live match — but NOT a terminal/efficient extreme (≤staleExtreme or ≥100−staleExtreme):
+  // such a book "doesn't move" because it's resolved-priced, not dead; quarantining it only hides an efficient
+  // quote and flaps quarantine↔lift each tick (F5).
+  const extreme = inp.priceCents <= cfg.staleExtremeCents || inp.priceCents >= 100 - cfg.staleExtremeCents;
+  if (inp.live && !extreme && inp.bookAgeMin != null && inp.bookAgeMin >= cfg.staleBookMin) {
     return { code: "stale_book", detail: `книга не менялась ${Math.round(inp.bookAgeMin)} мин при живом матче (≥ ${cfg.staleBookMin}) — стухшая/плейсхолдер` };
   }
   return null;
@@ -79,6 +113,12 @@ export function outcomeKey(label: string): string {
   // \b is ASCII-only in JS, so Cyrillic tokens need unicode-letter lookarounds to isolate whole words
   // (else "да"/"нет" would never fold, or would fold inside a name). English words pass through untouched.
   let s = ` ${String(label).toLowerCase()} `;
+  // F3: drop a "(TeamA vs TeamB)" order-qualifier before folding. Polymarket emits the same draw outcome under
+  // "Draw — Yes", "Draw (A vs. B) — Yes" and "Draw (B vs. A) — Yes"; keeping the parenthetical made each a
+  // distinct singleton key, so notationSpreads never grouped them and the notation_desync guard silently
+  // no-opped on its exact target family. Only qualifiers containing a "vs"/"против" token are stripped, so a
+  // handicap parenthetical like "(-1.5)" (where the number is meaningful) is untouched.
+  s = s.replace(/\([^)]*\s(?:vs\.?|против|v)\s[^)]*\)/gu, " ");
   const syn: [RegExp, string][] = [
     [/ничья/gu, "draw"], [/(?<![\p{L}])x(?![\p{L}])/giu, "draw"],
     [/(?<![\p{L}])да(?![\p{L}])/giu, "yes"], [/(?<![\p{L}])нет(?![\p{L}])/giu, "no"],

@@ -15,7 +15,9 @@
 //   e3  melting-option / game-state live prob + time_stop
 //   e4  fees+slippage ledger + real-$5000 budget view
 //   e5  post-audit: partial-close P&L + reserve-leak + time_stop-per-profile fixes
-export const CODE_VERSION = "e5";
+//   e6  batch-6: exonym team-linking + zombie fixes (notation/placeholder/extreme/live-ask) +
+//       gap-monitor blackout + tennis set-value scope/quarantine/coverage + tour-scope (ITF out)
+export const CODE_VERSION = "e6";
 
 /** Decision-time snapshot stored as JSON on the bet. Every field is what was TRUE at
  *  the instant the bet was proposed/filled — never re-read later. All optional so a

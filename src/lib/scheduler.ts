@@ -16,7 +16,7 @@ import { getDb } from "./db.js";
 import * as R from "./repo.js";
 import { loadSportsProvider, loadSportsConfig } from "./sports.js";
 import { loadPolymarketConfig } from "./polymarket.js";
-import { runAutoCycle, runLiveCycle, hasLiveMatchInPlay } from "./lifecycle.js";
+import { runAutoCycle, runLiveCycle, hasLiveMatchInPlay, earliestInPlayKickoffMs } from "./lifecycle.js";
 import { tryAcquireEngine, releaseEngine } from "./engineLock.js";
 import { recordScheduleGap } from "./scheduleGap.js";
 
@@ -34,7 +34,7 @@ const LAST_LIVE_TICK_KEY = "last_live_tick_ms";
 function stampLiveTick(db: ReturnType<typeof getDb>, nowMs: number, env: Record<string, string | undefined>): void {
   try {
     const prev = Number(R.metaGet(db, LAST_LIVE_TICK_KEY) ?? 0);
-    try { recordScheduleGap(db, prev, nowMs, hasLiveMatchInPlay(db), env); } catch { /* monitor best-effort */ }
+    try { recordScheduleGap(db, prev, nowMs, hasLiveMatchInPlay(db), env, earliestInPlayKickoffMs(db)); } catch { /* monitor best-effort */ }
     R.metaSet(db, LAST_LIVE_TICK_KEY, String(nowMs), new Date(nowMs).toISOString());
   } catch { /* stamp best-effort — a failed stamp just makes the next tick look overdue */ }
 }

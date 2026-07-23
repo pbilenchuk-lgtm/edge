@@ -370,6 +370,20 @@ export function hasLiveMatchInPlay(db: Database): boolean {
   return activeMatches(db).some(({ match: m }) => m.state === "live");
 }
 
+/** F7: earliest kickoff (ms) among matches currently in play, or 0 if none. Lets the gap monitor measure a
+ *  live blackout that PRECEDES the first live-tick marker (fresh boot / first tick after a long quiet window):
+ *  a match already in play since kickoff got zero live management up to now, but with no prior marker to
+ *  diff against the window was invisible. This gives the monitor a floor to measure from. */
+export function earliestInPlayKickoffMs(db: Database): number {
+  let min = 0;
+  for (const { match: m } of activeMatches(db)) {
+    if (m.state !== "live" || !m.kickoff_at) continue;
+    const k = Date.parse(m.kickoff_at); if (!Number.isFinite(k)) continue;
+    if (min === 0 || k < min) min = k;
+  }
+  return min;
+}
+
 // ------------------------------------------------------------
 // 0) Advance clocks — flip lineup_out / state from the kickoff time
 // ------------------------------------------------------------
@@ -1300,7 +1314,7 @@ function footballZombieMap(
       ? liveAdjustedProb(mk.label, { home: m.home, away: m.away, scoreHome: m.score_home, scoreAway: m.score_away, minute, core }, lpCfg)
       : null;
     const bookAge = R.bookStaleMinutes(db, m.id, mk.label, mk.price, now);
-    const z = classifyZombie({ label: mk.label, priceCents: mk.price, gsProb: gs?.prob ?? null, groupSpreadCents: spreads.get(mk.label) ?? null, bookAgeMin: bookAge, live: true }, cfg);
+    const z = classifyZombie({ label: mk.label, priceCents: mk.price, askCents: mk.ask_cents ?? null, gsProb: gs?.prob ?? null, groupSpreadCents: spreads.get(mk.label) ?? null, bookAgeMin: bookAge, live: true }, cfg);
     if (!z) continue;
     out.set(mk.label, z);
     if (logSid) throttleZombieLog(db, m, mk.label, z.code, `zombie_quarantine:${z.code} «${mk.label}»: ${z.detail} — рынок на карантине для всех потребителей (вход/контекст)`, logSid, now);

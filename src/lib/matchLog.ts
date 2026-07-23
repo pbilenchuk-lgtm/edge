@@ -56,10 +56,16 @@ function liveDataStatus(db: Database, matchId: string): { ok: boolean; via: stri
     const total = (db.prepare(`SELECT COUNT(*) n FROM tennis_snapshots WHERE pm_match_id=?`).get(matchId) as { n?: number } | undefined)?.n ?? 0;
     if (!snap) return { ok: false, via: "теннис: скаут не привязал матч (0 снапшотов tennis_snapshots) — маппинг имён не сошёлся или скаут не видит матч live" };
     const ageMin = Math.round((Date.now() - (Date.parse(snap.batch_at ?? "") || 0)) / 60000);
-    const fresh = ageMin <= 15; // mirrors TENNIS_SCOUT_STALE_MIN
+    // T6: env-tunable staleness (was hardcoded 15), mirrors TENNIS_SCOUT_STALE_MIN so the two never drift.
+    const staleMin = (() => { const n = Number(process.env.TENNIS_SCOUT_STALE_MIN); return Number.isFinite(n) && n > 0 ? n : 15; })();
+    const fresh = ageMin <= staleMin;
     const score = `сет ${snap.set_num ?? "?"}, геймы ${snap.games_p1 ?? "?"}-${snap.games_p2 ?? "?"}`;
     if (snap.live === 1 && fresh) return { ok: true, via: `теннис-скаут live (${total} снапшотов, свежий ${ageMin}м назад · ${score})` };
-    if (snap.live === 1) return { ok: false, via: `теннис-скаут: последний снапшот live, но устарел (${ageMin}м > 15м) — скаут молчит (крон/скаут простаивал)` };
+    // T4: a FINISHED match legitimately stops receiving fresh snapshots — the scout stop-polled after the
+    // terminal snapshot (which still carries live=1 Finished). Report that, NOT a false "скаут молчит /
+    // крон простаивал" outage — the match just ended, nothing is broken.
+    if (snap.live === 1 && m?.state === "finished") return { ok: false, via: `теннис-скаут: матч завершён ${ageMin}м назад — скаут корректно остановился (${total} снапшотов · ${score})` };
+    if (snap.live === 1) return { ok: false, via: `теннис-скаут: последний снапшот live, но устарел (${ageMin}м > ${staleMin}м) — скаут молчит (крон/скаут простаивал)` };
     return { ok: false, via: `теннис-скаут: последний снапшот не live (${total} снапшотов, ${ageMin}м назад · ${score})` };
   }
   if (m?.state === "live") {

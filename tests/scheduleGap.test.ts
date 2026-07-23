@@ -55,3 +55,19 @@ test("recordScheduleGap: a sleep with NO live match is recorded but not flagged 
   const okByHarm = cron.map((c) => c.ok).sort();
   assert.deepEqual(okByHarm, [0, 1], "the no-live gap ok=1, the live gap ok=0");
 });
+
+test("F7 recordScheduleGap: a live blackout since kickoff with no prior marker is recorded via the in-play floor", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const kickoff = Date.parse("2026-07-22T15:00:00Z");
+  const firstTick = Date.parse("2026-07-22T16:53:00Z"); // 113 min later — first live tick after the loop sat idle
+  // no prior live-tick marker (prevMs=0), but a match has been in play since kickoff → measured from kickoff
+  const gap = recordScheduleGap(db, 0, firstTick, true, {}, kickoff);
+  assert.ok(gap, "the pre-first-tick blackout is now surfaced, not swallowed");
+  assert.equal(gap!.sec, 113 * 60);
+  assert.equal(gap!.liveInPlay, true);
+  // no in-play floor and no prior marker → nothing to measure (unchanged old behaviour)
+  assert.equal(recordScheduleGap(db, 0, firstTick, true, {}, 0), null);
+  // a healthy loop (recent prevMs) is unaffected even when a kickoff floor is supplied — prevMs wins
+  assert.equal(recordScheduleGap(db, firstTick - 20_000, firstTick, true, {}, kickoff), null);
+});

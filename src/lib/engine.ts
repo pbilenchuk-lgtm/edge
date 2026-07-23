@@ -881,12 +881,30 @@ function foldLetters(s: string): string {
     .replace(/ø/g, "o").replace(/æ/g, "ae").replace(/œ/g, "oe").replace(/ß/g, "ss")
     .replace(/đ/g, "d").replace(/ð/g, "d").replace(/ł/g, "l").replace(/þ/g, "th").replace(/ħ/g, "h").replace(/ı/g, "i");
 }
+// F1: city EXONYMS — Polymarket carries the native spelling, ESPN/StatPal the English one, and diacritic
+// folding alone can't bridge a translated city ("Wien"→"Vienna", "Barysaŭ"→"Borisov"). Without this the
+// fixture never links → no match_live → phantom kickoff clock, zero entries, forced ?:? finish (Santa
+// Coloma–Rapid Wien, BATE Barysaŭ). Applied to BOTH names symmetrically and only maps a spelling to its
+// canonical, so it cannot create a false match: the distinctive-token subset gate in nameMatch still holds
+// (two different Vienna clubs keep their distinct rapid/austria tokens). Keys are post-fold/NFD ASCII tokens.
+const TEAM_EXONYMS: Record<string, string> = {
+  wien: "vienna", wenen: "vienna",
+  barysau: "borisov", barysaw: "borisov",
+  munchen: "munich", muenchen: "munich",
+  koln: "cologne", koeln: "cologne",
+  praha: "prague", moskva: "moscow", kyiv: "kiev",
+  beograd: "belgrade", warszawa: "warsaw", lisboa: "lisbon",
+  athina: "athens", bucuresti: "bucharest", kobenhavn: "copenhagen",
+  milano: "milan", torino: "turin", genova: "genoa", roma: "rome",
+  sevilla: "seville", venezia: "venice", firenze: "florence",
+};
 function teamTokens(name: string): Set<string> {
   // Keep tokens ≥3 chars, OR short ones that carry a digit — esports orgs are
   // routinely 2-char names ("T1", "G2", "C9"). Dropping those left such a match
   // with an EMPTY token set, so nameMatch always failed and the fixture could
   // never reconcile with the provider (it hung "live" forever on the timer).
-  return new Set(foldLetters(name.toLowerCase()).normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 3 || /\d/.test(w)));
+  const toks = foldLetters(name.toLowerCase()).normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 3 || /\d/.test(w));
+  return new Set(toks.map((w) => TEAM_EXONYMS[w] ?? w));   // F1: canonicalize known city exonyms
 }
 /** Do two team names refer to the same club/nation? Requires every token of the
  *  shorter name to appear in the longer (so "West Ham" ⊂ "West Ham United" ok,
@@ -902,14 +920,14 @@ function tokenCompat(x: string, y: string): boolean {
   const [s, g] = x.length <= y.length ? [x, y] : [y, x];
   return s.length >= 5 && g.length - s.length <= 3 && g.startsWith(s);
 }
-function nameMatch(a: string, b: string): boolean {
+export function nameMatch(a: string, b: string): boolean {
   const ta = [...teamTokens(a)], tb = [...teamTokens(b)];
   if (!ta.length || !tb.length) return false;
   const [small, big] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
   if (!small.every((t) => big.some((u) => tokenCompat(t, u)))) return false; // shorter ⊆ longer (stem-aware)
   return small.some((t) => !TEAM_STOPWORDS.has(t) && big.some((u) => !TEAM_STOPWORDS.has(u) && tokenCompat(t, u))); // a real, distinctive token
 }
-function sameTeams(h1: string, a1: string, h2: string, a2: string): boolean {
+export function sameTeams(h1: string, a1: string, h2: string, a2: string): boolean {
   return (nameMatch(h1, h2) && nameMatch(a1, a2)) || (nameMatch(h1, a2) && nameMatch(a1, h2));
 }
 

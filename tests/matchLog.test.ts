@@ -72,3 +72,21 @@ test("buildMatchLog: says so when there are no shadow decisions for the match", 
   R.metaSet(db, "shadow_config", JSON.stringify({ enabled: false }), "2026-07-13T13:00:00Z");
   assert.match(buildMatchLog(db, mid), /аллокатор ВЫКЛЮЧЕН/);
 });
+
+test("T4/T6 buildMatchLog: a finished tennis match with a stale scout reads «скаут корректно остановился», not an outage", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertCompetition(db, { id: "pm-wta", sport_id: "tennis", name: "WTA", budget: 0, external_league: null, created_at: "t" });
+  const stale = new Date(Date.now() - 30 * 60000).toISOString(); // 30 min old (> the 15-min freshness window)
+  const mk = (id: string, state: string) => {
+    R.insertMatch(db, { id, competition_id: "pm-wta", home: "A", away: "B", state, lineup_out: true, kickoff_at: "t", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: id } as any);
+    R.insertTennisSnapshot(db, { event_key: id, provider: "apitennis", batch_at: stale, p1: "A", p2: "B", tournament: "WTA", event_type: "WTA Singles", live: 1, status: "Finished", sets_p1: 2, sets_p2: 1, set_num: 3, games_p1: 6, games_p2: 4, game_points: null, server: null, pm_match_id: id, pm_mid_cents: null, pm_p1_cents: 100, pm_p2_cents: 0, raw: null } as any);
+  };
+  mk("fin", "finished");
+  mk("liv", "live");
+  const finLog = buildMatchLog(db, "fin");
+  assert.match(finLog, /скаут корректно остановился/, "finished match: reported as a clean stop, not an outage");
+  assert.doesNotMatch(finLog, /скаут молчит/, "finished match must NOT cry «скаут молчит»");
+  // a genuinely still-live match with a stale scout IS a real outage
+  assert.match(buildMatchLog(db, "liv"), /скаут молчит/);
+});

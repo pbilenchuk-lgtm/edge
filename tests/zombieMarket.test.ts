@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classifyZombie, outcomeKey, notationSpreads, loadZombieConfig, type ZombieConfig } from "../src/lib/zombieMarket.js";
 
-const CFG: ZombieConfig = { staleBookMin: 30, notationSpreadCents: 12, resolvedMarginCents: 12 };
+const CFG: ZombieConfig = { staleBookMin: 30, notationSpreadCents: 12, resolvedMarginCents: 12, placeholderBandCents: 0.5, placeholderStaleMin: 10, staleExtremeCents: 2 };
 
 test("P1 classifyZombie (a): a game-state-resolved leg priced far below 100¢ is a resolved_price zombie", () => {
   // both teams scored → BTTS-Yes gsProb ≈ 1, but the book still sits at 50¢ (Vardar)
@@ -58,4 +58,54 @@ test("P1 loadZombieConfig: defaults and env overrides", () => {
   assert.equal(d.resolvedMarginCents, 12);
   const o = loadZombieConfig({ FOOTBALL_ZOMBIE_STALE_MIN: "15", FOOTBALL_ZOMBIE_NOTATION_SPREAD: "20", FOOTBALL_ZOMBIE_RESOLVED_MARGIN: "8" });
   assert.deepEqual([o.staleBookMin, o.notationSpreadCents, o.resolvedMarginCents], [15, 20, 8]);
+});
+
+test("F3 outcomeKey: a «(TeamA vs TeamB)» order-qualifier is stripped so all Draw notations collapse to one key", () => {
+  // Debreceni–Pyunik: three disagreeing draw notations that used to key as distinct singletons
+  const k = outcomeKey("Draw — Yes");
+  assert.equal(outcomeKey("Draw (Pyunik FA vs. Debreceni VSC) — Yes"), k, "team-vs-team qualifier folds away");
+  assert.equal(outcomeKey("Draw (Debreceni VSC vs. Pyunik FA) — Yes"), k, "reverse team order folds to the same key");
+  // a handicap parenthetical (number is meaningful, no vs-token) is NOT stripped
+  assert.notEqual(outcomeKey("Debreceni VSC (-1.5)"), outcomeKey("Debreceni VSC (-2.5)"));
+});
+
+test("F3 notationSpreads: the three-notation draw group now spreads together and trips notation_desync", () => {
+  const s = notationSpreads([
+    { label: "Draw — Yes", price: 99.6 },
+    { label: "Draw (Pyunik FA vs. Debreceni VSC) — Yes", price: 42 },
+    { label: "Draw (Debreceni VSC vs. Pyunik FA) — Yes", price: 0.1 },
+  ]);
+  assert.ok((s.get("Draw — Yes") ?? 0) >= CFG.notationSpreadCents, "grouped spread ≥ tolerance");
+  const z = classifyZombie({ label: "Draw (Pyunik FA vs. Debreceni VSC) — Yes", priceCents: 42, gsProb: null, groupSpreadCents: s.get("Draw (Pyunik FA vs. Debreceni VSC) — Yes") ?? null, bookAgeMin: 1, live: true }, CFG);
+  assert.equal(z?.code, "notation_desync", "the desynced draw member is now quarantined, not fed as phantom edge");
+});
+
+test("F4 classifyZombie: an UNTRADED mid-placeholder (50±band, parked ≥stale) is placeholder_mid; a fresh 50¢ is not", () => {
+  // SK Rapid Wien Over 0.5: 50¢ · ai_prob 90% on an untraded Polymarket-only book, sat unchanged
+  assert.equal(classifyZombie({ label: "SK Rapid Wien Over 0.5", priceCents: 50, gsProb: null, groupSpreadCents: null, bookAgeMin: 20, live: true }, CFG)?.code, "placeholder_mid");
+  assert.equal(classifyZombie({ label: "x", priceCents: 50.4, gsProb: null, groupSpreadCents: null, bookAgeMin: 20, live: true }, CFG)?.code, "placeholder_mid");
+  // a FRESH 50¢ market (book not yet sat) is NOT falsely blocked — the entry gate owns brand-new books
+  assert.equal(classifyZombie({ label: "x", priceCents: 50, gsProb: null, groupSpreadCents: null, bookAgeMin: 3, live: true }, CFG), null);
+  assert.equal(classifyZombie({ label: "x", priceCents: 50, gsProb: null, groupSpreadCents: null, bookAgeMin: null, live: true }, CFG), null);
+  // just outside the band → not a placeholder even if parked
+  assert.equal(classifyZombie({ label: "x", priceCents: 47, gsProb: null, groupSpreadCents: null, bookAgeMin: 20, live: true }, CFG), null);
+  // a resolved 50¢ leg keeps its more specific resolved_price code (placeholder is checked after)
+  assert.equal(classifyZombie({ label: "BTTS — Yes", priceCents: 50, gsProb: 1, groupSpreadCents: null, bookAgeMin: 20, live: true }, CFG)?.code, "resolved_price");
+});
+
+test("F5 classifyZombie: an extreme-priced (≤2 / ≥98) stale book is exempt from stale_book; a mid one still fires", () => {
+  // Debreceni Under 5.5 ~99.6¢ sitting unchanged 356 min was flap-quarantined; now exempt
+  assert.equal(classifyZombie({ label: "Under 5.5", priceCents: 99.6, gsProb: null, groupSpreadCents: null, bookAgeMin: 356, live: true }, CFG), null);
+  assert.equal(classifyZombie({ label: "Over 0.5", priceCents: 0.5, gsProb: null, groupSpreadCents: null, bookAgeMin: 356, live: true }, CFG), null);
+  // a genuinely mid-priced stale book is still a stale_book zombie
+  assert.equal(classifyZombie({ label: "Over 2.5", priceCents: 55, gsProb: null, groupSpreadCents: null, bookAgeMin: 40, live: true }, CFG)?.code, "stale_book");
+});
+
+test("F6 classifyZombie: resolved_price evaluates the live ask, not a lagging stored mid", () => {
+  // Debreceni Over 0.5 @62': stored mid 77.5¢ (lagged) but live book already ~100¢ (ask 99.9) → NOT a zombie
+  assert.equal(classifyZombie({ label: "Debreceni VSC Over 0.5", priceCents: 77.5, askCents: 99.9, gsProb: 1, groupSpreadCents: null, bookAgeMin: 5, live: true }, CFG), null);
+  // a resolved leg whose live ask is genuinely below the margin stays quarantined (suspicious near-arb → skip)
+  assert.equal(classifyZombie({ label: "Debreceni VSC Over 0.5", priceCents: 77.5, askCents: 74, gsProb: 1, groupSpreadCents: null, bookAgeMin: 5, live: true }, CFG)?.code, "resolved_price");
+  // no live book (ask null) → fall back to the stored mid (unchanged fail-closed behaviour)
+  assert.equal(classifyZombie({ label: "x", priceCents: 74, askCents: null, gsProb: 1, groupSpreadCents: null, bookAgeMin: 5, live: true }, CFG)?.code, "resolved_price");
 });

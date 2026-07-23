@@ -6,7 +6,7 @@ import {
   serverSide, parsePair, currentSet, normalizeLive, detectBreaks, detectTennisEvents,
   collectTennisSnapshots, buildTennisScoutReport, loadTennisConfig, tennisScoutMarkdown,
   recordTennisBreakMarks, buildTennisBreakReport, tennisMoneyline, tennisScoutSilence,
-  buildTennisOverreactionCohort,
+  buildTennisOverreactionCohort, tourFromEventType,
 } from "../src/lib/tennisScout.js";
 
 const T0 = Date.parse("2026-07-14T00:00:00.000Z");
@@ -326,4 +326,17 @@ test("recordTennisBreakMarks: marks the panic window on the broken player's winn
   const brep = buildTennisBreakReport(db);
   assert.equal(brep.totalMarks, 1);
   assert.ok(!brep.ready, "1 of 100 → not calibration-ready");
+});
+
+test("T2 tourFromEventType: ITF is out of scope, not mis-folded into ATP/WTA via the men|women branch", () => {
+  // the leak: api-tennis names ITF "ITF Men/Women Singles" → old /atp|men/ regex classified it ATP
+  assert.equal(tourFromEventType("ITF Men Singles"), null, "ITF men → out of scope");
+  assert.equal(tourFromEventType("ITF Women Singles"), null, "ITF women → out of scope");
+  assert.equal(tourFromEventType("Challenger Men Singles"), null);
+  assert.equal(tourFromEventType("WTA 125 Singles"), null);
+  // main tour still classifies
+  assert.equal(tourFromEventType("ATP Singles"), "atp");
+  assert.equal(tourFromEventType("WTA Singles"), "wta");
+  assert.equal(tourFromEventType("Atp Men Singles"), "atp");
+  assert.equal(tourFromEventType(null), null);
 });

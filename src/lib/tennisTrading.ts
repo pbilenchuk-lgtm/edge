@@ -19,7 +19,7 @@ import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { chargeTennisTriggers, tennisReassessShouldCall, type TennisCharge } from "./tennisOverreaction.js";
 import { SET_VALUE_STRATEGY, SET_VALUE_ARMED, SET_VALUE_EPOCH, setValueGate, setValueFlagOnly } from "./tennisSetValue.js";
 import { recordSvShadowSignal, SV_SHADOW_EPOCH } from "./tennisSetValueShadow.js";
-import { detectBreaks, detectTennisEvents, tennisMoneyline, favTokenOf, tennisTourOf, fetchTennisFixtures, trimRaw, TENNIS_TERMINAL_RE, loadTennisConfig } from "./tennisScout.js";
+import { detectBreaks, detectTennisEvents, tennisMoneyline, favTokenOf, tennisTourOf, tourFromEventType, fetchTennisFixtures, trimRaw, TENNIS_TERMINAL_RE, loadTennisConfig } from "./tennisScout.js";
 import { loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
 import { classifyOrderBook, paperSellFill } from "./executor/paperFill.js";
 import { bookDepthUsd, liquidationCents } from "./execution.js";
@@ -89,9 +89,11 @@ export function tennisPanicThresholds(db: Database): TennisPanicThresholds {
   const envDrop = (p: string) => { const n = Number(process.env[`TENNIS_PANIC_MIN_DROP_${p.toUpperCase()}`]); return Number.isFinite(n) && n >= 0 ? n : null; };
   const eA = envDrop("aggressive"), eM = envDrop("medium"), eC = envDrop("conservative");
   if (eA != null && eM != null && eC != null) return { aggressive: eA, medium: eM, conservative: eC, source: "env", n: 0 };
-  // In-scope early panic amplitudes: ATP or WTA, NOT Challenger, broke_early.
+  // In-scope early panic amplitudes: ATP or WTA singles, broke_early. T2: gate on tourFromEventType (which
+  // excludes ITF/Challenger/125/qualifying) — the old `men|women` regex pulled "ITF Men Singles" in, skewing
+  // the live-armed panic quantiles with thin/jumpy ITF amplitudes.
   const xs = R.listTennisBreakMarks(db)
-    .filter((m) => m.panic_cents != null && m.broke_early && !/challenger/i.test(m.event_type ?? "") && /\b(atp|wta|men|women)\b/i.test(m.event_type ?? ""))
+    .filter((m) => m.panic_cents != null && m.broke_early && tourFromEventType(m.event_type ?? null) != null)
     .map((m) => m.panic_cents as number)
     .sort((a, b) => a - b);
   if (xs.length < TENNIS_PANIC_MIN_MARKS) return { ...(TENNIS_PANIC_INTERIM as { aggressive: number; medium: number; conservative: number }), source: "interim", n: xs.length };

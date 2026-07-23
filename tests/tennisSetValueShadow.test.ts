@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { recordSvShadowSignal, resolveSvShadowSignals, buildSvShadowCalibration, svRetroCohort, buildSvCohort, SV_SHADOW_EPOCH } from "../src/lib/tennisSetValueShadow.js";
+import { recordSvShadowSignal, resolveSvShadowSignals, buildSvShadowCalibration, svRetroCohort, buildSvCohort, set2PathCoverage, SV_SHADOW_EPOCH } from "../src/lib/tennisSetValueShadow.js";
 
 const TRIG = "2026-07-22T18:14:00.000Z";  // set-2 trigger time
 const NOW = "2026-07-22T19:30:00.000Z";
@@ -121,4 +121,53 @@ test("T5 svComputeEv: even 50/50 at 40¢ bleeds after fees (hold); 60/60 at 35¢
   const c = svComputeEv(35, 20, 60, 60, {}); // same EV but thin sample
   assert.equal(c.verdict, "insufficient", "n<40 never reenables regardless of EV");
   assert.equal(svComputeEv(null, 50, 60, 60, {}).evReturnPct, null, "no entry basis → no EV");
+});
+
+test("T1 svRetroCohort: an ITF match is scope-gated OUT; the WTA one enters with a canonical tour tag", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "pm-itf", sport_id: "tennis", name: "ITF", budget: 0, external_league: null, created_at: "t" });
+  R.upsertCompetition(db, { id: "pm-wta", sport_id: "tennis", name: "WTA", budget: 0, external_league: null, created_at: "t" });
+  const seedRetro = (mid: string, comp: string, et: string) => {
+    R.insertMatch(db, { id: mid, competition_id: comp, home: "Fav", away: "Opp", state: "finished", lineup_out: true, kickoff_at: "t", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: mid } as any);
+    const snap = (o: any) => R.insertTennisSnapshot(db, { event_key: mid, provider: "apitennis", p1: "Fav", p2: "Opp", tournament: "T", event_type: et, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, raw: null, ...o } as any);
+    snap({ batch_at: "2026-07-22T16:50:00Z", live: 1, status: "Set 1", sets_p1: 0, sets_p2: 0, set_num: 0, games_p1: 0, games_p2: 0, pm_p1_cents: 80, pm_p2_cents: 20 }); // fav p1 80¢
+    snap({ batch_at: "2026-07-22T17:40:00Z", live: 1, status: "Set 1", sets_p1: 0, sets_p2: 1, set_num: 1, games_p1: 5, games_p2: 7, pm_p1_cents: 40, pm_p2_cents: 60 }); // fav LOST set 1
+    snap({ batch_at: "2026-07-22T19:10:00Z", live: 0, status: "Finished", sets_p1: 2, sets_p2: 1, set_num: 3, games_p1: 6, games_p2: 4, pm_p1_cents: 100, pm_p2_cents: 0 }); // fav won 2-1
+  };
+  seedRetro("itf1", "pm-itf", "ITF Men Singles");
+  seedRetro("wta1", "pm-wta", "WTA Singles");
+  const cohort = svRetroCohort(db);
+  assert.equal(cohort.length, 1, "only the WTA match enters; ITF is scope-gated out");
+  assert.equal(cohort[0].tour, "wta", "row carries the canonical tour, not the raw tournament name");
+});
+
+test("T1 buildSvShadowCalibration: a first_snapshot-sourced signal is quarantined out of the verdict cohort", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seedMatch(db, "good", { favIsP1: true, finalFavSets: 2, finalOppSets: 1, set2FavPrices: [33, 40, 58] });
+  seedMatch(db, "bad", { favIsP1: true, finalFavSets: 2, finalOppSets: 1, set2FavPrices: [33, 40, 58] });
+  recordSvShadowSignal(db, input("good", "first", { prematchSrc: "prematch" }));
+  recordSvShadowSignal(db, input("bad", "first", { prematchSrc: "first_snapshot" }));
+  resolveSvShadowSignals(db, { now: () => NOW });
+  const cal = buildSvShadowCalibration(db);
+  assert.equal(cal.counts.resolved, 2, "both resolved");
+  assert.equal(cal.counts.firstSnapQuarantined, 1, "the first_snapshot row is quarantined");
+  assert.equal(cal.overall?.n, 1, "only the true-prematch row feeds the verdict cohort");
+});
+
+test("T5 set2PathCoverage / calibration: a set-2 path holed by a scheduler sleep is flagged sparse", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  // dense set-2 path (many close snapshots) → not sparse
+  seedMatch(db, "dense", { favIsP1: true, finalFavSets: 2, finalOppSets: 1, set2FavPrices: [33, 34, 35, 36, 37] });
+  recordSvShadowSignal(db, input("dense", "first", { prematchSrc: "prematch" }));
+  // sparse set-2 path: only 2 snapshots → below the min-snaps floor
+  seedMatch(db, "sparse", { favIsP1: true, finalFavSets: 2, finalOppSets: 1, set2FavPrices: [33] });
+  recordSvShadowSignal(db, input("sparse", "first", { prematchSrc: "prematch" }));
+  resolveSvShadowSignals(db, { now: () => NOW });
+  const covDense = set2PathCoverage(db, "dense", "first", TRIG);
+  const covSparse = set2PathCoverage(db, "sparse", "first", TRIG);
+  assert.equal(covDense.sparse, false, "dense path is trustworthy");
+  assert.equal(covSparse.sparse, true, "too few set-2 snapshots → sparse");
+  const cal = buildSvShadowCalibration(db);
+  assert.equal(cal.counts.sparsePath, 1, "exactly the sparse row is flagged");
 });

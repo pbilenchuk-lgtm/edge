@@ -66,13 +66,19 @@ export interface ScheduleGap { startMs: number; endMs: number; sec: number; live
  */
 export function recordScheduleGap(
   db: Database, prevMs: number, nowMs: number, inPlay: boolean, env: Record<string, string | undefined> = process.env,
+  inPlaySinceMs = 0,
 ): ScheduleGap | null {
-  if (!prevMs || !Number.isFinite(prevMs) || !Number.isFinite(nowMs) || nowMs <= prevMs) return null;
-  const sec = Math.round((nowMs - prevMs) / 1000);
+  // F7: with no valid prior live-tick marker (fresh boot / first live tick after a long quiet window) the
+  // blackout over a match that has ALREADY been in play since kickoff was swallowed — nothing to diff against.
+  // Fall back to the earliest in-play kickoff so that "a live match sat with no live tick since kickoff" is
+  // recorded, not lost. A healthy loop (recent prevMs) is unaffected: prevMs wins whenever it's valid.
+  const effStart = (prevMs && Number.isFinite(prevMs)) ? prevMs : (inPlay && inPlaySinceMs && Number.isFinite(inPlaySinceMs) ? inPlaySinceMs : 0);
+  if (!effStart || !Number.isFinite(nowMs) || nowMs <= effStart) return null;
+  const sec = Math.round((nowMs - effStart) / 1000);
   if (sec < gapAlertSec(env)) return null;
-  const gap: ScheduleGap = { startMs: prevMs, endMs: nowMs, sec, liveInPlay: inPlay };
+  const gap: ScheduleGap = { startMs: effStart, endMs: nowMs, sec, liveInPlay: inPlay };
   const at = new Date(nowMs).toISOString();
-  const startIso = new Date(prevMs).toISOString();
+  const startIso = new Date(effStart).toISOString();
   const mins = Math.round(sec / 60);
   const liveNote = inPlay
     ? " · В ПЛЕЙ был лайв-матч — стопы могли исполниться по дну гэпа"

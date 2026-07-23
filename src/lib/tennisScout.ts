@@ -42,6 +42,20 @@ export function tennisTourOf(c: { id: string; name: string; external_league?: st
   return null;
 }
 
+// T2: SAME scope decision as tennisTourOf, but keyed on the api-tennis `event_type` STRING carried by
+// snapshot/break-mark rows (which have no comp handle). The cohort/threshold readers used to classify tier
+// with a bare `men|women` branch — but api-tennis names ITF as "ITF Men Singles"/"ITF Women Singles", so
+// "men"/"women" pulled ITF into ATP/WTA, polluting the overreaction re-enable verdict AND the live-armed
+// panic quantiles. Main tour carries an explicit "ATP Singles"/"WTA Singles" token; the men|women fallback
+// only ever matched lower tiers, so excluding ITF/Challenger/125/qualifying FIRST is the whole fix.
+export function tourFromEventType(eventType: string | null): "atp" | "wta" | null {
+  const s = (eventType ?? "").toLowerCase();
+  if (/doubles|itf|challenger|wta ?125|atp ?125|\b125\b|\bqualif/.test(s)) return null; // out of scope
+  if (/\bwta\b|women/.test(s)) return "wta";
+  if (/\batp\b|men/.test(s)) return "atp";
+  return null;
+}
+
 export interface TennisConfig { enabled: boolean; key: string; base: string; timeoutMs: number }
 export function loadTennisConfig(env: Record<string, string | undefined> = process.env): TennisConfig {
   const key = (env.API_TENNIS_KEY ?? env.APITENNIS_KEY ?? "").trim();
@@ -644,7 +658,9 @@ export function buildTennisBreakReport(db: Database): TennisBreakReport {
   const mapLog = R.tennisMapLog(db, 5000);
   const mapping = { auto: mapLog.filter((m) => m.verdict === "auto").length, review: mapLog.filter((m) => m.verdict === "review").length, skip: mapLog.filter((m) => m.verdict === "skip").length };
   const groups = new Map<string, R.TennisBreakMarkRow[]>();
-  const levelOf = (t: string | null) => /challenger/i.test(t ?? "") ? "Challenger" : /wta/i.test(t ?? "") ? "WTA" : /atp|men/i.test(t ?? "") ? "ATP" : (t ?? "?");
+  // T2: ITF is its OWN display bucket (was mislabeled "ATP" via the men-branch on "ITF Men Singles"), so the
+  // panic-by-context diagnostic no longer blends ITF amplitudes into the ATP row. Order: ITF/Challenger first.
+  const levelOf = (t: string | null) => /itf/i.test(t ?? "") ? "ITF" : /challenger/i.test(t ?? "") ? "Challenger" : /wta|women/i.test(t ?? "") ? "WTA" : /atp|men/i.test(t ?? "") ? "ATP" : (t ?? "?");
   for (const m of marks) {
     const ctx = `${levelOf(m.event_type)} · ${m.broke_early ? "early" : "late"}`;
     (groups.get(ctx) ?? groups.set(ctx, []).get(ctx)!).push(m);
@@ -825,7 +841,9 @@ const pctl = (xs: number[], p: number): number | null => { if (!xs.length) retur
 
 export function buildTennisCalibrationReport(db: Database): TennisCalibrationReport {
   const marks = R.listTennisBreakMarks(db).filter((m) => m.panic_cents != null); // measurable only
-  const levelOf = (t: string | null) => /challenger/i.test(t ?? "") ? "Challenger" : /wta/i.test(t ?? "") ? "WTA" : /atp|men/i.test(t ?? "") ? "ATP" : (t ?? "?");
+  // T2: ITF is its OWN display bucket (was mislabeled "ATP" via the men-branch on "ITF Men Singles"), so the
+  // panic-by-context diagnostic no longer blends ITF amplitudes into the ATP row. Order: ITF/Challenger first.
+  const levelOf = (t: string | null) => /itf/i.test(t ?? "") ? "ITF" : /challenger/i.test(t ?? "") ? "Challenger" : /wta|women/i.test(t ?? "") ? "WTA" : /atp|men/i.test(t ?? "") ? "ATP" : (t ?? "?");
   const recovered: R.TennisBreakMarkRow[] = [], noRec: R.TennisBreakMarkRow[] = [];
   const recMin: number[] = [];
   for (const m of marks) { const w = recoveredWithinMin(m, TAKE_BUFFER_FOR_CALIB); if (w != null) { recovered.push(m); recMin.push(w); } else noRec.push(m); }
@@ -917,7 +935,9 @@ const OVR_MIN_N_PRIMARY = 80;           // #4
 const OVR_MIN_N_TOUR = 40;              // #4
 const OVR_FLOOR_HARD = 0.55;            // #3 hard recovery floor
 const OVR_MARGIN_PP = 0.05;             // #3 mandatory margin over breakeven (mid → upper-bound)
-const ovrTour = (t: string | null): "ATP" | "WTA" | null => /challenger/i.test(t ?? "") ? null : /wta|women/i.test(t ?? "") ? "WTA" : /atp|men/i.test(t ?? "") ? "ATP" : null;
+// T2: gate on the shared scope helper so ITF ("ITF Men/Women Singles") is EXCLUDED, not mis-folded into
+// ATP/WTA via the old men|women branch (which corrupted the overreaction re-enable cohort).
+const ovrTour = (t: string | null): "ATP" | "WTA" | null => { const x = tourFromEventType(t); return x ? (x.toUpperCase() as "ATP" | "WTA") : null; };
 /** #6: did the favourite snap back to the take level (pre−3) within ≤2 min of the FLOOR? */
 function ovrReachedTake(m: R.TennisBreakMarkRow): boolean {
   if (m.panic_cents == null) return false;

@@ -6,7 +6,7 @@ import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { parseEspnEvent, parseEspnSummary, MockSportsProvider, eventType } from "../src/lib/sports.js";
 import {
-  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch, settleStaleOpenBets, settleMatch, syncCompetitions,
+  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch, settleStaleOpenBets, settleMatch, syncCompetitions, nameMatch, sameTeams,
 } from "../src/lib/engine.js";
 import { matchContext } from "../src/lib/analysis.js";
 import type { SportsMatchStatus, SportsProvider, MatchDetail } from "../src/lib/sports.js";
@@ -1005,3 +1005,15 @@ test("espnLeagueForSeries: UEFA cups resolve by NAME (fixes null/aus.1 mis-map) 
   assert.equal(espnLeagueForSeries("Chinese Super League", "chinese-super-league"), "chn.1");
 });
 
+
+test("F1 nameMatch: city exonyms bridge Polymarket↔ESPN spellings", () => {
+  // the two confirmed coverage casualties from the 23.07 batch
+  assert.ok(nameMatch("SK Rapid Wien", "Rapid Vienna"), "Wien↔Vienna");
+  assert.ok(nameMatch("FK BATE Barysaŭ", "BATE Borisov"), "Barysaŭ↔Borisov");
+  assert.ok(nameMatch("Bayern München", "Bayern Munich"), "München↔Munich");
+  // full-fixture orientation via sameTeams (home/away either way)
+  assert.ok(sameTeams("FC Santa Coloma", "SK Rapid Wien", "Santa Coloma", "Rapid Vienna"));
+  // MUST NOT create false matches: two different Vienna clubs stay distinct (distinctive token differs)
+  assert.equal(nameMatch("Rapid Wien", "Austria Wien"), false, "shared city alone must not match");
+  assert.equal(nameMatch("SK Rapid Wien", "Rapid Bucharest"), false);
+});
