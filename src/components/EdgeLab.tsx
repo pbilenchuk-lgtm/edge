@@ -286,6 +286,24 @@ function collectLogEvents(competitions: any[], matchDb: any) {
   }
   return out.sort((a, b) => b.sortKey - a.sortKey);   // newest event on top
 }
+// «Логи» freshness watermark — the finish-time of the newest log THIS browser has already grabbed.
+// A log still un-downloaded but NEWER than the watermark is genuinely new (surface it, count it toward the
+// badge / bulk-download). One that's OLDER and was never grabbed is backlog the owner deliberately skipped
+// → show it muted as «старый» and keep it OUT of the count, so «не скачано» reflects only fresh logs. The
+// watermark auto-advances every time a newer log is downloaded, so the backlog never re-inflates the badge.
+function logWatermark(events: any[], isDl: (id: string) => boolean): number {
+  let c = -Infinity;
+  for (const e of events) if (isDl(e.id) && e.sortKey > c) c = e.sortKey;
+  return c;
+}
+// Is this un-downloaded event FRESH (newer than everything already grabbed)? Downloaded events are neither.
+function isFreshLog(e: any, watermark: number, isDl: (id: string) => boolean): boolean {
+  return !isDl(e.id) && e.sortKey > watermark;
+}
+function freshLogCount(events: any[], isDl: (id: string) => boolean): number {
+  const w = logWatermark(events, isDl);
+  return events.reduce((n, e) => n + (isFreshLog(e, w, isDl) ? 1 : 0), 0);
+}
 
 // Contain render crashes so one bad screen / match card can't blank the whole
 // app with Next's generic "Application error: a client-side exception has
@@ -347,7 +365,9 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const logEvents = useMemo(() => collectLogEvents(COMPETITIONS, matchDb), [COMPETITIONS, matchDb]);
   const [logsUnread, setLogsUnread] = useState(0);
   const recountLogs = useCallback(() => {
-    try { setLogsUnread(logEvents.filter((e: any) => localStorage.getItem(`mlog_dl_${e.id}`) !== "1").length); }
+    // Badge counts only FRESH un-downloaded logs (newer than the newest already grabbed), not the whole
+    // backlog — so old skipped logs stay «старые» and don't keep the badge lit. Same rule as the Логи page.
+    try { const isDl = (id: string) => localStorage.getItem(`mlog_dl_${id}`) === "1"; setLogsUnread(freshLogCount(logEvents, isDl)); }
     catch { setLogsUnread(0); }
   }, [logEvents]);
   useEffect(() => { recountLogs(); }, [recountLogs]);
@@ -689,9 +709,9 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
       <div style={S.screenSwitch} className="el-screen-switch">
         {[["matches", "Матчи"], ["feed", "Лента"], ["logs", "Логи"], ["portfolio", "Портфель"], ["metrics", "Метрики"], ["profiles", "Профили"], ["shadow", "Бюджет (shadow)"], ["strategies", "Стратегии"], ["models", "Настройки"]].map(([k, lbl]) => {
           const alert = k === "shadow" && screen !== "shadow" && ((shadow?.analytics?.blocked ?? 0) + (shadow?.analytics?.trimmed ?? 0) > 0 || (shadow?.projection?.blocked ?? 0) > 0);
-          // «Логи» badge = how many finished events' logs are not yet downloaded in THIS browser.
+          // «Логи» badge = how many FRESH (newer than the last grabbed) logs are not yet downloaded here.
           const badge = k === "logs" && logsUnread > 0 ? String(logsUnread) : null;
-          return <button key={k} onClick={() => setScreen(k)} style={{ ...S.screenBtn, ...(screen === k ? S.screenOn : {}) }} title={alert ? "капитал упирался в лимит — загляни" : badge ? `${logsUnread} логов ещё не скачано` : undefined}>{lbl}{alert && <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#ff6b6b", marginLeft: 6, verticalAlign: "middle" }} />}{badge && <span style={{ display: "inline-block", minWidth: 15, padding: "0 4px", marginLeft: 6, fontSize: 10, lineHeight: "15px", textAlign: "center", borderRadius: 8, background: "#e8a838", color: "#12161d", fontWeight: 700, verticalAlign: "middle" }}>{badge}</span>}</button>;
+          return <button key={k} onClick={() => setScreen(k)} style={{ ...S.screenBtn, ...(screen === k ? S.screenOn : {}) }} title={alert ? "капитал упирался в лимит — загляни" : badge ? `${logsUnread} новых логов ещё не скачано` : undefined}>{lbl}{alert && <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#ff6b6b", marginLeft: 6, verticalAlign: "middle" }} />}{badge && <span style={{ display: "inline-block", minWidth: 15, padding: "0 4px", marginLeft: 6, fontSize: 10, lineHeight: "15px", textAlign: "center", borderRadius: 8, background: "#e8a838", color: "#12161d", fontWeight: 700, verticalAlign: "middle" }}>{badge}</span>}</button>;
         })}
       </div>
 
@@ -1901,7 +1921,13 @@ function LogsScreen({ events, onDownloaded, onGoMatches }: any) {
     onDownloaded?.();
   };
 
-  const todo = events.filter((e: any) => !downloaded.has(e.id));
+  // Freshness watermark: newest already-grabbed log. Fresh = un-downloaded AND newer than it; the rest of
+  // the un-downloaded pile is old backlog → «старые» (kept out of «Не скачано» and the bulk download).
+  const isDl = (id: string) => downloaded.has(id);
+  const watermark = useMemo(() => logWatermark(events, isDl), [events, downloaded]);
+  const todo = events.filter((e: any) => isFreshLog(e, watermark, isDl));   // fresh un-downloaded — the count that matters
+  const stale = events.filter((e: any) => !downloaded.has(e.id) && e.sortKey <= watermark); // old, never grabbed
+  const doneCount = events.length - todo.length - stale.length;
   const downloadAll = async () => {
     if (!todo.length) return;
     setBulk({ done: 0, total: todo.length });
@@ -1910,8 +1936,8 @@ function LogsScreen({ events, onDownloaded, onGoMatches }: any) {
   };
 
   const withBets = events.filter((e: any) => (e.betCount ?? 0) > 0);
-  const shown = filter === "todo" ? todo : filter === "done" ? events.filter((e: any) => downloaded.has(e.id)) : filter === "bets" ? withBets : events;
-  const filters = [["todo", `Не скачано${todo.length ? ` (${todo.length})` : ""}`], ["bets", `Со ставками${withBets.length ? ` (${withBets.length})` : ""}`], ["all", `Все (${events.length})`], ["done", `Скачано (${events.length - todo.length})`]];
+  const shown = filter === "todo" ? todo : filter === "stale" ? stale : filter === "done" ? events.filter((e: any) => downloaded.has(e.id)) : filter === "bets" ? withBets : events;
+  const filters = [["todo", `Не скачано${todo.length ? ` (${todo.length})` : ""}`], ["stale", `Старые${stale.length ? ` (${stale.length})` : ""}`], ["bets", `Со ставками${withBets.length ? ` (${withBets.length})` : ""}`], ["all", `Все (${events.length})`], ["done", `Скачано (${doneCount})`]];
 
   return (
     <main style={S.main}>
@@ -1931,12 +1957,13 @@ function LogsScreen({ events, onDownloaded, onGoMatches }: any) {
       </div>
       <div style={S.feedList}>
         {events.length === 0 && <div style={S.noPos}>завершённых событий пока нет — логи появятся, когда матчи закончатся. <button onClick={onGoMatches} style={{ ...S.linkBtn }}>к матчам →</button></div>}
-        {events.length > 0 && shown.length === 0 && <div style={S.noPos}>{filter === "todo" ? "всё скачано — новых логов нет 🎉" : "пусто"}</div>}
+        {events.length > 0 && shown.length === 0 && <div style={S.noPos}>{filter === "todo" ? "новых логов нет 🎉" : filter === "stale" ? "старых логов нет" : "пусто"}</div>}
         {shown.map((e: any) => {
           const got = downloaded.has(e.id);
+          const isStale = !got && e.sortKey <= watermark;   // old backlog, never grabbed
           return (
-            <div key={e.id} style={{ ...S.feedItem, alignItems: "center" }}>
-              <div style={{ ...S.logDot, background: got ? "#5fd08a" : "#e8a838" }} title={got ? "скачан" : "не скачан"} />
+            <div key={e.id} style={{ ...S.feedItem, alignItems: "center", ...(isStale ? { opacity: 0.6 } : {}) }}>
+              <div style={{ ...S.logDot, background: got ? "#5fd08a" : isStale ? MUTE : "#e8a838" }} title={got ? "скачан" : isStale ? "старый — не скачан" : "не скачан"} />
               <div style={S.feedBody}>
                 <div style={S.feedItemTop}>
                   <span style={S.feedMatch}>{e.sportLabel} · {e.compName}</span>
@@ -1949,7 +1976,7 @@ function LogsScreen({ events, onDownloaded, onGoMatches }: any) {
                 <div style={{ fontSize: 11, color: MUTE }}>{e.endLabel || "—"}{e.endNote && !e.broken && ` · ${e.endNote}`}</div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                <button onClick={() => mark(e, !got)} title={got ? "снять отметку «скачан»" : "отметить как скачанный вручную"} style={{ fontSize: 11, color: got ? "#5fd08a" : MUTE, background: "transparent", border: "none", cursor: "pointer" }}>{got ? "✓ скачан" : "не скачан"}</button>
+                <button onClick={() => mark(e, !got)} title={got ? "снять отметку «скачан»" : isStale ? "старый лог — пометить как просмотренный" : "отметить как скачанный вручную"} style={{ fontSize: 11, color: got ? "#5fd08a" : MUTE, background: "transparent", border: "none", cursor: "pointer" }}>{got ? "✓ скачан" : isStale ? "старый" : "не скачан"}</button>
                 <button onClick={() => download(e)} disabled={busyId === e.id || !!bulk} style={{ ...S.artifactBtn, fontSize: 11, padding: "3px 10px", opacity: (busyId === e.id || bulk) ? 0.6 : 1 }} title="Полный лог матча одним .md — анализ, стратеги, ставки, переоценки, трейд-лог, события, снимки провайдеров">
                   {busyId === e.id ? "собираю…" : got ? "📥 снова" : "📥 скачать"}
                 </button>
