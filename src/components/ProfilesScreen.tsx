@@ -33,7 +33,7 @@ function ZoneTable({ title, rows }: { title: string; rows: any[] }) {
     <div>
       <div style={{ ...S.sub, marginBottom: 4 }}>{title}</div>
       <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 460 }}>
-        <thead><tr>{["зона edge", "N", "ROI", "ср. CLV", "hit-rate", "ср. implied"].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+        <thead><tr>{["зона edge", "N", "ROI", "ср. CLV", "hit-rate", "ср. implied", "model-fill"].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
         <tbody>
           {rows.map((z) => (
             <tr key={z.zone}>
@@ -43,6 +43,7 @@ function ZoneTable({ title, rows }: { title: string; rows: any[] }) {
               <td style={{ ...S.td, color: col(z.avgClvCents) }}>{cents(z.avgClvCents)}</td>
               <td style={S.td}>{pct(z.hitRate)}</td>
               <td style={{ ...S.td, color: MUTE }}>{pct(z.avgImplied)}</td>
+              <td style={{ ...S.td, color: (z.modelFillPct ?? 0) > 0 ? AMBER : MUTE }} title={`${z.earlyExits} досрочных выходов`}>{z.modelFillPct == null ? "—" : pct(z.modelFillPct)}</td>
             </tr>
           ))}
         </tbody>
@@ -122,9 +123,9 @@ export default function ProfilesScreen() {
         <div style={S.secLbl}>A · Сравнение профилей</div>
         <div style={S.card}>
           <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 720 }}>
-            <thead><tr>{["профиль", "ставок", "объём", "PnL", "ROI", "ср. CLV", "% побил закрытие", "макс. просадка", "серия убытков", "Sharpe"].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <thead><tr>{["профиль", "ставок", "объём", "PnL", "ROI", "ср. CLV", "% побил закрытие", "макс. просадка", "серия убытков", "Sharpe", "model-fill"].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
             <tbody>
-              {cmp.length === 0 && <tr><td colSpan={10} style={{ ...S.td, color: MUTE, textAlign: "center", padding: 20 }}>Пока нет закрытых ставок под этот фильтр.</td></tr>}
+              {cmp.length === 0 && <tr><td colSpan={11} style={{ ...S.td, color: MUTE, textAlign: "center", padding: 20 }}>Пока нет закрытых ставок под этот фильтр.</td></tr>}
               {cmp.map((p: any) => (
                 <tr key={p.profileId}>
                   <td style={{ ...S.td, fontWeight: 700 }}>{p.profileId}</td>
@@ -137,6 +138,7 @@ export default function ProfilesScreen() {
                   <td style={{ ...S.td, color: RED }}>{money(p.maxDrawdown)}</td>
                   <td style={S.td}>{p.longestLossStreak}</td>
                   <td style={S.td}>{p.sharpe == null ? "—" : p.sharpe.toFixed(2)}</td>
+                  <td style={{ ...S.td, color: (p.modelFillPct ?? 0) > 0 ? AMBER : MUTE }} title={`${p.earlyExits ?? 0} досрочных выходов`}>{p.modelFillPct == null ? "—" : pct(p.modelFillPct)}</td>
                 </tr>
               ))}
             </tbody>

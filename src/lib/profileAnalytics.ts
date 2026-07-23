@@ -24,7 +24,9 @@ export type ExitTrigger =
   | "hard_stop" | "time_decay_floor" | "settle" | "edge_closed" | "discretionary";
 
 export interface ExitRec {
-  trigger: ExitTrigger; minute: number | null; priceCents: number | null; pnl: number; partial: boolean; text: string;
+  trigger: ExitTrigger; minute: number | null; priceCents: number | null; pnl: number; partial: boolean;
+  modelFill: boolean; // F3: exit executed at a MODELLED price (no live bid) — a real-money path would not have filled
+  text: string;
 }
 
 export interface BetRec {
@@ -110,7 +112,7 @@ export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
         const pc = Number((e.text.match(/@ (\d+(?:\.\d+)?)¢/) ?? [])[1]);
         const pnlM = e.text.match(/P&L ([+-]?)\$?(-?\d+(?:\.\d+)?)/);
         const pnlV = pnlM ? (pnlM[1] === "-" ? -1 : 1) * Number(pnlM[2]) : 0;
-        return { trigger: classifyExitTrigger(e.text, b.settled_by), minute: minuteFrom(e.minute), priceCents: Number.isFinite(pc) ? pc : null, pnl: pnlV, partial: /частичн/.test(e.text), text: e.text };
+        return { trigger: classifyExitTrigger(e.text, b.settled_by), minute: minuteFrom(e.minute), priceCents: Number.isFinite(pc) ? pc : null, pnl: pnlV, partial: /частичн/.test(e.text), modelFill: /\[model_fill\]/.test(e.text), text: e.text };
       });
     out.push({
       id: b.id, matchId: b.match_id, matchLabel: `${m.home} — ${m.away}`, competitionId: m.competition_id, category: comp?.name ?? m.competition_id,
@@ -136,10 +138,21 @@ export interface ProfileStats {
   avgClvCents: number | null; pctBeatClose: number | null;
   maxDrawdown: number; longestLossStreak: number; sharpe: number | null;
   triggerMix: Record<string, number>; // trigger → % of closed positions
+  earlyExits: number; modelFillPct: number | null; // F3: of positions closed EARLY, share whose fill rode a modelled (non-book) price
 }
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 const std = (xs: number[]) => { if (xs.length < 2) return 0; const mu = mean(xs); return Math.sqrt(mean(xs.map((x) => (x - mu) ** 2))); };
 const r2 = (n: number) => Math.round(n * 100) / 100;
+
+/** F3 — «доля model-fill»: of positions closed by at least one EARLY exit (settle-only positions never
+ *  transacted a book, so they're outside this denominator), what fraction had a modelled (non-book) exit
+ *  fill. A high share means the realized P&L of that cut leans on prices no live bid would have paid. */
+export function modelFillShare(recs: BetRec[]): { earlyExits: number; modelFillPct: number | null } {
+  const withExit = recs.filter((r) => r.exits.length > 0);
+  if (!withExit.length) return { earlyExits: 0, modelFillPct: null };
+  const modelled = withExit.filter((r) => r.exits.some((e) => e.modelFill)).length;
+  return { earlyExits: withExit.length, modelFillPct: r2((modelled / withExit.length) * 100) };
+}
 
 export function profileComparison(recs: BetRec[]): ProfileStats[] {
   const byProf = new Map<string, BetRec[]>();
@@ -169,7 +182,7 @@ export function profileComparison(recs: BetRec[]): ProfileStats[] {
       profileId: p, bets: rs.length, volume: r2(volume), pnl: r2(pnl), roi: volume > 0 ? r2((pnl / volume) * 100) : 0,
       avgClvCents: clvs.length ? r2(mean(clvs)) : null, pctBeatClose: clvs.length ? r2((clvs.filter((c) => c > 0).length / clvs.length) * 100) : null,
       maxDrawdown: r2(maxDd), longestLossStreak: longest, sharpe: pnls.length >= 2 && std(pnls) > 0 ? r2(mean(pnls) / std(pnls)) : null,
-      triggerMix,
+      triggerMix, ...modelFillShare(rs),
     };
   });
 }
@@ -179,7 +192,7 @@ export const EDGE_ZONES: { key: string; lo: number; hi: number }[] = [
   { key: "2–3%", lo: 0.02, hi: 0.03 }, { key: "3–5%", lo: 0.03, hi: 0.05 },
   { key: "5–7%", lo: 0.05, hi: 0.07 }, { key: "7–10%", lo: 0.07, hi: 0.10 }, { key: "10%+", lo: 0.10, hi: Infinity },
 ];
-export interface EdgeZoneStat { zone: string; n: number; roi: number | null; avgClvCents: number | null; hitRate: number | null; avgImplied: number | null; }
+export interface EdgeZoneStat { zone: string; n: number; roi: number | null; avgClvCents: number | null; hitRate: number | null; avgImplied: number | null; earlyExits: number; modelFillPct: number | null; }
 function zoneStats(recs: BetRec[]): EdgeZoneStat[] {
   return EDGE_ZONES.map((z) => {
     const rs = recs.filter((r) => r.edge != null && r.edge >= z.lo && r.edge < z.hi);
@@ -194,6 +207,7 @@ function zoneStats(recs: BetRec[]): EdgeZoneStat[] {
       avgClvCents: clvs.length ? r2(mean(clvs)) : null,
       hitRate: byResult.length ? r2((byResult.filter((r) => r.outcome === "won").length / byResult.length) * 100) : null,
       avgImplied: implieds.length ? r2(mean(implieds) * 100) : null,
+      ...modelFillShare(rs),
     };
   });
 }

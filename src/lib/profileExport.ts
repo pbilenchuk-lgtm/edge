@@ -52,13 +52,13 @@ export function betsJson(db: Database, filter: ProfileFilter = {}): string {
   return JSON.stringify(betRecords(db, filter), null, 2);
 }
 
-const EXIT_COLS = ["bet_id", "match", "strategy", "profile", "market", "wins_on_event", "trigger", "minute", "exec_price_cents", "partial", "pnl", "text"];
+const EXIT_COLS = ["bet_id", "match", "strategy", "profile", "market", "wins_on_event", "trigger", "minute", "exec_price_cents", "partial", "model_fill", "pnl", "text"];
 /** One row per EXIT (execution analysis). */
 export function exitsCsv(db: Database, filter: ProfileFilter = {}): string {
   const rows: unknown[][] = [];
   for (const r of betRecords(db, filter))
     for (const e of r.exits)
-      rows.push([r.id, r.matchLabel, r.strategy, r.profileId, r.market, r.winsOnEvent ? 1 : 0, e.trigger, e.minute, e.priceCents, e.partial ? 1 : 0, e.pnl, e.text]);
+      rows.push([r.id, r.matchLabel, r.strategy, r.profileId, r.market, r.winsOnEvent ? 1 : 0, e.trigger, e.minute, e.priceCents, e.partial ? 1 : 0, e.modelFill ? 1 : 0, e.pnl, e.text]);
   return toCsv(EXIT_COLS, rows);
 }
 

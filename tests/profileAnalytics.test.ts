@@ -4,7 +4,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { serializeEntryMeta, CODE_VERSION, type BetEntryMeta } from "../src/lib/betMeta.js";
-import { betRecords, profileComparison, edgeZones, calibration, EDGE_ZONES, classifyExitTrigger } from "../src/lib/profileAnalytics.js";
+import { betRecords, profileComparison, edgeZones, calibration, EDGE_ZONES, classifyExitTrigger, modelFillShare } from "../src/lib/profileAnalytics.js";
 import { betsCsv, exitsCsv, BET_EXPORT_COLUMNS } from "../src/lib/profileExport.js";
 
 function setup() {
@@ -102,6 +102,34 @@ test("profileComparison: shared picks compared across profiles (ROI, drawdown, s
   const con = cmp.find((p) => p.profileId === "conservative")!;
   assert.equal(agg.pnl, 80); assert.equal(agg.roi, 80);
   assert.equal(con.pnl, -40); assert.equal(con.maxDrawdown, 40); assert.equal(con.longestLossStreak, 1);
+});
+
+test("F3: model-fill exit is parsed + surfaced as «доля model-fill» in the P&L cuts", () => {
+  const { db, comp, strat } = setup();
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: null, minute: 90, score_home: 1, score_away: 0, final_score: "1:0", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  // Two positions closed EARLY: one exit rode a MODELLED price (no live bid → [model_fill]), one a real book.
+  R.insertBet(db, bet({ id: "mf1", match_id: mid, strategy_id: strat.id, market_label: "Over 1.5", status: "settled_won", entry_price: 40, closing_price: 55, ai_prob: 0.6, stake: 100, result: "won", payout: 250, settled_by: "early", settled_at: "t", entry_meta: meta({ edge: 0.09 }) }));
+  R.insertBet(db, bet({ id: "mf2", match_id: mid, strategy_id: strat.id, market_label: "BTTS — Yes", status: "settled_lost", entry_price: 60, closing_price: 30, ai_prob: 0.55, stake: 100, result: "lost", payout: 0, settled_by: "early", settled_at: "t", entry_meta: meta({ edge: 0.09 }) }));
+  R.insertTradeLog(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, minute: "78'", type: "exit", text: `выход «Over 1.5» @ 62¢ · стратег: тезис сломан · ≈выход 62¢ (модель по ликвидности — нет живого бида) [model_fill] · P&L +$55.00`, created_at: "t" });
+  R.insertTradeLog(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, minute: "80'", type: "exit", text: `выход «BTTS — Yes» @ 30¢ · стратег: хард-стоп · выход VWAP 30¢ (бид 31¢) · P&L −$70.00`, created_at: "t" });
+  const recs = betRecords(db);
+  const mf = recs.find((r) => r.market === "Over 1.5")!;
+  const book = recs.find((r) => r.market === "BTTS — Yes")!;
+  assert.equal(mf.exits[0].modelFill, true, "model-fill exit parsed from the [model_fill] marker");
+  assert.equal(book.exits[0].modelFill, false, "book fill has no marker");
+  // Both positions closed early → denominator 2; one modelled → 50%.
+  const share = modelFillShare(recs);
+  assert.equal(share.earlyExits, 2);
+  assert.equal(share.modelFillPct, 50);
+  // Surfaced per-profile (both are «medium») and per edge-zone (both in 7–10%).
+  assert.equal(profileComparison(recs).find((p) => p.profileId === "medium")!.modelFillPct, 50);
+  assert.equal(edgeZones(recs).all.find((z) => z.zone === "7–10%")!.modelFillPct, 50);
+  // A cut with no early exits reports null, not 0 — «нет знаменателя», not «zero model-fill».
+  assert.equal(modelFillShare([]).modelFillPct, null);
+  // The exits CSV carries the model_fill column.
+  const csv = exitsCsv(db);
+  assert.ok(csv.split("\n")[0].split(",").includes("model_fill"), "model_fill column present");
 });
 
 test("export: bets CSV carries every Part-1 column and one row per bet", () => {

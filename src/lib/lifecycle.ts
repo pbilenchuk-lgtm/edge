@@ -170,6 +170,10 @@ export const EXIT_STALE_GAP = (() => { const n = Number(process.env.EXIT_STALE_G
 // F1: cumulative count of strategist DEFENSIVE exits blocked because their registered condition wasn't met
 // (was executed-then-relabelled «discretionary»). Read by ops / the F4 counterfactual report.
 export const F1_UNVERIFIED_EXIT_KEY = "unverified_exit_blocked_total";
+// F3: greppable marker on an exit executed at a MODELLED price (no live bid on the book). On the real-money
+// path this fill would NOT have happened — no bid means not filled — so the sim tags it, letting the P&L cuts
+// report what share of realized exits rode a modelled (non-book) fill instead of a real bid.
+export const modelFillTag = (fromBook: boolean): string => (fromBook ? "" : " [model_fill]");
 
 /** Parse the OBJECTIVE part (score + minute) of a counter_scenario condition string like
  *  "0:0 к 60' и Аргентина полностью контролирует" → {home:0, away:0, minute:60}. The
@@ -850,7 +854,7 @@ async function gapRepriceSweep(db: Database, deps: EngineDeps, poly: PolymarketC
     const fill = (reasonTag: string) => {
       const pnl = closeBetEarly(db, b, sell.cents, reasonTag, minuteLabel(m), now);
       if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: prof }, sell.cost, now);
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reasonTag}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reasonTag}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason: reasonTag, pnl });
       touched.add(b.strategy_id);
     };
@@ -951,7 +955,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           const reason = `плановый тайм-стоп: ${minNum}' ≥ ${ts.minute}', событие не наступило (рынок ${mk.price}¢) — ${ts.action === "close_half" ? "фиксирую половину" : "закрываю"} ${tsMarker}`;
           const res = closeBetPortion(db, b, fraction, sell.cents, minuteLabel(m), now);
           if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: prof }, scaleCost(sell.cost, fraction), now);
-          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${res.pnl >= 0 ? "+" : ""}$${res.pnl.toFixed(2)}`, created_at: now });
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reason}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${res.pnl >= 0 ? "+" : ""}$${res.pnl.toFixed(2)}`, created_at: now });
           out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason, pnl: res.pnl });
           touched.add(b.strategy_id);
           continue;
@@ -1062,7 +1066,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       }
       const pnl = closeBetEarly(db, b, sell.cents, d.reason, minuteLabel(m), now);
       if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, sell.cost, now);
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${d.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${d.reason}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason: d.reason, pnl });
       touched.add(b.strategy_id);
     }
@@ -1561,7 +1565,7 @@ export async function strategistReassess(
           // F1: a defensive tag that reaches HERE is already condition-verified (unverified ones were blocked
           // above) — no more «discretionary» demotion, the category is gone. Just name the fired trigger.
           const trg = ex.trigger ? ` (${ex.trigger})` : "";
-          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag})${trg} @ ${sell.cents}¢ · стратег: ${ex.reason}${sell.note ? ` · ${sell.note}` : ""} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag})${trg} @ ${sell.cents}¢ · стратег: ${ex.reason}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
           out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}`, pnl });
           exitedMarkets.push(`${b.market_label} (${tag})`);
           touched.add(sid);
