@@ -504,7 +504,16 @@ export function buildAppData(db: Database, env = process.env): AppData {
   const payload: AppData = { treasuryTotal: treasury.total_balance, bankCurve: treasuryBankCurve(db), capacity: buildCapacityCurve(db, env), sports, competitions, compBudget, shares, shareRows, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskProfiles: listRiskProfileViews(db), shadow };
   // node:sqlite rows have a null prototype; React Server Components can't pass
   // those to a client component. A JSON round-trip yields plain objects.
-  return JSON.parse(JSON.stringify(payload));
+  const json = JSON.stringify(payload);
+  // MEMORY DIAGNOSTIC: this pass materializes a MatchView for EVERY match ever, then the round-trip below
+  // triples the payload transiently (object → json string → parsed object) before RSC serializes it again.
+  // On a 2Gi box that stack is the likeliest OOM amplifier as history grows — log the size + RSS so a failed
+  // deploy's runtime log NAMES it (matches × payload MB × RSS) instead of us guessing. Cheap; the json exists.
+  try {
+    const rss = Math.round(process.memoryUsage().rss / 1e6);
+    console.log(`[buildAppData] matches ${Object.keys(matchDb).length} · payload ${Math.round(json.length / 1e6)}MB · rss ${rss}MB`);
+  } catch { /* memoryUsage unavailable — never block the render on a log */ }
+  return JSON.parse(json);
 }
 
 /** Order a match's markets so PAIRED SIDES sit together — the two sides of a
