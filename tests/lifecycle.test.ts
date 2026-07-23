@@ -505,6 +505,56 @@ test("evaluateExits HOLDS a stop when the full stake would SLIP far below the be
   assert.ok(R.getBet(db, "deep-bet")!.status.startsWith("settled"), "deep-book stop settled at the real price");
 });
 
+test("T3.1 strategistReassess: a counter/thesis on a totals market ≥1 goal from the line is held (totals_thesis_intact); a broken line fires", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.clearShares(db, comp.id);
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, risk_profile_id: "medium", pct: 50 });
+  const setup = (mid: string, sh: number, sa: number, betId: string) => {
+    R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 40, score_home: sh, score_away: sa, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+    R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 1.5", price: 45, ai_prob: 0.6, liquidity: "2000", external_ref: "TU" + mid, snapshot_at: "t", is_closing: false });
+    R.insertBet(db, { id: betId, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Under 1.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 45, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+  };
+  const tsExit = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Under 1.5", fraction: 1, reason: "гол — тезис под давлением", trigger: "thesis_stop" }] }) }] }) }) as any);
+  // HELD: 0:1 (total 1) — Under 1.5 breaks only on the SECOND goal, so the first goal is not a break.
+  const intact = R.uid(); setup(intact, 0, 1, "u-intact");
+  await strategistReassess(db, { fetchImpl: tsExit, env: { ANTHROPIC_API_KEY: "k" }, now: () => "2026-07-14T20:00:00Z" }, { newEventMatchIds: new Set([intact]), max: 50 });
+  assert.equal(R.getBet(db, "u-intact")!.status, "open", "totals thesis intact at 0:1 → the early counter/thesis is held");
+  assert.ok(R.tradeLogForMatch(db, intact).some((l) => l.type === "hold" && /totals_thesis_intact/.test(l.text)), "totals_thesis_intact logged");
+  // FIRES: 0:2 (total 2) — Under 1.5 has actually BROKEN, so the exit executes.
+  const broken = R.uid(); setup(broken, 0, 2, "u-broken");
+  await strategistReassess(db, { fetchImpl: tsExit, env: { ANTHROPIC_API_KEY: "k" }, now: () => "2026-07-14T20:05:00Z" }, { newEventMatchIds: new Set([broken]), max: 50 });
+  assert.ok(R.getBet(db, "u-broken")!.status.startsWith("settled"), "a broken totals line exits");
+});
+
+test("T3.3 evaluateExits: a deterministic stop the book only partly fills closes ONLY that fraction (remainder stays open)", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true", POLYMARKET_TAKER_FEE_RATE: "0.03" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  const mid = R.uid();
+  // Draw-No at 1:1 is currently LOSING (a draw) → the T1.1 winning-guard stands aside and a real stop fires.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 60, score_home: 1, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Draw — No", price: 30, ai_prob: 0.4, liquidity: "2000", external_ref: "TOKDN", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "dn", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Draw — No", status: "open", proposed_price: 60, entry_price: 60, current_price: 30, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+  // A single bid level at the mark with limited size (30% of the stake) — no cliff, so no slippage block; the
+  // ONLY effect is a partial fill. bestBid == VWAP == 30¢.
+  const bookFetch = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book") ? { asks: [{ price: "0.32", size: "500" }], bids: [{ price: "0.30", size: "100" }] } : {}) })) as unknown as typeof fetch;
+  await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch });
+  const open = R.betsForMatch(db, mid).find((b) => b.status === "open");
+  const partial = R.betsForMatch(db, mid).filter((b) => b.status.startsWith("settled") && b.settled_by === "partial");
+  assert.ok(open && (open.stake ?? 0) > 0, "the position is NOT fully closed on a partial fill");
+  assert.equal(partial.length, 1, "one partial slice booked at the filled fraction");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "exit" && /частично/.test(l.text)), "exit logged as partial, not a full close");
+});
+
 test("T1.2 terminalProtectiveHold: melting model-fill and terminal-winning defensive sells are held; take-profits and early stops are not", () => {
   const teams = { home: "Racing", away: "Houston" };
   // (A) a melting option (BTTS-Yes) DEFENSIVELY sold via a MODEL fill (no live bid) → held, at any minute.
@@ -1010,12 +1060,13 @@ test("F1: an unverified counter_scenario exit is BLOCKED (money held); a met one
   R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
   const mkMatch = (mid: string, sh: number, sa: number, minute: number) => {
     R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute, score_home: sh, score_away: sa, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
-    R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 40, ai_prob: 0.6, liquidity: "2000", external_ref: "T" + mid, snapshot_at: "t", is_closing: false });
-    R.insertBet(db, { id: "bet-" + mid, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Under 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 40, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" } as any);
-    // the plan registered the adverse condition «0:0 к 70'» for this market.
-    R.saveArtifact(db, { match_id: mid, kind: "battle_sheet", label: `${strat.name} · medium`, stage: "prematch", content: JSON.stringify({ positions: [{ market: "Under 2.5", exit: { counter_scenario_stop: "0:0 к 70'" } }] }), model: "m", created_at: "t" });
+    R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Draw — No", price: 40, ai_prob: 0.6, liquidity: "2000", external_ref: "T" + mid, snapshot_at: "t", is_closing: false });
+    R.insertBet(db, { id: "bet-" + mid, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Draw — No", status: "open", proposed_price: 55, entry_price: 55, current_price: 40, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" } as any);
+    // the plan registered the adverse condition «0:0 к 70'» for this market. (A non-totals market so the T3.1
+    // totals-thesis gate stands aside and this isolates F1's condition-verification.)
+    R.saveArtifact(db, { match_id: mid, kind: "battle_sheet", label: `${strat.name} · medium`, stage: "prematch", content: JSON.stringify({ positions: [{ market: "Draw — No", exit: { counter_scenario_stop: "0:0 к 70'" } }] }), model: "m", created_at: "t" });
   };
-  const csExit = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Under 2.5", fraction: 1, reason: "counter_scenario", trigger: "counter_scenario" }] }) }] }) }) as any);
+  const csExit = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Draw — No", fraction: 1, reason: "counter_scenario", trigger: "counter_scenario" }] }) }] }) }) as any);
   // BLOCKED: score 2:0 at 78' — «0:0 к 70'» did NOT happen → the defensive exit is unverified.
   const bad = R.uid(); mkMatch(bad, 2, 0, 78);
   await strategistReassess(db, { fetchImpl: csExit, env: { ANTHROPIC_API_KEY: "k" }, now: () => "t" }, { newEventMatchIds: new Set([bad]), max: 50 });
@@ -1042,11 +1093,11 @@ test("P0.4 partial-fill: a full-close the book only 20%-fills closes 20% of the 
   // Decision snapshot 50¢, entry 50¢, stake $100 → wants to sell 200 shares. The bid book holds only
   // ~40 shares at 50¢ (20% of the size) — a real, non-degenerate, non-stale book that just can't absorb
   // the full exit. Best bid == mark → no phantom/slippage/staleness block; the ONLY effect is a 20% fill.
-  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 50, ai_prob: 0.6, liquidity: "2000", external_ref: "TOK", snapshot_at: "t", is_closing: false });
-  R.insertBet(db, { id: "boh-bet", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Under 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Draw — No", price: 50, ai_prob: 0.6, liquidity: "2000", external_ref: "TOK", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "boh-bet", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Draw — No", status: "open", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
   const fetchImpl = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book")
     ? { bids: [{ price: "0.50", size: "40" }], asks: [{ price: "0.52", size: "500" }] }
-    : { content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Under 2.5", fraction: 1, reason: "тезис сломан — выхожу полностью", trigger: "thesis_stop" }] }) }] }) })) as unknown as typeof fetch;
+    : { content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Draw — No", fraction: 1, reason: "тезис сломан — выхожу полностью", trigger: "thesis_stop" }] }) }] }) })) as unknown as typeof fetch;
   await strategistReassess(db, { fetchImpl, polymarket: poly, env: { ANTHROPIC_API_KEY: "k" }, now: () => "t" }, { newEventMatchIds: new Set([mid]), max: 50 });
   const bets = R.betsForMatch(db, mid);
   const open = bets.find((b) => b.status === "open");
@@ -1680,31 +1731,33 @@ test("strategistReassess THROTTLES a repeat partial take-profit (partial_tp_thro
   const now = "2026-07-11T20:10:00Z";
   const setup = (mid: string, openId: string) => {
     R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 60, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
-    R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 55, ai_prob: 0.6, liquidity: null, external_ref: null, snapshot_at: "t", is_closing: false });
-    R.insertBet(db, { id: openId, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Under 2.5", status: "open", proposed_price: 40, entry_price: 40, current_price: 55, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
+    R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Draw — No", price: 55, ai_prob: 0.6, liquidity: null, external_ref: null, snapshot_at: "t", is_closing: false });
+    R.insertBet(db, { id: openId, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Draw — No", status: "open", proposed_price: 40, entry_price: 40, current_price: 55, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "10'", result: null, payout: null, created_at: "t" });
     // a partial fixation 2 min ago (< 8-min throttle window)
-    R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Under 2.5", status: "settled_won", proposed_price: 40, entry_price: 40, current_price: 52, closing_price: 52, ai_prob: 0.6, stake: 30, rationale: "частичная фиксация 30%", entered_minute: "10'", result: "won", payout: 39, settled_by: "partial", settled_at: "2026-07-11T20:08:00Z", created_at: "2026-07-11T20:08:00Z" });
+    R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Draw — No", status: "settled_won", proposed_price: 40, entry_price: 40, current_price: 52, closing_price: 52, ai_prob: 0.6, stake: 30, rationale: "частичная фиксация 30%", entered_minute: "10'", result: "won", payout: 39, settled_by: "partial", settled_at: "2026-07-11T20:08:00Z", created_at: "2026-07-11T20:08:00Z" });
   };
   const runWith = (exit: any) => strategistReassess(db, { fetchImpl: (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [exit] }) }] }) })) as any, env: { ANTHROPIC_API_KEY: "k" }, now: () => now });
 
   // (1) a repeat partial TAKE-PROFIT, 2 min after the last partial → THROTTLED (held, no nibble).
   const m1 = R.uid(); setup(m1, "tp-open");
-  const r1 = await runWith({ market: "Under 2.5", fraction: 0.5, reason: "take_price: цена достигла оценки, edge исчерпан", trigger: "take_price" });
+  const r1 = await runWith({ market: "Draw — No", fraction: 0.5, reason: "take_price: цена достигла оценки, edge исчерпан", trigger: "take_price" });
   assert.ok(!r1.exits.some((e) => e.matchId === m1), "repeat partial take-profit is throttled");
   assert.equal(R.getBet(db, "tp-open")!.stake, 100, "position untouched — no further nibble");
   assert.ok(R.tradeLogForMatch(db, m1).some((l) => l.type === "hold" && /partial_tp_throttle/.test(l.text)), "throttle logged");
   R.updateMatch(db, m1, { state: "finished" });
 
-  // (2) a DEFENSIVE exit (thesis_stop) with the SAME recent partial → NOT throttled, executes.
+  // (2) a DEFENSIVE exit (thesis_stop) with the SAME recent TAKE-PROFIT partial → NOT throttled by
+  // partial_tp_throttle (that gate is take-profit-only), executes. (T1.3's defensive cap counts only prior
+  // [defensive] cuts, of which there are none here, so it also stands aside.)
   const m2 = R.uid(); setup(m2, "def-open");
-  const r2 = await runWith({ market: "Under 2.5", fraction: 0.5, reason: "thesis_stop — гол сломал сценарий", trigger: "thesis_stop" });
-  assert.ok(r2.exits.some((e) => e.matchId === m2), "a defensive exit is never throttled");
+  const r2 = await runWith({ market: "Draw — No", fraction: 0.5, reason: "thesis_stop — гол сломал сценарий", trigger: "thesis_stop" });
+  assert.ok(r2.exits.some((e) => e.matchId === m2), "a defensive exit is not throttled by the take-profit throttle");
   assert.ok(R.getBet(db, "def-open")!.stake! < 100, "position reduced by the defensive exit");
   R.updateMatch(db, m2, { state: "finished" });
 
   // (3) a FULL take-profit close (fraction 1) → not a partial → not throttled.
   const m3 = R.uid(); setup(m3, "full-open");
-  const r3 = await runWith({ market: "Under 2.5", fraction: 1, reason: "take_price — фиксирую полностью", trigger: "take_price" });
+  const r3 = await runWith({ market: "Draw — No", fraction: 1, reason: "take_price — фиксирую полностью", trigger: "take_price" });
   assert.ok(r3.exits.some((e) => e.matchId === m3), "a full close is never throttled");
   assert.ok(R.getBet(db, "full-open")!.status.startsWith("settled"), "position fully closed");
 });

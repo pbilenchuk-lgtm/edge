@@ -887,7 +887,10 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
     rationale: `частичная фиксация ${Math.round(fraction * 100)}%${tag ? ` [${tag}]` : ""}`, entered_minute: bet.entered_minute,
     result: pnl > 0 ? "won" : pnl < 0 ? "lost" : null, payout, settled_by: "partial", settled_at: now, created_at: now,
   });
-  R.updateBet(db, bet.id, { stake: round2(stake - closed) }); // keep the remainder open
+  // T3.4: refresh the remaining leg's mark to THIS fill's price too — a partial that leaves the remainder on a
+  // stale `тек` from before the cut is what made the Cruz Azul twins read as a divergence (two rows carrying
+  // one carried-forward price). The settled child already stamps its own exec price; now the remainder does.
+  R.updateBet(db, bet.id, { stake: round2(stake - closed), current_price: currentPriceCents }); // keep the remainder open
   try { shadowOnExit(db, bet.id, fraction, loadShadowConfig(db), now); } catch { /* observe-only */ }
   return { pnl, partial: true };
 }
@@ -1021,8 +1024,17 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
         // momentarily-broken book (≤FLOOR¢ bid far under the mark) — hold to a real book/settle.
         const phantom = sell.fromBook && sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP;
         if (!already && !phantom) {
-          const fraction = ts.action === "close_half" ? 0.5 : 1;
+          const planned = ts.action === "close_half" ? 0.5 : 1;
+          // T3.3: book only the fraction the bid actually absorbed (planned × fillFrac), remainder re-offered.
+          const tsFillFrac = sell.requestedShares > 0 ? Math.min(1, sell.filledShares / sell.requestedShares) : 1;
+          const fraction = planned * tsFillFrac;
           const reason = `плановый тайм-стоп: ${minNum}' ≥ ${ts.minute}', событие не наступило (рынок ${mk.price}¢) — ${ts.action === "close_half" ? "фиксирую половину" : "закрываю"} ${tsMarker}`;
+          if (fraction <= 1e-6) { // book absorbed nothing — hold the whole leg, time_stop retries next cycle
+            const tsKey = `«${b.market_label}»`;
+            if (!R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === b.strategy_id).slice(-8).some((e) => e.type === "hold" && e.text.includes(tsKey) && e.text.includes("exit_partial_zero")))
+              R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text: `тайм-стоп по ${tsKey} не исполнен: бид не принял размер (0% филл); держим до реального рынка/сеттла (exit_partial_zero)`, created_at: now });
+            continue;
+          }
           const res = closeBetPortion(db, b, fraction, sell.cents, minuteLabel(m), now);
           if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: prof }, scaleCost(sell.cost, fraction), now);
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reason}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${res.pnl >= 0 ? "+" : ""}$${res.pnl.toFixed(2)}`, created_at: now });
@@ -1146,9 +1158,16 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           }
         }
       }
-      const pnl = closeBetEarly(db, b, sell.cents, d.reason, minuteLabel(m), now);
-      if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, sell.cost, now);
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${d.reason}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+      // T3.3 PARTIAL-FILL ACCOUNTING (deterministic path, SYMMETRIC with the strategist path): a stop that the
+      // bid book only partly absorbs must close ONLY the filled fraction — the remainder stays open and the
+      // stop re-fires next cycle. Before this, closeBetEarly booked the WHOLE stake at the thin VWAP even on a
+      // 42% fill (Cienciano: «исполнено 42%» yet the full $80 booked settled_lost), overstating the loss.
+      const fillFrac = sell.requestedShares > 0 ? Math.min(1, sell.filledShares / sell.requestedShares) : 1;
+      if (fillFrac <= 1e-6) { holdOnce(`выход по ${holdKey} не исполнен: бид не принял размер (0% филл, ${d.reason}); держим до реального рынка/сеттла (exit_partial_zero)`); continue; }
+      const { pnl, partial } = closeBetPortion(db, b, fillFrac, sell.cents, minuteLabel(m), now);
+      if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, fillFrac < 1 ? scaleCost(sell.cost, fillFrac) : sell.cost, now);
+      const fillTag = partial ? ` (частично ${Math.round(fillFrac * 100)}%)` : "";
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}»${fillTag} @ ${sell.cents}¢ · ${d.reason}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason: d.reason, pnl });
       touched.add(b.strategy_id);
     }
@@ -1638,6 +1657,19 @@ export async function strategistReassess(
             if (winsOnEventOccurrence(b.market_label) && defMin != null && defMin >= TERMINAL_MIN
               && gsFloor != null && sell.cents < gsFloor * 100 - TERMINAL_FLOOR_MARGIN) {
               logHold(`мелтинг-опцион: бид ${sell.cents}¢ ниже game-state-флора ${Math.round(gsFloor * 100)}¢ на ${defMin}' — живой апсайд не оплачен книгой; держим до сеттла (terminal_below_gs_floor)`); continue;
+            }
+            // T3.1: a totals thesis (Under/No total) BREAKS only when the total reaches the line — the goal
+            // COUNT is the fact, not a price move or a single early goal. A counter_scenario / thesis_stop on
+            // a totals market still ≥ UNDER_STOP_SUPPRESS_MARGIN goals from the line is premature (Rosenborg:
+            // Under 1.5 cut on the FIRST goal at 0:1; it breaks only on the SECOND). Hold — the deterministic
+            // layer re-checks every goal. Only the count-based tags; a genuine full break (margin 0) fires.
+            if (/counter_scenario|thesis_stop/i.test(ex.trigger ?? "")) {
+              // margin = line − total (fractional). > 0 ⟺ the total is still UNDER the line ⟺ goals_to_break > 0
+              // ⟺ the totals thesis has NOT broken. Only a crossed line (margin < 0) lets the counter fire.
+              const uMargin = underThesisMarginGoals(b.market_label, m.score_home ?? 0, m.score_away ?? 0, { home: m.home, away: m.away });
+              if (uMargin != null && uMargin > 0) {
+                logHold(`тотал-тезис не сломан: тотал ещё под линией (запас ${uMargin}) при счёте ${m.score_home ?? 0}:${m.score_away ?? 0} — ранний counter/thesis по тоталу отклонён (ломается только голом за линию) (totals_thesis_intact)`); continue;
+              }
             }
           }
           // Phantom-bid guard, SYMMETRIC with the deterministic exit path (evaluateExits):
