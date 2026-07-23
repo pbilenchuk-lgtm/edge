@@ -792,7 +792,7 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
         R.updateBet(db, b.id, { entry_meta: serializeEntryMeta(em) });
       }
       if (ex.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, ex.cost, now);
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "enter", text: `вход «${b.market_label}» @ ${ex.priceCents}¢ · $${ex.stake}${ex.note ? ` · ${ex.note}` : ""}`, created_at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "enter", text: `вход «${b.market_label}» @ ${ex.priceCents}¢ · $${ex.stake}${ex.note ? ` · ${ex.note}` : ""}`, dedup_key: `enter:${b.decision_id ?? b.id}`, created_at: now }); // Z3: one enter line per position
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, price: ex.priceCents, stake: ex.stake });
       // Mirror this fill into the shadow batch. edge = our prob − executed price; a fill
       // while the match is already live counts as a live-triggered entry (live_buffer).

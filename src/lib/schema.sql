@@ -252,8 +252,10 @@ CREATE TABLE IF NOT EXISTS trade_log (
   minute      TEXT,
   type        TEXT NOT NULL CHECK (type IN ('enter','exit','settle','skip','hold')),
   text        TEXT NOT NULL,
+  dedup_key   TEXT,            -- Z3: idempotency key (decision/bet id); a re-write of the same (match,type,key) is ignored
   created_at  TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tradelog_dedup ON trade_log(match_id, type, dedup_key) WHERE dedup_key IS NOT NULL;
 
 -- §2.14 quality_metrics (метрики качества стратегии; пересчитываются по расписанию)
 CREATE TABLE IF NOT EXISTS quality_metrics (

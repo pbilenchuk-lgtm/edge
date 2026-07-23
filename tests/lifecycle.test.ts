@@ -2074,3 +2074,22 @@ test("Z1 (batch-5): zombie log episode-throttled — 3 ticks of one market → 1
   throttleZombieLog(db, m, "Over 5.5", "resolved_price", `zombie_quarantine:resolved_price «Over 5.5»: цена решена — карантин`, strat.id, "2026-07-23T10:04:00Z");
   assert.equal(R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip" && /«Over 5.5»/.test(l.text)).length, 2, "code change re-logs");
 });
+
+test("Z3 (batch-5): trade-log dedup_key makes a re-written event idempotent; unkeyed rows never dedup", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const strat = R.listStrategies(db, "football")[0];
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 10, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  const enter = (id: string, key: string) => R.insertTradeLog(db, { id, match_id: mid, strategy_id: strat.id, minute: "10'", type: "enter", text: "вход X", dedup_key: key, created_at: "t" });
+  enter("a", "enter:dec1");
+  enter("b", "enter:dec1"); // same (match,type,key) → ignored
+  assert.equal(R.tradeLogForMatch(db, mid).filter((l) => l.type === "enter").length, 1, "duplicate enter is ignored");
+  enter("c", "enter:dec2"); // different key → inserts
+  assert.equal(R.tradeLogForMatch(db, mid).filter((l) => l.type === "enter").length, 2, "a distinct position still logs");
+  // unkeyed rows are never deduped (all existing callers unchanged)
+  R.insertTradeLog(db, { id: "d", match_id: mid, strategy_id: strat.id, minute: "11'", type: "skip", text: "s", created_at: "t" });
+  R.insertTradeLog(db, { id: "e", match_id: mid, strategy_id: strat.id, minute: "11'", type: "skip", text: "s", created_at: "t" });
+  assert.equal(R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip").length, 2, "unkeyed rows insert normally");
+});

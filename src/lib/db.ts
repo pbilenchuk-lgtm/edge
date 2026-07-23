@@ -251,6 +251,10 @@ export function initSchema(db: Database): void {
     "ALTER TABLE bets ADD COLUMN settle_suspect INTEGER NOT NULL DEFAULT 0",
     // P0.5: football epoch tag on the bet (parallels tennis «пороги:…»); backfilled or epoch_unknown.
     "ALTER TABLE bets ADD COLUMN football_epoch TEXT",
+    // Z3 (batch-5): idempotency key for trade-log lines — a re-render / double-write of the SAME event
+    // (enter dup: Kansas, Hammarby) collapses to one row. Partial unique index so only keyed rows dedup.
+    "ALTER TABLE trade_log ADD COLUMN dedup_key TEXT",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_tradelog_dedup ON trade_log(match_id, type, dedup_key) WHERE dedup_key IS NOT NULL",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }

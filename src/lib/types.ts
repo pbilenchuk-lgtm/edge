@@ -236,6 +236,7 @@ export interface TradeLogEntry {
   type: "enter" | "exit" | "settle" | "skip" | "hold";
   text: string;
   created_at: string;
+  dedup_key?: string | null; // Z3: when set, a duplicate (match_id, type, dedup_key) insert is ignored
 }
 
 export interface CalibrationBucket {

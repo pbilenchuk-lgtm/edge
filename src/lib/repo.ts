@@ -1000,9 +1000,12 @@ export function insertReassessment(db: Database, r: Reassessment): void {
   ).run(r.id, r.match_id, r.strategy_id, r.minute, r.body, r.confidence, r.trigger, r.created_at);
 }
 export function insertTradeLog(db: Database, e: TradeLogEntry): void {
+  // Z3: OR IGNORE + the partial unique index on (match_id,type,dedup_key) makes a keyed line idempotent —
+  // a re-render / double-write of the same event is dropped. Rows without a dedup_key never hit the index,
+  // so they insert normally (the uid() PK is unique), and behaviour is unchanged for all existing callers.
   db.prepare(
-    `INSERT INTO trade_log(id,match_id,strategy_id,minute,type,text,created_at) VALUES(?,?,?,?,?,?,?)`,
-  ).run(e.id, e.match_id, e.strategy_id, e.minute, e.type, e.text, e.created_at);
+    `INSERT OR IGNORE INTO trade_log(id,match_id,strategy_id,minute,type,text,dedup_key,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+  ).run(e.id, e.match_id, e.strategy_id, e.minute, e.type, e.text, e.dedup_key ?? null, e.created_at);
 }
 export function reassessmentsForMatch(db: Database, matchId: string): Reassessment[] {
   return db.prepare(`SELECT * FROM reassessments WHERE match_id=? ORDER BY created_at`).all(matchId) as Reassessment[];

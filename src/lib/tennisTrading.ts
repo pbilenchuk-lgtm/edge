@@ -1246,7 +1246,7 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
         entry_meta: serializeEntryMeta(meta), code_version: codeVer, decision_id: decisionId, created_at: now,
       });
       try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: fillStake, edge: edgeAtFill, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(edgeAtFill * 100).toFixed(1)}% от филла, тейк ~${Math.round((prePrice - TENNIS_TAKE_BUFFER) * 10) / 10}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${Math.round((fillCents - TENNIS_CATASTROPHIC_FLOOR) * 10) / 10}¢, пороги:${TENNIS_ARMED_EPOCH})${cohortTag}`, created_at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(edgeAtFill * 100).toFixed(1)}% от филла, тейк ~${Math.round((prePrice - TENNIS_TAKE_BUFFER) * 10) / 10}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${Math.round((fillCents - TENNIS_CATASTROPHIC_FLOOR) * 10) / 10}¢, пороги:${TENNIS_ARMED_EPOCH})${cohortTag}`, dedup_key: `enter:${betId}`, created_at: now });
       opened++;
     }
   }
@@ -1514,7 +1514,7 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
         entry_meta: serializeEntryMeta(meta), code_version: codeVer, decision_id: decisionId, created_at: now,
       });
       try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: SET_VALUE_STRATEGY, profileId: profile, size: fillStake, edge: edgeAtFill, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "enter", text: `[${profile}] SET-VALUE «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(edgeAtFill * 100).toFixed(1)}% от филла, тейк 50% @ ${SET_VALUE_ARMED.takeLowCents}¢ / стоп брейк-невозврат K${SET_VALUE_ARMED.thesisStopReceiverGames} / floor ${Math.round((fillCents - SET_VALUE_ARMED.floorBelowEntryCents) * 10) / 10}¢, пороги:${SET_VALUE_EPOCH})`, created_at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "enter", text: `[${profile}] SET-VALUE «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(edgeAtFill * 100).toFixed(1)}% от филла, тейк 50% @ ${SET_VALUE_ARMED.takeLowCents}¢ / стоп брейк-невозврат K${SET_VALUE_ARMED.thesisStopReceiverGames} / floor ${Math.round((fillCents - SET_VALUE_ARMED.floorBelowEntryCents) * 10) / 10}¢, пороги:${SET_VALUE_EPOCH})`, dedup_key: `enter:${betId}`, created_at: now });
       opened++;
     }
   }
