@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase, migrateRetireFable } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision, winsOnEventOccurrence } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure, stopContradictsGameState } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure, stopContradictsGameState, terminalProtectiveHold } from "../src/lib/lifecycle.js";
 import { analyzeMatch, runStrategists } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
@@ -503,6 +503,42 @@ test("evaluateExits HOLDS a stop when the full stake would SLIP far below the be
   const ex2 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.44", size: "500" }], bids: [{ price: "0.18", size: "100000" }] }) });
   assert.ok(ex2.some((e) => e.matchId === m2), "deep-book stop executes (guard doesn't over-block a genuine low value)");
   assert.ok(R.getBet(db, "deep-bet")!.status.startsWith("settled"), "deep-book stop settled at the real price");
+});
+
+test("T1.2 terminalProtectiveHold: melting model-fill and terminal-winning defensive sells are held; take-profits and early stops are not", () => {
+  const teams = { home: "Racing", away: "Houston" };
+  // (A) a melting option (BTTS-Yes) DEFENSIVELY sold via a MODEL fill (no live bid) → held, at any minute.
+  assert.ok(terminalProtectiveHold("Both Teams to Score — Yes", 0, 1, 79, teams, false, true), "melting model-fill defensive sell → held");
+  // (B) terminal minute + winning by the current score → held to settle.
+  assert.ok(terminalProtectiveHold("CS Cienciano Under 1.5", 1, 0, 88, { home: "CS Cienciano", away: "Melgar" }, true, true), "terminal winning position → held");
+  // A TAKE-PROFIT (isDefensive=false) is never blocked — a real peak-fix still fires.
+  assert.equal(terminalProtectiveHold("Both Teams to Score — Yes", 0, 1, 88, teams, false, false), null, "take-profit not blocked");
+  // A melting option on a REAL book mid-match (not model, not terminal-winning) is not blocked here.
+  assert.equal(terminalProtectiveHold("Over 1.5", 0, 0, 60, teams, true, true), null, "real-book melting mid-match → helper adds no block");
+  // A winning position EARLY (minute < terminal) is not held by rule B.
+  assert.equal(terminalProtectiveHold("CS Cienciano Under 1.5", 1, 0, 60, { home: "CS Cienciano", away: "Melgar" }, true, true), null, "winning but early → not terminal");
+});
+
+test("T1.2 strategistReassess: a melting BTTS-Yes defensively stopped with NO live bid is HELD (terminal_model_fill), not model-filled at a loss", async () => {
+  const { loadPolymarketConfig } = await import("../src/lib/polymarket.js");
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true" });
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.clearShares(db, comp.id);
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, risk_profile_id: "medium", pct: 50 });
+  const mid = R.uid();
+  // 0:1 at 79' — BTTS-Yes not yet won (Houston hasn't scored), the strategist wants to cut its losing thesis.
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Racing", away: "Houston", state: "live", lineup_out: true, kickoff_at: null, minute: 79, score_home: 0, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Both Teams to Score — Yes", price: 40, ai_prob: 0.5, liquidity: "500", external_ref: "TOKB", snapshot_at: "t", is_closing: false });
+  R.insertBet(db, { id: "btts", match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Both Teams to Score — Yes", status: "open", proposed_price: 55, entry_price: 55, current_price: 40, closing_price: null, ai_prob: 0.5, stake: 100, rationale: "r", entered_minute: "45'", result: null, payout: null, created_at: "t" });
+  // Empty bid book → sellVwapCents returns a MODELLED price (fromBook=false) — exactly the «нет живого бида» case.
+  const csExit = (async (url: any) => { const u = String(url); if (u.includes("anthropic") || u.includes("/messages")) return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [{ market: "Both Teams to Score — Yes", fraction: 1, reason: "тезис не сыграл — фиксирую убыток", trigger: "thesis_stop" }] }) }] }) } as any; return { ok: true, status: 200, json: async () => (u.includes("/book") ? { asks: [{ price: "0.90", size: "500" }], bids: [] } : {}) } as any; }) as unknown as typeof fetch;
+  await strategistReassess(db, { fetchImpl: csExit, polymarket: poly, env: { ANTHROPIC_API_KEY: "k" }, now: () => "2026-07-14T20:00:00Z" }, { max: 50 });
+  assert.equal(R.getBet(db, "btts")!.status, "open", "melting option held to settle, not model-filled at a loss");
+  assert.ok(R.tradeLogForMatch(db, mid).some((l) => l.type === "hold" && /terminal_model_fill/.test(l.text)), "terminal_model_fill hold logged");
 });
 
 test("T1.1 evaluateExits: a WINNING team-Under dumped on a THIN book is HELD (state_price_contradiction), not stopped into a zombie bid", async () => {

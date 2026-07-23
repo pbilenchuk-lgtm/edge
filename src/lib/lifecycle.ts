@@ -142,6 +142,29 @@ export function stopContradictsGameState(
   if (!thin) return null;                                              // deep-book genuine low value on a fragile Under → let the stop fire
   return `позиция выигрывает по счёту ${scoreHome ?? 0}:${scoreAway ?? 0}, но бид ${sell.cents}¢ на тонкой книге (вход ${entryCents}¢) — цена противоречит факту, книга-зомби; держим до сеттла (state_price_contradiction)`;
 }
+
+// T1.2 TERMINAL-PHASE melting-option protection. Racing/Fluminense/Göteborg: a long Over / BTTS-Yes was
+// liquidated DEFENSIVELY in the closing phase — its whole value is a future event and its downside is already
+// ~0 (settles 0 if the event never lands), so a defensive sale can only forfeit upside. Two deterministic
+// blocks; a TAKE-PROFIT (high real bid) is never touched, so a genuine peak-fix still fires.
+export const TERMINAL_MIN = (() => { const n = Number(process.env.TERMINAL_MIN); return Number.isFinite(n) && n > 0 ? n : 85; })();          // minute at/after which a winner holds to settle
+export const TERMINAL_FLOOR_MARGIN = (() => { const n = Number(process.env.TERMINAL_FLOOR_MARGIN); return Number.isFinite(n) && n >= 0 ? n : 5; })(); // ¢ a terminal defensive sale may sit below the game-state floor
+/** T1.2: should a DEFENSIVE exit be BLOCKED to hold-to-settle in the terminal phase? Reason, or null.
+ *  (A) a MELTING option (Over/BTTS-Yes) sold via a MODEL fill (no live bid) — the sale is fictional and the
+ *      downside is already ~0; hold (resolution pays 100 if the event lands, 0 otherwise — never worse).
+ *  (B) terminal minute + already WINNING by the current score → hold to settle (resolution-close pays 100).
+ *  gsFloorProb (liveAdjustedProb) adds (C) at the call site: a terminal melting sale below its game-state floor. */
+export function terminalProtectiveHold(
+  label: string, scoreHome: number | null, scoreAway: number | null, minute: number | null,
+  teams: { home: string; away: string }, sellFromBook: boolean, isDefensive: boolean,
+): string | null {
+  if (!isDefensive) return null;                                       // a take-profit at a high price is fine
+  const melting = winsOnEventOccurrence(label);
+  if (melting && !sellFromBook) return `мелтинг-опцион защитно продаётся по МОДЕЛИ (нет живого бида) — продажа фиктивна, даунсайд уже ≈0; держим до сеттла (terminal_model_fill)`;
+  const winning = resolveFootballMarket(label, scoreHome ?? 0, scoreAway ?? 0, teams) === true;
+  if (winning && minute != null && minute >= TERMINAL_MIN) return `${minute}' ≥ ${TERMINAL_MIN}' и позиция выигрывает по счёту — защитная продажа отклонена, resolution-close закроет по 100 (terminal_winning_hold)`;
+  return null;
+}
 // TIME-DECAY FLOOR for "wins on event occurrence" markets (Over, BTTS Yes, team-to-score),
 // which are EXEMPT from the price stop (their price is a melting option — see
 // winsOnEventOccurrence). Exempt ≠ hold the corpse to the whistle: an option that is BOTH
@@ -1072,6 +1095,9 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       if (d.kind === "stop") {
         const sc = stopContradictsGameState(b.market_label, m.score_home, m.score_away, { home: m.home, away: m.away }, b.entry_price, sell);
         if (sc) { holdOnce(`выход отклонён по ${holdKey}: ${sc}`); continue; }
+        // T1.2: a terminal-phase winning position (or a melting model-fill) is held to settle, not stopped.
+        const th = terminalProtectiveHold(b.market_label, m.score_home, m.score_away, minNum, { home: m.home, away: m.away }, sell.fromBook, true);
+        if (th) { holdOnce(`выход отклонён по ${holdKey}: ${th}`); continue; }
       }
       // Phantom-bid guard: a stop firing on a degenerate bid (≤FLOOR¢) that sits far
       // below the mid is dumping into a momentarily-broken book, not managing risk —
@@ -1595,12 +1621,23 @@ export async function strategistReassess(
           // defensive exit (a take-profit sells into a HIGH bid and never reaches the floor). Anchored on game
           // state so it stays effective as the book decays. Log once per continuous hold period.
           if (defensiveExit) {
+            const holdKey = `«${b.market_label}»`;
+            const defMin = m.minute ?? minuteApprox;
+            const alreadyHeld = () => R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
+            const logHold = (why: string) => { if (!alreadyHeld()) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отклонён по ${holdKey}: ${why}`, created_at: now }); };
+            // T1.1: state↔price contradiction (winning position dumped into a zombie bid).
             const sc = stopContradictsGameState(b.market_label, m.score_home, m.score_away, { home: m.home, away: m.away }, b.entry_price, sell);
-            if (sc) {
-              const holdKey = `«${b.market_label}»`;
-              const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
-              if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `выход стратега отклонён по ${holdKey}: ${sc}`, created_at: now });
-              continue;
+            if (sc) { logHold(sc); continue; }
+            // T1.2 (A/B): terminal-phase melting model-fill / winning-by-score hold to settle.
+            const th = terminalProtectiveHold(b.market_label, m.score_home, m.score_away, defMin, { home: m.home, away: m.away }, sell.fromBook, true);
+            if (th) { logHold(th); continue; }
+            // T1.2 (C): a MELTING option defensively sold in the terminal phase BELOW its game-state floor —
+            // the option still has live equity the crashed bid isn't paying; hold to settle (Fluminense: sold
+            // at 7¢ with model P≈15%, then the goal landed at 90'+14' → won). gsFloor from liveAdjustedProb.
+            const gsFloor = gsProbByLabel.get(b.market_label)?.prob ?? null;
+            if (winsOnEventOccurrence(b.market_label) && defMin != null && defMin >= TERMINAL_MIN
+              && gsFloor != null && sell.cents < gsFloor * 100 - TERMINAL_FLOOR_MARGIN) {
+              logHold(`мелтинг-опцион: бид ${sell.cents}¢ ниже game-state-флора ${Math.round(gsFloor * 100)}¢ на ${defMin}' — живой апсайд не оплачен книгой; держим до сеттла (terminal_below_gs_floor)`); continue;
             }
           }
           // Phantom-bid guard, SYMMETRIC with the deterministic exit path (evaluateExits):
