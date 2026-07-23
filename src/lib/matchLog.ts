@@ -119,6 +119,22 @@ export function buildMatchLog(db: Database, matchId: string): string {
   const markets = R.latestMarkets(db, m.id);
   if (!markets.length) L.push("(нет рынков)");
   for (const mk of markets) L.push(`- ${mk.label}: ${mk.price}¢${mk.ai_prob != null ? ` · ai_prob ${(mk.ai_prob * 100).toFixed(0)}%` : ""}${mk.liquidity ? ` · ликв. ${mk.liquidity}` : ""}`);
+  // Z1 (batch-5): zombie-quarantine COVERAGE counter — one header line replaces the (now episode-throttled)
+  // per-tick skip flood and answers "is quarantine choking the entry universe?" for this match at a glance.
+  // Derived from the throttled episode lines in the trade log: distinct markets that hit quarantine, by cause.
+  {
+    const byCode = new Map<string, Set<string>>();
+    for (const e of R.tradeLogForMatch(db, m.id)) {
+      const mtch = /zombie_quarantine:(\w+)\s+«([^»]+)»/.exec(e.text ?? "");
+      if (!mtch) continue;
+      (byCode.get(mtch[1]) ?? byCode.set(mtch[1], new Set()).get(mtch[1])!).add(mtch[2]);
+    }
+    if (byCode.size) {
+      const distinct = new Set<string>(); for (const s of byCode.values()) for (const l of s) distinct.add(l);
+      const causes = [...byCode.entries()].map(([code, s]) => `${code} ${s.size}`).join(", ");
+      L.push(`- Карантин рынков: ${distinct.size} из ${markets.length} попадали в карантин (по причинам: ${causes})`);
+    }
+  }
 
   // ── Analysis artifacts (base / category / distribution) ──
   const arts = R.artifactsForMatch(db, m.id);

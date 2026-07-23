@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase, migrateRetireFable } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision, winsOnEventOccurrence } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure, stopContradictsGameState, terminalProtectiveHold } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure, stopContradictsGameState, terminalProtectiveHold, throttleZombieLog } from "../src/lib/lifecycle.js";
 import { analyzeMatch, runStrategists } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
@@ -2056,4 +2056,21 @@ test("recordMatchStats: market-snapshot fallback when no ESPN stats; skips non-l
   const snaps = R.eventsForMatch(db, fb).filter((e) => e.type === "stats");
   assert.equal(snaps.length, 1, "market-snapshot fallback written");
   assert.match(snaps[0].text, /рынок: Alcaraz 62¢ · Sinner 38¢/); // favourite (higher price) first
+});
+
+test("Z1 (batch-5): zombie log episode-throttled — 3 ticks of one market → 1 line, counter 3; code change re-logs", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const strat = R.listStrategies(db, "football")[0];
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  const m = R.getMatch(db, mid)!;
+  for (let i = 0; i < 3; i++) throttleZombieLog(db, m, "Over 5.5", "stale_book", `zombie_quarantine:stale_book «Over 5.5»: книга не менялась — карантин`, strat.id, `2026-07-23T10:0${i}:00Z`);
+  const lines = R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip" && /zombie_quarantine:stale_book «Over 5.5»/.test(l.text));
+  assert.equal(lines.length, 1, "3 same-code ticks → exactly 1 episode line");
+  assert.equal(JSON.parse(R.metaGet(db, `zombie_ep:${mid} Over 5.5`)!).ticks, 3, "silent tick counter reached 3");
+  // a code change is a class change → a new episode line
+  throttleZombieLog(db, m, "Over 5.5", "resolved_price", `zombie_quarantine:resolved_price «Over 5.5»: цена решена — карантин`, strat.id, "2026-07-23T10:04:00Z");
+  assert.equal(R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip" && /«Over 5.5»/.test(l.text)).length, 2, "code change re-logs");
 });

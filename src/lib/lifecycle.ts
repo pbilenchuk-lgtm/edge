@@ -742,8 +742,9 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       // P1: refuse a fill on a quarantined book — the quote isn't a real tradeable price (feeds unfillable_edge).
       const zr = zombie.get(b.market_label);
       if (zr) {
+        // Z1: the not_filled status + rationale still records WHY on the bet; the per-tick trade-log line here
+        // was redundant with footballZombieMap's episode line (throttleZombieLog) and drove ~44k of the storm.
         R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `zombie_quarantine:${zr.code} — ${zr.detail}`) });
-        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `zombie_quarantine:${zr.code} «${b.market_label}»: ${zr.detail} — вход отклонён`, created_at: now });
         continue;
       }
       const proposed = b.stake ?? 0;
@@ -1302,15 +1303,36 @@ function footballZombieMap(
     const z = classifyZombie({ label: mk.label, priceCents: mk.price, gsProb: gs?.prob ?? null, groupSpreadCents: spreads.get(mk.label) ?? null, bookAgeMin: bookAge, live: true }, cfg);
     if (!z) continue;
     out.set(mk.label, z);
-    if (logSid) {
-      // Dedup: one quarantine line per (label, code) within the recent tail — both consumers call this each
-      // tick, and the same zombie persists across ticks; we log the TRANSITION, not every tick.
-      const tag = `zombie_quarantine:${z.code}`;
-      const recent = R.tradeLogForMatch(db, m.id).slice(-14).some((e) => e.type === "skip" && e.text.includes(tag) && e.text.includes(`«${mk.label}»`));
-      if (!recent) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: logSid, minute: minuteLabel(m), type: "skip", text: `${tag} «${mk.label}»: ${z.detail} — рынок на карантине для всех потребителей (вход/контекст)`, created_at: now });
+    if (logSid) throttleZombieLog(db, m, mk.label, z.code, `zombie_quarantine:${z.code} «${mk.label}»: ${z.detail} — рынок на карантине для всех потребителей (вход/контекст)`, logSid, now);
+  }
+  // Z1: close episodes for markets no longer quarantined this tick — log the LIFT once, then drop the marker
+  // (so a re-quarantine later starts a fresh episode). Bounded scan: only THIS match's episode markers.
+  if (logSid) {
+    for (const rec of R.metaByPrefix(db, `${ZOMBIE_EP}${m.id} `)) {
+      const label = rec.key.slice(`${ZOMBIE_EP}${m.id} `.length);
+      if (out.has(label)) continue; // still quarantined → its marker was already refreshed above
+      let ticks = 0; try { ticks = Number(JSON.parse(rec.value).ticks ?? 0); } catch { /* ignore */ }
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: logSid, minute: minuteLabel(m), type: "skip", text: `zombie_lifted «${label}»: карантин снят (эпизод ${ticks} тик.) — рынок снова торгуем`, created_at: now });
+      try { R.metaDelete(db, rec.key); } catch { /* best-effort */ }
     }
   }
   return out;
+}
+
+// Z1 (batch-5): episode-throttled zombie log. ONE line per continuous (match, label, code) quarantine episode;
+// each further tick of the SAME code accrues a silent counter (no line); a code change re-logs (class change),
+// and the lift is logged once by the sweep above. Keyed on a meta marker so BOTH consumers (strategist context
+// + autoEnter fill choke) that call footballZombieMap each tick collapse to a single episode line instead of
+// re-logging every tick — the ~90k skip-line storm (staleSweep-frozen matches ran this for hours) becomes a
+// handful of transition lines. Replaces the old slice(-14) tail dedup, which failed once #markets×#consumers>14.
+const ZOMBIE_EP = "zombie_ep:";
+export function throttleZombieLog(db: Database, m: Match, label: string, code: string, text: string, sid: string, now: string): void {
+  const key = `${ZOMBIE_EP}${m.id} ${label}`;
+  let ep: { code: string; ticks: number } | null = null;
+  try { const s = R.metaGet(db, key); if (s) ep = JSON.parse(s); } catch { /* treat as new */ }
+  if (ep && ep.code === code) { try { R.metaSet(db, key, JSON.stringify({ code, ticks: ep.ticks + 1 }), now); } catch { /* ignore */ } return; } // same episode → silent tick++
+  try { R.metaSet(db, key, JSON.stringify({ code, ticks: 1 }), now); } catch { /* ignore */ }
+  R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "skip", text, created_at: now });
 }
 
 export async function strategistReassess(

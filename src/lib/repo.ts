@@ -374,6 +374,9 @@ export function metaSet(db: Database, key: string, value: string, now: string): 
      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
   ).run(key, value, now);
 }
+export function metaDelete(db: Database, key: string): void {
+  db.prepare(`DELETE FROM app_meta WHERE key=?`).run(key);
+}
 /** All KV rows whose key starts with `prefix` (newest first). Used by diagnostics that
  *  aggregate per-item markers (e.g. the tennis funnel's per-break action markers). */
 export function metaByPrefix(db: Database, prefix: string): { key: string; value: string; updated_at: string }[] {
