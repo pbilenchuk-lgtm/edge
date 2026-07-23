@@ -72,12 +72,21 @@ const PMV_BUDGET = (() => { const n = Number(process.env.TENNIS_PMV_SIM_BUDGET_U
 // Evaluated at call time so it can be flipped without a restart (and set per-test).
 export const pmvFlagOnly = (): boolean => process.env.TENNIS_PMV_FLAG_ONLY !== "false";
 const VOID_FAMILIES = new Set<PropFamily>(["total_sets", "set_handicap"]);
-// B7 — a prop that VOIDS (refunds) if the match doesn't complete (retire/cancel). This is the SINGLE
-// source shared by the theo void-haircut (theoForProp) AND settlement (MATCH_SCOPE_VOID); the two
-// having drifted apart WAS the bug — a match-scope Total Games voids on retire in settlement, but the
-// theo priced it as if it always resolved (no haircut) → a systematic phantom edge on match totals.
-// Note it is a SUPERSET of VOID_FAMILIES: those families are always match-completion-scoped, and a
-// Total Games prop is too ONLY when its scope is the whole match (a set-scoped total resolves on its set).
+// batch-4 п.4 — EXPLICIT-LIST PRINCIPLE for derivative gate coverage. The families that void on
+// incompletion are enumerated HERE and nowhere else; a market family is neither priced nor traded until
+// it is added to the coverage below (fail-closed BY FAMILY). Two holes were each found only after a loss —
+// set_winner (П4) and match-scope Total Games (Draxl, dev +11.3¢ → void). The rule replaces "find the
+// third hole by losing money on it": if parseProp doesn't recognise a family it returns null → skip
+// (already fail-closed), and every recognised void-family MUST appear in isMatchScopeVoid so the theo
+// haircut (theoForProp) and settlement (MATCH_SCOPE_VOID) can never disagree about what voids.
+//
+// B7 — a prop that VOIDS (refunds) if the match doesn't complete (retire/cancel). SINGLE source shared by
+// the theo void-haircut (theoForProp) AND settlement (MATCH_SCOPE_VOID); the two having drifted apart WAS
+// the bug. Covered void families (the explicit list):
+//   • total_sets           — always match-completion-scoped (VOID_FAMILIES)
+//   • set_handicap         — always match-completion-scoped (VOID_FAMILIES)
+//   • total_games, match scope ("Match Over/Under N.5 games") — void ONLY when the whole match is the unit
+//     (a SET-scoped total resolves on its own set → not match-void). This is the п.4 game-totals coverage.
 const isMatchScopeVoid = (p: ParsedProp): boolean => VOID_FAMILIES.has(p.family) || (p.family === "total_games" && p.scope === "match");
 const PMV_ACTED = "tennis_pmv_acted:"; // per-match idempotency (pre-match scan runs once)
 

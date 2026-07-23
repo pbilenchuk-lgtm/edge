@@ -356,3 +356,23 @@ test("finalSetsFromRaw: parses API-Tennis scores into per-set games", () => {
   assert.equal(fs.matchGames, 19);
   assert.equal(fs.setsWonP1, 1); assert.equal(fs.setsWonP2, 1);
 });
+
+test("п.4 (batch-4): match-scope Total Games gets the void haircut in theo AND voids on retire in settlement (Draxl case)", () => {
+  const theo = tennisTheo(0.55, BASE_HOLD.atp_hard);
+  const matchTotal = parseProp("Swiss Open: Draxl vs Trotter Match Over 21.5")!; // total_games, match scope
+  assert.equal(matchTotal.family, "total_games");
+  assert.equal(matchTotal.scope, "match");
+  // theo: the match-scope total must be haircut toward a void (0.5) by the completion prob — i.e. the
+  // priced theo differs from the raw (un-hairut) match-games-over probability. A SET-scoped total is NOT.
+  const rawOver = theo.matchGamesOver(21.5);
+  const priced = theoForProp(matchTotal, theo, null)!; // order-symmetric total → firstIsP1 ignored
+  assert.ok(Math.abs(priced - rawOver) > 1e-9, "match Total Games is haircut for void (not priced as always-resolving)");
+  const setTotal = parseProp("Swiss Open: Draxl vs Trotter Set 1 Over 9.5")!; // set-scoped → no match-void haircut
+  assert.ok(Math.abs(theoForProp(setTotal, theo, false)! - theo.setGamesOver(9.5)) < 1e-9, "set-scoped total is NOT haircut (resolves on its own set)");
+  // settlement: a mid-match RETIRE voids the match-scope total (the match didn't complete).
+  const fs: FinalSets = { sets: [{ p1: 6, p2: 3 }, { p1: 2, p2: 1 }], setsWonP1: 1, setsWonP2: 0, matchGames: 12 };
+  assert.equal(resolveTennisProp("Swiss Open: Draxl vs Trotter Match Over 21.5", fs, { retired: true, canceled: false, firstIsP1: true }), null, "match Total Games voids on retire");
+  // a COMPLETED match resolves it normally (not void).
+  const fsDone: FinalSets = { sets: [{ p1: 6, p2: 4 }, { p1: 7, p2: 5 }], setsWonP1: 2, setsWonP2: 0, matchGames: 22 };
+  assert.equal(resolveTennisProp("Swiss Open: Draxl vs Trotter Match Over 21.5", fsDone, { retired: false, canceled: false, firstIsP1: true }), true, "22 games > 21.5 → Over wins when the match completes");
+});

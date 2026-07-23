@@ -33,6 +33,8 @@ export interface CapacitySegment {
   key: string; strategyId: string; epoch: string;
   betsModeled: number; cN: number; cSource: "own" | "own_thin" | "none";
   cMedPer1k: number | null; cLoPer1k: number | null; cHiPer1k: number | null; // ¢ vwap move per $1k, median + range
+  cMedPer1kWithModelled: number | null; // п.3: the OLD c-base (book+modelled) — for the old→new shift
+  cModelledExcluded: number;            // how many modelled (from_book=false) buy-fills were dropped from c
   rows: CapacityRow[]; note: string;
 }
 export interface CapacityCurve {
@@ -51,15 +53,26 @@ export function buildCapacityCurve(db: Database, env: Record<string, string | un
 
   // Per-bet buy slippage coefficient c (¢ of vwap per $ of size): c = Σ slip_cents / Σ notional, and the
   // biggest single fill we ever observed for that bet (the extrapolation frontier).
-  const buyAgg = new Map<string, { slip: number; notional: number; maxFill: number }>();
+  // batch-4 п.3: the c-BASE must be honest slippage only. A `from_book=false` fill is MODELLED (quote-
+  // fallback / paper-midpoint) — its "slippage" is a parametric artifact, not a measured book cost, and the
+  // 0-slip paper epoch was flooding the median downward → an OPTIMISTIC capacity curve. Exclude modelled
+  // fills from c by MODE (from_book), NEVER by value: a genuine 0¢ slip on a deep book IS a real measure and
+  // stays. We keep a SEPARATE all-fills aggregate purely to show the old→new c shift as a number.
+  const buyAgg = new Map<string, { slip: number; notional: number; maxFill: number }>();       // book-only (honest c)
+  const buyAggAll = new Map<string, { slip: number; notional: number }>();                       // incl. modelled (old, for comparison)
   for (const f of R.allFillCosts(db)) {
     if (f.side !== "buy" || !f.bet_id) continue;
+    const a = buyAggAll.get(f.bet_id) ?? { slip: 0, notional: 0 };
+    a.slip += (f.slip_cents ?? 0); a.notional += (f.notional_usd ?? 0); buyAggAll.set(f.bet_id, a);
+    if (!f.from_book) continue; // MODELLED fill → excluded from the honest c-base (mode filter, not value)
     const e = buyAgg.get(f.bet_id) ?? { slip: 0, notional: 0, maxFill: 0 };
     e.slip += (f.slip_cents ?? 0); e.notional += (f.notional_usd ?? 0); e.maxFill = Math.max(e.maxFill, f.notional_usd ?? 0);
     buyAgg.set(f.bet_id, e);
   }
   const cByBet = new Map<string, number>();
   for (const [betId, e] of buyAgg) { if (e.notional > 0) { const c = e.slip / e.notional; if (c > 0) cByBet.set(betId, c); } }
+  const cByBetAll = new Map<string, number>(); // old basis (book + modelled) — comparison only
+  for (const [betId, a] of buyAggAll) { if (a.notional > 0) { const c = a.slip / a.notional; if (c > 0) cByBetAll.set(betId, c); } }
 
   const settled = R.allBets(db).filter((b) => (b.status === "settled_won" || b.status === "settled_lost") && b.entry_price != null && b.stake != null && (b.stake ?? 0) > 0);
 
@@ -70,10 +83,16 @@ export function buildCapacityCurve(db: Database, env: Record<string, string | un
   const segFor = (key: string, bets: typeof settled): CapacitySegment => {
     const [strategyId, epoch] = [bets[0].strategy_id, epochOf((bets[0] as any).code_version)];
     // c comes from THIS segment's OWN fills only — never a global median.
-    const ownCs: number[] = [], ownMax: number[] = [];
-    for (const b of bets) { const c = cByBet.get(b.id); if (c != null) { ownCs.push(c); ownMax.push(buyAgg.get(b.id)?.maxFill ?? 0); } }
+    const ownCs: number[] = [], ownMax: number[] = [], ownCsAll: number[] = [];
+    let modelledExcluded = 0;
+    for (const b of bets) {
+      const c = cByBet.get(b.id); if (c != null) { ownCs.push(c); ownMax.push(buyAgg.get(b.id)?.maxFill ?? 0); }
+      const cAll = cByBetAll.get(b.id); if (cAll != null) ownCsAll.push(cAll);
+      if (cByBetAll.has(b.id) && !cByBet.has(b.id)) modelledExcluded++; // had a c on the old basis, dropped as modelled
+    }
     const cN = ownCs.length;
     const cMed = median(ownCs);
+    const cMedAll = median(ownCsAll);
     const cSource: CapacitySegment["cSource"] = cN >= C_MIN_OWN ? "own" : cN >= 1 ? "own_thin" : "none";
     const maxObsNotional = ownMax.length ? Math.max(...ownMax) : 0;
     const medStake = median(bets.map((b) => b.stake as number)) ?? 0;
@@ -105,6 +124,8 @@ export function buildCapacityCurve(db: Database, env: Record<string, string | un
       cMedPer1k: cMed != null ? Math.round(cMed * 1000 * 10) / 10 : null,
       cLoPer1k: ownCs.length ? Math.round(Math.min(...ownCs) * 1000 * 10) / 10 : null,
       cHiPer1k: ownCs.length ? Math.round(Math.max(...ownCs) * 1000 * 10) / 10 : null,
+      cMedPer1kWithModelled: cMedAll != null ? Math.round(cMedAll * 1000 * 10) / 10 : null,
+      cModelledExcluded: modelledExcluded,
       rows, note,
     };
   };
@@ -119,6 +140,12 @@ export function buildCapacityCurve(db: Database, env: Record<string, string | un
     segments: segments.filter((s) => s.key !== verdictKey),
     caveats: [
       "Ёмкость — свойство СТРАТЕГИИ × её рынков, не аккаунта. Вердикт — Overreaction (real-whitelist) на текущей эпохе, не смесь портфеля.",
+      "п.3: c-база — ТОЛЬКО замеренный по книге slippage (from_book). Модельные (quote-fallback/paper-0) филлы исключены по РЕЖИМУ, не по значению 0 — честный 0¢ на глубокой книге остаётся. Старая база (с модельными) занижала c → оптимистичная ёмкость.",
+      verdict && verdict.cMedPer1kWithModelled != null && verdict.cMedPer1k != null
+        ? `Сдвиг c у вердикта: старая база ${verdict.cMedPer1kWithModelled}¢/$1k (с модельными) → новая ${verdict.cMedPer1k}¢/$1k (только книга), исключено модельных ${verdict.cModelledExcluded}. Решения по банку читать ТОЛЬКО с новой кривой.`
+        : verdict
+          ? `Сдвиг c у вердикта: новая база (только книга) даёт ${verdict.cMedPer1k ?? "нет"} ¢/$1k; модельных исключено ${verdict.cModelledExcluded}. Если новая база пуста — ёмкость пока не измерить честно (нужны book-филлы).`
+          : "c-сдвиг: нет вердиктного сегмента на текущей эпохе.",
       "c берётся из СОБСТВЕННЫХ замеров сегмента (никогда глобальная медиана). Тонкий n → показываем n и разброс, не гладкую кривую на чужом slippage.",
       "МОДЕЛЬ, не замер: линейный slippage, книгу не пере-VWAP-или. Строки beyondObserved — экстраполяция за наблюдённые размеры («модель сломалась»), не прогноз.",
       "Только ВХОД. У Overreaction выход (выкуп→тейк) — часть эджа, большой размер портит ОБЕ ноги → оценка оптимистична.",
