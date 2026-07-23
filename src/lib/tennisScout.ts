@@ -987,11 +987,14 @@ export async function buildOvrRunnerBacktest(db: Database): Promise<OvrRunnerBac
   const { tennisFinalResult } = await import("./tennisTrading.js");
   const cohort = R.listTennisBreakMarks(db).filter((m) =>
     m.broke_early === 1 && ovrTour(m.event_type) != null && (m.pre_cents ?? 0) >= OVR_FAV_MIN_PRIMARY &&
-    m.panic_cents != null && m.pre_cents != null && m.broken_side != null && m.match_id != null);
+    m.floor_cents != null && m.pre_cents != null && m.broken_side != null && m.match_id != null);
   const runnerNets: number[] = [], takeOnlyNets: number[] = [];
   let nTakeReached = 0, nSettleWin = 0, nExcludedOutOfBand = 0;
   for (const m of cohort) {
-    const entry = m.panic_cents as number;
+    // The ENTRY price is the absolute BOTTOM the strategy buys (floor_cents) — NOT panic_cents, which is the
+    // slide MAGNITUDE (ovrCohortStats: stopLevel = pre − pctl(panic_cents)). The band drops deep collapses /
+    // non-drops the strategy would never actually buy.
+    const entry = m.floor_cents as number;
     if (!(entry >= OVR_RUNNER_ENTRY_MIN && entry <= OVR_RUNNER_ENTRY_MAX)) { nExcludedOutOfBand++; continue; } // not a real overreaction buy
     const fin = tennisFinalResult(db, m.match_id!);
     if (!fin || !fin.finished || fin.canceled || fin.manual || fin.advancing == null) continue; // need a clean win/loss
