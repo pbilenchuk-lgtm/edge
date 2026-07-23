@@ -1,37 +1,16 @@
 import EdgeLab from "@/components/EdgeLab";
+import { getAppSnapshot } from "@/lib/appSnapshot";
 
 export const dynamic = "force-dynamic";
 
-// SSR snapshot cache. buildAppData() is a synchronous node:sqlite pass over EVERY match
-// (per-match assessments/markets/odds queries) — it grows with the DB and now takes
-// several SECONDS. node:sqlite blocks the event loop, so an uncached `/` freezes the whole
-// process on every hit (nothing else — not /api/health, not Render's post-deploy port
-// probe — can be answered while it runs). A burst of `/` hits during a deploy therefore
-// starved the port scan → "No open HTTP ports" → deploy timeout. Caching the snapshot for
-// a few seconds means `/` blocks the loop at most once per TTL instead of once per request,
-// so health/port probes get their free windows and homepage loads are instant after the
-// first. A few seconds of staleness on a dashboard is irrelevant. Module-level state
-// persists across requests in the single production worker (WEB_CONCURRENCY=1).
-const SNAPSHOT_TTL_MS = Math.max(0, Number(process.env.APP_SNAPSHOT_TTL_MS ?? 10_000));
-let _snap: { at: number; data: unknown } | null = null;
-
+// The heavy AppData build is behind a shared STALE-WHILE-REVALIDATE cache (see lib/appSnapshot): `/` and the
+// `/api/app` poll share it, so buildAppData runs at most once per TTL for the worker and never blocks the port
+// with back-to-back builds. This page just reads the current snapshot.
 export default async function Home() {
-  const { getDb } = await import("@/lib/db");
-  const { buildAppData } = await import("@/lib/view");
-
-  let initial = null;
+  let initial: unknown | null = null;
   let error: string | null = null;
-  try {
-    const now = Date.now();
-    if (_snap && now - _snap.at < SNAPSHOT_TTL_MS) {
-      initial = _snap.data as ReturnType<typeof buildAppData>;
-    } else {
-      initial = buildAppData(getDb());
-      _snap = { at: now, data: initial };
-    }
-  } catch (e) {
-    error = e instanceof Error ? e.message : String(e);
-  }
+  try { initial = await getAppSnapshot(); }
+  catch (e) { error = e instanceof Error ? e.message : String(e); }
 
   if (!initial) {
     return (
@@ -45,5 +24,5 @@ npm run dev`}</pre>
     );
   }
 
-  return <EdgeLab initial={initial} />;
+  return <EdgeLab initial={initial as any} />;
 }
