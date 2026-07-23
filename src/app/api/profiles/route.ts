@@ -56,6 +56,13 @@ export async function GET(req: Request) {
       // (delta saved/cost vs the gap bottom, with the pre-set verdict criterion).
       return NextResponse.json({ ok: true, gaps: scheduleGapSummary(db), reprice: gapRepriceSummary(db) });
     }
+    // ?report=pmv_exit_counterfactual → F4: for every early-closed prematch_value bet, actual P&L vs
+    // hold-to-settle (the real settle grade on the final score), cut by exit reason × market family with a
+    // pre-set «держать было лучше на ≥15% оборота при n≥30» flag, plus opposite-outcome twin divergences.
+    if (new URL(req.url).searchParams.get("report") === "pmv_exit_counterfactual") {
+      const { buildPmvExitCounterfactual } = await import("@/lib/pmvExitCounterfactual");
+      return NextResponse.json({ ok: true, report: buildPmvExitCounterfactual(db) });
+    }
     return NextResponse.json({ ok: false, error: "unknown report" }, { status: 400 });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
