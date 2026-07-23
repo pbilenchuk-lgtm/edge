@@ -65,6 +65,12 @@ export async function GET(req: Request) {
     }
     // ?report=reassess_efficiency → F5: re-measure the P0.4 «LLM-мельница» ratio post-gate — cumulative
     // strategist calls vs deterministic gate skips, calls per traded match against the 26–42 baseline band.
+    // ?report=reassess_audit → Z4 (batch-5): reassess-throttle MEASUREMENT — storm composition by trigger
+    // + a conservative count of executed exits the proposed throttle might have skipped (gate: must be 0).
+    if (new URL(req.url).searchParams.get("report") === "reassess_audit") {
+      const { buildReassessAudit } = await import("@/lib/reassessAudit");
+      return NextResponse.json({ ok: true, audit: buildReassessAudit(getDb()) });
+    }
     if (new URL(req.url).searchParams.get("report") === "reassess_efficiency") {
       const { buildReassessEfficiency } = await import("@/lib/reassessEfficiency");
       return NextResponse.json({ ok: true, report: buildReassessEfficiency(db) });

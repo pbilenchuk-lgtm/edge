@@ -2116,3 +2116,25 @@ test("Z2(b) (batch-5): payout inconsistency flags accounting_suspect at settle (
   R.updateBet(db, "e", { status: "settled_lost", result: "lost", payout: Math.round(100 * (30 / 40) * 100) / 100, closing_price: 30, settled_by: "early" });
   assert.equal(R.getBet(db, "e")!.accounting_suspect ?? 0, 0, "early cash-out consistent → clean");
 });
+
+test("Z4 (batch-5): reassess audit — storm composition + conservative at-risk exit count gates the throttle", async () => {
+  const { buildReassessAudit } = await import("../src/lib/reassessAudit.js");
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const strat = R.listStrategies(db, "football")[0];
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Portland", away: "Dallas", state: "finished", lineup_out: true, kickoff_at: null, minute: 90, score_home: 0, score_away: 1, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  const rs = (trg: string, at: string) => R.insertReassessment(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, minute: "50'", body: "b", confidence: null, trigger: trg as any, created_at: at });
+  rs("time", "2026-07-23T02:00:00Z"); rs("time", "2026-07-23T02:05:00Z"); rs("price_move", "2026-07-23T02:08:00Z"); rs("goal", "2026-07-23T02:10:00Z");
+  // an exit right after a 'time' reassessment → conservatively at-risk (throttle might have skipped it)
+  R.insertTradeLog(db, { id: R.uid(), match_id: mid, strategy_id: strat.id, minute: "50'", type: "exit", text: "выход X", created_at: "2026-07-23T02:05:30Z" });
+  const a = buildReassessAudit(db);
+  const pm = a.perMatch.find((x) => x.match === "Portland — Dallas")!;
+  assert.equal(pm.reassessments, 4, "this match's reassessments");
+  assert.equal(pm.byTrigger["time"], 2);
+  assert.equal(pm.byTrigger["goal"], 1);
+  assert.equal(pm.exits, 1);
+  assert.equal(pm.atRiskExits, 1, "the exit near a 'time' reassessment is counted at-risk");
+  assert.equal(a.verdict, "not_safe", "any at-risk exit → do not enable");
+});
