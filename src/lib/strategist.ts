@@ -167,6 +167,13 @@ export interface SizeInput {
    *  the real phantom sources (wrong token, dust book, frozen favourite) are cut by dedicated guards
    *  upstream — so the absurd-edge net can widen here. Omit → use the profile's cfg value. */
   absurdEdgeBlock?: number;
+  /** П1 (batch-3) sizing_insanity backstop — the AUTHORITATIVE account bank ($), sourced from a fixed
+   *  constant independent of `budget`. If a single sized stake exceeds bankCeiling × SIZING_INSANITY_SHARE
+   *  the stake is REJECTED (flag), loudly. Defense in depth: the caps below already hold stake ≤ budget,
+   *  but a CORRUPTED budget input (the poisoned-epoch $1M PMV-sim leak that sized a Set-Value bet at $7k
+   *  on a $1k bank) slips past a budget-relative cap — a ceiling anchored to the TRUE bank catches it.
+   *  Omit → no insanity check (football keeps its existing exposure caps; opt-in per caller). */
+  bankCeiling?: number;
 }
 
 /** HARD liquidity floor ($): a market whose known depth is below this is
@@ -187,6 +194,11 @@ export const MIN_LIQUIDITY_BLOCK = (() => { const n = Number(process.env.MARKET_
 const LIVE_DIVERGENCE_PROB = (() => { const n = Number(process.env.LIVE_DIVERGENCE_PROB); return Number.isFinite(n) && n > 0 && n <= 1 ? n : 0.90; })();
 const LIVE_DIVERGENCE_PRICE_C = (() => { const n = Number(process.env.LIVE_DIVERGENCE_PRICE_C); return Number.isFinite(n) && n > 0 ? n : 12; })();
 const LIVE_ABSURD_EDGE_CAP = (() => { const n = Number(process.env.LIVE_ABSURD_EDGE_CAP); return Number.isFinite(n) && n > 0 ? n : 0.80; })();
+// П1 (batch-3) sizing_insanity ceiling — max fraction of the AUTHORITATIVE bank a single stake may be.
+// A stake past this is almost surely a corrupted-budget / caps-bypass bug, never a real position — reject
+// it loudly. 0.5 = no single bet exceeds half the bank; env-tunable. Only enforced when a caller passes
+// bankCeiling (the true account bank, sourced from a fixed constant, NOT the possibly-corrupted budget).
+const SIZING_INSANITY_SHARE = (() => { const n = Number(process.env.SIZING_INSANITY_SHARE); return Number.isFinite(n) && n > 0 && n <= 1 ? n : 0.5; })();
 
 /**
  * Deterministically decide entry + size for ONE market against a risk profile.
@@ -239,7 +251,10 @@ export function sizePrematch(inp: SizeInput): SizeResult {
   const thin = inp.liquidity == null || inp.liquidity < cfg.entry_thresholds.min_market_liquidity;
   const minEdge = thin ? cfg.entry_thresholds.min_edge_low_liquidity : cfg.entry_thresholds.min_edge;
   if (calibration < cfg.entry_thresholds.min_calibration) return skip(`калибровка ${calibration.toFixed(2)} < ${cfg.entry_thresholds.min_calibration}`);
-  if (edge < minEdge) return skip(`edge ${(edge * 100).toFixed(1)}% < порога ${(minEdge * 100).toFixed(1)}%${thin ? " (тонкий рынок)" : ""}`);
+  // T3 (batch-3): the boundary is INCLUSIVE — edge EXACTLY == minEdge passes (only edge strictly below
+  // the floor skips). The "edge 3.0% < порога 3.0%" a log showed was a 1-decimal rounding artifact
+  // (2.99% vs 3.00% both render "3.0"), not a boundary rejection — 2 decimals here make that legible.
+  if (edge < minEdge) return skip(`edge ${(edge * 100).toFixed(2)}% < порога ${(minEdge * 100).toFixed(2)}%${thin ? " (тонкий рынок)" : ""}`);
 
   // Fractional Kelly for buying a binary at price p with model prob q:
   //   f_kelly = (q − p) / (1 − p),  scaled by the profile's Kelly fraction.
@@ -275,6 +290,11 @@ export function sizePrematch(inp: SizeInput): SizeResult {
   // budget) must never be exceeded, not even by the ≤$0.50 that Math.round(x.5) adds.
   const stake = Math.floor(capped);
   if (stake <= 0) return skip("размер округлился до нуля");
+  // П1 sizing_insanity backstop — anchored to the TRUE bank (bankCeiling), not `budget`. Catches a
+  // corrupted budget input that slipped a huge stake past the budget-relative caps above (the $1M
+  // PMV-sim leak → $7k Set-Value bet on a $1k bank). Loud flag, never a silent trim.
+  if (inp.bankCeiling != null && inp.bankCeiling > 0 && stake > inp.bankCeiling * SIZING_INSANITY_SHARE)
+    return flag(`sizing_insanity: размер $${stake} > $${Math.round(inp.bankCeiling * SIZING_INSANITY_SHARE)} (${(SIZING_INSANITY_SHARE * 100).toFixed(0)}% банка $${Math.round(inp.bankCeiling)}) — вероятно повреждён бюджет/кэп, ставка ЗАБЛОКИРОВАНА`);
 
   return { status: "enter", stake, fraction: stake / budget, edge, implied, kellyFraction: kFrac, reason: `вход: edge ${(edge * 100).toFixed(1)}%, Kelly×${kFrac.toFixed(2)}, ${(stake / budget * 100).toFixed(1)}% бюджета` };
 }

@@ -6,7 +6,7 @@ import { resolveTennisWinner } from "../src/lib/settlement.js";
 import { serializeEntryMeta, parseEntryMeta } from "../src/lib/betMeta.js";
 import { tennisFinalResult, settleTennisBets, chargeTennisMatch, finishTennisMatches, tennisExitTick, tennisTradingTick, tennisSetValueTick, tennisEntryMeta, pollTennisFinals } from "../src/lib/tennisTrading.js";
 import { migrateTennisStrategy, migrateTennisSetValueStrategy } from "../src/lib/seed.js";
-import { buildTennisCalibrationReport, tennisTourOf, collectTennisSnapshots, fetchTennisFixtures } from "../src/lib/tennisScout.js";
+import { buildTennisCalibrationReport, tennisTourOf, collectTennisSnapshots, fetchTennisFixtures, buildTennisLinkRate, buildOvrRunnerBacktest } from "../src/lib/tennisScout.js";
 import { buildTennisFunnel } from "../src/lib/tennisTrading.js";
 import { advanceClocks } from "../src/lib/lifecycle.js";
 
@@ -129,6 +129,39 @@ test("tennisExitTick: thesis_stop cuts the position on a SECOND break of the fav
   assert.equal(b.status, "settled_lost", "40¢ < 44¢ entry → the cut books a loss");
   assert.equal(b.settled_by, "early");
   assert.equal(b.closing_price, 40);
+});
+
+test("tennisExitTick S3 (batch-3): a take within the min-edge floor of entry does NOT fire (spread/fee-eaten), holds", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  // Entered at 44¢; the take target sits at 45¢ (only 1¢ over entry — below the 3¢ min-edge floor).
+  R.insertBet(db, { id: "s3a", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 1", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: { take_price: { at_cents: 45 } } }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+  R.insertTennisSnapshot(db, { event_key: "S3E", provider: "apitennis", batch_at: "2026-07-14T10:10:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "Set 3", sets_p1: 1, sets_p2: 1, set_num: 3, games_p1: 2, games_p2: 1, game_points: null, server: "first", pm_match_id: mid, pm_mid_cents: 45, pm_p1_cents: 45, pm_p2_cents: 55, raw: "{}" });
+  const n = await tennisExitTick(db, { now: () => "2026-07-14T10:10:05Z" });
+  assert.equal(n, 0, "cur 45¢ is only +1¢ over entry 44¢ (< 3¢ floor) → the take must NOT fire");
+  assert.equal(R.getBet(db, "s3a")!.status, "open", "position held to a better price/settlement");
+});
+
+test("tennisExitTick T2 (batch-3): a protective stop in the gap-wake window is DEFERRED, then executed on expiry (repriced)", async () => {
+  const { markGapWake } = await import("../src/lib/scheduleGap.js");
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  R.insertBet(db, { id: "t2a", match_id: mid, strategy_id: "tennis_overreaction", risk_profile_id: "medium", market_label: "Aleksandar Vukic", status: "open", proposed_price: 44, entry_price: 44, current_price: 44, closing_price: null, ai_prob: 0.62, stake: 100, rationale: "выкуп", entered_minute: "сет 2", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: serializeEntryMeta({ phase: "live", exitPlan: { take_price: { at_cents: 59 } } }), code_version: "e5", created_at: "2026-07-14T10:00:00Z" } as any);
+  const base = { provider: "apitennis", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1 as const, status: "Set 2", sets_p1: 1, sets_p2: 1, set_num: 2, game_points: null, pm_match_id: mid, pm_mid_cents: 40, pm_p2_cents: 60, raw: "{}" };
+  R.insertTennisSnapshot(db, { ...base, event_key: "T2E", batch_at: "2026-07-14T10:05:00Z", games_p1: 3, games_p2: 3, server: "first", pm_p1_cents: 40 });
+  R.insertTennisSnapshot(db, { ...base, event_key: "T2E", batch_at: "2026-07-14T10:06:00Z", games_p1: 3, games_p2: 4, server: "second", pm_p1_cents: 40 });
+  R.insertTennisSnapshot(db, { ...base, event_key: "T2E", batch_at: "2026-07-14T10:07:00Z", games_p1: 3, games_p2: 4, server: "second", pm_p1_cents: 40 });
+  // Arm the post-gap window (a live match was in play at wake), then tick INSIDE it: the stop must defer.
+  markGapWake(db, Date.parse("2026-07-14T10:07:00Z"), 900);
+  const n1 = await tennisExitTick(db, { now: () => "2026-07-14T10:07:05Z" });
+  assert.equal(n1, 0, "the protective stop is deferred inside the gap-wake window, not executed at the gap bottom");
+  assert.equal(R.getBet(db, "t2a")!.status, "open", "position still open (deferred)");
+  assert.ok(R.getOpenGapReprice(db, "t2a") != null, "a gap-wake deferral watch is armed");
+  // A later tick past the reprice deadline: the sweep executes the stop unconditionally at the fresh price.
+  const n2 = await tennisExitTick(db, { now: () => "2026-07-14T10:09:30Z" });
+  assert.equal(n2, 1, "window expired → the stop executes (repriced), never cancelled");
+  assert.equal(R.getBet(db, "t2a")!.status, "settled_lost", "executed at the fresh 40¢ < 44¢ entry");
+  assert.ok(R.getOpenGapReprice(db, "t2a") == null, "the deferral resolved");
 });
 
 test("tennisExitTick: FAIL-CLOSED — no live price never fabricates a $0 exit, warns loudly, holds the position", async () => {
@@ -813,4 +846,35 @@ test("settleTennisBets: a retirement resolves to the advancing (non-retiring) pl
   settleTennisBets(db, { now: () => "2026-07-14T13:00:00Z" });
   const b = R.getBet(db, "tb2")!;
   assert.equal(b.status, "settled_lost", "the Broady bet loses — Vukic advanced on retirement");
+});
+
+test("T1 (batch-3): buildTennisLinkRate computes the auto-share from the persistent map log", () => {
+  const db = openDb(":memory:");
+  const mk = (ev: string, verdict: string, score: number, cands: any[]) =>
+    R.insertTennisMapLog(db, { event_key: ev, players: `${ev} A vs B`, verdict, match_id: verdict === "auto" ? "m" + ev : null, score, candidates: JSON.stringify(cands), created_at: "2026-07-20T10:00:00Z" });
+  mk("e1", "auto", 0.9, [{ home: "A", away: "B", score: 0.9 }]);
+  mk("e2", "auto", 0.85, [{ home: "A", away: "B", score: 0.85 }]);
+  // same event logged twice more across passes — must collapse to ONE distinct match, best verdict kept.
+  mk("e2", "review", 0.7, [{ home: "A", away: "B", score: 0.7 }]);
+  mk("e3", "review", 0.7, [{ home: "C", away: "D", score: 0.7 }]); // gray-zone (near-miss)
+  mk("e4", "skip", 0.3, [{ home: "E", away: "F", score: 0.3 }]);   // no-candidate
+  const r = buildTennisLinkRate(db);
+  assert.equal(r.totalEvents, 4, "4 distinct matches (e2's two rows collapse)");
+  assert.equal(r.auto, 2, "e1 + e2 auto");
+  assert.equal(r.linkPct, 50, "2/4 = 50%");
+  assert.equal(r.grayZone, 1, "e3 sits in [review, auto) → gray-zone near-miss");
+  assert.equal(r.noCandidate, 1, "e4 below review → no-candidate");
+  assert.ok(r.unlinkedExamples.length === 2 && r.unlinkedExamples[0].bestScore >= r.unlinkedExamples[1].bestScore, "unlinked sorted by closest near-miss first");
+});
+
+test("П3 (batch-3): buildOvrRunnerBacktest runs read-only and returns INSUFFICIENT below n=80", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  // A finished match where the broken favourite (first) advanced (event_winner First Player).
+  R.insertTennisSnapshot(db, { event_key: "R1", provider: "apitennis", batch_at: "2026-07-14T12:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 0, status: "Finished", sets_p1: 2, sets_p2: 1, set_num: 3, games_p1: 6, games_p2: 4, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, pm_p1_cents: 100, pm_p2_cents: 0, raw: JSON.stringify({ event_winner: "First Player" }) });
+  R.insertTennisBreakMark(db, { event_key: "R1", match_id: mid, players: "A. Vukic vs L. Broady", tournament: "Granby", event_type: "ATP Singles", set_num: 1, broken_side: "first", broke_early: 1, t_event: "2026-07-14T10:30:00Z", pre_cents: 65, floor_cents: 40, t_floor_sec: 60, panic_cents: 44, recovery_1: 55, recovery_2: 62, recovery_3: null, recovery_5: null, window_quotes: 10, confidence_flags: null, code_version: "e5", created_at: "2026-07-14T10:30:00Z" });
+  const r = await buildOvrRunnerBacktest(db);
+  assert.equal(r.n, 1, "one cohort mark with a clean settlement");
+  assert.equal(r.verdict, "insufficient", "n=1 < 80 → do not decide (Overreaction stays parked)");
+  assert.ok(r.runnerEvPct != null && r.takeOnlyEvPct != null, "both structures priced on the mark");
 });

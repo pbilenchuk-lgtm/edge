@@ -81,19 +81,15 @@ const VOID_FAMILIES = new Set<PropFamily>(["total_sets", "set_handicap"]);
 const isMatchScopeVoid = (p: ParsedProp): boolean => VOID_FAMILIES.has(p.family) || (p.family === "total_games" && p.scope === "match");
 const PMV_ACTED = "tennis_pmv_acted:"; // per-match idempotency (pre-match scan runs once)
 
-/**
- * B5 — NARROW the anti-Draw provenance block, for the SIDE-misread risk ONLY. The large-dev block
- * conflates two failures: (1) we misread WHICH PLAYER-SIDE (the Draw lesson), and (2) retire/void
- * resolution semantics. Risk (1) exists ONLY for PLAYER-SPECIFIC families (which player wins the
- * set / covers the handicap) — an Over/Under total is order-symmetric, so there is no player side to
- * misread and its large-dev block is about theo/void, NOT side (untouched here — that's B2/B7). Among
- * player-specific families, set_handicap is ALSO a void/retire family, so its block stays for B7. That
- * leaves set_winner: risk (1) is eliminated — hence "verified two-sided" — exactly when its side is
- * RESOLVED and carried on a STORED field (propFirstIsP1, frozen on the bet + read by settlement, not
- * re-derived downstream). Only then does a large deviation take the normal ENTER path instead of a block. */
-function pmvVerifiedTwoSided(family: PropFamily, first: boolean | null): boolean {
-  return family === "set_winner" && first != null; // player-side resolved AND stored → not a Draw-misread
-}
+// П4 (batch-3) — the anti-Draw ≥PROVENANCE block is UNCONDITIONAL for every family, set_winner included.
+// The large-dev block conflates two failures: (1) we misread WHICH PLAYER-SIDE (the Draw lesson), and
+// (2) retire/void resolution semantics. An earlier narrowing (B5) exempted set_winner once its side was
+// resolved, on the theory that only risk (1) applied to it. That opened a hole: set_winner ALSO carries
+// risk (2) — a set that doesn't complete voids (retire), and predmatch "Set N Winner" voids in practice
+// (Bronzetti "Set 2 Winner" dev +24.8¢ → entered $345 → all void). By the SAME logic the block "stays"
+// for set_handicap (a void/retire family, per B7), it must stay for set_winner. So a large deviation on
+// set_winner is the "contract semantics/void" signal, not an edge — block it. Settlement already voids an
+// incomplete set correctly (resolveTennisProp/setCompleted); this closes the ENTRY side to match.
 // P4 scan fixes. (1) Placeholder: a prop sitting at exactly ~50¢ is almost always an untraded default,
 // not a real market price — deviation against it is noise. (2) Uniformity guard: if >this share of a
 // family's PASSING deviations lean the SAME side (all "over", etc.), that's a model bias not an edge —
@@ -236,8 +232,8 @@ export function scanMatchProps(db: Database, matchId: string, players: { p1: str
     const dev = Math.round((theoCents - mid) * 10) / 10;
     if (book < PMV_BOOK_MIN) push("skip", `книга $${Math.round(book)} < $${PMV_BOOK_MIN}`, theoCents, dev);
     else if (mid < PMV_PRICE_MIN || mid > PMV_PRICE_MAX) push("skip", `цена ${mid}¢ вне полосы ${PMV_PRICE_MIN}-${PMV_PRICE_MAX}¢`, theoCents, dev);
-    else if (Math.abs(dev) >= PMV_DEV_PROVENANCE && !pmvVerifiedTwoSided(parsed.family, first)) push("provenance_review", `|dev| ${Math.abs(dev)}¢ ≥ ${PMV_DEV_PROVENANCE}¢ — анти-Draw: сторона/семантика контракта под вопросом, блок до ручного разбора`, theoCents, dev);
-    else if (dev >= PMV_DEV_ENTER) push("enter", `theo ${theoCents}¢ vs mid ${mid}¢ (dev +${dev}¢${Math.abs(dev) >= PMV_DEV_PROVENANCE ? ", верифиц. двусторонний set_winner — сторона резолвлена+сохранена" : ""}) — рынок недооценил, покупаем`, theoCents, dev);
+    else if (Math.abs(dev) >= PMV_DEV_PROVENANCE) push("provenance_review", `|dev| ${Math.abs(dev)}¢ ≥ ${PMV_DEV_PROVENANCE}¢ — анти-Draw: сторона/семантика контракта под вопросом (вкл. set_winner: риск void/ретайра), блок до ручного разбора`, theoCents, dev);
+    else if (dev >= PMV_DEV_ENTER) push("enter", `theo ${theoCents}¢ vs mid ${mid}¢ (dev +${dev}¢) — рынок недооценил, покупаем`, theoCents, dev);
     else push("skip", `dev ${dev}¢ < порога ${PMV_DEV_ENTER}¢`, theoCents, dev);
   }
   out.candidates.sort((a, b) => b.deviation - a.deviation);
@@ -636,7 +632,7 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
         for (const profile of profilesAll) {
           const cfg = getProfileConfig(db, profile);
           const held = heldByProfile(profile).reduce((s, b) => s + (b.stake ?? 0), 0);
-          const r = sizePrematch({ ourProb, priceCents: cand.midCents, implied, calibration: 0.6, liquidity: cand.bookUsd, budget: PMV_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: false });
+          const r = sizePrematch({ ourProb, priceCents: cand.midCents, implied, calibration: 0.6, liquidity: cand.bookUsd, budget: PMV_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: false, bankCeiling: PMV_BUDGET });
           if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `[${profile}] «${cand.label}» dev +${cand.deviation}¢, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
           // Thin-book cap: never stake more than 25% of the prop's book depth.
           const stake = Math.min(r.stake, 0.25 * cand.bookUsd);

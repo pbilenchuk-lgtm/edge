@@ -81,6 +81,34 @@ test("sizePrematch: enters on real edge, skips below the profile threshold", () 
   assert.equal(r2.status, "skip");
 });
 
+test("sizePrematch П1 (batch-3): sizing_insanity flags a stake past bankCeiling×SHARE — the corrupted-budget backstop", () => {
+  // The poisoned-epoch bug: a corrupted budget ($1M PMV-sim leak) sized a Set-Value bet at ~$7k while the
+  // TRUE bank was $1000. The caps hold stake ≤ budget, so a budget-relative check misses it; a ceiling
+  // anchored to the true bank (bankCeiling) catches it. Reproduce: budget corrupted to 1e6, bank still 1000.
+  const r = sizePrematch({ ourProb: 0.62, priceCents: 53, implied: 0.52, calibration: 0.7, budget: 1_000_000, cfg: MED, bankCeiling: 1000 });
+  assert.equal(r.status, "flag", "a $-thousands stake on a $1000 bank must be flagged, not booked");
+  assert.match(r.reason, /sizing_insanity/);
+  // Without bankCeiling the check is opt-out (football keeps its own caps) — the same corrupted budget sizes big.
+  const noGuard = sizePrematch({ ourProb: 0.62, priceCents: 53, implied: 0.52, calibration: 0.7, budget: 1_000_000, cfg: MED });
+  assert.equal(noGuard.status, "enter", "no bankCeiling → no insanity check (opt-in)");
+  // A sane stake on a correct bank passes the guard.
+  const ok = sizePrematch({ ourProb: 0.62, priceCents: 53, implied: 0.52, calibration: 0.7, budget: 1000, cfg: MED, bankCeiling: 1000 });
+  assert.equal(ok.status, "enter", "a normal ≤max_position stake clears bankCeiling×SHARE");
+});
+
+test("sizePrematch T3 (batch-3): the min_edge boundary is INCLUSIVE — edge EXACTLY at the floor enters", () => {
+  // medium min_edge = 5%. Construct edge == 0.05 exactly (ourProb − implied), deep-liquidity so the full
+  // (not thin) floor applies. Must ENTER (the boundary is `<`, so equality passes), not skip.
+  const cfg = MED;
+  const minEdge = cfg.entry_thresholds.min_edge;
+  const implied = 0.50, ourProb = implied + minEdge; // edge == min_edge to the ULP
+  const r = sizePrematch({ ourProb, priceCents: 53, implied, calibration: 0.9, liquidity: 10_000_000, budget: 1000, cfg });
+  assert.equal(r.status, "enter", `edge == min_edge (${minEdge}) must enter, not skip`);
+  // A hair below the floor still skips.
+  const below = sizePrematch({ ourProb: implied + minEdge - 0.005, priceCents: 53, implied, calibration: 0.9, liquidity: 10_000_000, budget: 1000, cfg });
+  assert.equal(below.status, "skip", "edge below the floor skips");
+});
+
 test("sizePrematch: low calibration gate blocks entry regardless of edge", () => {
   const r = sizePrematch({ ourProb: 0.7, priceCents: 50, implied: 0.5, calibration: 0.3, budget: 1000, cfg: MED });
   assert.equal(r.status, "skip");

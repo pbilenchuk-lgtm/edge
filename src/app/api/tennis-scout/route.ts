@@ -54,6 +54,18 @@ export async function GET(req: Request) {
       if (format === "csv") return new NextResponse(pmv.pmvBetsCsv(rep), { status: 200, headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="pmv-bets.csv"` } });
       return NextResponse.json(rep);
     }
+    // ?report=link_rate → T1 (batch-3): scout API-Tennis↔Polymarket link-rate from the persistent map log
+    // (auto/review/skip by day + reason + near-miss examples + retention cross-check). md|json.
+    if (url.searchParams.get("report") === "link_rate") {
+      const rep = scout.buildTennisLinkRate(getDb());
+      if (format === "json") return NextResponse.json(rep);
+      return new NextResponse(scout.tennisLinkRateMarkdown(rep), { status: 200, headers: { "Content-Type": "text/markdown; charset=utf-8" } });
+    }
+    // ?report=ovr_runner → П3 (batch-3): read-only EV of a "take 50% + hold runner to settle" overreaction
+    // structure on the ALREADY-accumulated cohort (no money moved) — the go/no-go gate before any re-enable.
+    if (url.searchParams.get("report") === "ovr_runner") {
+      return NextResponse.json(await scout.buildOvrRunnerBacktest(getDb()));
+    }
     // ?report=ovr_cohort → Overreaction calibration Step 1: is the FAVOURITE-broken-early cohort
     // tradeable (Petro's breakeven formula), before any calibration? Diagnostic, read-only.
     if (url.searchParams.get("report") === "ovr_cohort") {

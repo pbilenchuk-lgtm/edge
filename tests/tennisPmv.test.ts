@@ -38,7 +38,7 @@ function seedScan(db: ReturnType<typeof openDb>, mlCents: number, props: { label
   return mid;
 }
 
-test("scan B5: a verified two-sided set_winner (side resolved+stored) with a big dev ENTERs; order-symmetric Over stays blocked", () => {
+test("scan П4 (batch-3): a big-dev set_winner is BLOCKED even with side resolved (void/retire risk) — Bronzetti Set 2 Winner +24.8¢ case", () => {
   const db = openDb(":memory:");
   const theo = tennisTheo(0.65, BASE_HOLD.wta);
   const swLabel = Q + "Set 1 Winner";               // player-specific; Kawa (label-first) == scout p1 → first resolved
@@ -46,14 +46,25 @@ test("scan B5: a verified two-sided set_winner (side resolved+stored) with a big
   const gamesLabel = Q + "Set 2 Over 8.5";          // order-symmetric Over/Under — no player side to misread
   const gTheo = Math.round(theoForProp(parseProp(gamesLabel)!, theo, true)! * 100);
   const mid = seedScan(db, 65, [
-    { label: swLabel, mid: swTheo - 25, liq: 3000 },     // dev +25, set_winner, side resolved+stored → ENTER (B5 narrows the block)
-    { label: gamesLabel, mid: gTheo - 25, liq: 3000 },   // dev +25, total_games (order-symmetric) → STILL anti-Draw block (unchanged)
+    { label: swLabel, mid: swTheo - 25, liq: 3000 },     // dev +25, set_winner, side resolved — П4: STILL blocked (void-risk family, the B5 exemption is removed)
+    { label: gamesLabel, mid: gTheo - 25, liq: 3000 },   // dev +25, total_games (order-symmetric) → anti-Draw block (unchanged)
   ]);
   const scan = scanMatchProps(db, mid, { p1: "Kawa", p2: "Waltert" }, "wta", "WTA");
   const by = (frag: string) => scan.candidates.find((c) => c.label.includes(frag))!;
-  assert.equal(by("Set 1 Winner").action, "enter", "verified set_winner big dev → ENTER, not a Draw-misread block");
-  assert.match(by("Set 1 Winner").reason, /верифиц/);
-  assert.equal(by("Set 2 Over").action, "provenance_review", "order-symmetric total_games big dev → still blocked (side risk N/A; that's B2/B7)");
+  // The Bronzetti "Set 2 Winner" hole: a resolvable-side set_winner at dev ≥18¢ used to ENTER (and then
+  // void). set_winner carries void/retire risk exactly like set_handicap, so the ≥18¢ block now stays.
+  assert.equal(by("Set 1 Winner").action, "provenance_review", "big-dev set_winner → blocked (void/retire risk, not an edge)");
+  assert.match(by("Set 1 Winner").reason, /set_winner|void|ретайр/);
+  assert.equal(by("Set 2 Over").action, "provenance_review", "order-symmetric total_games big dev → still blocked");
+});
+test("scan П4: a SMALL-dev set_winner (below the anti-Draw floor) still ENTERs — the block is only the ≥18¢ zone", () => {
+  const db = openDb(":memory:");
+  const theo = tennisTheo(0.65, BASE_HOLD.wta);
+  const swLabel = Q + "Set 1 Winner";
+  const swTheo = Math.round(theoForProp(parseProp(swLabel)!, theo, true)! * 100);
+  const mid = seedScan(db, 65, [{ label: swLabel, mid: swTheo - 12, liq: 3000 }]); // dev +12 (< 18, avoids the ~50¢ placeholder band) → ENTER
+  const scan = scanMatchProps(db, mid, { p1: "Kawa", p2: "Waltert" }, "wta", "WTA");
+  assert.equal(scan.candidates.find((c) => c.label.includes("Set 1 Winner"))!.action, "enter", "small-dev set_winner unaffected by П4");
 });
 
 test("scan: deviation ≥7¢ → enter; ≥18¢ → provenance_review (anti-Draw); thin/out-of-band → skip", () => {

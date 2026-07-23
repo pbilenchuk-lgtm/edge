@@ -372,9 +372,15 @@ export function buildAppData(db: Database, env = process.env): AppData {
       // «Поломанный» = swept as abandoned (kickoff passed, never went live) — finished by the sweep with
       // the BROKEN_NOTE marker, so the UI can bucket it under «Поломанные» instead of «Завершённые».
       const broken = m.state === "finished" && (m.end_note ?? "").startsWith("⚠ поломан");
+      // T4 (batch-3): a tennis match carries no goal score, so a finished tennis card showed «?:?». Resolve
+      // the final SET score from the terminal scout snapshot (sets_p1-sets_p2) — only for a finished tennis
+      // match that has no stored score (one indexed query; tennis is a minority of matches).
+      const tennisSets = (c.sport_id === "tennis" && m.state === "finished" && m.score_home == null)
+        ? (db.prepare(`SELECT sets_p1, sets_p2 FROM tennis_snapshots WHERE pm_match_id=? AND sets_p1 IS NOT NULL ORDER BY batch_at DESC LIMIT 1`).get(m.id) as { sets_p1?: number; sets_p2?: number } | undefined)
+        : undefined;
       matchDb[m.id] = {
         id: m.id, competitionId: m.competition_id, home: m.home, away: m.away, state: m.state, liveNoData, broken,
-        minute: liveNoData ? null : liveMinute, clock: m.clock ?? null, scoreHome: m.score_home, scoreAway: m.score_away, lineupOut: m.lineup_out,
+        minute: liveNoData ? null : liveMinute, clock: m.clock ?? null, scoreHome: tennisSets?.sets_p1 ?? m.score_home, scoreAway: tennisSets?.sets_p2 ?? m.score_away, lineupOut: m.lineup_out,
         // Real starting XI published (provider), NOT the ~1h timer flip — this is
         // what actually gates football analysis, so the UI badge must track it.
         // Light record falls back to the stored lineup_out flag (no extra query).

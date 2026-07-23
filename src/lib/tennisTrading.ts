@@ -33,6 +33,7 @@ import { isStaleProposal, proposalDrift } from "./thresholds.js";
 import { getProfileConfig, RISK_PROFILE_DEFS } from "./riskConfig.js";
 import { shadowOnEntries, type ShadowEntryRequest } from "./shadow.js";
 import { getStrategy } from "./repo.js";
+import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
 
 const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
@@ -404,6 +405,12 @@ const TOKEN_ORIENTATION_TOLERANCE_C = (() => { const n = Number(process.env.TOKE
 // PROTECTIVE exits are NOT capped — a broken thesis must leave (thin bid → partial + attention). A normal
 // bid/ask spread is a few cents (well under the cap); only a dust bid trips it. Env-tunable.
 const TENNIS_EXIT_MAX_SLIP_C = (() => { const n = Number(process.env.TENNIS_EXIT_MAX_SLIP_CENTS); return Number.isFinite(n) && n > 0 ? n : 10; })();
+// S3 (batch-3) take-distance floor — a TAKE must clear entry by at least this (¢) to be a REAL profit,
+// not a spread/slip/commission-eaten loss (Bassols overreaction take: entry 30.2¢, target 31.5¢ → filled
+// 28.5¢ → −$1.18 booked while the reason claimed the target was "hit"). B8 above caps trigger↔fill slip;
+// this is the complementary gate on the target↔ENTRY distance. A take is OPTIONAL — below the floor we
+// HOLD (to a better price or settlement), never realize a sub-cost "take". Covers spread+slip+fee+margin.
+const TENNIS_TAKE_MIN_EDGE_C = (() => { const n = Number(process.env.TENNIS_TAKE_MIN_EDGE_CENTS); return Number.isFinite(n) && n >= 0 ? n : 3; })();
 
 /** The mismatch (token's top-of-book cents + gap) when the book is PRESENT and diverges beyond
  *  tolerance from the side we intend to transact — i.e. we're about to trade the wrong outcome.
@@ -493,6 +500,70 @@ async function execTennisExit(
   return closeTennisBetPortion(db, b.id, sell.filledFrac, sell.exitCents, `${reason} · бид тонкий (${Math.round(sell.filledFrac * 100)}%)`, deps, now, { attentionRemainder: true }) != null ? 1 : 0;
 }
 
+const round1 = (n: number): number => Math.round(n * 10) / 10;
+
+/**
+ * T2 (batch-3) GAP-WAKE reprice sweep for tennis — the port of football's P0.6 three-step onto the
+ * tennis protective exits. A protective stop that fires in the immediate post-gap window (gapWakeActive)
+ * is DEFERRED, not executed at the possibly-gap-bottom first price. This sweep resolves those deferrals
+ * each tick: (a) INVALIDATOR — the favourite broke back / is no longer behind → the stop's premise is
+ * gone, clear the deferral (recovered, no stop); (b) RECOVERED — the fresh price climbed back above the
+ * wake price → clear; (c) EXPIRED — window elapsed (≤repriceSec OR repriceTicks) and the stop still
+ * stands → execute UNCONDITIONALLY at the fresh (repriced) price. The stop is only ever DELAYED, never
+ * cancelled. The anti-artifact floor persistence remains as an independent layer. Returns positions closed.
+ */
+async function tennisGapRepriceSweep(db: Database, sellCtx: TennisSellCtx, deps: EngineDeps, now: string): Promise<number> {
+  const nowMs = Date.parse(now) || 0;
+  const { repriceTicks } = gapRepriceConfig(deps.env ?? process.env);
+  let closed = 0;
+  for (const w of R.openGapReprices(db)) {
+    if (!TENNIS_STRATEGIES.has(w.strategy_id)) continue; // football's gapRepriceSweep owns its own rows
+    const b = R.getBet(db, w.bet_id);
+    if (!b || b.status !== "open") { R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: w.wake_price_cents, deltaCents: 0, at: now }); continue; }
+    // A finished/retired match is settle's job (advancer/void) — clear the deferral, no price stop.
+    if (tennisFinalResult(db, b.match_id)?.finished) { R.resolveGapReprice(db, w.bet_id, { outcome: "recovered", execCents: w.wake_price_cents, deltaCents: 0, at: now }); continue; }
+    const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(b.match_id) as R.TennisSnapshotRow[];
+    if (!snaps.length) { R.bumpGapRepriceTick(db, w.bet_id); continue; }
+    const favSide = favSideForLabel(snaps[snaps.length - 1], b.market_label);
+    if (!favSide) { R.bumpGapRepriceTick(db, w.bet_id); continue; }
+    const oppSide = favSide === "first" ? "second" : "first";
+    const last = snaps[snaps.length - 1];
+    const priceOn = (r: R.TennisSnapshotRow) => (favSide === "first" ? r.pm_p1_cents : r.pm_p2_cents);
+    const priced = snaps.filter((s) => priceOn(s) != null);
+    const curRow = priced[priced.length - 1] ?? null;
+    const mlNow = (curRow ? priceOn(curRow) : null) == null ? tennisMoneyline(db, b.match_id, { p1: last.p1 ?? "", p2: last.p2 ?? "" }) : null;
+    const cur = (curRow ? priceOn(curRow) : null) ?? (mlNow ? (favSide === "first" ? mlNow.p1Cents : mlNow.p2Cents) : null);
+    if (cur == null) { R.bumpGapRepriceTick(db, w.bet_id); continue; } // still price-starved → wait (deadline still bounds it)
+    const entryMs = Date.parse(b.created_at) || 0;
+    const evs = detectTennisEvents(snaps).filter((e) => (Date.parse(e.batchAt) || 0) > entryMs);
+    const counterBreak = evs.some((e) => e.type === "break" && e.server === oppSide); // favourite broke opponent back
+    const favGamesNow = favSide === "first" ? (last.games_p1 ?? null) : (last.games_p2 ?? null);
+    const oppGamesNow = favSide === "first" ? (last.games_p2 ?? null) : (last.games_p1 ?? null);
+    const favBehindNow = favGamesNow != null && oppGamesNow != null && favGamesNow < oppGamesNow;
+    // (a) INVALIDATOR — the stop's premise is gone: the favourite broke back, or is no longer behind.
+    if (counterBreak || !favBehindNow) {
+      R.resolveGapReprice(db, w.bet_id, { outcome: "recovered", execCents: cur, deltaCents: round1(cur - w.wake_price_cents), at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: b.entered_minute ?? "лайв", type: "skip", text: `gap-wake снят: премисса стопа отпала (${counterBreak ? "брейк отыгран" : "фаворит не позади"}), цена ${cur}¢ vs дно гэпа ${w.wake_price_cents}¢ — стоп НЕ исполнен (recovered)`, created_at: now });
+      continue;
+    }
+    // (b) RECOVERED — the fresh price climbed back above the gap-bottom wake price → clear.
+    if (cur > w.wake_price_cents) {
+      R.resolveGapReprice(db, w.bet_id, { outcome: "recovered", execCents: cur, deltaCents: round1(cur - w.wake_price_cents), at: now });
+      continue;
+    }
+    // (c) EXPIRED — window elapsed → execute the protective stop at the fresh (repriced) price.
+    const ticks = R.bumpGapRepriceTick(db, w.bet_id);
+    if (nowMs >= Date.parse(w.deadline_at) || ticks >= repriceTicks) {
+      const players = { p1: last.p1 ?? "", p2: last.p2 ?? "" };
+      const gs = `${last.games_p1}-${last.games_p2}`;
+      const recvGames = evs.filter((e) => (e.type === "hold" || e.type === "break") && e.server === oppSide).length;
+      closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "gap_wake_stop", `gap-wake: окно (~${w.gap_sec}с сна) истекло, защитный стоп исполнен по свежей цене ${cur}¢`, { gameScore: gs, recvGames }, deps, now, { kind: "protective" });
+      R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: cur, deltaCents: round1(cur - w.wake_price_cents), at: now });
+    }
+  }
+  return closed;
+}
+
 /**
  * §6 EXIT: deterministic close of open tennis buyback positions from the PRE-WRITTEN plan.
  * Runs every live tick. §9.6 — both the arithmetic AND the trigger detection are CODE, never
@@ -511,11 +582,16 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
   // book-fill-m1: exits sell into the live BID book (VWAP), symmetric to entries. One book fetch per
   // token per tick (cached). Exec model off → midpoint (legacy paper, tests). §9.6 all deterministic.
   const sellCtx: TennisSellCtx = { poly: deps.polymarket ?? loadPolymarketConfig(deps.env ?? process.env), bookCache: new Map<string, OrderBookFetch>(), exitCache: new Map() };
+  const nowMs = Date.parse(now) || 0;
+  // T2: resolve any armed gap-wake deferrals FIRST (execute expired / clear recovered), so a bet the sweep
+  // still owns is skipped below and never double-processed or re-armed this tick.
+  closed += await tennisGapRepriceSweep(db, sellCtx, deps, now);
   const tennisMatchIds = new Set(R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => m.id)));
   for (const b of R.openBets(db)) {
     if (!TENNIS_STRATEGIES.has(b.strategy_id) || !tennisMatchIds.has(b.match_id)) continue;
     // A4 #1: a finished/retired match is settleTennisBets' job (advancer wins / void) — never a price exit.
     if (tennisFinalResult(db, b.match_id)?.finished) continue;
+    if (R.getOpenGapReprice(db, b.id)) continue; // T2: an active gap-wake deferral — the sweep owns this bet
     const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(b.match_id) as R.TennisSnapshotRow[];
     if (!snaps.length) continue;
     const favSide = favSideForLabel(snaps[snaps.length - 1], b.market_label);
@@ -560,6 +636,19 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
     const ext = { gameScore: gs, recvGames };
     const players = { p1: last.p1 ?? "", p2: last.p2 ?? "" }; // for the book/token resolution on exit
 
+    // T2 gap-wake: a PROTECTIVE stop firing inside the immediate post-gap window is DEFERRED (armed as a
+    // gap_reprice watch the sweep above resolves next ticks), never executed at the first post-gap price.
+    // Outside the window it executes immediately as before. Take-profits are never deferred (not protective).
+    const fireProtective = async (trigger: string, reason: string): Promise<number> => {
+      if (gapWakeActive(db, nowMs)) {
+        const cfg = gapRepriceConfig(deps.env ?? process.env);
+        R.openGapReprice(db, { bet_id: b.id, match_id: b.match_id, strategy_id: b.strategy_id, profile: b.risk_profile_id ?? "medium", gap_sec: gapWakeGapSec(db), wake_price_cents: cur, floor_cents: cur, deadline_at: new Date(nowMs + cfg.repriceSec * 1000).toISOString(), created_at: now });
+        R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: b.entered_minute ?? "лайв", type: "skip", text: `gap-wake: защитный стоп (${trigger}) отложен ≤${cfg.repriceSec}с/${cfg.repriceTicks} тика по цене ${cur}¢ — даю книге разжаться после сна планировщика; стоп НЕ отменён`, created_at: now });
+        return 0;
+      }
+      return await execTennisExit(db, sellCtx, b, cur, players, favSide, trigger, reason, ext, deps, now, { kind: "protective" });
+    };
+
     // MARK-TO-MARKET (open tennis positions): the portfolio froze unrealized P&L at entry because only
     // the FOOTBALL engine marked bets live (engine.ts:163-167); tennis touched current_price solely on
     // exit/settle. Every tick already resolves `cur` (the live favourite price) for the exit checks —
@@ -588,22 +677,25 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
         // T2: fire ONLY if the break is unreturned BY THE CURRENT SCORE too — favBehindNow gates out a latch
         // that the event chain left stuck after a re-break (games delta already back to even/ahead).
         if (!brokeBack && favBehindNow && recvAfter >= K) {
-          closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "thesis_stop", `стоп тезиса: брейк во 2-м сете без возврата за ${recvAfter} приёмных (счёт ${favGamesNow}-${oppGamesNow}, брейк не отыгран)`, ext, deps, now, { kind: "protective" });
+          closed += await fireProtective("thesis_stop", `стоп тезиса: брейк во 2-м сете без возврата за ${recvAfter} приёмных (счёт ${favGamesNow}-${oppGamesNow}, брейк не отыгран)`);
           continue;
         }
       }
       // catastrophic_floor — real collapse to ≤ floor, phantom-guarded by persistence (cur AND prev ≤ floor).
       const svFloor = Number.isFinite(plan?.catastrophic_floor?.at_cents) ? Number(plan.catastrophic_floor.at_cents) : null;
       if (svFloor != null && cur <= svFloor && prev != null && prev <= svFloor) {
-        closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${svFloor}¢, подтверждён)`, ext, deps, now, { kind: "protective" });
+        closed += await fireProtective("catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${svFloor}¢, подтверждён)`);
         continue;
       }
       // take_price — favourite recovered into the take band → fix HALF once, hold the rest to settle.
       const svTake = Number.isFinite(plan?.take_price?.at_cents) ? Number(plan.take_price.at_cents) : SET_VALUE_ARMED.takeLowCents;
       const frac = Number.isFinite(plan?.take_price?.fraction) ? Number(plan.take_price.fraction) : SET_VALUE_ARMED.takeFraction;
       const alreadyPartial = R.betsForMatch(db, b.match_id, SET_VALUE_STRATEGY).some((x) => x.settled_by === "partial" && (x.risk_profile_id ?? "medium") === (b.risk_profile_id ?? "medium") && x.market_label === b.market_label);
-      if (cur >= svTake && !alreadyPartial) {
-        closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "take_price", `тейк камбэка: фаворит вернулся к ${cur}¢ (цель ≥${svTake}¢)`, ext, deps, now, { kind: "take", fraction: frac });
+      // S3: only take once the price clears entry by the min-edge floor — otherwise the "take" books a
+      // spread/fee-eaten loss. Below the floor we hold (thesis is the favourite wins the match anyway).
+      const svEntry = b.entry_price ?? 0;
+      if (cur >= svTake && cur - svEntry >= TENNIS_TAKE_MIN_EDGE_C && !alreadyPartial) {
+        closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "take_price", `тейк камбэка: фаворит вернулся к ${cur}¢ (цель ≥${svTake}¢, +${Math.round((cur - svEntry) * 10) / 10}¢ к входу)`, ext, deps, now, { kind: "take", fraction: frac });
         continue;
       }
       continue; // Set-Value handled — never fall through to the Overreaction ladder
@@ -611,7 +703,7 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
 
     // #2 thesis_stop — a NEW break of the FAVOURITE's serve after entry.
     if (evs.some((e) => e.type === "break" && e.server === favSide)) {
-      closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "thesis_stop", `стоп тезиса: второй брейк фаворита — выход`, ext, deps, now, { kind: "protective" });
+      closed += await fireProtective("thesis_stop", `стоп тезиса: второй брейк фаворита — выход`);
       continue;
     }
     // #3 catastrophic_floor — a real collapse to ≤ floor, phantom-guarded by PERSISTENCE: cur AND the
@@ -620,7 +712,7 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
     // (±5-8¢) never reaches entry−15¢, only an injury/cascade does.
     const floorAt = Number.isFinite(plan?.catastrophic_floor?.at_cents) ? Number(plan.catastrophic_floor.at_cents) : null;
     if (floorAt != null && cur <= floorAt && prev != null && prev <= floorAt) {
-      closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${floorAt}¢, подтверждён)`, ext, deps, now, { kind: "protective" });
+      closed += await fireProtective("catastrophic_floor", `катастрофический floor: коллапс к ${cur}¢ (≤${floorAt}¢, подтверждён)`);
       continue;
     }
     // #4 game_count_stop — the favourite has played ≥K receiving games since entry with NO break-back.
@@ -628,13 +720,17 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
     // T2 latch reset (same class as set_value thesis_stop): a re-break that brought the games delta back
     // resets the count — fire only if the favourite is STILL behind by the current score.
     if (recvGames >= K && !counterBreak && favBehindNow) {
-      closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "game_count_stop", `стоп по геймам: ${recvGames} приёмных без брейка назад (счёт ${favGamesNow}-${oppGamesNow})`, ext, deps, now, { kind: "protective" });
+      closed += await fireProtective("game_count_stop", `стоп по геймам: ${recvGames} приёмных без брейка назад (счёт ${favGamesNow}-${oppGamesNow})`);
       continue;
     }
     // #5 take_price — recovered to the pre-written take level (pre-break − buffer).
+    // S3: fire only once the price also clears entry by the min-edge floor — a target that sits within a
+    // cent or two of entry (low pre-break favourite) books a spread/fee-eaten "take" (Bassols −$1.18). A
+    // take is optional; below the floor we hold to a better price or settlement.
     const takeAt = Number.isFinite(plan?.take_price?.at_cents) ? Number(plan.take_price.at_cents) : null;
-    if (takeAt != null && cur >= takeAt) {
-      closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "take_price", `тейк выкупа: фаворит вернулся к ${cur}¢ (цель ≥${takeAt}¢)`, ext, deps, now, { kind: "take", fraction: 1 });
+    const ovrEntry = b.entry_price ?? 0;
+    if (takeAt != null && cur >= takeAt && cur - ovrEntry >= TENNIS_TAKE_MIN_EDGE_C) {
+      closed += await execTennisExit(db, sellCtx, b, cur, players, favSide, "take_price", `тейк выкупа: фаворит вернулся к ${cur}¢ (цель ≥${takeAt}¢, +${Math.round((cur - ovrEntry) * 10) / 10}¢ к входу)`, ext, deps, now, { kind: "take", fraction: 1 });
       continue;
     }
   }
@@ -808,7 +904,7 @@ export function tennisEntryMeta(o: { favPrice: number; prePrice: number; edge: n
     kellyFraction: Math.round(o.kelly * 1000) / 1000, sizeRequested: Math.round(o.stake * 100) / 100, sizeFilled: null, entrySlipCents: null,
     calibration: null, branchWeightSum: null, phantomCheck: null, marketThinnessUsd: o.thinnessUsd,
     winsOnEvent: false, exitPlan: {
-      take_price: { at_cents: o.prePrice - TENNIS_TAKE_BUFFER, note: "возврат к предбрейковой минус запас" },
+      take_price: { at_cents: Math.round((o.prePrice - TENNIS_TAKE_BUFFER) * 10) / 10, note: "возврат к предбрейковой минус запас" }, // T4: round to 0.1¢
       thesis_stop: "второй брейк подряд / признаки ретайра",
       game_count_stop: { receiver_games: TENNIS_GAME_COUNT_STOP }, // A1: main stop — K receiving games, no break-back
       catastrophic_floor: { at_cents: Math.round((o.favPrice - TENNIS_CATASTROPHIC_FLOOR) * 10) / 10 }, // A2: wide backstop for a collapse (P2: round to 0.1¢)
@@ -1102,7 +1198,7 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       // allowLargeEdge OFF: a huge tennis moneyline edge is still the phantom signature. B2: the ceiling
       // is TENNIS_ABSURD_EDGE_BLOCK (40%, was the shared 25%) — the real phantom sources are cut upstream
       // (token invariant / thin_real_book / frozen_favourite), so the net widens to admit deep-but-real snapbacks.
-      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, absurdEdgeBlock: TENNIS_ABSURD_EDGE_BLOCK });
+      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, absurdEdgeBlock: TENNIS_ABSURD_EDGE_BLOCK, bankCeiling: TENNIS_PAPER_BUDGET });
       if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `[${profile}] overreaction подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
       // B2 cohort tag: an entry whose edge sits in the newly-opened 25–40% band USED to be auto-blocked.
       // Tag it (appended to the enter log below) so the raised ceiling can be validated from the clean distribution.
@@ -1135,7 +1231,7 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
         entry_meta: serializeEntryMeta(meta), code_version: codeVer, decision_id: decisionId, created_at: now,
       });
       try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: fillStake, edge: edgeAtFill, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(edgeAtFill * 100).toFixed(1)}% от филла, тейк ~${prePrice - TENNIS_TAKE_BUFFER}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${Math.round((fillCents - TENNIS_CATASTROPHIC_FLOOR) * 10) / 10}¢, пороги:${TENNIS_ARMED_EPOCH})${cohortTag}`, created_at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(edgeAtFill * 100).toFixed(1)}% от филла, тейк ~${Math.round((prePrice - TENNIS_TAKE_BUFFER) * 10) / 10}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${Math.round((fillCents - TENNIS_CATASTROPHIC_FLOOR) * 10) / 10}¢, пороги:${TENNIS_ARMED_EPOCH})${cohortTag}`, created_at: now });
       opened++;
     }
   }
@@ -1362,7 +1458,7 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
       // allowLargeEdge OFF (same phantom-guard reasoning as Overreaction): a Set-Value edge is
       // comebackProb(0.5) − price, ≤20% inside the 30-45¢ band, so the 25% absurd_edge_block never
       // catches a legitimate entry — it only backstops a bad-quote / mislabelled-favourite artifact.
-      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg });
+      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, bankCeiling: TENNIS_PAPER_BUDGET });
       if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `[${profile}] конкурентный сет подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
       // book-fill-m1: fill against the LIVE moneyline book. On ≥$10k-declared moneylines the skip rate
       // should be LOW — a high no_book_liquidity rate here points at OUR book mapping first (tokenId /

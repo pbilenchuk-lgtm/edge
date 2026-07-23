@@ -15,7 +15,8 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { loadPolymarketConfig, fetchMidpointCents } from "./polymarket.js";
-import { mapTennisMatch, logMapDecision, normName } from "./tennisMatch.js";
+import { mapTennisMatch, logMapDecision, normName, MAP_AUTO, MAP_REVIEW } from "./tennisMatch.js";
+import { parseEntryMeta } from "./betMeta.js";
 import { computeWindowMetrics, polymarketSeries } from "./overreactionLatency.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 
@@ -662,6 +663,113 @@ export function buildTennisBreakReport(db: Database): TennisBreakReport {
   };
 }
 
+// ── T1 (batch-3): SCOUT LINK-RATE report — the first-priority diagnostic ──────────────────────
+// Everything downstream stands on the scout linking the API-Tennis live match to the Polymarket app
+// match (mapTennisMatch → verdict "auto"): overreaction/set_value only tick on linked snapshots, the
+// shadow cohorts only fill from linked matches, break-marks only accrue when linked. The 19-log "0
+// snapshots · скаут не привязал" reading could be a RETENTION artifact (snapshots pruned) OR the real
+// prod truth. This report answers it from the PERSISTENT source: tennis_map_log records every mapping
+// DECISION at the time it was made (kept independently of snapshot pruning), so its auto-share is the
+// true decision-time link-rate. Split by day + reason (gray-zone vs no-candidate) + examples, and cross-
+// checked against the CURRENT snapshot linkage so a low number can be attributed (mapping vs discovery).
+export interface LinkRateDay { day: string; total: number; auto: number; review: number; skip: number; linkPct: number }
+export interface LinkRateExample { players: string; verdict: string; bestScore: number; bestCandidate: string | null; day: string }
+export interface TennisLinkRateReport {
+  totalEvents: number; auto: number; review: number; skip: number; linkPct: number;
+  grayZone: number; noCandidate: number;
+  byDay: LinkRateDay[];
+  unlinkedExamples: LinkRateExample[];
+  betsWithProvenance: number; betsTotal: number;
+  currentlyLinkedMatches: number; currentLiveTennisMatches: number;
+  mapAuto: number; mapReview: number;
+  note: string;
+}
+export function buildTennisLinkRate(db: Database): TennisLinkRateReport {
+  const rank = (v: string): number => (v === "auto" ? 2 : v === "review" ? 1 : 0);
+  // Collapse the per-pass rows to ONE verdict per distinct match (event_key): the BEST it ever reached
+  // (a match that ever auto-linked is linked). Keep its top score, latest players, first-seen day.
+  const best = new Map<string, { players: string; verdict: string; score: number; candidates: string | null; day: string }>();
+  for (const r of R.tennisMapLog(db, 20000)) {
+    const day = (r.created_at ?? "").slice(0, 10);
+    const cur = best.get(r.event_key);
+    const score = Number(r.score ?? 0) || 0;
+    if (!cur || rank(r.verdict) > rank(cur.verdict) || (rank(r.verdict) === rank(cur.verdict) && score > cur.score)) {
+      best.set(r.event_key, { players: r.players ?? "?", verdict: r.verdict, score, candidates: r.candidates, day: cur?.day ?? day });
+    } else if (cur && day < cur.day) cur.day = day;
+  }
+  const events = [...best.values()];
+  const auto = events.filter((e) => e.verdict === "auto").length;
+  const review = events.filter((e) => e.verdict === "review").length;
+  const skip = events.filter((e) => e.verdict === "skip").length;
+  const total = events.length;
+  // Reason split for the UNLINKED (non-auto): gray-zone = a candidate scored into [MAP_REVIEW, MAP_AUTO)
+  // (names nearly matched — a normalization/threshold near-miss); no-candidate = nothing scored that high
+  // (the match likely isn't in Polymarket discovery at all, NOT a name-order problem).
+  const grayZone = events.filter((e) => e.verdict !== "auto" && e.score >= MAP_REVIEW).length;
+  const noCandidate = events.filter((e) => e.verdict !== "auto" && e.score < MAP_REVIEW).length;
+  const byDayMap = new Map<string, LinkRateDay>();
+  for (const e of events) {
+    const d = byDayMap.get(e.day) ?? { day: e.day, total: 0, auto: 0, review: 0, skip: 0, linkPct: 0 };
+    d.total++; if (e.verdict === "auto") d.auto++; else if (e.verdict === "review") d.review++; else d.skip++;
+    byDayMap.set(e.day, d);
+  }
+  const byDay = [...byDayMap.values()].map((d) => ({ ...d, linkPct: d.total ? Math.round((d.auto / d.total) * 1000) / 10 : 0 })).sort((a, b) => b.day.localeCompare(a.day));
+  const topCand = (c: string | null): string | null => {
+    try { const arr = JSON.parse(c ?? "[]"); const t = arr[0]; return t ? `${t.home} — ${t.away} (score ${t.score ?? t.nameScore ?? "?"})` : null; } catch { return null; }
+  };
+  const unlinkedExamples = events.filter((e) => e.verdict !== "auto")
+    .sort((a, b) => b.score - a.score) // closest near-misses first — the actionable ones
+    .slice(0, 25).map((e) => ({ players: e.players, verdict: e.verdict, bestScore: e.score, bestCandidate: topCand(e.candidates), day: e.day }));
+  // Independent corroboration #1: bets whose entry carried a data_provenance source (proves a snapshot
+  // backed the decision at the time — immune to later snapshot pruning).
+  const tennisMatchIds = new Set(R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id).map((m) => m.id)));
+  let betsWithProvenance = 0, betsTotal = 0;
+  for (const b of R.allBets(db)) {
+    if (!tennisMatchIds.has(b.match_id)) continue;
+    betsTotal++;
+    try { if (parseEntryMeta(b.entry_meta)?.dataProvenance?.source) betsWithProvenance++; } catch { /* ignore */ }
+  }
+  // Independent corroboration #2: the CURRENT snapshot linkage (subject to pruning) — if this is 0 but the
+  // map-log auto-share is high, the "0 snapshots" logs were a RETENTION artifact, not a mapping failure.
+  let currentlyLinkedMatches = 0, currentLiveTennisMatches = 0;
+  for (const mid of tennisMatchIds) {
+    const linked = (db.prepare(`SELECT COUNT(*) n FROM tennis_snapshots WHERE pm_match_id=?`).get(mid) as { n: number }).n;
+    if (linked > 0) currentlyLinkedMatches++;
+  }
+  currentLiveTennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id)).filter((m) => m.state === "live").length;
+  const linkPct = total ? Math.round((auto / total) * 1000) / 10 : 0;
+  const note = total === 0
+    ? "нет решений маппинга в журнале — скаут ещё не видел ни одного live-матча (проверь API_TENNIS_KEY и что идут ATP/WTA матчи)"
+    : linkPct >= 80
+      ? `link-rate ${linkPct}% (${auto}/${total}) — скаут привязывает нормально; «0 снапшотов» в старых логах — это ретеншн (снапшоты подчищены), НЕ провал маппинга`
+      : grayZone >= noCandidate
+        ? `link-rate ${linkPct}% (${auto}/${total}) НИЗКИЙ, доминируют gray-zone (${grayZone}) — имена почти сходятся, но не дотягивают до порога ${MAP_AUTO}; чинить нормализацию/порог (примеры ниже — ближайшие промахи)`
+        : `link-rate ${linkPct}% (${auto}/${total}) НИЗКИЙ, доминирует no-candidate (${noCandidate}) — матча нет в Polymarket-дискавери (не проблема порядка имён); смотреть покрытие рынков, не маппинг`;
+  return { totalEvents: total, auto, review, skip, linkPct, grayZone, noCandidate, byDay, unlinkedExamples, betsWithProvenance, betsTotal, currentlyLinkedMatches, currentLiveTennisMatches, mapAuto: MAP_AUTO, mapReview: MAP_REVIEW, note };
+}
+export function tennisLinkRateMarkdown(r: TennisLinkRateReport): string {
+  const L: string[] = [];
+  L.push(`# Теннис — link-rate скаута (API-Tennis ↔ Polymarket)`);
+  L.push("");
+  L.push(`**${r.note}**`);
+  L.push("");
+  L.push(`- Всего матчей в журнале маппинга: **${r.totalEvents}** · привязано (auto) **${r.auto}** · серая зона (review) ${r.review} · не найдено (skip) ${r.skip}`);
+  L.push(`- **Link-rate: ${r.linkPct}%** (порог auto=${r.mapAuto}, review=${r.mapReview})`);
+  L.push(`- Причина непривязки: gray-zone (почти сошлось) ${r.grayZone} · no-candidate (нет матча) ${r.noCandidate}`);
+  L.push(`- Проверка ретеншна: снапшоты сейчас привязаны у ${r.currentlyLinkedMatches} матчей · live-теннис сейчас ${r.currentLiveTennisMatches} · ставок с provenance ${r.betsWithProvenance}/${r.betsTotal}`);
+  L.push("");
+  L.push(`## По дням`);
+  L.push(`| день | всего | auto | review | skip | link-rate |`);
+  L.push(`|---|---|---|---|---|---|`);
+  for (const d of r.byDay.slice(0, 30)) L.push(`| ${d.day} | ${d.total} | ${d.auto} | ${d.review} | ${d.skip} | ${d.linkPct}% |`);
+  L.push("");
+  L.push(`## Непривязанные — ближайшие промахи (кандидат на починку нормализации)`);
+  L.push(`| API-Tennis игроки | вердикт | score | лучший кандидат Polymarket | день |`);
+  L.push(`|---|---|---|---|---|`);
+  for (const e of r.unlinkedExamples) L.push(`| ${e.players} | ${e.verdict} | ${e.bestScore} | ${e.bestCandidate ?? "—"} | ${e.day} |`);
+  return L.join("\n");
+}
+
 // ── Part B: recovery-vs-no-recovery calibration report (build now, READ after ~100 marks) ──
 // A mark "recovered" when the price climbed back to within the take buffer of the pre-break level
 // (recovery_N ≥ panic − buffer for some window N) — the same definition the live take_price uses.
@@ -838,6 +946,67 @@ export function buildTennisOverreactionCohort(db: Database): OvrCohortReport {
     orientation: "цена — winner-манилайн СЛОМАННОЙ стороны (broken_side из детектора брейков по дельте геймов, не токен/first-named); фильтр pre≥60¢ сам отсекает перевёрнутые марки (у андердога winner-цена <40¢). Пятый ориентационный баг здесь не воспроизводится.",
     note: verdictNote,
   };
+}
+
+// ── П3 (batch-3): "take 50% + hold runner to settle" backtest on the ALREADY-accumulated cohort ──
+// The runner is NOT a tweak to a live strategy — Overreaction is PARKED (no_go). It is a NEW payout
+// structure, so the ONLY legitimate path is to measure it on marks we already have (zero money) and
+// gate it on a criterion fixed BEFORE the data: runner-EV > 0 with ≥3pp margin after commission on
+// n≥80. Pass → carry to ratification as a NEW-epoch re-enable; fail → it stays parked, buried as cleanly
+// as the first version. Per mark we compare the current TAKE-ONLY structure (sell 100% at the buyback)
+// against the RUNNER (sell 50% at the buyback, hold 50% to the match settlement). The delta is non-zero
+// only on marks whose take was reached — i.e. exactly where the current strategy leaves the settlement
+// upside on the table (the Napolitano ≈$68 case). Marks are MID (no spread/fill) → an UPPER bound, hence
+// the mandatory margin. Read-only.
+const OVR_RUNNER_FEE = (() => { const n = Number(process.env.TENNIS_RUNNER_FEE_RATE); return Number.isFinite(n) && n >= 0 ? n : 0.02; })();
+const OVR_RUNNER_MARGIN = 0.03; // criterion: EV must clear 0 by ≥3pp after commission (fixed before data)
+export interface OvrRunnerBacktest {
+  n: number; nTakeReached: number; nSettleWin: number;
+  runnerEvPct: number | null; takeOnlyEvPct: number | null; deltaPct: number | null;
+  verdict: "go" | "no_go" | "insufficient"; criterion: string; note: string;
+}
+export async function buildOvrRunnerBacktest(db: Database): Promise<OvrRunnerBacktest> {
+  // Dynamic import breaks the static cycle (tennisTrading already imports this module); the settlement
+  // resolver is the SINGLE source, never re-implemented here (no drift with the live settle path).
+  const { tennisFinalResult } = await import("./tennisTrading.js");
+  const cohort = R.listTennisBreakMarks(db).filter((m) =>
+    m.broke_early === 1 && ovrTour(m.event_type) != null && (m.pre_cents ?? 0) >= OVR_FAV_MIN_PRIMARY &&
+    m.panic_cents != null && m.pre_cents != null && m.broken_side != null && m.match_id != null);
+  const runnerNets: number[] = [], takeOnlyNets: number[] = [];
+  let nTakeReached = 0, nSettleWin = 0;
+  for (const m of cohort) {
+    const fin = tennisFinalResult(db, m.match_id!);
+    if (!fin || !fin.finished || fin.canceled || fin.manual || fin.advancing == null) continue; // need a clean win/loss
+    const entry = m.panic_cents as number; if (!(entry > 0)) continue;
+    const shares = 100 / entry; // binary pays 100¢ per share on a win
+    const won = fin.advancing === m.broken_side; // the broken favourite went on to win the match
+    if (won) nSettleWin++;
+    const takeTarget = (m.pre_cents as number) - OVR_TAKE_BUFFER;
+    const reached = [m.recovery_1, m.recovery_2, m.recovery_3, m.recovery_5].some((v) => v != null && (v as number) >= takeTarget);
+    if (reached) nTakeReached++;
+    const settleProceeds = shares * (won ? 1 : 0);                 // hold to settle → 100¢ or 0
+    const takeProceeds = shares * (takeTarget / 100) * (1 - OVR_RUNNER_FEE); // sell at the buyback (a trade → fee)
+    const takeOnly = reached ? takeProceeds : settleProceeds;      // current parked structure
+    const runner = reached ? 0.5 * takeProceeds + 0.5 * settleProceeds : settleProceeds;
+    runnerNets.push(runner - 1); // staked $1
+    takeOnlyNets.push(takeOnly - 1);
+  }
+  const n = runnerNets.length;
+  const mean = (xs: number[]) => xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null;
+  const runnerEv = mean(runnerNets), takeOnlyEv = mean(takeOnlyNets);
+  const runnerEvPct = runnerEv == null ? null : Math.round(runnerEv * 1000) / 10;
+  const takeOnlyEvPct = takeOnlyEv == null ? null : Math.round(takeOnlyEv * 1000) / 10;
+  const deltaPct = runnerEv == null || takeOnlyEv == null ? null : Math.round((runnerEv - takeOnlyEv) * 1000) / 10;
+  const criterion = `раннер-EV > 0 с маржой ≥${OVR_RUNNER_MARGIN * 100}пп после комиссии (${OVR_RUNNER_FEE * 100}%) на n≥${OVR_MIN_N_PRIMARY}; марки — MID (без спреда/филла) → верхняя граница`;
+  const verdict: OvrRunnerBacktest["verdict"] =
+    n < OVR_MIN_N_PRIMARY ? "insufficient"
+      : (runnerEv != null && runnerEv >= OVR_RUNNER_MARGIN) ? "go" : "no_go";
+  const note = verdict === "insufficient"
+    ? `n=${n} < ${OVR_MIN_N_PRIMARY} — данных мало, НЕ решаем (Overreaction остаётся парковаться); копим марки`
+    : verdict === "go"
+      ? `раннер-EV ${runnerEvPct}% ≥ ${OVR_RUNNER_MARGIN * 100}пп (vs take-only ${takeOnlyEvPct}%, Δ${deltaPct}пп) — структура проходит критерий, выносить на ратификацию как НОВУЮ эпоху re-enable (не включать руками)`
+      : `раннер-EV ${runnerEvPct}% < ${OVR_RUNNER_MARGIN * 100}пп (vs take-only ${takeOnlyEvPct}%, Δ${deltaPct}пп) — не проходит, раннер хоронится так же чисто, как take-only`;
+  return { n, nTakeReached, nSettleWin, runnerEvPct, takeOnlyEvPct, deltaPct, verdict, criterion, note };
 }
 
 /** Per-break-mark CSV — inspect the actual pre/floor/panic per break (is the panic real?). */
