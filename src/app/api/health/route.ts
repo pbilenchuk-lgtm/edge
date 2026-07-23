@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const { getDb } = await import("@/lib/db");
-    const { listCompetitions, listStrategies, getTreasury } = await import("@/lib/repo");
+    const { listCompetitions, listStrategies, getTreasury, metaGet } = await import("@/lib/repo");
     const { scheduleGapSummary } = await import("@/lib/scheduleGap");
     const db = getDb();
     const comps = listCompetitions(db);
@@ -36,6 +36,9 @@ export async function GET() {
       strategies: strats.length,
       // count + longest recorded scheduler sleep window (0/none when the loop has stayed alive).
       scheduleGaps: scheduleGaps ? { count: scheduleGaps.count, longestSec: scheduleGaps.longestSec, last: scheduleGaps.last } : null,
+      // Z2(b): running count of payout-inconsistent settles (decimal-shift class); >0 warrants a look.
+      accountingSuspect: (() => { try { const n = Number(metaGet(db, "accounting_suspect_count") ?? 0); return { count: Number.isFinite(n) ? n : 0, last: (() => { try { return JSON.parse(metaGet(db, "accounting_suspect_last") ?? "null"); } catch { return null; } })() }; } catch { return { count: 0, last: null }; } })(),
+      tennisLinkRate,
     });
   } catch (e) {
     return NextResponse.json(

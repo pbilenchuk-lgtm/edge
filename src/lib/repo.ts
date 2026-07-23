@@ -947,11 +947,40 @@ export function updateBet(db: Database, id: string, patch: Partial<Bet>): void {
   // differ (cross_epoch), which per-epoch verdict slices exclude. Single choke point: every settle path
   // funnels its status change through updateBet. Only stamp once (first settled transition) and only when
   // the caller didn't set it explicitly. Epoch computed inline to avoid a repo→codeEpoch import cycle.
-  if (typeof p.status === "string" && p.status.startsWith("settled") && p.exit_code_version === undefined) {
-    const row = db.prepare(`SELECT exit_code_version FROM bets WHERE id=?`).get(id) as { exit_code_version?: string | null } | undefined;
-    if (row && row.exit_code_version == null) {
+  if (typeof p.status === "string" && p.status.startsWith("settled")) {
+    const row = db.prepare(`SELECT exit_code_version, stake, entry_price, closing_price, settled_by, payout FROM bets WHERE id=?`).get(id) as
+      { exit_code_version?: string | null; stake?: number | null; entry_price?: number | null; closing_price?: number | null; settled_by?: string | null; payout?: number | null } | undefined;
+    // п.2: stamp the EXIT epoch on the first settled transition (entry epoch = code_version, exit epoch =
+    // exit_code_version; a deploy mid-life makes them differ → cross_epoch, excluded from per-epoch cuts).
+    if (p.exit_code_version === undefined && row && row.exit_code_version == null) {
       const me = Number(metaGet(db, "model_epoch") ?? 1);
       p.exit_code_version = `${CODE_VERSION}·m${Number.isFinite(me) && me >= 1 ? Math.floor(me) : 1}`;
+    }
+    // Z2(b): payout-consistency invariant. The recorded payout must match the EXPECTED value for its settle
+    // kind within a commission tolerance — a mismatch is a decimal shift (Kansas «payout ≈ тек/10»), flagged
+    // accounting_suspect at birth. void refunds vary by path → skipped (only won/lost validated). Read-only
+    // guard: it flags, never blocks a settle. Both consumers share this single choke (every settle → updateBet).
+    if ((p.status === "settled_won" || p.status === "settled_lost") && p.accounting_suspect === undefined && row) {
+      const stake = Number(p.stake ?? row.stake ?? 0);
+      const entry = Number(row.entry_price ?? 0);
+      const payout = Number(p.payout ?? row.payout ?? NaN);
+      const closing = Number(p.closing_price ?? row.closing_price ?? NaN);
+      const settledBy = (p.settled_by ?? row.settled_by ?? null) as string | null;
+      if (stake > 0 && entry > 0 && Number.isFinite(payout)) {
+        const early = settledBy === "early" || settledBy === "partial";
+        const expected = early
+          ? (Number.isFinite(closing) ? stake * (closing / entry) : payout) // trading cash-out: stake·exit/entry
+          : (p.status === "settled_won" ? stake * (100 / entry) : 0);        // held to settle: won→100¢, lost→0
+        const tol = Math.max(0.5, 0.02 * Math.max(stake, expected)); // ~2% of notional or 50¢, covers fee+rounding
+        if (Math.abs(payout - expected) > tol) {
+          p.accounting_suspect = 1;
+          try {
+            const n = Number(metaGet(db, "accounting_suspect_count") ?? 0) + 1;
+            metaSet(db, "accounting_suspect_count", String(n), new Date().toISOString());
+            metaSet(db, "accounting_suspect_last", JSON.stringify({ betId: id, status: p.status, settledBy, stake, entry, payout, expected: Math.round(expected * 100) / 100 }), new Date().toISOString());
+          } catch { /* best-effort telemetry */ }
+        }
+      }
     }
   }
   const keys = Object.keys(p);

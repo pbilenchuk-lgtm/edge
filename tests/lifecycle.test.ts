@@ -2093,3 +2093,26 @@ test("Z3 (batch-5): trade-log dedup_key makes a re-written event idempotent; unk
   R.insertTradeLog(db, { id: "e", match_id: mid, strategy_id: strat.id, minute: "11'", type: "skip", text: "s", created_at: "t" });
   assert.equal(R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip").length, 2, "unkeyed rows insert normally");
 });
+
+test("Z2(b) (batch-5): payout inconsistency flags accounting_suspect at settle (Kansas decimal-shift class)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const strat = R.listStrategies(db, "football")[0];
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: null, minute: 90, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  const mkBet = (id: string) => R.insertBet(db, { id, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "X", status: "open", proposed_price: 40, entry_price: 40, current_price: 40, closing_price: null, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: null, result: null, payout: null, created_at: "t" } as any);
+  // held-to-settle WON at entry 40¢, stake 100 → expected payout = 100·100/40 = 250. Correct → clean.
+  mkBet("w");
+  R.updateBet(db, "w", { status: "settled_won", result: "won", payout: 250, closing_price: 100 });
+  assert.equal(R.getBet(db, "w")!.accounting_suspect ?? 0, 0, "consistent payout → not flagged");
+  // Kansas class: a decimal shift books payout ≈ тек/10 → 25 instead of 250 → flagged.
+  mkBet("k");
+  R.updateBet(db, "k", { status: "settled_won", result: "won", payout: 25, closing_price: 100 });
+  assert.equal(R.getBet(db, "k")!.accounting_suspect, 1, "decimal-shifted payout → accounting_suspect");
+  assert.ok(Number(R.metaGet(db, "accounting_suspect_count")) >= 1, "loud counter bumped");
+  // an early cash-out priced by stake·exit/entry stays clean.
+  mkBet("e");
+  R.updateBet(db, "e", { status: "settled_lost", result: "lost", payout: Math.round(100 * (30 / 40) * 100) / 100, closing_price: 30, settled_by: "early" });
+  assert.equal(R.getBet(db, "e")!.accounting_suspect ?? 0, 0, "early cash-out consistent → clean");
+});

@@ -215,6 +215,9 @@ export interface Bet {
   settle_suspect?: number | null;
   /** P0.5: football strategy epoch tag (parallels tennis «пороги:…»); null/`epoch_unknown` excluded from cuts. */
   football_epoch?: string | null;
+  /** Z2(b): set at settle when the recorded payout disagrees with the expected value for its settle kind
+   *  (early/partial → stake·exit/entry; won → stake·100/entry; lost → 0) beyond a commission tolerance. */
+  accounting_suspect?: number | null;
 }
 
 export interface Reassessment {

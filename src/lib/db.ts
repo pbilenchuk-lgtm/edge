@@ -255,6 +255,9 @@ export function initSchema(db: Database): void {
     // (enter dup: Kansas, Hammarby) collapses to one row. Partial unique index so only keyed rows dedup.
     "ALTER TABLE trade_log ADD COLUMN dedup_key TEXT",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_tradelog_dedup ON trade_log(match_id, type, dedup_key) WHERE dedup_key IS NOT NULL",
+    // Z2(b) (batch-5): payout-consistency flag — set at settle when |payout − expected| exceeds a
+    // commission tolerance (a decimal shift like the Kansas «payout ≈ тек/10»). Caught at birth, not a week later.
+    "ALTER TABLE bets ADD COLUMN accounting_suspect INTEGER NOT NULL DEFAULT 0",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }
