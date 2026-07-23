@@ -227,6 +227,21 @@ test("normalizeStrategistJson: minimal {picks,exits,note} still parses (back-com
   assert.equal(d.note, "n");
 });
 
+test("T2.2 normalizeStrategistJson: a HOLD ticket is flagged hold (explicit action OR «не новый вход» reason), a real pick isn't", () => {
+  const d = normalizeStrategistJson({
+    picks: [
+      { label: "BTTS — No", conviction: "средняя", reason: "держу открытую anchor-позицию, не новый вход", prob: 0.6 },
+      { label: "Over 1.5", conviction: "высокая", reason: "структурный value", prob: 0.7, action: "hold" },
+      { label: "Draw — No", conviction: "средняя", reason: "живой выкуп после красной", prob: 0.55 },
+    ],
+    note: "n",
+  });
+  const byLabel = Object.fromEntries(d.picks.map((p) => [p.label, p]));
+  assert.equal(byLabel["BTTS — No"].hold, true, "«не новый вход» reason → hold");
+  assert.equal(byLabel["Over 1.5"].hold, true, "action:hold → hold");
+  assert.equal(byLabel["Draw — No"].hold, undefined, "a genuine buyback pick is NOT flagged hold");
+});
+
 test("normalizeStrategistJson: v3 pre_match_positions + rich fields captured (engine still sizes from prob)", () => {
   const d = normalizeStrategistJson({
     match_shape: "A",

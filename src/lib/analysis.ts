@@ -321,6 +321,7 @@ export async function runStrategists(
     for (const { m, implied } of ranked) {
       const pick = picksArr?.find((p) => sameMarketLabel(p.label, m.label));
       if (picksArr && !pick) { skipped++; continue; }
+      if (pick?.hold) { skipped++; continue; } // T2.2: a hold ticket never opens — no-op prematch too
       if (held.has(norm(m.label))) { skipped++; continue; }
       // Duplicate-outcome price conflict → never enter, even if the strategist picked
       // it: one of the twins is a data artifact, so its edge is phantom.

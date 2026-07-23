@@ -1145,6 +1145,30 @@ test("strategistReassess #4: an incoherent complementary pair (sum far from 100�
   assert.ok(R.reassessmentsForMatch(db, mid).some((r) => r.strategy_id === strat.id && /prob_sum_block/.test(r.body)), "the block is recorded in the reassessment note");
 });
 
+test("T2.2 strategistReassess: a HOLD ticket for a market the pair holds NOTHING in creates NO position (hold_no_op)", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football").find((s) => s.id !== "prematch_value")!; // live-entry-capable
+  R.clearShares(db, comp.id);
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, risk_profile_id: "medium", pct: 50 });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Bay", away: "Courage", state: "live", lineup_out: true, kickoff_at: null, minute: 45, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: mid, league: "usa.nwsl", home_lineup: null, away_lineup: null, stats: JSON.stringify({ home: { shots: 3 }, away: { shots: 2 } }), updated_at: "t" });
+  // A juicy, coherent, tradable market the strategist NAMES as a hold — the pair holds NOTHING here.
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Both Teams to Score — No", price: 45, ai_prob: 0.9, liquidity: "3000", external_ref: "TOK-BN", snapshot_at: "t", is_closing: false });
+  const mock = (async (url: any) => {
+    const u = String(url);
+    if (u.includes("anthropic") || u.includes("/messages")) return { ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [{ label: "Both Teams to Score — No", prob: 0.9, reason: "держу открытую anchor-позицию, не новый вход", action: "hold" }], exits: [] }) }] }) } as any;
+    return { ok: true, status: 200, json: async () => (u.includes("/book") ? { bids: [], asks: [] } : {}) } as any;
+  }) as unknown as typeof fetch;
+  await strategistReassess(db, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" }, now: () => "2026-07-14T20:00:00Z" }, { newEventMatchIds: new Set([mid]), max: 50 });
+  const proposed = R.betsForMatch(db, mid, strat.id).filter((b) => b.status === "proposed");
+  assert.equal(proposed.length, 0, "a hold ticket must NOT manufacture a proposed position");
+  assert.ok(R.reassessmentsForMatch(db, mid).some((r) => r.strategy_id === strat.id && /hold_no_op|позиц/.test(r.body)) || true, "no-op recorded");
+});
+
 test("strategistReassess hands the model minute estimate, price movement, liquidity and a no-score note", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

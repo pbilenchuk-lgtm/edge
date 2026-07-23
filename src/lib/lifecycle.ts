@@ -1598,6 +1598,10 @@ export async function strategistReassess(
           const clusterExp = new Map<string, number>();
           for (const b of liveHeld) { const k = correlationKey(b.market_label, m.home, m.away); if (k) clusterExp.set(k, (clusterExp.get(k) ?? 0) + (b.stake ?? 0)); }
           for (const pick of dec.picks) {
+            // T2.2: a HOLD ticket never opens. If the pair already holds this market, holding is the default
+            // (nothing to do); if it holds NOTHING, a hold pick is a NO-OP — it must not manufacture a new
+            // position (the Cruz Azul/Göteborg/Hammarby «hold, не новый вход» → phantom «вошёл» bug).
+            if (pick.hold) { unfilled.push(`«${pick.label}» — hold-тикет, позиция не открывается (hold_no_op)`); continue; }
             const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
             if (!mk || mk.price == null) { unfilled.push(`«${pick.label}» — нет рынка`); continue; }
             // P1: never open into a quarantined book (the strategist shouldn't even see it, but a cached

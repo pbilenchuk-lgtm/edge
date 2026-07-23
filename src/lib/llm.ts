@@ -659,6 +659,10 @@ export interface StrategistPick {
   phantomCheck?: string;         // anti-phantom verdict for this bet
   totalCheck?: string;           // total_note reconciliation on a borderline total
   exitPlan?: StrategistExitPlan; // the pre-written exit plan for the live window
+  // T2.2: a HOLD ticket — the strategist naming an EXISTING position it wants to keep («держу / не новый
+  // вход»), NOT a request to open. A hold pick must never create a position (no-op if nothing is held);
+  // set in normalizeStrategistJson from an explicit hold action or a «не новый вход»-class reason.
+  hold?: boolean;
 }
 export interface StrategistExit {
   market: string; reason: string; fraction: number; // fraction 0..1 of the position to close
@@ -704,6 +708,15 @@ export function normalizeStrategistJson(j: any): Omit<StrategistDecision, "ok" |
   const arrStr = (x: unknown): string[] | undefined => (Array.isArray(x) ? x.map((v) => String(v)).filter(Boolean) : undefined);
   const isAdd = (a: unknown) => a === "add" || a === "open_new";
   const isClose = (a: unknown) => a === "reduce" || a === "close";
+  // T2.2: a HOLD intent on an entry-candidate — the strategist keeping an EXISTING position, never opening.
+  // Detected from an explicit action verb OR a narrow «не новый вход / не открываю новую» reason phrase
+  // (kept narrow so a prematch pick's prose can't false-positive into a suppressed entry).
+  const isHoldAction = (a: unknown) => { const s = String(a ?? "").toLowerCase(); return s === "hold" || s === "keep" || s === "держать" || s === "hold_existing"; };
+  const holdReason = (p: any): boolean => {
+    const t = `${p?.reason ?? ""} ${p?.note ?? ""}`.toLowerCase();
+    return /не\s+нов\w*\s+вход|не\s+открыва\w*\s+нов|держу\s+(открыт|существ|тек)|hold[\s_-]?existing|не\s+доливаю/.test(t);
+  };
+  const isHoldPick = (p: any) => isHoldAction(p?.action) || holdReason(p);
   // ENTRY sources: explicit picks, v3 pre_match_positions, or live actions=add.
   const rawEntries: any[] = [
     ...(Array.isArray(j.picks) ? j.picks : []),
@@ -736,6 +749,7 @@ export function normalizeStrategistJson(j: any): Omit<StrategistDecision, "ok" |
         ...(str(p.phantom_check) ? { phantomCheck: str(p.phantom_check) } : {}),
         ...(str(p.total_check) ? { totalCheck: str(p.total_check) } : {}),
         ...(exitPlan && Object.keys(exitPlan).length ? { exitPlan } : {}),
+        ...(isHoldPick(p) ? { hold: true } : {}),
       } as StrategistPick;
     });
   // EXIT sources: explicit `exits`, live `actions`=reduce/close, AND `exit_checks`
