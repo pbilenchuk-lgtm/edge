@@ -255,7 +255,10 @@ CREATE TABLE IF NOT EXISTS trade_log (
   dedup_key   TEXT,            -- Z3: idempotency key (decision/bet id); a re-write of the same (match,type,key) is ignored
   created_at  TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tradelog_dedup ON trade_log(match_id, type, dedup_key) WHERE dedup_key IS NOT NULL;
+-- NB: idx_tradelog_dedup is created in db.ts migrations (AFTER the ALTER that adds dedup_key on an
+-- existing DB). It must NOT live here: db.exec(schema.sql) runs BEFORE migrations, so on a pre-existing
+-- trade_log (where CREATE TABLE IF NOT EXISTS is a no-op and the column isn't there yet) a standalone
+-- CREATE INDEX on dedup_key throws and aborts the whole schema apply → the ALTER never runs.
 
 -- §2.14 quality_metrics (метрики качества стратегии; пересчитываются по расписанию)
 CREATE TABLE IF NOT EXISTS quality_metrics (
