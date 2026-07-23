@@ -10,6 +10,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { winsOnEventOccurrence } from "./thresholds.js";
+import { canonicalProfileId } from "./riskProfiles.js";
 
 export interface ProfileFilter {
   fromMs?: number; toMs?: number;      // created_at window
@@ -116,7 +117,9 @@ export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
       });
     out.push({
       id: b.id, matchId: b.match_id, matchLabel: `${m.home} — ${m.away}`, competitionId: m.competition_id, category: comp?.name ?? m.competition_id,
-      strategyId: b.strategy_id, strategy: strats.get(b.strategy_id) ?? b.strategy_id, profileId: b.risk_profile_id ?? "medium", market: b.market_label,
+      // canonicalProfileId folds legacy `rp-lite*` → `max` so pre-rename history glues to the renamed
+      // profile WITHOUT a DB rewrite (owner decision 23.07.2026 b).
+      strategyId: b.strategy_id, strategy: strats.get(b.strategy_id) ?? b.strategy_id, profileId: canonicalProfileId(b.risk_profile_id ?? "medium"), market: b.market_label,
       phase, minute: em?.minute ?? null, scoreHome: em?.scoreHome ?? null, scoreAway: em?.scoreAway ?? null,
       edge: em?.edge ?? (b.ai_prob != null && entryCents != null ? Math.round((b.ai_prob - entryCents / 100) * 1000) / 1000 : null),
       aiProb: em?.aiProb ?? num(b.ai_prob), derivedProb: em?.derivedProb ?? null, impliedProb: em?.impliedProb ?? (entryCents != null ? Math.round(entryCents) / 100 : null),

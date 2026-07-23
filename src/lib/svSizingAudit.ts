@@ -1,11 +1,12 @@
 // ============================================================
 // EDGE LAB — SET-VALUE sizing audit  [SERVER-ONLY, READ-ONLY]  (P0.6)
 //
-// The 10-log review showed rp-lite staked MORE than aggressive on every match ($129-135 vs $80). This
-// report makes that legible WITHOUT changing behaviour: for each risk profile it prints the sizing knobs
-// (kelly_fraction_base, clamp, max_position_pct, max_match_exposure_pct) and the stake each WOULD size on
-// one fixed reference setup (the median set_value entry: edge ~15% at 35¢). If a "lite"/"conservative"
-// profile outsizes "aggressive", that's flagged as an inversion — the decision to fix it is the owner's.
+// The 10-log review showed the profile now renamed `max` staked MORE than aggressive on every match
+// ($129-135 vs $80). Owner decision 23.07.2026 (b): that is now INTENTIONAL — `max` is the super-risky
+// profile, expected to be the largest, and is NOT an inversion. This report still prints, for each profile,
+// the sizing knobs (kelly_fraction_base, clamp, max_position_pct, max_match_exposure_pct) and the stake each
+// WOULD size on one fixed reference setup (median set_value entry: edge ~15% at 35¢). It flags an inversion
+// ONLY when a "lite"/"conservative" profile outsizes "aggressive" — `max` outsizing everyone is by design.
 // ============================================================
 
 import type { Database } from "./db.js";
@@ -27,7 +28,7 @@ export interface SvSizingAudit {
   note: string;
 }
 
-/** Per-profile sizing on ONE fixed set_value setup, so the rp-lite-outsizes-aggressive inversion is
+/** Per-profile sizing on ONE fixed set_value setup, so a genuine lite/conservative-outsizes-aggressive inversion is
  *  visible with the exact knobs behind it. Pure read — never changes a config. */
 export function buildSvSizingAudit(db: Database, env: Record<string, string | undefined> = process.env): SvSizingAudit {
   const budget = num(env.TENNIS_PAPER_BUDGET_USD, 1000);

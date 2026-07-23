@@ -15,6 +15,7 @@
 
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
+import { canonicalProfileId } from "./riskProfiles.js";
 
 export interface RiskConfig {
   config_version: string;
@@ -233,9 +234,34 @@ export function migrateRiskProfileExits(db: Database): void {
   }
 }
 
-/** A named profile's validated config, or defaults if missing/corrupt. */
+/** Owner decision 23.07.2026 (option b): rename the super-risky profile `rp-lite-mrca9dz8` → `max`, keeping
+ *  its config (Kelly ×0.50, no calibration floor) AS-IS — that is now design. Idempotent, marker-guarded.
+ *  Historical BETS are NOT rewritten (readers alias `rp-lite*`→`max`); only the ACTIVE allocation moves: the
+ *  risk_profiles row is renamed and strategy_shares are repointed, so NEW bets place under `max`. */
+const RENAME_MAX_MARK = "rename_rplite_to_max_v1";
+export function migrateRenameRpLiteToMax(db: Database, now: string): void {
+  if (R.metaGet(db, RENAME_MAX_MARK)) return;
+  const legacy = R.listRiskProfiles(db).filter((r) => /^rp-lite/i.test(r.id));
+  const maxExists = !!R.getRiskProfileRow(db, "max");
+  for (const r of legacy) {
+    // Create `max` from the legacy config verbatim (super-risky by owner decision — Kelly ×0.50, no
+    // calibration floor — намеренно), unless it already exists; then repoint active shares + drop the old row.
+    if (!maxExists && !R.getRiskProfileRow(db, "max")) {
+      R.upsertRiskProfile(db, { id: "max", name: "max", content: r.content, sort: r.sort, created_at: r.created_at });
+    }
+    try { db.prepare(`UPDATE strategy_shares SET risk_profile_id='max' WHERE risk_profile_id=?`).run(r.id); }
+    catch { /* a (comp,strat,'max') already exists → PK clash; the max share is already there, drop the legacy one */
+      db.prepare(`DELETE FROM strategy_shares WHERE risk_profile_id=?`).run(r.id); }
+    R.deleteRiskProfile(db, r.id);
+    console.log(`[migrate] risk profile «${r.id}» → «max» (супер-рисковый профиль по решению владельца 23.07.2026)`);
+  }
+  R.metaSet(db, RENAME_MAX_MARK, now, now);
+}
+
+/** A named profile's validated config, or defaults if missing/corrupt. Aliases a legacy `rp-lite*` id to
+ *  `max` so a lingering old-id reference (an open bet placed pre-rename) still resolves to its real config. */
 export function getProfileConfig(db: Database, id: string): RiskConfig {
-  const row = R.getRiskProfileRow(db, id);
+  const row = R.getRiskProfileRow(db, id) ?? R.getRiskProfileRow(db, canonicalProfileId(id));
   if (!row) return DEFAULT_RISK_CONFIG;
   try {
     const loaded = loadRiskConfig(JSON.parse(row.content));

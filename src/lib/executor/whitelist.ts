@@ -15,6 +15,7 @@ import type { Bet } from "../types.js";
 import * as RR from "../realRepo.js";
 import { isSettled } from "../repo.js";
 import { parseEntryMeta } from "../betMeta.js";
+import { isMaxProfile } from "../riskProfiles.js";
 import { loadSafetyCaps, effectiveTradingMode, modeCaps, readTradingMode } from "./safety.js";
 import { DryRunExecutor } from "./dryRun.js";
 import { classifyOrderBook } from "./paperFill.js";
@@ -133,6 +134,10 @@ export async function mirrorPaperEntryToReal(db: Database, bet: Bet, ctx: Mirror
     const mode = effectiveTradingMode(db, ctx.env);
     const caps = modeCaps(mode);
     if (!caps.simulate && !caps.realEntry) return { mirrored: false, note: `режим «${mode}» — реал не строится` };
+    // The super-risky `max` profile (Kelly ×0.50, no calibration floor) is NEVER mirrored to real, on ANY
+    // whitelisted strategy — реал запрещён до отдельной ратификации владельца (решение 23.07.2026 b). Belt at
+    // the mirror gate; the whitelist itself is per-strategy and has no profile column.
+    if (isMaxProfile(bet.risk_profile_id)) return { mirrored: false, note: "max: реал запрещён до ратификации — только paper" };
     const row = matchWhitelist(db, { strategyId: bet.strategy_id, categoryId: ctx.categoryId });
     if (!row) return { mirrored: false, note: "не в whitelist — только paper" }; // expected, high-volume — stays silent
     // Past the whitelist = this entry was INTENDED for the real contour. ANY skip from here is a

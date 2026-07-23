@@ -26,6 +26,24 @@ function pmvSettled(db: any, o: { id: string; label: string; profile?: string; e
 }
 const exit = (db: any, label: string, text: string) => R.insertTradeLog(db, { id: R.uid(), match_id: "m1", strategy_id: "prematch_value", minute: "78'", type: "exit", text: `выход «${label}» ${text}`, created_at: "t" });
 
+test("F4 isolation: the main line is the trio only; `max` (incl. legacy rp-lite alias) is a SEPARATE maxLine", () => {
+  const db = seed();
+  // Two MAIN-profile early-closed PMV bets (medium + aggressive) and TWO max bets (one new `max`, one legacy
+  // rp-lite id that aliases to max) — all on Over 1.5 which WON at settle (2:0). Each was closed early.
+  pmvSettled(db, { id: "mn1", label: "Over 1.5", profile: "medium", entry: 40, stake: 100, result: "lost", payout: 0 });
+  pmvSettled(db, { id: "mn2", label: "Over 1.5", profile: "aggressive", entry: 40, stake: 100, result: "lost", payout: 0 });
+  pmvSettled(db, { id: "mx1", label: "Over 1.5", profile: "max", entry: 40, stake: 200, result: "lost", payout: 0 });
+  pmvSettled(db, { id: "mx2", label: "Over 1.5", profile: "rp-lite-mrca9dz8", entry: 40, stake: 200, result: "lost", payout: 0 });
+  exit(db, "Over 1.5", "@ 25¢ · тезис · P&L -$100.00");
+  const rep = buildPmvExitCounterfactual(db);
+  assert.equal(rep.n, 2, "main line counts only the aggressive/medium trio bets");
+  assert.equal(rep.turnover, 200, "main turnover = 100 + 100, max's 400 excluded");
+  assert.equal(rep.maxLine.n, 2, "both max bets (new id + legacy alias) land in maxLine");
+  assert.equal(rep.maxLine.turnover, 400, "max turnover isolated");
+  // main cells never carry a max stake
+  assert.ok(rep.byReasonFamily.every((c) => c.turnover <= 200), "no main cell includes max's stake");
+});
+
 test("F4 marketFamily: coarse classification", () => {
   assert.equal(marketFamily("Over 1.5"), "totals");
   assert.equal(marketFamily("Under 3.5 goals"), "totals");

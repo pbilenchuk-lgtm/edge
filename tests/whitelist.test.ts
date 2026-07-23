@@ -63,6 +63,20 @@ test("mirror: a whitelisted football entry builds a dry order at the PROPORTIONA
   assert.equal(ord.exchange_order_id, null, "dry");
 });
 
+// ── the `max` profile is never real (owner rule 23.07.2026 b) ────────────────────
+test("mirror: the `max` profile is NEVER mirrored to real on a whitelisted strategy (реал запрещён до ратификации)", async () => {
+  const d = db();
+  addWhitelistRow(d, { strategyId: "overreaction", categories: ["epl"], maxOrderUsd: 50, enabled: true }, "owner", NOW);
+  const r = await mirrorPaperEntryToReal(d, bet({ stake: 100, risk_profile_id: "max" }), mirrorCtx());
+  assert.equal(r.mirrored, false, "max profile blocked from real even though the strategy IS whitelisted");
+  assert.match(r.note, /реал запрещён|max/);
+  assert.equal(RR.listRealOrders(d).length, 0, "no real order built for a max bet");
+  // a legacy rp-lite id (an open bet placed before the rename) is blocked too, via the canonical alias
+  const r2 = await mirrorPaperEntryToReal(d, bet({ stake: 100, risk_profile_id: "rp-lite-mrca9dz8" }), mirrorCtx());
+  assert.equal(r2.mirrored, false, "legacy rp-lite id also blocked from real");
+  assert.equal(RR.listRealOrders(d).length, 0);
+});
+
 // ── condition 1: gate-first (no-op by COST, not just effect) ─────────────────────
 test("mirror: REAL_TRADING=off returns BEFORE any work — no book read, no rows (hot-path no-op)", async () => {
   const d = db();

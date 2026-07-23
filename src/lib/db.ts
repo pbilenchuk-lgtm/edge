@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy, migrateTennisSetValueStrategy, migrateTennisPmvStrategy, migrateVoidOutOfScopePmv, migrateVoidAllOpenPmv, migrateResettleExtraTimeVoids, migrateResetTennisMarks, migrateRetireFable, migrateBetOrigin } from "./seed.js";
 import { markUefaSettleSuspect, migrateFootballEpochUnknown } from "./footballIntegrity.js";
-import { seedRiskProfiles, migrateRiskProfileExits } from "./riskConfig.js";
+import { seedRiskProfiles, migrateRiskProfileExits, migrateRenameRpLiteToMax } from "./riskConfig.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
 import { migrateQuarantinePoisonedTennis } from "./tennisTrading.js";
 
@@ -85,6 +85,9 @@ export function getDb(path = dbPath()): Database {
   // Add the exits group to presets seeded before it existed (profile-specific take/stop).
   try { migrateRiskProfileExits(db); }
   catch { /* non-fatal */ }
+  // Owner decision 23.07.2026 (b): rename the super-risky `rp-lite-*` profile → `max` (config kept as-is).
+  try { migrateRenameRpLiteToMax(db, new Date().toISOString()); }
+  catch { /* non-fatal: history reads still alias rp-lite→max even if the rename hasn't run */ }
   // Ensure the three real strategists exist and, on the first boot after this
   // ships, retire the legacy "wc" strategy and assign the trio (medium profile)
   // to every competition. One-time (gated on wc existing); non-recurring.

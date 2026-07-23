@@ -14,6 +14,7 @@ import { tennisTourOf } from "./tennisScout.js";
 import { resolveFootballMarket, matchPhase } from "./settlement.js";
 import { maxLiveMinutes, liveDelivering } from "./lifecycle.js";
 import { listRiskProfileViews, type RiskProfileView } from "./riskConfig.js";
+import { isMaxProfile } from "./riskProfiles.js";
 import { loadShadowConfig, shadowPoolState, shadowAnalytics, buildReplayEntries, shadowProject, type ShadowConfig, type ShadowPoolState, type ShadowAnalytics, type ProjectionSummary } from "./shadow.js";
 import { buildCapacityCurve } from "./capacityCurve.js";
 import { budgetPosition, type BudgetPosition } from "./budgetPosition.js";
@@ -150,6 +151,8 @@ export interface AppData {
   providers: ProviderView[];
   cron: CronView;
   strategyStats: Record<string, StrategyStats>;
+  /** the super-risky `max` profile's per-strategy stats, ISOLATED from strategyStats (owner rule 23.07.2026 b) */
+  strategyStatsMax: Record<string, StrategyStats>;
   /** named risk presets (Окно 4); a competition assigns (strategy, profile) pairs */
   riskProfiles: RiskProfileView[];
   /** shadow capital allocator (observe-only «Бюджет (shadow)» tab) */
@@ -433,7 +436,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
     recent: recentRuns.map((r) => ({ at: r.at, kind: r.kind, ok: r.ok === 1, summary: r.summary })),
   };
 
-  const strategyStats = computeStrategyStats(strategies, allMatches, betsByMatch, pricesByMatch);
+  const { main: strategyStats, max: strategyStatsMax } = computeStrategyStats(strategies, allMatches, betsByMatch, pricesByMatch);
 
   // Shadow allocator view (observe-only). Cheap: a few small reads + JS aggregation.
   const shadowConfig = loadShadowConfig(db, env);
@@ -501,7 +504,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
     })),
   };
 
-  const payload: AppData = { treasuryTotal: treasury.total_balance, bankCurve: treasuryBankCurve(db), capacity: buildCapacityCurve(db, env), sports, competitions, compBudget, shares, shareRows, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, riskProfiles: listRiskProfileViews(db), shadow };
+  const payload: AppData = { treasuryTotal: treasury.total_balance, bankCurve: treasuryBankCurve(db), capacity: buildCapacityCurve(db, env), sports, competitions, compBudget, shares, shareRows, catalog, analysis, matchDb, quality, eventFeed, providers, cron, strategyStats, strategyStatsMax, riskProfiles: listRiskProfileViews(db), shadow };
   // node:sqlite rows have a null prototype; React Server Components can't pass
   // those to a client component. A JSON round-trip yields plain objects.
   const json = JSON.stringify(payload);
@@ -550,18 +553,26 @@ const FEED_EVENT_TYPE: Record<string, string> = { goal: "goal", red_card: "card"
 function computeStrategyStats(
   strategies: { id: string }[], matches: Match[],
   betsByMatch: Map<string, Bet[]>, pricesByMatch: Map<string, Record<string, number>>,
-): Record<string, StrategyStats> {
+): { main: Record<string, StrategyStats>; max: Record<string, StrategyStats> } {
+  // ISOLATION (owner rule 23.07.2026 b): the MAIN per-strategy line is the aggressive/medium/conservative
+  // TRIO only; the super-risky `max` profile (no calibration floor → a different entry set) is tallied into a
+  // SEPARATE map so it never inflates a strategy's headline P&L. `max` stays fully visible on the Профили tab
+  // (its own row) and in the F4 counterfactual (maxLine).
   const out: Record<string, StrategyStats> = {};
+  const outMax: Record<string, StrategyStats> = {};
+  const blank = (): StrategyStats => ({ matches: 0, predictions: 0, won: 0, lost: 0, openPlus: 0, openMinus: 0, openPnl: 0, earned: 0, lostMoney: 0, inMatch: 0, inMatchPlus: 0, inMatchMinus: 0 });
   const seenMatch: Record<string, Set<string>> = {};
+  const seenMatchMax: Record<string, Set<string>> = {};
   for (const s of strategies) {
-    out[s.id] = { matches: 0, predictions: 0, won: 0, lost: 0, openPlus: 0, openMinus: 0, openPnl: 0, earned: 0, lostMoney: 0, inMatch: 0, inMatchPlus: 0, inMatchMinus: 0 };
-    seenMatch[s.id] = new Set();
+    out[s.id] = blank(); outMax[s.id] = blank();
+    seenMatch[s.id] = new Set(); seenMatchMax[s.id] = new Set();
   }
   {
     for (const m of matches) {
       const cur = pricesByMatch.get(m.id) ?? {}; // freshest quote per market label
       for (const b of betsByMatch.get(m.id) ?? []) {
-        const st = out[b.strategy_id];
+        const toMax = isMaxProfile(b.risk_profile_id);
+        const st = (toMax ? outMax : out)[b.strategy_id];
         if (!st) continue;
         const open = b.status === "open";
         const settled = R.isSettled(b.status);
@@ -574,7 +585,7 @@ function computeStrategyStats(
         // refunded, unscorable market. Neither is a distinct prediction — count
         // their (zero, for void) P&L but not a second prediction/in-match tally.
         const isPartialSlice = settled && (b.settled_by === "partial" || b.settled_by === "void");
-        if (!isPartialSlice) { st.predictions++; seenMatch[b.strategy_id].add(m.id); }
+        if (!isPartialSlice) { st.predictions++; (toMax ? seenMatchMax : seenMatch)[b.strategy_id].add(m.id); }
         const inMatch = !isPartialSlice && !!b.entered_minute && /\d/.test(b.entered_minute); // a live minute, not "предматч"
         let pnl = 0;
         if (settled) {
@@ -592,8 +603,8 @@ function computeStrategyStats(
       }
     }
   }
-  for (const s of strategies) out[s.id].matches = seenMatch[s.id].size;
-  return out;
+  for (const s of strategies) { out[s.id].matches = seenMatch[s.id].size; outMax[s.id].matches = seenMatchMax[s.id].size; }
+  return { main: out, max: outMax };
 }
 
 /** Derived quality extras from the bet history: results split by ENTRY phase

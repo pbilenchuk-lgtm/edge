@@ -21,6 +21,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { betRecords, type BetRec, type ExitTrigger } from "./profileAnalytics.js";
 import { resolveFootballMarket } from "./settlement.js";
+import { isMainProfile, isMaxProfile } from "./riskProfiles.js";
 
 export const PMV_STRATEGY = "prematch_value";
 export const CF_MIN_N = (() => { const n = Number(process.env.PMV_CF_MIN_N); return Number.isFinite(n) && n > 0 ? n : 30; })();
@@ -138,12 +139,17 @@ export interface PmvExitCounterfactual {
   totalActualPnl: number; totalHoldPnl: number; totalDelta: number; deltaPctTurnover: number | null;
   byReasonFamily: CfCell[]; byReason: CfCell[]; byFamily: CfCell[];
   flaggedCells: CfCell[]; twins: TwinDivergence[];
+  maxLine: { n: number; turnover: number; actualPnl: number; holdPnl: number; delta: number; deltaPctTurnover: number | null }; // the `max` profile, ISOLATED beside the main line
   excluded: { unresolvable: number; noEarlyExit: number; unfinished: number };
   note: string;
 }
 export function buildPmvExitCounterfactual(db: Database): PmvExitCounterfactual {
   const pmvRecs = betRecords(db).filter((r) => r.strategyId === PMV_STRATEGY); // ONE scan of the bet log, shared
-  const { bets, excluded } = pmvCounterfactualBets(db, pmvRecs);
+  const { bets: allBets, excluded } = pmvCounterfactualBets(db, pmvRecs);
+  // ISOLATION (owner rule): the main line is the aggressive/medium/conservative TRIO only; `max` (no
+  // calibration floor → a different entry set) is a SEPARATE line, never mixed into the main aggregate/cells.
+  const bets = allBets.filter((b) => isMainProfile(b.profileId));
+  const maxBets = allBets.filter((b) => isMaxProfile(b.profileId));
   const turnover = bets.reduce((s, b) => s + b.stake, 0);
   const totalActualPnl = bets.reduce((s, b) => s + b.actualPnl, 0);
   const totalHoldPnl = bets.reduce((s, b) => s + b.holdPnl, 0);
@@ -151,6 +157,10 @@ export function buildPmvExitCounterfactual(db: Database): PmvExitCounterfactual 
   const byReasonFamily = cellize(bets, (b) => ({ reason: b.reason, family: b.family }));
   const byReason = cellize(bets, (b) => ({ reason: b.reason, family: "все" }));
   const byFamily = cellize(bets, (b) => ({ reason: "все", family: b.family }));
+  const maxTurnover = maxBets.reduce((s, b) => s + b.stake, 0);
+  const maxActual = maxBets.reduce((s, b) => s + b.actualPnl, 0);
+  const maxHold = maxBets.reduce((s, b) => s + b.holdPnl, 0);
+  const maxDelta = maxHold - maxActual;
   return {
     strategy: PMV_STRATEGY, criterion: { minN: CF_MIN_N, edgeMarginPct: r2(CF_EDGE_MARGIN * 100) },
     n: bets.length, turnover: r2(turnover),
@@ -158,7 +168,8 @@ export function buildPmvExitCounterfactual(db: Database): PmvExitCounterfactual 
     deltaPctTurnover: turnover > 0 ? r2((totalDelta / turnover) * 100) : null,
     byReasonFamily, byReason, byFamily,
     flaggedCells: byReasonFamily.filter((c) => c.flagged), twins: twinDivergences(pmvRecs),
+    maxLine: { n: maxBets.length, turnover: r2(maxTurnover), actualPnl: r2(maxActual), holdPnl: r2(maxHold), delta: r2(maxDelta), deltaPctTurnover: maxTurnover > 0 ? r2((maxDelta / maxTurnover) * 100) : null },
     excluded,
-    note: "delta = hold-to-settle − actual (>0 → держать было лучше). Flagged: n≥минимум И delta/turnover ≥ порог. Только PMV, завершённые, разрешимые, чистая эпоха.",
+    note: "delta = hold-to-settle − actual (>0 → держать было лучше). Основная строка — тройка aggressive/medium/conservative; max отдельной строкой (maxLine). Flagged: n≥минимум И delta/turnover ≥ порог. Только PMV, завершённые, разрешимые, чистая эпоха.",
   };
 }
