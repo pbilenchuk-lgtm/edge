@@ -864,6 +864,8 @@ test("T1 (batch-3): buildTennisLinkRate computes the auto-share from the persist
   assert.equal(r.linkPct, 50, "2/4 = 50%");
   assert.equal(r.grayZone, 1, "e3 sits in [review, auto) → gray-zone near-miss");
   assert.equal(r.noCandidate, 1, "e4 below review → no-candidate");
+  assert.equal(r.inDiscoveryEvents, 3, "auto+review = listable (e4 no-candidate excluded)");
+  assert.equal(r.inDiscoveryLinkPct, Math.round((2 / 3) * 1000) / 10, "in-discovery link-rate = auto/(auto+review)");
   assert.ok(r.unlinkedExamples.length === 2 && r.unlinkedExamples[0].bestScore >= r.unlinkedExamples[1].bestScore, "unlinked sorted by closest near-miss first");
 });
 

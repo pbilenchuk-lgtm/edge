@@ -676,7 +676,8 @@ export interface LinkRateDay { day: string; total: number; auto: number; review:
 export interface LinkRateExample { players: string; verdict: string; bestScore: number; bestCandidate: string | null; day: string }
 export interface TennisLinkRateReport {
   totalEvents: number; auto: number; review: number; skip: number; linkPct: number;
-  grayZone: number; noCandidate: number;
+  grayZone: number; noCandidate: number; doubles: number;
+  inDiscoveryEvents: number; inDiscoveryLinkPct: number; // auto / (auto+review) — the mapping quality that matters
   byDay: LinkRateDay[];
   unlinkedExamples: LinkRateExample[];
   betsWithProvenance: number; betsTotal: number;
@@ -737,15 +738,21 @@ export function buildTennisLinkRate(db: Database): TennisLinkRateReport {
     if (linked > 0) currentlyLinkedMatches++;
   }
   currentLiveTennisMatches = R.listCompetitions(db).filter((c) => c.sport_id === "tennis").flatMap((c) => R.listMatches(db, c.id)).filter((m) => m.state === "live").length;
+  const doubles = events.filter((e) => e.verdict !== "auto" && /\//.test(e.players)).length; // pairs (A/B vs C/D) — out of scope
   const linkPct = total ? Math.round((auto / total) * 1000) / 10 : 0;
+  // The mapping quality that actually matters: among matches Polymarket LISTS (had a candidate = auto+review),
+  // how many auto-linked. A no-candidate match isn't a mapping failure — Polymarket simply doesn't offer it
+  // (mostly doubles + obscure ITF we never trade). So `total` over-counts the denominator with un-listable matches.
+  const inDiscoveryEvents = auto + review;
+  const inDiscoveryLinkPct = inDiscoveryEvents ? Math.round((auto / inDiscoveryEvents) * 1000) / 10 : 0;
   const note = total === 0
     ? "нет решений маппинга в журнале — скаут ещё не видел ни одного live-матча (проверь API_TENNIS_KEY и что идут ATP/WTA матчи)"
-    : linkPct >= 80
-      ? `link-rate ${linkPct}% (${auto}/${total}) — скаут привязывает нормально; «0 снапшотов» в старых логах — это ретеншн (снапшоты подчищены), НЕ провал маппинга`
+    : inDiscoveryLinkPct >= 95 && grayZone === 0
+      ? `маппинг ЗДОРОВ: среди матчей, которые есть в Polymarket (${auto}/${inDiscoveryEvents}), привязка ${inDiscoveryLinkPct}% (0 серой зоны). Общий ${linkPct}% занижен un-listable матчами: ${noCandidate} no-candidate (из них ${doubles} — пары/дабл, которые мы и не торгуем). «0 снапшотов» в старых логах — ретеншн, НЕ провал маппинга.`
       : grayZone >= noCandidate
-        ? `link-rate ${linkPct}% (${auto}/${total}) НИЗКИЙ, доминируют gray-zone (${grayZone}) — имена почти сходятся, но не дотягивают до порога ${MAP_AUTO}; чинить нормализацию/порог (примеры ниже — ближайшие промахи)`
-        : `link-rate ${linkPct}% (${auto}/${total}) НИЗКИЙ, доминирует no-candidate (${noCandidate}) — матча нет в Polymarket-дискавери (не проблема порядка имён); смотреть покрытие рынков, не маппинг`;
-  return { totalEvents: total, auto, review, skip, linkPct, grayZone, noCandidate, byDay, unlinkedExamples, betsWithProvenance, betsTotal, currentlyLinkedMatches, currentLiveTennisMatches, mapAuto: MAP_AUTO, mapReview: MAP_REVIEW, note };
+        ? `среди listable-матчей привязка ${inDiscoveryLinkPct}% (${auto}/${inDiscoveryEvents}); ${grayZone} в серой зоне — имена почти сходятся, но не дотягивают до порога ${MAP_AUTO}, чинить нормализацию/порог (примеры ниже)`
+        : `среди listable-матчей привязка ${inDiscoveryLinkPct}% (${auto}/${inDiscoveryEvents}); ${noCandidate} no-candidate (${doubles} пар/дабл) — матча нет в Polymarket-дискавери, это покрытие рынков, а не маппинг`;
+  return { totalEvents: total, auto, review, skip, linkPct, grayZone, noCandidate, doubles, inDiscoveryEvents, inDiscoveryLinkPct, byDay, unlinkedExamples, betsWithProvenance, betsTotal, currentlyLinkedMatches, currentLiveTennisMatches, mapAuto: MAP_AUTO, mapReview: MAP_REVIEW, note };
 }
 export function tennisLinkRateMarkdown(r: TennisLinkRateReport): string {
   const L: string[] = [];
@@ -754,8 +761,9 @@ export function tennisLinkRateMarkdown(r: TennisLinkRateReport): string {
   L.push(`**${r.note}**`);
   L.push("");
   L.push(`- Всего матчей в журнале маппинга: **${r.totalEvents}** · привязано (auto) **${r.auto}** · серая зона (review) ${r.review} · не найдено (skip) ${r.skip}`);
-  L.push(`- **Link-rate: ${r.linkPct}%** (порог auto=${r.mapAuto}, review=${r.mapReview})`);
-  L.push(`- Причина непривязки: gray-zone (почти сошлось) ${r.grayZone} · no-candidate (нет матча) ${r.noCandidate}`);
+  L.push(`- **Привязка среди listable-матчей (есть в Polymarket): ${r.inDiscoveryLinkPct}%** (${r.auto}/${r.inDiscoveryEvents}) — ключевая метрика`);
+  L.push(`- Общий link-rate: ${r.linkPct}% (порог auto=${r.mapAuto}, review=${r.mapReview}) — занижен un-listable матчами`);
+  L.push(`- Причина непривязки: gray-zone (почти сошлось) ${r.grayZone} · no-candidate (нет в Polymarket) ${r.noCandidate}, из них пар/дабл ${r.doubles}`);
   L.push(`- Проверка ретеншна: снапшоты сейчас привязаны у ${r.currentlyLinkedMatches} матчей · live-теннис сейчас ${r.currentLiveTennisMatches} · ставок с provenance ${r.betsWithProvenance}/${r.betsTotal}`);
   L.push("");
   L.push(`## По дням`);
@@ -959,10 +967,18 @@ export function buildTennisOverreactionCohort(db: Database): OvrCohortReport {
 // upside on the table (the Napolitano ≈$68 case). Marks are MID (no spread/fill) → an UPPER bound, hence
 // the mandatory margin. Read-only.
 const OVR_RUNNER_FEE = (() => { const n = Number(process.env.TENNIS_RUNNER_FEE_RATE); return Number.isFinite(n) && n >= 0 ? n : 0.02; })();
-const OVR_RUNNER_MARGIN = 0.03; // criterion: EV must clear 0 by ≥3pp after commission (fixed before data)
+const OVR_RUNNER_MARGIN = 0.03; // criterion: the runner must BEAT take-only by ≥3pp after commission (fixed before data)
+// The realistic Overreaction buy band ($): entries only fire when the panicked favourite sits in this band
+// (≤ early-break buyback + a small floor). A mark whose panic is OUTSIDE it (a deep-discount 2-3¢ slide the
+// strategy would never buy) must be EXCLUDED — else a handful of near-loss comebacks that settled at 100¢
+// dominate the mean and print a nonsense 3000%+ EV (the entry-price/settlement artifact). Env-tunable.
+const OVR_RUNNER_ENTRY_MIN = (() => { const n = Number(process.env.TENNIS_RUNNER_ENTRY_MIN); return Number.isFinite(n) && n > 0 ? n : 20; })();
+const OVR_RUNNER_ENTRY_MAX = (() => { const n = Number(process.env.TENNIS_RUNNER_ENTRY_MAX); return Number.isFinite(n) && n > 0 ? n : 58; })();
+const OVR_RUNNER_MIN_TAKES = (() => { const n = Number(process.env.TENNIS_RUNNER_MIN_TAKES); return Number.isFinite(n) && n > 0 ? Math.round(n) : 20; })();
 export interface OvrRunnerBacktest {
-  n: number; nTakeReached: number; nSettleWin: number;
+  n: number; nExcludedOutOfBand: number; nTakeReached: number; nSettleWin: number;
   runnerEvPct: number | null; takeOnlyEvPct: number | null; deltaPct: number | null;
+  medianRunnerPct: number | null; medianTakeOnlyPct: number | null;
   verdict: "go" | "no_go" | "insufficient"; criterion: string; note: string;
 }
 export async function buildOvrRunnerBacktest(db: Database): Promise<OvrRunnerBacktest> {
@@ -973,11 +989,12 @@ export async function buildOvrRunnerBacktest(db: Database): Promise<OvrRunnerBac
     m.broke_early === 1 && ovrTour(m.event_type) != null && (m.pre_cents ?? 0) >= OVR_FAV_MIN_PRIMARY &&
     m.panic_cents != null && m.pre_cents != null && m.broken_side != null && m.match_id != null);
   const runnerNets: number[] = [], takeOnlyNets: number[] = [];
-  let nTakeReached = 0, nSettleWin = 0;
+  let nTakeReached = 0, nSettleWin = 0, nExcludedOutOfBand = 0;
   for (const m of cohort) {
+    const entry = m.panic_cents as number;
+    if (!(entry >= OVR_RUNNER_ENTRY_MIN && entry <= OVR_RUNNER_ENTRY_MAX)) { nExcludedOutOfBand++; continue; } // not a real overreaction buy
     const fin = tennisFinalResult(db, m.match_id!);
     if (!fin || !fin.finished || fin.canceled || fin.manual || fin.advancing == null) continue; // need a clean win/loss
-    const entry = m.panic_cents as number; if (!(entry > 0)) continue;
     const shares = 100 / entry; // binary pays 100¢ per share on a win
     const won = fin.advancing === m.broken_side; // the broken favourite went on to win the match
     if (won) nSettleWin++;
@@ -993,20 +1010,29 @@ export async function buildOvrRunnerBacktest(db: Database): Promise<OvrRunnerBac
   }
   const n = runnerNets.length;
   const mean = (xs: number[]) => xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null;
+  const median = (xs: number[]) => { if (!xs.length) return null; const v = [...xs].sort((a, b) => a - b); return v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2; };
+  const pct = (x: number | null) => x == null ? null : Math.round(x * 1000) / 10;
   const runnerEv = mean(runnerNets), takeOnlyEv = mean(takeOnlyNets);
-  const runnerEvPct = runnerEv == null ? null : Math.round(runnerEv * 1000) / 10;
-  const takeOnlyEvPct = takeOnlyEv == null ? null : Math.round(takeOnlyEv * 1000) / 10;
+  const runnerEvPct = pct(runnerEv), takeOnlyEvPct = pct(takeOnlyEv);
   const deltaPct = runnerEv == null || takeOnlyEv == null ? null : Math.round((runnerEv - takeOnlyEv) * 1000) / 10;
-  const criterion = `раннер-EV > 0 с маржой ≥${OVR_RUNNER_MARGIN * 100}пп после комиссии (${OVR_RUNNER_FEE * 100}%) на n≥${OVR_MIN_N_PRIMARY}; марки — MID (без спреда/филла) → верхняя граница`;
+  const medianRunnerPct = pct(median(runnerNets)), medianTakeOnlyPct = pct(median(takeOnlyNets));
+  const criterion = `раннер должен ОБОЙТИ take-only на ≥${OVR_RUNNER_MARGIN * 100}пп после комиссии (${OVR_RUNNER_FEE * 100}%) на n≥${OVR_MIN_N_PRIMARY} с ≥${OVR_RUNNER_MIN_TAKES} достигнутыми тейками; вход в полосе ${OVR_RUNNER_ENTRY_MIN}-${OVR_RUNNER_ENTRY_MAX}¢; марки — MID (верхняя граница)`;
+  // The runner differs from take-only ONLY on take-reached marks. If the take (pre−buffer) is essentially
+  // never hit, the "runner" is just hold-to-settle and the comparison is degenerate (Δ≈0) → not a runner
+  // test at all. So a small nTakeReached forces INSUFFICIENT regardless of the raw EV.
+  const delta = runnerEv == null || takeOnlyEv == null ? null : runnerEv - takeOnlyEv;
   const verdict: OvrRunnerBacktest["verdict"] =
     n < OVR_MIN_N_PRIMARY ? "insufficient"
-      : (runnerEv != null && runnerEv >= OVR_RUNNER_MARGIN) ? "go" : "no_go";
-  const note = verdict === "insufficient"
-    ? `n=${n} < ${OVR_MIN_N_PRIMARY} — данных мало, НЕ решаем (Overreaction остаётся парковаться); копим марки`
-    : verdict === "go"
-      ? `раннер-EV ${runnerEvPct}% ≥ ${OVR_RUNNER_MARGIN * 100}пп (vs take-only ${takeOnlyEvPct}%, Δ${deltaPct}пп) — структура проходит критерий, выносить на ратификацию как НОВУЮ эпоху re-enable (не включать руками)`
-      : `раннер-EV ${runnerEvPct}% < ${OVR_RUNNER_MARGIN * 100}пп (vs take-only ${takeOnlyEvPct}%, Δ${deltaPct}пп) — не проходит, раннер хоронится так же чисто, как take-only`;
-  return { n, nTakeReached, nSettleWin, runnerEvPct, takeOnlyEvPct, deltaPct, verdict, criterion, note };
+      : nTakeReached < OVR_RUNNER_MIN_TAKES ? "insufficient"
+        : (delta != null && delta >= OVR_RUNNER_MARGIN) ? "go" : "no_go";
+  const note = n < OVR_MIN_N_PRIMARY
+    ? `n=${n} < ${OVR_MIN_N_PRIMARY} (в полосе ${OVR_RUNNER_ENTRY_MIN}-${OVR_RUNNER_ENTRY_MAX}¢; вне полосы отброшено ${nExcludedOutOfBand}) — данных мало, НЕ решаем; Overreaction остаётся парковаться`
+    : nTakeReached < OVR_RUNNER_MIN_TAKES
+      ? `тейк (pre−${OVR_TAKE_BUFFER}¢) достигнут лишь ${nTakeReached} раз из ${n} — раннер не активируется, сравнивать нечего (Δ вырожден). Это отдельный сигнал: тейк-уровень overreaction ЗАВЫШЕН относительно того, как цена реально восстанавливается. Вердикт INSUFFICIENT.`
+      : verdict === "go"
+        ? `раннер обходит take-only на Δ${deltaPct}пп ≥ ${OVR_RUNNER_MARGIN * 100}пп (раннер ${runnerEvPct}% / медиана ${medianRunnerPct}% vs take-only ${takeOnlyEvPct}%) на ${nTakeReached} тейках — выносить на ратификацию как НОВУЮ эпоху re-enable (не включать руками)`
+        : `раннер НЕ обходит take-only (Δ${deltaPct}пп < ${OVR_RUNNER_MARGIN * 100}пп; медианы ${medianRunnerPct}% vs ${medianTakeOnlyPct}%) — не проходит, раннер хоронится так же чисто, как take-only`;
+  return { n, nExcludedOutOfBand, nTakeReached, nSettleWin, runnerEvPct, takeOnlyEvPct, deltaPct, medianRunnerPct, medianTakeOnlyPct, verdict, criterion, note };
 }
 
 /** Per-break-mark CSV — inspect the actual pre/floor/panic per break (is the panic real?). */
