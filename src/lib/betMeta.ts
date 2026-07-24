@@ -17,7 +17,9 @@
 //   e5  post-audit: partial-close P&L + reserve-leak + time_stop-per-profile fixes
 //   e6  batch-6: exonym team-linking + zombie fixes (notation/placeholder/extreme/live-ask) +
 //       gap-monitor blackout + tennis set-value scope/quarantine/coverage + tour-scope (ITF out)
-export const CODE_VERSION = "e6";
+//   e7  FT-mode: PM-resolution settle contour + blind (ft_blind) entries on Polymarket-only fixtures
+//       (dormant until FT_BLIND_ENABLED=true; a separate hold-to-settle risk cohort, half size)
+export const CODE_VERSION = "e7";
 
 /** Decision-time snapshot stored as JSON on the bet. Every field is what was TRUE at
  *  the instant the bet was proposed/filled — never re-read later. All optional so a
@@ -45,6 +47,10 @@ export interface BetEntryMeta {
   phantomCheck: string | null;      // the anti-phantom verdict text
   marketThinnessUsd: number | null; // known book depth/liquidity at entry ($)
   winsOnEvent: boolean;             // melting option (bet ON an event) vs directional
+  // FT-mode (Decision-1): this position was entered BLIND on a Polymarket-only fixture (no ESPN/StatPal live
+  // telemetry), so it is HOLD-TO-SETTLE — the live-exit machinery must skip it (no rudder), it settles from
+  // PM resolution, and it lives in a SEPARATE verdict cohort (a different risk class: zero in-flight mgmt).
+  ftBlind?: boolean;
   exitPlan: unknown | null;         // the pre-written exit plan (take_price/thesis/counter/time_stop)
   // T6: data provenance FROZEN at the decision — which feed the entry was decided on and how stale that
   // snapshot was (seconds) at decision time. Makes «на какой цене/данных решали» auditable per bet.
@@ -94,6 +100,13 @@ export function parseEntryMeta(raw: string | null | undefined): BetEntryMeta | n
   if (!raw) return null;
   try { const v = JSON.parse(raw); return v && typeof v === "object" ? v as BetEntryMeta : null; }
   catch { return null; }
+}
+
+// FT-mode (Decision-1): was this bet entered BLIND on a Polymarket-only fixture (entry_meta.ftBlind)? Such a
+// position is hold-to-settle (the exit machinery skips it) and lives in a SEPARATE verdict cohort — it must
+// never mix with managed positions in the prematch_value Brier/CLV metrics.
+export function isFtBlindBet(b: { entry_meta?: string | null }): boolean {
+  try { return parseEntryMeta(b.entry_meta)?.ftBlind === true; } catch { return false; }
 }
 
 // ── origin phase (prematch vs live) as a FIELD with explicit provenance ─────────────────────────

@@ -12,6 +12,7 @@ import { warsawLabel, warsawClock, isIso } from "./time.js";
 import { SPORT_LABELS, isNoiseMarket } from "./polymarket.js";
 import { tennisTourOf } from "./tennisScout.js";
 import { resolveFootballMarket, matchPhase, isResolutionSettle } from "./settlement.js";
+import { isFtBlindBet } from "./betMeta.js";
 import { maxLiveMinutes, liveDelivering } from "./lifecycle.js";
 import { listRiskProfileViews, type RiskProfileView } from "./riskConfig.js";
 import { isMaxProfile } from "./riskProfiles.js";
@@ -597,7 +598,7 @@ function computeStrategyStats(
         if (settled) {
           pnl = (b.payout ?? 0) - (b.stake ?? 0);
           if (pnl >= 0) st.earned += pnl; else st.lostMoney += -pnl;
-          if (isResolutionSettle(b.settled_by)) { if (b.result === "won") st.won++; else st.lost++; } // real outcome only
+          if (isResolutionSettle(b.settled_by) && !isFtBlindBet(b)) { if (b.result === "won") st.won++; else st.lost++; } // real outcome only; FT-blind is a separate cohort
         } else {
           const price = cur[b.market_label] ?? b.current_price ?? b.entry_price ?? 0; // current quote
           const entry = b.entry_price ?? 0;
@@ -645,7 +646,7 @@ function computeQualityExtras(matchById: Map<string, Match>, bets: Bet[], base: 
         // feed the prediction tallies: an early/partial cash-out's `result` is booked by P&L sign (not the
         // real outcome) and its `closing_price` is the exit price (not the kickoff/closing line), so counting
         // them would let trading P&L masquerade as win-rate / CLV — consistent with recomputeMetrics.
-        const resolution = isResolutionSettle(b.settled_by);
+        const resolution = isResolutionSettle(b.settled_by) && !isFtBlindBet(b); // FT-blind excluded — separate cohort
         if (resolution) { ph.bets++; if (b.result === "won") ph.wins++; }
         if (resolution && b.closing_price != null && entry) { ph.clvSum += b.closing_price - entry; ph.clvN++; }
         // management value: on a FINISHED match, compare the actual close to

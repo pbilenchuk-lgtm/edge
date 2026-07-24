@@ -17,6 +17,7 @@ import type { Bet, Match, MatchState } from "./types.js";
 import type { SportsMatchStatus } from "./sports.js";
 import { reassessNarrative, effectiveEnv } from "./llm.js";
 import { settleBet, resolveFootballMarket, matchPhase, isResolutionSettle } from "./settlement.js";
+import { isFtBlindBet } from "./betMeta.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig } from "./polymarket.js";
 import { liquidationCents } from "./execution.js";
@@ -219,7 +220,9 @@ export async function refreshActiveOdds(db: Database, deps: EngineDeps = {}, opt
 export function recomputeMetrics(db: Database, strategyId: string, deps: EngineDeps = {}): void {
   // Only bets settled by the REAL match outcome measure prediction quality.
   // Early/partial cash-outs are booked by P&L sign and would bias Brier/CLV.
-  const bets = R.settledBetsForStrategy(db, strategyId).filter((b) => isResolutionSettle(b.settled_by));
+  // FT-blind bets (blind Polymarket-only entries) are a SEPARATE risk cohort — zero in-flight management —
+  // so they must NOT mix into the managed prematch_value Brier/CLV verdict (Decision-1 condition 2).
+  const bets = R.settledBetsForStrategy(db, strategyId).filter((b) => isResolutionSettle(b.settled_by) && !isFtBlindBet(b));
   const samples: MetricSample[] = bets.map((b) => ({
     aiProb: b.ai_prob ?? 0, outcome: (b.result === "won" ? 1 : 0) as 0 | 1,
     entryPrice: b.entry_price ?? 0, closingPrice: b.closing_price,

@@ -27,6 +27,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { settleBet } from "./settlement.js";
+import { isFtBlindBet } from "./betMeta.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { loadPolymarketConfig, fetchTokenResolution } from "./polymarket.js";
 
@@ -199,4 +200,30 @@ function defaultResolveTokens(deps: EngineDeps): ResolveTokensFn {
     const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
     return fetchTokenResolution(poly, tokenIds, { fetchImpl: deps.fetchImpl });
   };
+}
+
+// FT-blind cohort (Decision-1 condition 2): the SEPARATE verdict row for blind Polymarket-only positions —
+// a different risk class (zero in-flight management), kept out of the managed prematch_value metrics and
+// measured on its own. Read-only.
+export interface FtBlindCohort { total: number; open: number; settled: number; won: number; lost: number; void: number; pnl: number; winPct: number | null }
+export function ftBlindCohort(db: Database): FtBlindCohort {
+  const c: FtBlindCohort = { total: 0, open: 0, settled: 0, won: 0, lost: 0, void: 0, pnl: 0, winPct: null };
+  for (const comp of R.listCompetitions(db).filter((x) => x.sport_id === "football")) {
+    for (const m of R.listMatches(db, comp.id)) {
+      for (const b of R.betsForMatch(db, m.id)) {
+        if (!isFtBlindBet(b)) continue;
+        c.total++;
+        if (b.status === "open") { c.open++; continue; }
+        c.settled++;
+        if (b.status === "settled_void") c.void++;
+        else if (b.result === "won") c.won++;
+        else if (b.result === "lost") c.lost++;
+        c.pnl += (b.payout ?? 0) - (b.stake ?? 0);
+      }
+    }
+  }
+  c.pnl = Math.round(c.pnl * 100) / 100;
+  const decided = c.won + c.lost;
+  c.winPct = decided ? Math.round((c.won / decided) * 1000) / 10 : null;
+  return c;
 }

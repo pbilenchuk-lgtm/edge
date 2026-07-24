@@ -48,8 +48,11 @@ export async function GET(req: Request) {
         return NextResponse.json({ ok: true, ran: true, result });
       }
       const { metaGet } = await import("@/lib/repo");
+      const { ftBlindCohort } = await import("@/lib/pmResolution");
       let last: unknown = null; try { last = JSON.parse(metaGet(db, "pm_resolution_last") ?? "null"); } catch { last = null; }
-      return NextResponse.json({ ok: true, ran: false, last, hint: "add &run=1 to run the sweep now" });
+      // condition 2: the SEPARATE ft_blind verdict row (blind Polymarket-only positions — kept out of the
+      // managed prematch_value metrics, measured on their own).
+      return NextResponse.json({ ok: true, ran: false, last, ftBlind: ftBlindCohort(db), hint: "add &run=1 to run the sweep now" });
     }
     // ?report=pmv_shadow_calibration → tennis PMV flag-only shadow scoring (Brier markov vs implied on
     // frozen-mid, win%-vs-theo, unresolved share) — the «немой ноль» fix. Read-only.

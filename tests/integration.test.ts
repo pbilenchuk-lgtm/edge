@@ -124,7 +124,7 @@ test("analysis duel (ANALYSIS_DUEL=on): a match is analysed by one arm and its b
   assert.ok(bets.length > 0, "at least one bet proposed");
   const tag = analysisModelTag(asmt.model!);
   assert.ok(bets.every((b) => (b.code_version ?? "").endsWith(`·${tag}`)), `every bet tagged with the arm (${tag}) — got ${bets[0].code_version}`);
-  assert.match(bets[0].code_version ?? "", /^e6·m1·(opus48|fable5)$/, "epoch × model-arm label");
+  assert.match(bets[0].code_version ?? "", /^e7·m1·(opus48|fable5)$/, "epoch × model-arm label");
 });
 
 test("module 3: the assigned risk profile gates entries + saves a battle_sheet (calibration differs)", async () => {

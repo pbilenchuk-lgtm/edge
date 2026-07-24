@@ -31,7 +31,7 @@ import { classifyZombie, notationSpreads, loadZombieConfig, type ZombieReason } 
 import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
 import { exitDecision, winsOnEventOccurrence, isStaleProposal, proposalDrift } from "./thresholds.js";
 import { underThesisMarginGoals, resolveFootballMarket } from "./settlement.js";
-import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
+import { serializeEntryMeta, parseEntryMeta, isFtBlindBet, type BetEntryMeta } from "./betMeta.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
 import { getProfileConfig } from "./riskConfig.js";
@@ -707,6 +707,33 @@ async function sellVwapCents(
   return paperSellFill(bookRes, shares, basisUsd, quoteCents, liq, poly.exec);
 }
 
+// ── FT-mode (Decision-1): blind entries on Polymarket-only fixtures ─────────────────────────────────────
+// A fixture ESPN/StatPal never linked has NO live telemetry, so today it takes 0 entries (the coverage
+// casualty — Austria Under 2.5 +10% lost). FT-mode lets a prematch_value thesis on an FT-SETTLED market
+// (resolved purely on the final score) ENTER and HOLD TO SETTLE — no live-exit management (there's no
+// rudder), a SEPARATE risk cohort (ft_blind), HALF the size, and it settles from PM resolution. OFF by
+// default; flip FT_BLIND_ENABLED=true in a quiet window to activate (the code deploy stays dormant).
+export function ftBlindConfig(env: Record<string, string | undefined> = process.env): { enabled: boolean; capFrac: number } {
+  const capN = Number(env.FT_BLIND_CAP_FRAC);
+  return { enabled: (env.FT_BLIND_ENABLED ?? "false").toLowerCase() === "true", capFrac: Number.isFinite(capN) && capN > 0 && capN <= 1 ? capN : 0.5 };
+}
+// A market that settles PURELY on the final 90' score (safe to hold blind). Excludes knockout progression /
+// extra-time / penalties (need external resolution or match phase we don't have blind); everything else
+// football (totals / BTTS / 1X2 / handicap) is final-score-settled.
+export function isFtSettledMarket(label: string): boolean {
+  return !/advance|progress|проход|выход|qualif|extra[\s-]*time|over[\s-]*time|go to extra|penalt|shoot[\s-]*out|дополнительное|овертайм|пенальт/i.test(label);
+}
+// Is a proposed bet eligible for a BLIND FT entry? A PRE-MATCH decision (origin=prematch — a thesis held to
+// settle, never a live-entry strategy like overreaction), an FT-settled market, and a genuinely
+// Polymarket-ONLY fixture (no provider match_live row — a transient live-data gap on a COVERED fixture keeps
+// its row, so it is NOT blind). Gated behind the env switch.
+function ftBlindEligible(db: Database, m: Match, b: { origin?: string | null; market_label: string }, env: Record<string, string | undefined>): boolean {
+  if (!ftBlindConfig(env).enabled) return false;
+  if (b.origin !== "prematch") return false;      // pre-match thesis only (live-entry strategies excluded)
+  if (!isFtSettledMarket(b.market_label)) return false;
+  if (R.getMatchLive(db, m.id)) return false;     // has a provider row → covered, not blind
+  return true;
+}
 export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<AutoEnterItem[]> {
   const now = nowFn(deps)();
   const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
@@ -748,7 +775,10 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
     for (const b of bets) {
       if (b.status !== "proposed") continue;
       if (preLineupHold) continue; // preview only — keep it «предлагается» until lineups are out
-      if (!liveData) continue; // no provider live coverage → hold as «предлагается», never fill blind
+      // FT-mode: a prematch_value FT-settled thesis on a Polymarket-only fixture MAY fill blind (hold to
+      // settle, half size, no live rudder). Everything else with no live coverage stays a preview.
+      const ftBlind = !liveData && ftBlindEligible(db, m, b, deps.env ?? process.env);
+      if (!liveData && !ftBlind) continue; // no provider live coverage & not FT-blind-eligible → hold «предлагается»
       const key = pairMkt(b);
       if (openKey.has(key)) { R.updateBet(db, b.id, { status: "not_filled" }); continue; } // already in this market — drop the dup
       const mk = markets.find((x) => x.label === b.market_label);
@@ -762,7 +792,8 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
         R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `zombie_quarantine:${zr.code} — ${zr.detail}`) });
         continue;
       }
-      const proposed = b.stake ?? 0;
+      // Condition 5: a rudderless FT-blind position gets HALF the normal size until its cohort matures.
+      const proposed = (b.stake ?? 0) * (ftBlind ? ftBlindConfig(deps.env ?? process.env).capFrac : 1);
 
       // Execute against the real order book: fill at VWAP (slippage), cap the size
       // to what the book can absorb while keeping edge AND not moving the price too
@@ -804,10 +835,15 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       if (em) {
         em.sizeFilled = ex.stake;
         if (ex.cost) em.entrySlipCents = ex.cost.slipCents;
+        if (ftBlind) em.ftBlind = true; // condition 2: freeze the mode tag on the bet (separate cohort + no live exits)
         R.updateBet(db, b.id, { entry_meta: serializeEntryMeta(em) });
+      } else if (ftBlind) {
+        // No decision-time meta (shouldn't happen for prematch_value) — never lose the mode tag the exit
+        // machinery + cohort depend on; stamp a minimal one.
+        R.updateBet(db, b.id, { entry_meta: serializeEntryMeta({ ftBlind: true }) });
       }
       if (ex.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, ex.cost, now);
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "enter", text: `вход «${b.market_label}» @ ${ex.priceCents}¢ · $${ex.stake}${ex.note ? ` · ${ex.note}` : ""}`, dedup_key: `enter:${b.decision_id ?? b.id}`, created_at: now }); // Z3: one enter line per position
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "enter", text: `вход «${b.market_label}» @ ${ex.priceCents}¢ · $${ex.stake}${ftBlind ? " · ft_blind (слепой вход, держим до сеттла, 50% размер)" : ""}${ex.note ? ` · ${ex.note}` : ""}`, dedup_key: `enter:${b.decision_id ?? b.id}`, created_at: now }); // Z3: one enter line per position
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, price: ex.priceCents, stake: ex.stake });
       // Mirror this fill into the shadow batch. edge = our prob − executed price; a fill
       // while the match is already live counts as a live-triggered entry (live_buffer).
@@ -1004,6 +1040,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
     const markets = R.latestMarkets(db, m.id);
     for (const b of R.betsForMatch(db, m.id)) {
       if (b.status !== "open") continue;
+      if (isFtBlindBet(b)) continue; // FT-blind = hold-to-settle, never live-managed (settles via PM resolution)
       const mk = markets.find((x) => x.label === b.market_label);
       if (!mk || mk.price == null || b.entry_price == null) continue;
       const strat = R.getStrategy(db, b.strategy_id);
@@ -1391,7 +1428,7 @@ export async function strategistReassess(
     // until real live data resumes or the match settles. A real event would make
     // liveDelivering true, so this never skips a genuine reaction.
     if (!liveDelivering(db, m, sport)) continue;
-    const open = R.betsForMatch(db, m.id).filter((b) => b.status === "open");
+    const open = R.betsForMatch(db, m.id).filter((b) => b.status === "open" && !isFtBlindBet(b)); // FT-blind = hold-to-settle, not reassessed
     // Reassess only where there's live risk (open positions) or a fresh trigger.
     // In triggeredOnly mode (fast loop) a trigger is REQUIRED — quiet positions
     // are handled by the deterministic exits + the slow full cycle.
