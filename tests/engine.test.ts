@@ -864,6 +864,12 @@ test("pruneStaleMatches keeps funded finished matches but drops unfunded/stale n
   assert.equal(R.reassessmentsForMatch(db, "fin-unfunded").length, 0);
   // the kept bet survives
   assert.ok(R.getBet(db, "b-keep"));
+  // audit trail: every pruned match is recorded with a reason («куда попропало») — a silent DELETE no more.
+  const audit = JSON.parse(R.metaGet(db, "pruned_matches_recent") as string);
+  assert.equal(audit.total, 3);
+  assert.equal(audit.pruned.length, 3);
+  assert.ok(audit.pruned.every((p: any) => typeof p.reason === "string" && p.match && p.at), "each carries match + reason + timestamp");
+  assert.ok(audit.pruned.some((p: any) => /unfunded/.test(p.reason)), "the unfunded prune reason is captured");
 });
 
 test("strategyCompExposure / strategyCompRealized aggregate across the whole competition", async () => {
@@ -1124,4 +1130,15 @@ test("F1 nameMatch: city exonyms bridge Polymarket↔ESPN spellings", () => {
   // MUST NOT create false matches: two different Vienna clubs stay distinct (distinctive token differs)
   assert.equal(nameMatch("Rapid Wien", "Austria Wien"), false, "shared city alone must not match");
   assert.equal(nameMatch("SK Rapid Wien", "Rapid Bucharest"), false);
+});
+
+test("P3 batch-7 nameMatch: club-name variants from the &probe audit bridge to ESPN's spelling", () => {
+  assert.ok(nameMatch("AEK Lárnakas", "AEK Larnaca"), "Lárnakas↔Larnaca");
+  assert.ok(nameMatch("FK Polissia", "Polissya Zhitomir"), "Polissia↔Polissya");
+  assert.ok(nameMatch("Tobyl FK", "Tobol Kostanay"), "Tobyl↔Tobol");
+  assert.ok(nameMatch("NK Varaždin", "Varteks"), "Varaždin↔Varteks (historical name)");
+  assert.ok(nameMatch("Zirə FK", "Zira FK"), "schwa ə folds to a");
+  // no false matches: the aliases only bridge the intended pairs, distinctive tokens still gate
+  assert.equal(nameMatch("AEK Lárnakas", "AEK Athens"), false, "AEK alone (a shared prefix) must not match");
+  assert.equal(nameMatch("Tobyl FK", "Astana FK"), false);
 });
