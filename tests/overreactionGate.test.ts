@@ -58,6 +58,22 @@ test("overreactionGate: settle_suspect (two-leg mislabel) excluded from the clea
   assert.equal(g.lost, 1);
 });
 
+test("overreactionGate: clean-epoch cash-outs feed the DIAGNOSTIC cohort, never the gate", () => {
+  const db = seed();
+  settledBet(db, { status: "settled_won", code: "e7·m1" });                      // gate cohort
+  settledBet(db, { status: "settled_lost", code: "e7·m1" });                     // gate cohort
+  settledBet(db, { status: "settled_won", settledBy: "early", code: "e7·m1" });  // cash-out → diagnostic only
+  settledBet(db, { status: "settled_won", settledBy: "partial", code: "e7·m1" });// cash-out → diagnostic only
+  const g = buildOverreactionGate(db);
+  assert.equal(g.cleanCycles, 2, "gate counts only the 2 resolution settles — cash-outs never inflate it");
+  assert.equal(g.excluded.cashOut, 2);
+  assert.equal(g.settleCohort.n, 2);
+  assert.equal(g.cashOutCohort.n, 2, "both clean-epoch cash-outs land in the diagnostic cohort");
+  assert.equal(g.cashOutCohort.won, 2);
+  assert.match(g.note, /ДИАГНОСТИКА кэш-аут/);
+  assert.match(g.note, /гейт остаётся ратифицированным/);
+});
+
 test("overreactionGate: gate opens at n≥30 clean cycles", () => {
   const db = seed();
   for (let i = 0; i < 30; i++) settledBet(db, { status: i % 2 ? "settled_won" : "settled_lost", code: "e7·m1" });

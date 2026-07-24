@@ -31,15 +31,23 @@ export function isEuroCupLeague(externalLeague: string | null | undefined): bool
 
 export interface LeagueCoverage { league: string; euro: boolean; total: number; covered: number; blind: number; linkRatePct: number | null }
 export interface BlindPair { match: string; league: string; day: string; euro: boolean; reason: string }
+export interface CoverageCut { total: number; covered: number; blind: number; linkRatePct: number | null }
+export interface BindReject { home: string; away: string; recordKickoff: string | null; espnDate: string | null; gapHours: number | null; league: string; reason: string; possibleReschedule: boolean }
 export interface NoFeedCoverage {
   windowDays: number;
   overall: { total: number; covered: number; blind: number; linkRatePct: number | null };
   euro: { total: number; covered: number; blind: number; linkRatePct: number | null; targetPct: number; meetsTarget: boolean };
+  // P3(1): the HONEST miss %, over fixtures ESPN should already have boarded (kickoff past, or within
+  // nearKickoffHours) — strips the future-fixture noise that deflates the full-window link-rate.
+  nearKickoff: { withinHours: number; overall: CoverageCut; euro: CoverageCut & { targetPct: number; meetsTarget: boolean } };
   byLeague: LeagueCoverage[];
   byLeagueDay: { league: string; day: string; euro: boolean; total: number; blind: number }[]; // blind pairs × league × day
   blindEuroPairs: BlindPair[];   // the actionable list: which euro pairs are blind, and the derived reason
   blindPairsSample: BlindPair[]; // a small sample across ALL leagues (context beyond euro)
   legMismatchTally: unknown;     // the persisted enrich leg-mismatch marker (date_gap / orient) for context
+  // P3-audit(2): the per-rejection detail behind the date_gap tally — a 1–3 day gap is a possible RESCHEDULE
+  // (a real match the gate may be over-tightly cutting), a ~week gap is a genuine other leg.
+  bindRejections: BindReject[];
   note: string;
 }
 
@@ -56,7 +64,9 @@ export function buildNoFeedCoverage(db: Database, opts: { nowMs?: number; window
   const nowMs = opts.nowMs ?? Date.now();
   const windowDays = opts.windowDays ?? 14;
   const targetPct = Math.max(1, Number(env.EURO_LINK_RATE_TARGET_PCT ?? 85));
+  const nearHours = Math.max(1, Number(env.COVERAGE_NEAR_KICKOFF_HOURS ?? 48));
   const loMs = nowMs - windowDays * 86_400_000, hiMs = nowMs + windowDays * 86_400_000;
+  const nearHiMs = nowMs + nearHours * 3_600_000; // kickoff already past, or within nearHours → ESPN should have boarded it
 
   const byLeague = new Map<string, LeagueCoverage>();
   const byLeagueDay = new Map<string, { league: string; day: string; euro: boolean; total: number; blind: number }>();
@@ -64,6 +74,8 @@ export function buildNoFeedCoverage(db: Database, opts: { nowMs?: number; window
   const blindPairsAll: BlindPair[] = [];
   const overall = { total: 0, covered: 0, blind: 0 };
   const euro = { total: 0, covered: 0, blind: 0 };
+  const nearOverall = { total: 0, covered: 0, blind: 0 };
+  const nearEuro = { total: 0, covered: 0, blind: 0 };
 
   for (const comp of R.listCompetitions(db).filter((c) => c.sport_id === "football")) {
     const league = String(comp.external_league || comp.name || "—");
@@ -78,6 +90,13 @@ export function buildNoFeedCoverage(db: Database, opts: { nowMs?: number; window
 
       overall.total++; if (covered) overall.covered++; else overall.blind++;
       if (isEuro) { euro.total++; if (covered) euro.covered++; else euro.blind++; }
+
+      // P3(1): near-kickoff cut — kickoff past OR ≤ nearHours ahead (a known kickoff ESPN should already carry).
+      // A fixture with no kickoff we can't place on the timeline → excluded from this honest slice.
+      if (Number.isFinite(koMs) && koMs <= nearHiMs) {
+        nearOverall.total++; if (covered) nearOverall.covered++; else nearOverall.blind++;
+        if (isEuro) { nearEuro.total++; if (covered) nearEuro.covered++; else nearEuro.blind++; }
+      }
 
       const lc = byLeague.get(league) ?? { league, euro: isEuro, total: 0, covered: 0, blind: 0, linkRatePct: null };
       lc.total++; if (covered) lc.covered++; else lc.blind++;
@@ -111,6 +130,16 @@ export function buildNoFeedCoverage(db: Database, opts: { nowMs?: number; window
   let legMismatchTally: unknown = null;
   try { legMismatchTally = JSON.parse(R.metaGet(db, "fixture_leg_mismatch") ?? "null"); } catch { legMismatchTally = null; }
 
+  // P3-audit(2): pull the per-rejection detail; flag a 1–3 day gap as a possible reschedule (over-tight cut).
+  const bindRejections: BindReject[] = [];
+  try {
+    const raw = JSON.parse(R.metaGet(db, "fixture_bind_rejections") ?? "null");
+    for (const r of (raw?.rejects ?? []) as Omit<BindReject, "possibleReschedule">[]) {
+      bindRejections.push({ ...r, possibleReschedule: r.gapHours != null && r.gapHours >= 24 && r.gapHours <= 72 });
+    }
+  } catch { /* best-effort */ }
+
+  const nearEuroLink = pct(nearEuro.covered, nearEuro.total);
   const note = euro.total === 0
     ? `нет еврокубковых пар в окне ±${windowDays}д — link-rate еврокубков не считается`
     : meetsTarget
@@ -121,11 +150,17 @@ export function buildNoFeedCoverage(db: Database, opts: { nowMs?: number; window
     windowDays,
     overall: { ...overall, linkRatePct: pct(overall.covered, overall.total) },
     euro: { ...euro, linkRatePct: euroLink, targetPct, meetsTarget },
+    nearKickoff: {
+      withinHours: nearHours,
+      overall: { ...nearOverall, linkRatePct: pct(nearOverall.covered, nearOverall.total) },
+      euro: { ...nearEuro, linkRatePct: nearEuroLink, targetPct, meetsTarget: nearEuroLink != null && nearEuroLink >= targetPct },
+    },
     byLeague: leagues,
     byLeagueDay: [...byLeagueDay.values()].filter((x) => x.blind > 0).sort((a, b) => (Number(b.euro) - Number(a.euro)) || b.blind - a.blind),
     blindEuroPairs: blindEuroPairs.slice(0, 40),
     blindPairsSample: blindPairsAll.slice(0, 20),
     legMismatchTally,
+    bindRejections,
     note,
   };
 }
