@@ -26,6 +26,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
+import { isStateSuspect } from "./engine.js";
 import { settleBet } from "./settlement.js";
 import { isFtBlindBet } from "./betMeta.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
@@ -37,6 +38,7 @@ export interface PmResolutionConfig {
   voidTimeoutH: number;   // finished ≥ this and still unresolved → void_timeout
   stableMin: number;      // fallback: a resolving price must persist across two polls ≥ this many minutes apart
   matchDurationH: number; // finish ≈ kickoff + this (PM-only fixtures carry no real end_time)
+  suspectAgeH: number;    // P2: a state_suspect freeze this many hours past expected finish → PM-resolution queue
 }
 export function loadPmResolutionConfig(env: Record<string, string | undefined> = process.env): PmResolutionConfig {
   const num = (k: string, d: number) => { const n = Number(env[k]); return Number.isFinite(n) && n > 0 ? n : d; };
@@ -46,6 +48,7 @@ export function loadPmResolutionConfig(env: Record<string, string | undefined> =
     voidTimeoutH: num("PM_RES_VOID_TIMEOUT_H", 72),
     stableMin: num("PM_RES_STABLE_MIN", 30),
     matchDurationH: num("PM_RES_MATCH_DURATION_H", 2.5),
+    suspectAgeH: num("PM_RES_SUSPECT_AGE_H", 6),
   };
 }
 
@@ -59,6 +62,7 @@ export interface PmResolutionResult {
   marketVoid: number;        // closed=true + non-resolving price → PM refunded
   voidTimeout: number;       // unresolved past the timeout → we stopped waiting
   suspect: number;           // complement mismatch → not settled, flagged
+  frozenSuspect: number;     // P2: candidates pulled via the state_suspect-freeze extension (not PM-only no-score)
   pendingStable: number;     // resolving price, no closed flag → awaiting the second stable poll
   pendingUnresolved: number; // no resolving price yet, still inside the timeout
   zombieBackfill: number;    // = candidates: the hidden already-eternal-open tail this pass cleared/examined
@@ -83,15 +87,31 @@ export async function settlePmResolutionBets(
   const nowMs = Date.parse(now) || Date.now();
   const cfg = loadPmResolutionConfig(deps.env);
   const shadowCfg = loadShadowConfig(db, deps.env);
-  const res: PmResolutionResult = { candidates: 0, settled: 0, won: 0, lost: 0, marketVoid: 0, voidTimeout: 0, suspect: 0, pendingStable: 0, pendingUnresolved: 0, zombieBackfill: 0, bankDeltaUsd: 0, reservesFreedUsd: 0 };
+  const res: PmResolutionResult = { candidates: 0, settled: 0, won: 0, lost: 0, marketVoid: 0, voidTimeout: 0, suspect: 0, frozenSuspect: 0, pendingStable: 0, pendingUnresolved: 0, zombieBackfill: 0, bankDeltaUsd: 0, reservesFreedUsd: 0 };
+  const suspectAgeMs = cfg.suspectAgeH * 3_600_000;
 
-  // 1) Gather candidates: FINISHED football matches with NO score (the PM-only signature) that still hold open bets.
-  const cands: { betId: string; matchId: string; kickoffAt: string | null; createdAt: string; token: string | null; token2: string | null }[] = [];
+  // 1) Gather candidates. Two signatures of the SAME class — "no trustworthy score of ours, defer to PM":
+  //    (a) PM-only: a FINISHED football fixture with NO score (ESPN/StatPal never linked it).
+  //    (b) P2 [batch-7] state_suspect freeze: F2 froze settlement (premature/unflagged finish) — its score, if
+  //        any, is not to be trusted. Once the freeze has hung past a grace window (suspectAgeH beyond expected
+  //        finish), route its open bets to PM resolution too. Athletic–São Bernardo (score ?:? forever, Draw-No
+  //        $120 hanging) is exactly this. The six e7 resolution rules below apply to both, unchanged.
+  const cands: { betId: string; matchId: string; kickoffAt: string | null; createdAt: string; token: string | null; token2: string | null; frozen: boolean }[] = [];
   const tokenSet = new Set<string>();
   for (const comp of R.listCompetitions(db).filter((c) => c.sport_id === "football")) {
     for (const m of R.listMatches(db, comp.id)) {
-      if (m.state !== "finished") continue;
-      if (m.score_home != null && m.score_away != null) continue; // has our score → the normal settleMatch path owns it
+      const pmOnly = m.state === "finished" && m.score_home == null && m.score_away == null;
+      const suspect = isStateSuspect(db, m.id);
+      // A state_suspect freeze qualifies once it's aged past the grace window (give our own feed time to un-freeze
+      // via a valid finish first). No kickoff to anchor the window → don't gate on age (it's clearly stuck).
+      let frozenAged = false;
+      if (suspect && !pmOnly) {
+        const koMs = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
+        const expFinishMs = Number.isFinite(koMs) ? koMs + cfg.matchDurationH * 3_600_000 : NaN;
+        frozenAged = !Number.isFinite(expFinishMs) || (nowMs - expFinishMs) >= suspectAgeMs;
+      }
+      if (!pmOnly && !frozenAged) continue; // has our trusted score, or a not-yet-aged freeze → not our queue
+      const frozen = frozenAged; // pulled via the state_suspect extension (its score, if present, is untrusted)
       for (const b of R.betsForMatch(db, m.id)) {
         if (b.status !== "open") continue;
         const mk = R.latestMarkets(db, m.id).find((x) => x.label === b.market_label);
@@ -99,7 +119,8 @@ export async function settlePmResolutionBets(
         const token2 = mk?.token_second ?? null;
         if (token) tokenSet.add(token);
         if (token2) tokenSet.add(token2);
-        cands.push({ betId: b.id, matchId: m.id, kickoffAt: m.kickoff_at, createdAt: b.created_at, token, token2 });
+        cands.push({ betId: b.id, matchId: m.id, kickoffAt: m.kickoff_at, createdAt: b.created_at, token, token2, frozen });
+        if (frozen) res.frozenSuspect++;
       }
     }
   }

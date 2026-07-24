@@ -14,11 +14,11 @@ function seed() {
   return db;
 }
 // insert a settled Overreaction bet and stamp status / settled_by / epoch directly.
-function settledBet(db: any, o: { status: string; settledBy?: string | null; code?: string | null; exit?: string | null }) {
+function settledBet(db: any, o: { status: string; settledBy?: string | null; code?: string | null; exit?: string | null; suspect?: number }) {
   const id = R.uid();
   R.insertBet(db, { id, match_id: "m1", strategy_id: "overreaction", risk_profile_id: "medium", market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: null, ai_prob: 0.6, stake: 40, rationale: "r", entered_minute: "30'", result: null, payout: null, decision_id: id, created_at: NOW } as any);
-  db.prepare(`UPDATE bets SET status=?, settled_by=?, code_version=?, exit_code_version=? WHERE id=?`)
-    .run(o.status, o.settledBy ?? null, o.code ?? "e5·m1", o.exit ?? o.code ?? "e5·m1", id);
+  db.prepare(`UPDATE bets SET status=?, settled_by=?, code_version=?, exit_code_version=?, settle_suspect=? WHERE id=?`)
+    .run(o.status, o.settledBy ?? null, o.code ?? "e5·m1", o.exit ?? o.code ?? "e5·m1", o.suspect ?? 0, id);
   return id;
 }
 
@@ -43,6 +43,19 @@ test("overreactionGate: clean-epoch resolution cycles count; void/cash-out/pre-e
   assert.equal(g.excluded.preEpoch, 1);
   assert.equal(g.excluded.crossEpoch, 1);
   assert.equal(g.byEpoch["e7"].won, 1);
+});
+
+test("overreactionGate: settle_suspect (two-leg mislabel) excluded from the clean-cycle gate (P1б)", () => {
+  const db = seed();
+  settledBet(db, { status: "settled_won", code: "e7·m1" });                 // counts
+  settledBet(db, { status: "settled_lost", code: "e7·m1" });                // counts
+  settledBet(db, { status: "settled_lost", code: "e7·m1", suspect: 1 });    // excluded: two-leg mislabel
+  settledBet(db, { status: "settled_won", code: "e7·m1", suspect: 1 });     // excluded: two-leg mislabel
+  const g = buildOverreactionGate(db);
+  assert.equal(g.cleanCycles, 2, "only the 2 non-suspect cycles count toward n/30");
+  assert.equal(g.excluded.settleSuspect, 2);
+  assert.equal(g.won, 1);
+  assert.equal(g.lost, 1);
 });
 
 test("overreactionGate: gate opens at n≥30 clean cycles", () => {

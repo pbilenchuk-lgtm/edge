@@ -17,7 +17,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
-import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries } from "./engine.js";
+import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, reSettleSuspectBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries } from "./engine.js";
 import { settlePmResolutionBets } from "./pmResolution.js";
 import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
@@ -2007,6 +2007,11 @@ export async function runAutoCycle(
   // P0.1 backfill (slow cadence, bounded): re-fetch the ESPN date for historically-bound matches with no
   // frozen espn_event_date, then CLEAR settle_suspect on the ones proven clean (|Δkickoff| ≤ 1 day).
   if (provider) await step("fixtureDateBackfill", async () => { const r = await backfillEspnEventDates(db, provider!, deps); return r.dated; }, 0);
+  // P1(в) [batch-7]: re-grade the two-leg suspects by the corrected binding. Runs right after the date
+  // backfill (which proves bindings clean): a suspect on a proven-clean finished match is re-settled off the
+  // now-correct score so a Raków-class win becomes an honest record, not an eternal suspect. Unprovable ones
+  // stay flagged for the PM-resolution settler below. Idempotent.
+  stepSync("reSettleSuspects", () => reSettleSuspectBets(db, deps).regraded, 0);
   const labelFor = new Map<string, ReassessTrigger>();
   for (const e of enrich.newEvents) if (!labelFor.has(e.matchId)) labelFor.set(e.matchId, LIVE_TRIGGER_TYPES.has(e.type) ? (e.type as ReassessTrigger) : "price_move");
   const triggers = new Set(enrich.newEvents.map((e) => e.matchId));
