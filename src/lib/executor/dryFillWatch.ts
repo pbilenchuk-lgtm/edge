@@ -96,7 +96,9 @@ export function buildDryFillWatch(db: Database, env: Record<string, string | und
   }
   const recentNotes = windowOrders.filter((o) => o.filled_size_usd <= 0).slice(-8).map((o) => ({ status: o.status, note: o.note ?? "", at: o.created_at }));
   const dryFillsAllTime = allOrders.filter((o) => o.filled_size_usd > 0).length;
-  const openDryPositions = (db.prepare(`SELECT COUNT(*) n FROM real_positions WHERE dry=1 AND size_shares > 0`).get() as { n: number }).n;
+  // size_shares > 1e-6 (not > 0): an exit that fully sold leaves sub-nano float residue (e.g. 2e-14 shares);
+  // counting that as an "open position" overstates live risk. 1e-6 matches the dust floor used in whitelist.ts.
+  const openDryPositions = (db.prepare(`SELECT COUNT(*) n FROM real_positions WHERE dry=1 AND ABS(size_shares) > 1e-6`).get() as { n: number }).n;
 
   // ── QUALITY CUTS on the ACTUAL window fills (Petro's 3 checks). A "fill" = a real order with money on it.
   //    (1) whose volume — by strategy (should be football Overreaction, not some other book) and its $;
@@ -115,7 +117,7 @@ export function buildDryFillWatch(db: Database, env: Record<string, string | und
   }
   const avgFillUsd = windowFills.length ? Math.round((windowFills.reduce((a, o) => a + o.filled_size_usd, 0) / windowFills.length) * 100) / 100 : 0;
   const openPositions = (db.prepare(
-    `SELECT strategy_id, match_id, size_shares, avg_price_cents, unrealized_pnl_usd FROM real_positions WHERE dry=1 AND size_shares > 0 ORDER BY updated_at DESC LIMIT 20`,
+    `SELECT strategy_id, match_id, size_shares, avg_price_cents, unrealized_pnl_usd FROM real_positions WHERE dry=1 AND ABS(size_shares) > 1e-6 ORDER BY updated_at DESC LIMIT 20`,
   ).all() as any[]).map((p) => ({ strategy: p.strategy_id ?? null, matchId: p.match_id ?? null, shares: p.size_shares, avgCents: p.avg_price_cents ?? null, upnl: p.unrealized_pnl_usd ?? null }));
 
   // ── LOUD-ZERO verdict: name the exact stage the funnel dies at.
