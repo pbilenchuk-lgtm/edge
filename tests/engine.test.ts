@@ -898,6 +898,24 @@ test("listMatchLogs + capMatchLogArchive: the archive lists finished matches and
   assert.ok(R.getMatch(db, "bet1"), "bet-bearing match never capped");
 });
 
+test("listMatchLogs: out-of-perimeter tennis (ITF/Challenger/125/quali/doubles) is excluded; ATP/WTA + football stay", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const foot = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "itf", sport_id: "tennis", name: "ITF W15 Monastir", budget: 0, external_league: null, created_at: "t" } as any);
+  R.upsertCompetition(db, { id: "chl", sport_id: "tennis", name: "Challenger Como", budget: 0, external_league: null, created_at: "t" } as any);
+  R.upsertCompetition(db, { id: "atp", sport_id: "tennis", name: "ATP Washington", budget: 0, external_league: null, created_at: "t" } as any);
+  const fin = (id: string, comp: string) => R.insertMatch(db, { id, competition_id: comp, home: "P" + id, away: "Q" + id, state: "finished", lineup_out: false, kickoff_at: "2026-07-24T10:00:00Z", minute: null, score_home: null, score_away: null, final_score: "2:0", kickoff_time: null, end_time: "2026-07-24T12:00:00Z", duration: null, end_note: null, external_ref: id } as any);
+  fin("itf1", "itf"); fin("chl1", "chl"); fin("atp1", "atp"); fin("foot1", foot.id);
+  const logs = R.listMatchLogs(db, 100);
+  const ids = new Set(logs.map((l) => l.id));
+  assert.ok(!ids.has("itf1"), "ITF excluded");
+  assert.ok(!ids.has("chl1"), "Challenger excluded");
+  assert.ok(ids.has("atp1"), "ATP kept");
+  assert.ok(ids.has("foot1"), "football kept");
+});
+
 test("strategyCompExposure / strategyCompRealized aggregate across the whole competition", async () => {
   const { strategyCompExposure, strategyCompRealized } = await import("../src/lib/analysis.js");
   const db = openDb(":memory:");
