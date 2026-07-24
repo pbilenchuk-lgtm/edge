@@ -18,6 +18,12 @@ export async function GET(req: Request) {
       const { buildDryFillWatch } = await import("@/lib/executor/dryFillWatch");
       return NextResponse.json({ ok: true, watch: buildDryFillWatch(db, process.env) });
     }
+    // ?report=overreaction_gate → the football Overreaction sample gate: clean-epoch (≥e5), same-epoch,
+    // resolution-settled cycles counted against the pre-set n≥30 verdict threshold ("6/30" made loud). Read-only.
+    if (new URL(req.url).searchParams.get("report") === "overreaction_gate") {
+      const { buildOverreactionGate } = await import("@/lib/overreactionGate");
+      return NextResponse.json({ ok: true, gate: buildOverreactionGate(db) });
+    }
     // ?report=phase_f_readiness[&strategy=…] → the mechanical go/hold gate over the accumulated dry
     // data before flipping to real money on ONE strategy (default prematch_value). Read-only.
     if (new URL(req.url).searchParams.get("report") === "phase_f_readiness") {

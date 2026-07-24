@@ -62,6 +62,10 @@ export interface PmResolutionResult {
   pendingStable: number;     // resolving price, no closed flag → awaiting the second stable poll
   pendingUnresolved: number; // no resolving price yet, still inside the timeout
   zombieBackfill: number;    // = candidates: the hidden already-eternal-open tail this pass cleared/examined
+  // Proof #2: the one-time bank impact of this pass (a backfill settles a tail that accrued for weeks — a
+  // STEP on the P&L curve, not a trading result). settled_by="pm_resolution"/void tags segment it out of daily cuts.
+  bankDeltaUsd: number;      // Σ P&L booked this pass (won/lost payouts − stakes; a void refund is 0)
+  reservesFreedUsd: number;  // Σ stake released back to the shadow bank this pass
 }
 
 const PMRES_OBS = "pmres_obs:"; // per-bet fallback observation: JSON { side: "won"|"lost", at: iso }
@@ -79,7 +83,7 @@ export async function settlePmResolutionBets(
   const nowMs = Date.parse(now) || Date.now();
   const cfg = loadPmResolutionConfig(deps.env);
   const shadowCfg = loadShadowConfig(db, deps.env);
-  const res: PmResolutionResult = { candidates: 0, settled: 0, won: 0, lost: 0, marketVoid: 0, voidTimeout: 0, suspect: 0, pendingStable: 0, pendingUnresolved: 0, zombieBackfill: 0 };
+  const res: PmResolutionResult = { candidates: 0, settled: 0, won: 0, lost: 0, marketVoid: 0, voidTimeout: 0, suspect: 0, pendingStable: 0, pendingUnresolved: 0, zombieBackfill: 0, bankDeltaUsd: 0, reservesFreedUsd: 0 };
 
   // 1) Gather candidates: FINISHED football matches with NO score (the PM-only signature) that still hold open bets.
   const cands: { betId: string; matchId: string; kickoffAt: string | null; createdAt: string; token: string | null; token2: string | null }[] = [];
@@ -120,6 +124,7 @@ export async function settlePmResolutionBets(
     try { R.metaDelete(db, `${PMRES_OBS}${betId}`); } catch { /* best-effort */ }
     R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: "финал", type: "settle", text: `${b.market_label}: PM-резолюция → ${won ? "выигрыш" : "проигрыш"} (цена ${priceCents ?? "?"}¢) · выплата $${(patch.payout ?? 0).toFixed(2)} (P&L ${(patch.pnl).toFixed(2)}) [pm_resolution]`, created_at: now });
     res.settled++; won ? res.won++ : res.lost++;
+    res.bankDeltaUsd += patch.pnl; res.reservesFreedUsd += b.stake ?? 0;
   };
   const voidBet = (betId: string, tag: "void" | "void_timeout", detail: string) => {
     const b = R.getBet(db, betId); if (!b) return;
@@ -128,6 +133,7 @@ export async function settlePmResolutionBets(
     try { R.metaDelete(db, `${PMRES_OBS}${betId}`); } catch { /* best-effort */ }
     R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: "финал", type: "settle", text: `${b.market_label}: ${detail} — возврат ставки $${(b.stake ?? 0).toFixed(2)} (P&L $0) [${tag}]`, created_at: now });
     tag === "void" ? res.marketVoid++ : res.voidTimeout++;
+    res.reservesFreedUsd += b.stake ?? 0; // a refund frees the reserve; P&L 0 → no bankDelta
   };
 
   for (const c of cands) {
@@ -177,6 +183,8 @@ export async function settlePmResolutionBets(
     else res.pendingUnresolved++;
   }
 
+  res.bankDeltaUsd = Math.round(res.bankDeltaUsd * 100) / 100;
+  res.reservesFreedUsd = Math.round(res.reservesFreedUsd * 100) / 100;
   return res;
 }
 

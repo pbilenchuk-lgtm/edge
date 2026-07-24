@@ -63,4 +63,9 @@ test("dryFillWatch: a FILLED dry order → dry_fill_achieved (Pre-F gate passed 
   assert.equal(rep.dryFillsInWindow, 1);
   assert.equal(rep.dryFillsAllTime, 1);
   assert.equal(rep.verdict, "dry_fill_achieved");
+  // quality cuts: whose volume + which epoch + avg fill size on the window fills
+  assert.equal(rep.cuts.byStrategy["overreaction"].fills, 1);
+  assert.equal(rep.cuts.byStrategy["overreaction"].usd, 20);
+  assert.equal(rep.cuts.byEpoch["legacy"], 1, "null code_version buckets as legacy");
+  assert.equal(rep.cuts.avgFillUsd, 20);
 });

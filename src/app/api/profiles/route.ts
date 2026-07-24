@@ -26,16 +26,17 @@ export async function GET(req: Request) {
       if (url.searchParams.get("probe") === "1") {
         const R = await import("@/lib/repo");
         const { fetchTokenResolution, loadPolymarketConfig } = await import("@/lib/polymarket");
-        // Validate the PARSED resolver against real resolved football tokens: resolution.priceCents should
-        // sit ~0/~100 and agree with the match's actual final score. Read-only (no settle).
+        // Proof #1: a MULTI-MATCH ground-truth sample. ONE clear final-score market per finished football
+        // fixture that HAS a real score, across up to 10 matches — so the resolver's verdict can be hand-checked
+        // against reality (does resolution.priceCents ~0/~100 agree with the actual score?). Read-only (no settle).
         const samples: { token: string; label: string; match: string; score: string }[] = [];
         outer: for (const c of R.listCompetitions(db).filter((x) => x.sport_id === "football")) {
           for (const m of R.listMatches(db, c.id)) {
-            if (m.state !== "finished") continue;
-            for (const mk of R.latestMarkets(db, m.id)) {
-              if (mk.external_ref) samples.push({ token: mk.external_ref, label: mk.label, match: `${m.home}—${m.away}`, score: `${m.score_home ?? "?"}:${m.score_away ?? "?"}` });
-              if (samples.length >= 8) break outer;
-            }
+            if (m.state !== "finished" || m.score_home == null || m.score_away == null) continue; // need a real score to verify
+            const mks = R.latestMarkets(db, m.id).filter((x) => x.external_ref);
+            const pick = mks.find((x) => /over 2\.5|under 2\.5/i.test(x.label)) ?? mks[0]; // a clear totals leg if present
+            if (pick?.external_ref) samples.push({ token: pick.external_ref, label: pick.label, match: `${m.home}—${m.away}`, score: `${m.score_home}:${m.score_away}` });
+            if (samples.length >= 10) break outer;
           }
         }
         const map = await fetchTokenResolution(loadPolymarketConfig(process.env), samples.map((s) => s.token));
