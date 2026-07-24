@@ -1980,10 +1980,17 @@ export async function runAutoCycle(
   // the score-based settleMatch can't (no score → open forever). Also clears the hidden already-open tail
   // (rule 6). Async (getQuotes + Gamma); slow-cadence auto cycle is the right home. Summary persisted for the report.
   await step("pmResolution", async () => {
-    const r = await settlePmResolutionBets(db, deps);
     const at = deps.now?.() ?? new Date().toISOString();
-    try { R.metaSet(db, "pm_resolution_last", JSON.stringify({ ...r, at }), at); } catch { /* best-effort */ }
-    return r;
+    try {
+      const r = await settlePmResolutionBets(db, deps);
+      try { R.metaSet(db, "pm_resolution_last", JSON.stringify({ ...r, at }), at); } catch { /* best-effort */ }
+      return r;
+    } catch (e) {
+      // Always leave a footprint: if the sweep throws, record the error so /api/health.pmResolution shows it
+      // (a null there means the step never RAN — auto cycle not firing — vs an {error} means it ran and failed).
+      try { R.metaSet(db, "pm_resolution_last", JSON.stringify({ error: e instanceof Error ? e.message : String(e), at }), at); } catch { /* best-effort */ }
+      throw e;
+    }
   }, { candidates: 0 } as any);
   stepSync("captureLiveOpens", () => captureLiveOpens(db, deps), undefined); // kickoff-price baseline
   // Analyze BEFORE reassessment: analyzeMatch wipes a match's proposed bets to
