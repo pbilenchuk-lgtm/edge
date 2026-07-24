@@ -149,7 +149,7 @@ export interface SvCohortBin {
 // already have, because MARKS ARE PRICES, not decisions poisoned by the 0.5 constant. Per match: a
 // verified pre-match favourite (≥55¢) who LOST set 1, with a readable set-2 / match outcome. Same two
 // outcomes as the shadow resolve. Pure read.
-export interface SvCohortRow { tour: string | null; eventType: string | null; prematchCents: number; set2: "won" | "lost" | null; match: "won" | "lost" | "void" | null; source: "retro" | "shadow" }
+export interface SvCohortRow { tour: string | null; eventType: string | null; prematchCents: number; set2: "won" | "lost" | null; match: "won" | "lost" | "void" | null; source: "retro" | "shadow"; frozenSrc: "prematch" | "first_snapshot" }
 
 export function svRetroCohort(db: Database): SvCohortRow[] {
   const ids = db.prepare(`SELECT DISTINCT pm_match_id id FROM tennis_snapshots WHERE pm_match_id IS NOT NULL`).all() as { id: string }[];
@@ -172,6 +172,12 @@ export function svRetroCohort(db: Database): SvCohortRow[] {
     const favSide: "first" | "second" = firstPriced.pm_p1_cents >= firstPriced.pm_p2_cents ? "first" : "second";
     const prematch = favSide === "first" ? firstPriced.pm_p1_cents : firstPriced.pm_p2_cents;
     if (prematch == null || prematch < 55) continue;                      // not a real pre-match favourite
+    // R1 (batch-8): frozen-price PROVENANCE. If the first PRICED snapshot already shows a set decided,
+    // the scout bound late — its "prematch" price is an already-live (panic-moved) mark, not a true anchor,
+    // and it biases the strength bin low (a depressed fav reads weaker). Tag it so the verdict can quarantine
+    // it (parity with the shadow path's prematch_src) and the cohort report can surface the first_snapshot
+    // SHARE — a high share means retention/late-binding is silently dropping or skewing comeback cases.
+    const frozenSrc: "prematch" | "first_snapshot" = (firstPriced.sets_p1 ?? 0) === 0 && (firstPriced.sets_p2 ?? 0) === 0 ? "prematch" : "first_snapshot";
     const afterSet1 = snaps.find((s) => (s.sets_p1 ?? 0) + (s.sets_p2 ?? 0) >= 1);
     if (!afterSet1) continue;
     const favSet1 = favSide === "first" ? afterSet1.sets_p1 : afterSet1.sets_p2;
@@ -179,7 +185,7 @@ export function svRetroCohort(db: Database): SvCohortRow[] {
     const last = snaps[snaps.length - 1];
     const finished = last.live === 0 || /finish|retir|walk|cancel|def|w[/.]o/i.test(String(last.status ?? ""));
     if (!finished) continue;
-    const row = { tour, eventType: firstPriced.event_type ?? null, prematchCents: prematch, source: "retro" as const };
+    const row = { tour, eventType: firstPriced.event_type ?? null, prematchCents: prematch, source: "retro" as const, frozenSrc };
     if (/cancel|walkover/i.test(String(last.status ?? ""))) { out.push({ ...row, set2: null, match: "void" }); continue; }
     const favFinal = favSide === "first" ? last.sets_p1 : last.sets_p2;
     const oppFinal = favSide === "first" ? last.sets_p2 : last.sets_p1;
@@ -283,6 +289,11 @@ export interface SvCohort {
   overall: SvCohortBin | null;
   constComebackProb: number;
   criterion: { verdictBinN: number; totalN: number; verdictBinMet: boolean; totalMet: boolean };
+  // R1: bias monitor — share of scoreable rows whose frozen "prematch" price was actually a first_snapshot
+  // (late scout bind); a high share means retention/late-binding is skewing or dropping comeback cases.
+  frozenSrcShare: number; firstSnapQuarantined: number;
+  // R1: the 55-60¢ acceleration-lever readiness (criterion-gated, never auto-promoted).
+  band5560Promotable: { n: number; comebackPct: number | null; ref6070Pct: number | null; dirDiffPp: number | null; ready: boolean };
   verdict: "insufficient" | "measured";
   note: string;
 }
@@ -323,8 +334,14 @@ export function buildSvCohort(db: Database, env: Record<string, string | undefin
   const shadowRows = db.prepare(`SELECT tour, event_type, prematch_ml_cents pm, set2_outcome s2, match_outcome mo FROM sv_shadow_signals WHERE status='resolved' AND prematch_src != 'first_snapshot'`).all() as any[];
   // T5: shadow rows WITH the set-2 trigger (entry) price — the EV basis (retro rows have no set-2 entry).
   const evShadow = db.prepare(`SELECT tour, event_type, prematch_ml_cents pm, trigger_cents trig, set2_outcome s2, match_outcome mo FROM sv_shadow_signals WHERE status='resolved' AND prematch_src != 'first_snapshot' AND set2_outcome IN ('won','lost') AND trigger_cents IS NOT NULL AND prematch_ml_cents >= 60`).all() as any[];
-  const shadow: SvCohortRow[] = shadowRows.map((r) => ({ tour: r.tour, eventType: r.event_type, prematchCents: r.pm ?? 0, set2: r.s2 ?? null, match: r.mo ?? null, source: "shadow" as const }));
-  const all = [...retro, ...shadow].filter((r) => r.set2 === "won" || r.set2 === "lost"); // scoreable rows only
+  // Shadow rows already excluded first_snapshot in the query above (prematch_src != 'first_snapshot').
+  const shadow: SvCohortRow[] = shadowRows.map((r) => ({ tour: r.tour, eventType: r.event_type, prematchCents: r.pm ?? 0, set2: r.s2 ?? null, match: r.mo ?? null, source: "shadow" as const, frozenSrc: "prematch" as const }));
+  const scoreable = [...retro, ...shadow].filter((r) => r.set2 === "won" || r.set2 === "lost");
+  // R1: quarantine first_snapshot-sourced RETRO rows out of the verdict too (parity with the shadow path) —
+  // their depressed "prematch" price would bias the strength bin. Track the share as a bias monitor.
+  const firstSnapScoreable = scoreable.filter((r) => r.frozenSrc === "first_snapshot").length;
+  const frozenSrcShare = scoreable.length ? Math.round((1000 * firstSnapScoreable) / scoreable.length) / 10 : 0;
+  const all = scoreable.filter((r) => r.frozenSrc !== "first_snapshot"); // true-prematch anchor only
 
   const isWta = (r: SvCohortRow) => /wta|women/i.test(`${r.tour ?? ""} ${r.eventType ?? ""}`);
   const strengthBin = (pm: number): string => (pm >= 80 ? "80+" : pm >= 70 ? "70-80" : pm >= 60 ? "60-70" : "<60");
@@ -365,6 +382,15 @@ export function buildSvCohort(db: Database, env: Record<string, string | undefin
   const verdictBinMet = (biggest?.n ?? 0) >= VERDICT_BIN_N;
   const totalMet = verdictRows.length >= TOTAL_N;
   const verdict: SvCohort["verdict"] = verdictBinMet && totalMet ? "measured" : "insufficient";
+  // R1: PREPARE (not pull) the 55-60¢ acceleration lever. It promotes into the verdict cohort ONLY when a
+  // criterion fixed BEFORE the data holds — n≥15 in the band AND its P(comeback set2) agrees in direction with
+  // the 60-70 bin (|Δ| ≤ 10pp). Until then it stays in `quarantine`, accruing apart. Readiness only; it NEVER
+  // auto-promotes (no dilution of the cohort by lowering the bar).
+  const band5560Pct = quar.length ? pct(quar.map((r) => (r.set2 === "won" ? 1 : 0))) : null;
+  const ref6070Rows = verdictRows.filter((r) => strengthBin(r.prematchCents) === "60-70");
+  const ref6070Pct = ref6070Rows.length ? pct(ref6070Rows.map((r) => (r.set2 === "won" ? 1 : 0))) : null;
+  const dirDiffPp = band5560Pct != null && ref6070Pct != null ? Math.round(Math.abs(band5560Pct - ref6070Pct) * 10) / 10 : null;
+  const band5560Promotable = { n: quar.length, comebackPct: band5560Pct, ref6070Pct, dirDiffPp, ready: quar.length >= 15 && dirDiffPp != null && dirDiffPp <= 10 };
   const evNote = reenable.length
     ? ` T5 net-EV: бин(ы) под ре-включение (EV ≥ ${Math.max(0, Number(env.SV_EV_MARGIN_PP ?? 3))}пп, n≥${VERDICT_BIN_N}): ${reenable.join("; ")}.`
     : ` T5 net-EV: ни один бин пока не проходит (EV ≥ ${Math.max(0, Number(env.SV_EV_MARGIN_PP ?? 3))}пп при n≥${VERDICT_BIN_N}) — держим flag-only.`;
@@ -384,6 +410,32 @@ export function buildSvCohort(db: Database, env: Record<string, string | undefin
     bins, quarantine, overall,
     constComebackProb: 0.5,
     criterion: { verdictBinN: VERDICT_BIN_N, totalN: TOTAL_N, verdictBinMet, totalMet },
+    frozenSrcShare, firstSnapQuarantined: firstSnapScoreable, band5560Promotable,
     verdict, note,
   };
+}
+
+export interface SvCohortAccrual { resolvedForward: number; spanDays: number; perWeek: number | null; verdictBinN: number; biggestBinN: number; totalVerdictN: number; weeksToVerdictBin: number | null; note: string }
+/**
+ * R1 (Branch Б): forward-tempo accrual for the weekly self-report. Retro gives an instant n from snapshot
+ * history but does NOT grow; the shadow path grows ~1 record/day. Measures the FORWARD shadow tempo (resolved
+ * rows / week over their own span) and the ETA to a matured verdict bin (n≥40) at that tempo. Read-only.
+ */
+export function svCohortAccrual(db: Database, nowIso: string): SvCohortAccrual {
+  const rows = db.prepare(`SELECT created_at c FROM sv_shadow_signals WHERE status='resolved' AND set2_outcome IN ('won','lost') ORDER BY created_at`).all() as { c: string }[];
+  const cohort = buildSvCohort(db);
+  const biggestBinN = cohort.bins.reduce((m, b) => Math.max(m, b.n), 0);
+  const totalVerdictN = cohort.overall?.n ?? 0;
+  const nowMs = Date.parse(nowIso) || Date.now();
+  const firstMs = rows.length ? (Date.parse(rows[0].c) || nowMs) : nowMs;
+  const spanDays = Math.max(1, (nowMs - firstMs) / 86400_000);
+  const perWeek = rows.length ? Math.round((rows.length / spanDays) * 7 * 10) / 10 : null;
+  const remaining = Math.max(0, VERDICT_BIN_N - biggestBinN);
+  const weeksToVerdictBin = perWeek && perWeek > 0 ? Math.round((remaining / perWeek) * 10) / 10 : null;
+  const note = remaining === 0
+    ? `вердиктный бин созрел (n=${biggestBinN}≥${VERDICT_BIN_N})`
+    : perWeek && perWeek > 0
+      ? `forward-темп ${perWeek}/нед; до n≥${VERDICT_BIN_N} в крупнейшем бине ещё ${remaining} (~${weeksToVerdictBin} нед)`
+      : `forward-темп пока не измерим (нет разрешённых shadow-строк); retro даёт мгновенный n, но не растёт`;
+  return { resolvedForward: rows.length, spanDays: Math.round(spanDays * 10) / 10, perWeek, verdictBinN: VERDICT_BIN_N, biggestBinN, totalVerdictN, weeksToVerdictBin, note };
 }
