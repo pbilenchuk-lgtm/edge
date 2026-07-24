@@ -916,6 +916,22 @@ test("listMatchLogs: out-of-perimeter tennis (ITF/Challenger/125/quali/doubles) 
   assert.ok(ids.has("foot1"), "football kept");
 });
 
+test("listMatchLogs: a BROKEN no-bet match (abandoned junk) is hidden; a broken match WITH a bet is kept", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const foot = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mk = (id: string, note: string | null) => R.insertMatch(db, { id, competition_id: foot.id, home: "H" + id, away: "A" + id, state: "finished", lineup_out: false, kickoff_at: "2026-07-24T10:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: "2026-07-24T12:00:00Z", duration: null, end_note: note, external_ref: id } as any);
+  mk("clean", null);                          // normal finished no-bet → kept
+  mk("broken_nobet", "⚠ поломан: заброшен"); // broken + no bet → hidden
+  mk("broken_bet", "⚠ поломан: заброшен");   // broken + a real bet → kept (worth reviewing)
+  R.insertBet(db, { id: R.uid(), match_id: "broken_bet", strategy_id: strat.id, market_label: "Over 1.5", status: "settled_lost", proposed_price: 50, entry_price: 50, current_price: 0, closing_price: 50, ai_prob: 0.5, stake: 40, rationale: "r", entered_minute: "3'", result: "lost", payout: 0, settled_by: null, created_at: "t" } as any);
+  const ids = new Set(R.listMatchLogs(db, 100).map((l) => l.id));
+  assert.ok(ids.has("clean"), "normal no-bet finished kept");
+  assert.ok(!ids.has("broken_nobet"), "broken + no-bet abandoned junk hidden");
+  assert.ok(ids.has("broken_bet"), "broken WITH a bet kept for review");
+});
+
 test("strategyCompExposure / strategyCompRealized aggregate across the whole competition", async () => {
   const { strategyCompExposure, strategyCompRealized } = await import("../src/lib/analysis.js");
   const db = openDb(":memory:");
