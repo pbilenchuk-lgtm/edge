@@ -1403,6 +1403,22 @@ export function throttleZombieLog(db: Database, m: Match, label: string, code: s
   R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "skip", text, created_at: now });
 }
 
+/**
+ * D (batch-8 follow-up): the "same question" signature for a live reassessment. A periodic (non-event)
+ * re-ask whose signature is unchanged since the last call would put an IDENTICAL prompt to the strategist
+ * and reproduce the last verdict (Viborg: 16× identical "дубликат-конфликт"). Signature = score + a coarse
+ * minute bucket (re-asks at least every ~10') + each managed market's coarse (5¢) price. A real change — a
+ * goal (score flips), a price move past the 5¢ grid, or a fresh event trigger — changes it and re-engages
+ * the LLM immediately; static noise does not. Deterministic exits run regardless, so a throttled tick is
+ * never unmanaged. Pure + exported for test.
+ */
+export function reassessHoldSignature(scoreHome: number | null, scoreAway: number | null, minute: number | null, positions: Array<{ label: string; priceCents: number | null }>): string {
+  const parts = positions
+    .map((p) => `${p.label.trim().toLowerCase()}=${Math.round((p.priceCents ?? 0) / 5)}`)
+    .sort();
+  return `${scoreHome ?? "?"}:${scoreAway ?? "?"}|${Math.floor((minute ?? 0) / 10)}|${parts.join(",")}`;
+}
+
 export async function strategistReassess(
   db: Database, deps: EngineDeps = {}, opts: { max?: number; newEventMatchIds?: Set<string>; triggeredOnly?: boolean; labelFor?: Map<string, ReassessTrigger>; onlyStrategyId?: string } = {},
 ): Promise<ReassessResult> {
@@ -1574,6 +1590,20 @@ export async function strategistReassess(
           continue;
         }
       }
+      // D: throttle a periodic "same question" re-ask. On a routine heartbeat tick (no fresh event
+      // trigger) where neither the score nor any managed market's coarse price has moved since the LAST
+      // PURE-HOLD verdict, re-invoking the LLM only reproduces that refusal — pure cost (Viborg: 16×
+      // identical "дубликат-конфликт"). The stored signature is written ONLY after a decision that did
+      // nothing (no exits, no picks — below), so an ACTIVELY MANAGING strategy (defensive partial-cut
+      // cadence, phantom-block retries) is never throttled; only a repeated do-nothing is. Deterministic
+      // exits run regardless; any real change (goal/price move/new market) flips the signature.
+      const throttleOn = stratOpen.length > 0 && isPeriodic(m.id) && (env.REASSESS_HOLD_THROTTLE ?? "true").toLowerCase() === "true";
+      let holdSig: string | null = null; const holdSigKey = `reassess_hold_sig:${m.id}:${sid}`;
+      if (throttleOn) {
+        const priceByLabel = new Map(liveMarkets.map((mk) => [norm(mk.label), mk.price] as const));
+        holdSig = reassessHoldSignature(m.score_home, m.score_away, liveMinute, stratOpen.map((b) => ({ label: b.market_label, priceCents: priceByLabel.get(norm(b.market_label)) ?? b.current_price ?? null })));
+        if (R.metaGet(db, holdSigKey) === holdSig) { out.gateSkips = (out.gateSkips ?? 0) + 1; continue; } // last verdict was a pure hold on this exact state → don't re-ask
+      }
       // CIRCUIT-BREAKER short-circuit: a hard strategist outage (credit/auth) is open → don't
       // re-issue the dead call for every pair. The deterministic exit net (degraded → price-stop
       // restore + Under gap-suppression) manages the positions until a probe closes the breaker.
@@ -1622,6 +1652,14 @@ export async function strategistReassess(
         continue;
       }
       touched.add(sid);
+      // D: remember the "pure hold" signature so the next identical periodic tick is throttled (above) —
+      // but ONLY when this decision did NOTHING (no exits, no new picks). An actionable decision CLEARS
+      // any stored hold-sig, so a strategy in the middle of managing (partial cuts, entries) is re-asked
+      // every tick as before. Best-effort meta; a miss just costs one extra call.
+      if (throttleOn && holdSig) {
+        const acted = (dec.exits?.length ?? 0) > 0 || (dec.picks?.length ?? 0) > 0;
+        try { if (acted) R.metaDelete(db, holdSigKey); else R.metaSet(db, holdSigKey, holdSig, now); } catch { /* best-effort */ }
+      }
       // The strategist layer is alive — record it so the exit net keeps trusting it to manage
       // the melting-option positions (and doesn't restore the price stop). A live success also
       // CLOSES the hard-outage breaker immediately (recovery beats waiting out the cooldown).

@@ -69,3 +69,20 @@ test("calibration: Brier markov vs implied on frozen mid; insufficient until n�
   assert.equal(cal.verdict, "insufficient", "n=2 < 40 → not matured (but no longer a MUTE zero)");
   assert.equal(cal.unresolvedPct, 25, "1 unresolved of 4 terminal");
 });
+
+test("C sideBias: a family×side whose model theo consistently overshoots reality is measured (optimismPp) and flagged", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  // 12 matches, each a 2-set match → Over 2.5 (theo 60¢) LOSES every time = a systematic over-lean.
+  for (let i = 0; i < 12; i++) {
+    const id = `mo${i}`; finishedMatch(db, id);
+    recordPmvShadowSignal(db, { matchId: id, label: `ATP: A vs B Total Sets: Over 2.5`, family: "total_sets", side: "over", firstIsP1: true, theoCents: 60, midCents: 55, deviation: 5, delta: 3, bookUsd: 4000, tour: "atp", surface: "hard", epoch: "e5·shadow-s1", at: NOW } as any);
+  }
+  resolvePmvShadowSignals(db, { now: () => NOW });
+  const cal = buildPmvShadowCalibration(db);
+  const over = cal.sideBias.find((b) => b.family === "total_sets" && b.side === "over")!;
+  assert.equal(over.n, 12);
+  assert.equal(over.winPctActual, 0, "Over 2.5 lost every 2-set match");
+  assert.equal(over.theoMeanPct, 60, "model said 60% on average");
+  assert.equal(over.optimismPp, 60, "measured over-optimism = theo − actual");
+  assert.ok(cal.biasFlags.some((f) => f.includes("total_sets·over")), "the sized lean is flagged");
+});

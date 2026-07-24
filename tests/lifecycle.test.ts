@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase, migrateRetireFable } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision, winsOnEventOccurrence } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure, stopContradictsGameState, terminalProtectiveHold, throttleZombieLog, ftBlindEnterable, isFtSettledMarket } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure, stopContradictsGameState, terminalProtectiveHold, throttleZombieLog, ftBlindEnterable, isFtSettledMarket, reassessHoldSignature } from "../src/lib/lifecycle.js";
 import { analyzeMatch, runStrategists } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
@@ -2163,4 +2163,18 @@ test("R3 ftBlindEnterable: gates the deep-tree analysis skip — ft off → neve
   R.insertMatch(db, { id: mid2, competition_id: "pm-romania-1", home: "X", away: "Y", state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid2 });
   R.insertMarket(db, { id: R.uid(), match_id: mid2, label: "Y to Advance", price: 50, ai_prob: null, liquidity: "1000", external_ref: "tok2", snapshot_at: "t", is_closing: false });
   assert.equal(ftBlindEnterable(db, R.getMatch(db, mid2)!, { FT_BLIND_ENABLED: "true" }), false);
+});
+
+test("D reassessHoldSignature: identical state → identical signature (throttle skips); a goal, a >5¢ price move, or a new managed market flips it (re-engage)", () => {
+  const base = reassessHoldSignature(1, 1, 55, [{ label: "Over 2.5", priceCents: 60 }, { label: "BTTS — Yes", priceCents: 45 }]);
+  // exact prices, reordered, minute still in the same 10' bucket → SAME signature (would be throttled)
+  assert.equal(reassessHoldSignature(1, 1, 58, [{ label: "BTTS — Yes", priceCents: 46 }, { label: "Over 2.5", priceCents: 61 }]), base, "order-independent + in-bucket price/minute → same");
+  // a goal (score flips) → different
+  assert.notEqual(reassessHoldSignature(2, 1, 55, [{ label: "Over 2.5", priceCents: 60 }, { label: "BTTS — Yes", priceCents: 45 }]), base);
+  // a real price move past the 5¢ grid → different
+  assert.notEqual(reassessHoldSignature(1, 1, 55, [{ label: "Over 2.5", priceCents: 70 }, { label: "BTTS — Yes", priceCents: 45 }]), base);
+  // crossing the 10' minute bucket → different (bounds staleness — re-asks at least every ~10')
+  assert.notEqual(reassessHoldSignature(1, 1, 65, [{ label: "Over 2.5", priceCents: 60 }, { label: "BTTS — Yes", priceCents: 45 }]), base);
+  // a newly managed market → different
+  assert.notEqual(reassessHoldSignature(1, 1, 55, [{ label: "Over 2.5", priceCents: 60 }]), base);
 });
