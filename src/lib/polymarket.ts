@@ -428,7 +428,9 @@ export async function fetchTokenResolution(
   const doFetch = deps.fetchImpl ?? fetch;
   await Promise.all(tokenIds.slice(0, cap).map(async (id) => {
     try {
-      const res = await withTimeout(cfg.timeoutMs, (signal) => doFetch(`${cfg.gammaBase}/markets?clob_token_ids=${encodeURIComponent(id)}`, { signal }));
+      // &closed=true is REQUIRED: the Gamma /markets endpoint defaults to OPEN markets only, so a resolved
+      // (finished) market comes back as [] without it — the settle path needs precisely the closed ones.
+      const res = await withTimeout(cfg.timeoutMs, (signal) => doFetch(`${cfg.gammaBase}/markets?clob_token_ids=${encodeURIComponent(id)}&closed=true`, { signal }));
       if (!res.ok) return;
       const rows = (await res.json()) as any[];
       const m = Array.isArray(rows) ? (rows.find((r) => parseJsonArray(r.clobTokenIds).includes(id)) ?? rows[0]) : null;

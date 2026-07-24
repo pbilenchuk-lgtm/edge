@@ -25,31 +25,21 @@ export async function GET(req: Request) {
       // entry relies on it — the resolver never runs in the sweep while candidates=0.
       if (url.searchParams.get("probe") === "1") {
         const R = await import("@/lib/repo");
-        const { loadPolymarketConfig } = await import("@/lib/polymarket");
-        // Find ONE real resolved football token, then hit several Gamma endpoint variants RAW so we can see
-        // exactly what the API returns (status + a body snippet) and fix the resolver against ground truth.
-        let token: string | null = null, label = "", match = "";
+        const { fetchTokenResolution, loadPolymarketConfig } = await import("@/lib/polymarket");
+        // Validate the PARSED resolver against real resolved football tokens: resolution.priceCents should
+        // sit ~0/~100 and agree with the match's actual final score. Read-only (no settle).
+        const samples: { token: string; label: string; match: string; score: string }[] = [];
         outer: for (const c of R.listCompetitions(db).filter((x) => x.sport_id === "football")) {
           for (const m of R.listMatches(db, c.id)) {
             if (m.state !== "finished") continue;
-            for (const mk of R.latestMarkets(db, m.id)) if (mk.external_ref) { token = mk.external_ref; label = mk.label; match = `${m.home}—${m.away}`; break outer; }
+            for (const mk of R.latestMarkets(db, m.id)) {
+              if (mk.external_ref) samples.push({ token: mk.external_ref, label: mk.label, match: `${m.home}—${m.away}`, score: `${m.score_home ?? "?"}:${m.score_away ?? "?"}` });
+              if (samples.length >= 8) break outer;
+            }
           }
         }
-        if (!token) return NextResponse.json({ ok: true, probe: "no finished football market with a token found" });
-        const poly = loadPolymarketConfig(process.env);
-        const variants = [
-          `${poly.gammaBase}/markets?clob_token_ids=${encodeURIComponent(token)}`,
-          `${poly.gammaBase}/markets?clob_token_ids=${encodeURIComponent(token)}&closed=true`,
-        ];
-        const probes: any[] = [];
-        for (const u of variants) {
-          try {
-            const r = await fetch(u);
-            const body = await r.text();
-            probes.push({ url: u, status: r.status, ok: r.ok, bodyLen: body.length, bodySnippet: body.slice(0, 600) });
-          } catch (e) { probes.push({ url: u, error: e instanceof Error ? e.message : String(e) }); }
-        }
-        return NextResponse.json({ ok: true, token, label, match, gammaEnabled: poly.enabled, probes });
+        const map = await fetchTokenResolution(loadPolymarketConfig(process.env), samples.map((s) => s.token));
+        return NextResponse.json({ ok: true, probe: samples.map((s) => ({ ...s, resolution: map[s.token] ?? null })) });
       }
       if (url.searchParams.get("run") === "1") {
         const { settlePmResolutionBets } = await import("@/lib/pmResolution");
