@@ -17,7 +17,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
-import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, reSettleSuspectBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries } from "./engine.js";
+import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, reSettleSuspectBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries, repairCategoryLeagues } from "./engine.js";
 import { settlePmResolutionBets } from "./pmResolution.js";
 import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
@@ -1997,6 +1997,10 @@ export async function runAutoCycle(
       discovered += items.length;
     }
   }
+  // R2(а): correct any category comp whose external_league disagrees with current
+  // inference (stale slug from before a mapping rule existed — e.g. Denmark stamped
+  // tur.1). Runs BEFORE enrich so the corrected board is queried the same tick.
+  stepSync("repairLeagueMap", () => repairCategoryLeagues(db, nowFn(deps)()).length, 0);
   // Drop duplicate fixtures (a Polymarket row + a market-less provider clone that
   // slipped past name-matching) BEFORE enrich, so provider data lands on the
   // surviving tradeable row, not the bare clone.
@@ -2013,6 +2017,17 @@ export async function runAutoCycle(
   // now-correct score so a Raków-class win becomes an honest record, not an eternal suspect. Unprovable ones
   // stay flagged for the PM-resolution settler below. Idempotent.
   stepSync("reSettleSuspects", () => reSettleSuspectBets(db, deps).regraded, 0);
+  // R2(б): AFTER enrich — surface funded football matches that are past kickoff yet still
+  // carry no provider bind (category_tier_mismatch / name-fold / dark board). Instead of a
+  // silent «?:?», persist the flagged set + emit a loud warn so it can't hide. The R2(в)
+  // network probe classifies the cause; this step just refuses silent blindness.
+  stepSync("blindFundedAudit", () => {
+    const now = nowFn(deps)(); const nowMs = Date.parse(now) || Date.now();
+    const blind = R.listBlindFundedFootball(db, { nowMs });
+    R.metaSet(db, "blind_funded_matches_recent", JSON.stringify({ at: now, total: blind.length, matches: blind.slice(0, 50) }), now);
+    if (blind.length) console.warn(`[blindFunded] ${blind.length} funded football match(es) past kickoff with NO provider bind — category_tier_mismatch/name-fold/dark board; see ?report=blind_funded`);
+    return blind.length;
+  }, 0);
   const labelFor = new Map<string, ReassessTrigger>();
   for (const e of enrich.newEvents) if (!labelFor.has(e.matchId)) labelFor.set(e.matchId, LIVE_TRIGGER_TYPES.has(e.type) ? (e.type as ReassessTrigger) : "price_move");
   const triggers = new Set(enrich.newEvents.map((e) => e.matchId));

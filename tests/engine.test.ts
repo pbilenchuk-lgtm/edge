@@ -6,7 +6,7 @@ import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { parseEspnEvent, parseEspnSummary, MockSportsProvider, eventType } from "../src/lib/sports.js";
 import {
-  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch, settleStaleOpenBets, settleMatch, reSettleSuspectBets, syncCompetitions, nameMatch, sameTeams,
+  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch, settleStaleOpenBets, settleMatch, reSettleSuspectBets, syncCompetitions, nameMatch, sameTeams, repairCategoryLeagues,
 } from "../src/lib/engine.js";
 import { matchContext } from "../src/lib/analysis.js";
 import type { SportsMatchStatus, SportsProvider, MatchDetail } from "../src/lib/sports.js";
@@ -1201,4 +1201,72 @@ test("P3 batch-7 nameMatch: club-name variants from the &probe audit bridge to E
   // no false matches: the aliases only bridge the intended pairs, distinctive tokens still gate
   assert.equal(nameMatch("AEK Lárnakas", "AEK Athens"), false, "AEK alone (a shared prefix) must not match");
   assert.equal(nameMatch("Tobyl FK", "Astana FK"), false);
+});
+
+test("R2(а) repairCategoryLeagues: a stale wrong slug (Denmark stamped tur.1) is corrected to den.1; a null is backfilled; a correct one is untouched; tennis is never touched", () => {
+  const db = openDb(":memory:");
+  R.upsertSport(db, "football", "Football");
+  R.upsertSport(db, "tennis", "Tennis");
+  // stale/wrong: "Denmark Superliga" inference is den.1, but stored tur.1 (pre-rule value)
+  R.upsertCompetition(db, { id: "pm-denmark-superliga", sport_id: "football", name: "Denmark Superliga", budget: 8000, external_league: "tur.1", created_at: "t" });
+  // null → should be backfilled to swe.1
+  R.upsertCompetition(db, { id: "pm-sweden-allsvenskan-2026", sport_id: "football", name: "Sweden Allsvenskan 2026", budget: 8000, external_league: null, created_at: "t" });
+  // already correct → left alone (no churn)
+  R.upsertCompetition(db, { id: "pm-brazil-serie-b", sport_id: "football", name: "Brazil Serie B", budget: 8000, external_league: "bra.2", created_at: "t" });
+  // tennis comp with a NON-ESPN scope slug → must never be "corrected"
+  R.upsertCompetition(db, { id: "pm-atp", sport_id: "tennis", name: "ATP", budget: 1000, external_league: "atp", created_at: "t" });
+
+  const fixes = repairCategoryLeagues(db, "2026-07-24T00:00:00Z");
+  const byComp = new Map(fixes.map((f) => [f.comp, f]));
+  assert.equal(byComp.get("pm-denmark-superliga")?.from, "tur.1");
+  assert.equal(byComp.get("pm-denmark-superliga")?.to, "den.1");
+  assert.ok(byComp.has("pm-sweden-allsvenskan-2026")); // null → swe.1 backfill counts as a fix
+  assert.equal(byComp.get("pm-sweden-allsvenskan-2026")?.to, "swe.1");
+  assert.ok(!byComp.has("pm-brazil-serie-b"), "already-correct comp not touched");
+  assert.ok(!byComp.has("pm-atp"), "tennis comp never touched");
+
+  const comps = new Map(R.listCompetitions(db).map((c) => [c.id, c.external_league]));
+  assert.equal(comps.get("pm-denmark-superliga"), "den.1", "Denmark now queries the Danish board");
+  assert.equal(comps.get("pm-atp"), "atp", "tennis scope slug preserved");
+
+  // idempotent: a second pass finds nothing
+  assert.equal(repairCategoryLeagues(db, "2026-07-24T00:01:00Z").length, 0);
+  // audit ring recorded the correction
+  const ring = JSON.parse(R.metaGet(db, "league_map_fixes_recent") ?? "[]");
+  assert.ok(ring.some((r: { comp: string; to: string }) => r.comp === "pm-denmark-superliga" && r.to === "den.1"));
+});
+
+test("R2(б) name-fold: Swedish å romanized 'aa' (Vasteraas) matches ESPN 'Västerås' so a covered swe.1 fixture binds", () => {
+  assert.ok(nameMatch("Vasteraas SK", "Västerås SK"), "Vasteraas ↔ Västerås");
+  assert.ok(nameMatch("Orgryte IS", "Örgryte IS"), "Orgryte ↔ Örgryte");
+  assert.ok(sameTeams("Vasteraas SK", "Orgryte IS", "Örgryte IS", "Västerås SK"), "reversed pair still matches");
+});
+
+test("R2(б) listBlindFundedFootball: funded football past kickoff with no match_live is flagged (no silent blindness); bound/tennis/pre-kickoff/no-budget are not", () => {
+  const db = openDb(":memory:");
+  R.upsertSport(db, "football", "Football");
+  R.upsertSport(db, "tennis", "Tennis");
+  R.upsertCompetition(db, { id: "pm-denmark-superliga", sport_id: "football", name: "Denmark Superliga", budget: 8000, external_league: "den.1", created_at: "t" });
+  R.upsertCompetition(db, { id: "pm-romania-1", sport_id: "football", name: "Romania 1", budget: 8000, external_league: null, created_at: "t" });
+  R.upsertCompetition(db, { id: "pm-atp", sport_id: "tennis", name: "ATP", budget: 1000, external_league: "atp", created_at: "t" });
+  R.upsertCompetition(db, { id: "pm-unfunded", sport_id: "football", name: "Some League", budget: 0, external_league: "eng.1", created_at: "t" });
+  const now = Date.parse("2026-07-24T22:00:00Z");
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const mk = (id: string, comp: string, koMs: number, live = false) => {
+    R.insertMatch(db, { id, competition_id: comp, home: `${id}H`, away: `${id}A`, state: "finished", lineup_out: false, kickoff_at: iso(koMs), minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id } as any);
+    if (live) R.upsertMatchLive(db, { match_id: id, espn_event_id: "e"+id, league: "den.1", espn_event_date: null, home_lineup: null, away_lineup: null, stats: null, updated_at: iso(koMs) } as any);
+  };
+  mk("blindDen", "pm-denmark-superliga", now - 3 * 3600_000);         // funded, past kickoff, no bind → flagged unbound
+  mk("blindRou", "pm-romania-1", now - 3 * 3600_000);                 // funded, no external_league → flagged no_league
+  mk("boundDen", "pm-denmark-superliga", now - 3 * 3600_000, true);   // has match_live → NOT flagged
+  mk("preDen", "pm-denmark-superliga", now + 3 * 3600_000);           // kickoff in future → NOT flagged
+  mk("tennisM", "pm-atp", now - 3 * 3600_000);                        // tennis → NOT flagged
+  mk("unfunded", "pm-unfunded", now - 3 * 3600_000);                  // budget 0 → NOT flagged
+
+  const blind = R.listBlindFundedFootball(db, { nowMs: now });
+  const ids = new Set(blind.map((b) => b.id));
+  assert.ok(ids.has("blindDen") && ids.has("blindRou"), "both blind funded football matches flagged");
+  assert.ok(!ids.has("boundDen") && !ids.has("preDen") && !ids.has("tennisM") && !ids.has("unfunded"), "bound/pre-kickoff/tennis/unfunded excluded");
+  assert.equal(blind.find((b) => b.id === "blindDen")?.reason, "unbound");
+  assert.equal(blind.find((b) => b.id === "blindRou")?.reason, "no_league");
 });

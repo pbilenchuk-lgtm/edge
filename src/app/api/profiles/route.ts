@@ -135,6 +135,25 @@ export async function GET(req: Request) {
       let pruned: unknown = null; try { pruned = JSON.parse(metaGet(db, "pruned_matches_recent") ?? "null"); } catch { pruned = null; }
       return NextResponse.json({ ok: true, pruned, note: "матчи со ставками не удаляются НИКОГДА. Завершённые без ставок теперь архив (хранятся до cap MATCH_LOG_ARCHIVE_MAX). Удаляются только: зависшие НЕ-завершённые импорты (старше окна) + сломанные-без-ставок (заброшенный мусор). Старые записи с причиной «finished … старше окна review» — из прежнего пруна до decouple." });
     }
+    // ?report=league_map_audit → R2(а): category-name↔league-id cross-mapping validation. `mismatches`
+    // = comps whose stored external_league disagrees with current inference (dry-run, NOT applied here —
+    // the lifecycle repairLeagueMap step applies them); `fixes` = the audit ring of corrections already made.
+    if (new URL(req.url).searchParams.get("report") === "league_map_audit") {
+      const { repairCategoryLeagues } = await import("@/lib/engine");
+      const { metaGet } = await import("@/lib/repo");
+      const mismatches = repairCategoryLeagues(db, new Date().toISOString(), { apply: false });
+      let fixes: unknown = []; try { fixes = JSON.parse(metaGet(db, "league_map_fixes_recent") ?? "[]"); } catch { fixes = []; }
+      return NextResponse.json({ ok: true, mismatches, fixes, note: "mismatches — расхождения имя-категории↔слаг-лиги по текущему инференсу (dry-run); применяет их шаг lifecycle repairLeagueMap. fixes — кольцо уже исправленных (from→to)." });
+    }
+    // ?report=blind_funded → R2(б): funded football matches that ran past kickoff with NO provider bind
+    // (не молчаливая слепота). `live` = current detection; `persisted` = the ring the lifecycle step wrote.
+    // reason: no_league (comp unmapped) vs unbound (league set, bind failed — tier/name/dark).
+    if (new URL(req.url).searchParams.get("report") === "blind_funded") {
+      const { listBlindFundedFootball, metaGet } = await import("@/lib/repo");
+      const live = listBlindFundedFootball(db, { nowMs: Date.now() });
+      let persisted: unknown = null; try { persisted = JSON.parse(metaGet(db, "blind_funded_matches_recent") ?? "null"); } catch { persisted = null; }
+      return NextResponse.json({ ok: true, live, persisted, note: "funded-футбол прошёл kickoff без привязки провайдера. no_league — комп без external_league; unbound — лига есть, но бинд не случился (tier/name-fold/тёмная доска). Причину по каждому классифицирует ?report=no_feed_coverage&probe=1." });
+    }
     // ?report=schedule_gaps → scheduler sleep-window monitor: recorded gaps (count, longest, last, recent list)
     // where the in-process loop was down and deterministic stops sat unmanaged / ran at the gap bottom on wake.
     if (new URL(req.url).searchParams.get("report") === "schedule_gaps") {
