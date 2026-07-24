@@ -47,6 +47,7 @@ import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
 import { resolvePmvShadowSignals } from "./tennisPmvShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates } from "./footballIntegrity.js";
+import { persistNoFeedCoverage } from "./noFeedCoverage.js";
 import { captureBookDepth } from "./bookDepthCapture.js";
 import { overreactionGate } from "./reassessGate.js";
 import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
@@ -2088,6 +2089,9 @@ export async function runAutoCycle(
     // row-cap undercuts SNAPSHOT_RETENTION_DAYS when scouting is dense). Read by ops / the sv_cohort report.
     try { const d = R.tennisSnapshotDepth(db); R.metaSet(db, "tennis_snapshot_depth", JSON.stringify(d), nowFn(deps)()); } catch { /* best-effort */ }
     return 0; }, 0); // snapshot retention + hard row-caps — a burst once bloated tennis_snapshots to 1.2 GB and starved boot
+  // P3/B2: persist the "blind pairs × league × day" coverage digest for the weekly report (the biggest
+  // underearning lump is blind euro pairs — make it DATA, tracked against the ≥85% link-rate target).
+  stepSync("noFeedCoverage", () => { persistNoFeedCoverage(db, nowFn(deps)(), { env: deps.env }); return 0; }, 0);
   // A match that passed kickoff but never went live (scout never saw the court / ESPN never delivered)
   // is stuck in upcoming/lineup — give it a terminal state so it leaves «Актуальные» within a tick
   // (voids its open bets, flags it «поломан» for the «Поломанные» bucket) instead of lingering 3 days.
