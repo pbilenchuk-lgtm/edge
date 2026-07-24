@@ -17,7 +17,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
-import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, reSettleSuspectBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries } from "./engine.js";
+import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, reSettleSuspectBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries, repairCategoryLeagues } from "./engine.js";
 import { settlePmResolutionBets } from "./pmResolution.js";
 import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
@@ -526,6 +526,11 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
     // до составов). Silently skip; it becomes eligible the tick after the provider publishes
     // lineups. A live match is never held (awaitingLineup is false once state=live).
     if (R.awaitingLineup(db, m, sportByComp.get(comp) ?? "football")) continue;
+    // R3 (e7) deep-tree economy: a BLIND football match (no provider bind — un-manageable in
+    // play) that no mode can enter — ft_blind off, or on but no FT-settled market to hold — gets
+    // NO pre-match analysis. Nothing is recorded, so it analyses fresh the tick it binds; a
+    // covered fixture normally binds before kickoff, so only genuinely-dark matches stay skipped.
+    if ((sportByComp.get(comp) ?? "football") === "football" && !hasLiveData(db, m) && !ftBlindEnterable(db, m, deps.env ?? process.env)) continue;
     const stage = m.lineup_out ? "post_lineup" : "pre_lineup";
     // Time gate: pre-match assessment only within ~12h of kickoff. Matches with no known
     // kickoff (e.g. an ESPN live match) aren't gated.
@@ -734,6 +739,16 @@ function ftBlindEligible(db: Database, m: Match, b: { origin?: string | null; ma
   if (!isFtSettledMarket(b.market_label)) return false;
   if (R.getMatchLive(db, m.id)) return false;     // has a provider row → covered, not blind
   return true;
+}
+// R3 (e7): would ANY entry mode be able to take a position on this blind match? Only ft_blind
+// can — and only when it's enabled AND the match exposes at least one FT-settled (final-score)
+// market to hold. If not, a blind football match is un-enterable by every mode, so the deep
+// pre-match tree is pure LLM waste (its proposals can only ever sit as un-fillable previews —
+// the FC Argeș case). Used to skip such matches' analysis entirely (regression-safe: no
+// assessment is written, so the match analyses fresh the moment it binds and hasLiveData flips).
+export function ftBlindEnterable(db: Database, m: Match, env: Record<string, string | undefined>): boolean {
+  if (!ftBlindConfig(env).enabled) return false;
+  return R.latestMarkets(db, m.id).some((mk) => isFtSettledMarket(mk.label));
 }
 export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<AutoEnterItem[]> {
   const now = nowFn(deps)();
@@ -1997,6 +2012,10 @@ export async function runAutoCycle(
       discovered += items.length;
     }
   }
+  // R2(а): correct any category comp whose external_league disagrees with current
+  // inference (stale slug from before a mapping rule existed — e.g. Denmark stamped
+  // tur.1). Runs BEFORE enrich so the corrected board is queried the same tick.
+  stepSync("repairLeagueMap", () => repairCategoryLeagues(db, nowFn(deps)()).length, 0);
   // Drop duplicate fixtures (a Polymarket row + a market-less provider clone that
   // slipped past name-matching) BEFORE enrich, so provider data lands on the
   // surviving tradeable row, not the bare clone.
@@ -2013,6 +2032,17 @@ export async function runAutoCycle(
   // now-correct score so a Raków-class win becomes an honest record, not an eternal suspect. Unprovable ones
   // stay flagged for the PM-resolution settler below. Idempotent.
   stepSync("reSettleSuspects", () => reSettleSuspectBets(db, deps).regraded, 0);
+  // R2(б): AFTER enrich — surface funded football matches that are past kickoff yet still
+  // carry no provider bind (category_tier_mismatch / name-fold / dark board). Instead of a
+  // silent «?:?», persist the flagged set + emit a loud warn so it can't hide. The R2(в)
+  // network probe classifies the cause; this step just refuses silent blindness.
+  stepSync("blindFundedAudit", () => {
+    const now = nowFn(deps)(); const nowMs = Date.parse(now) || Date.now();
+    const blind = R.listBlindFundedFootball(db, { nowMs });
+    R.metaSet(db, "blind_funded_matches_recent", JSON.stringify({ at: now, total: blind.length, matches: blind.slice(0, 50) }), now);
+    if (blind.length) console.warn(`[blindFunded] ${blind.length} funded football match(es) past kickoff with NO provider bind — category_tier_mismatch/name-fold/dark board; see ?report=blind_funded`);
+    return blind.length;
+  }, 0);
   const labelFor = new Map<string, ReassessTrigger>();
   for (const e of enrich.newEvents) if (!labelFor.has(e.matchId)) labelFor.set(e.matchId, LIVE_TRIGGER_TYPES.has(e.type) ? (e.type as ReassessTrigger) : "price_move");
   const triggers = new Set(enrich.newEvents.map((e) => e.matchId));

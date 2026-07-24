@@ -747,6 +747,36 @@ export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number; 
   return deleteMatches(db, doomed);
 }
 
+export interface BlindFundedMatch { id: string; match: string; comp: string; league: string | null; kickoff: string | null; state: string; reason: string }
+/**
+ * R2(б): funded FOOTBALL matches that are past kickoff yet carry NO match_live row —
+ * i.e. we went into (or through) the match blind on a league we pay to trade. This is the
+ * "не молчаливая слепота" surface: instead of a silent `?:?`, these get flagged so the
+ * category_tier_mismatch / name-fold / upstream-dark cause can be chased (the R2(в) probe
+ * classifies which). Bounded to a recent window so it's a rolling "recently blind" set.
+ * reason: `no_league` (comp has no external_league at all) vs `unbound` (league set, but no
+ * provider bind — tier mismatch, name mismatch, or a genuinely dark board).
+ */
+export function listBlindFundedFootball(db: Database, opts: { nowMs?: number; windowDays?: number; minPastMin?: number } = {}): BlindFundedMatch[] {
+  const nowMs = opts.nowMs ?? Date.now();
+  const loMs = nowMs - (opts.windowDays ?? 3) * 86400_000;
+  const hiMs = nowMs - (opts.minPastMin ?? 15) * 60_000; // kickoff at least this long ago
+  const rows = db.prepare(
+    `SELECT m.id AS id, m.home AS home, m.away AS away, m.state AS state, m.kickoff_at AS kickoff_at,
+            c.name AS comp, c.external_league AS league FROM matches m
+       JOIN competitions c ON c.id = m.competition_id
+       WHERE c.sport_id='football' AND c.budget > 0 AND m.kickoff_at IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM match_live ml WHERE ml.match_id = m.id)`,
+  ).all() as { id: string; home: string; away: string; state: string; kickoff_at: string | null; comp: string; league: string | null }[];
+  const out: BlindFundedMatch[] = [];
+  for (const r of rows) {
+    const k = r.kickoff_at && /^\d{4}-\d\d-\d\dT/.test(r.kickoff_at) ? Date.parse(r.kickoff_at) : NaN;
+    if (isNaN(k) || k < loMs || k > hiMs) continue;
+    out.push({ id: r.id, match: `${r.home}—${r.away}`, comp: r.comp, league: r.league, kickoff: r.kickoff_at, state: r.state, reason: r.league ? "unbound" : "no_league" });
+  }
+  return out.sort((a, b) => (b.kickoff ?? "").localeCompare(a.kickoff ?? ""));
+}
+
 /** Delete matches + all their child rows — NO transaction (caller owns one).
  *  node:sqlite has no nested transactions, so this is the reusable body that
  *  both deleteMatches and deleteCompetition run inside their own BEGIN/COMMIT. */

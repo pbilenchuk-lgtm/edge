@@ -191,9 +191,12 @@ export async function buildNoFeedProbe(db: Database, provider: SportsProvider, o
   const max = opts.max ?? 25;
   const loMs = nowMs - windowDays * 86_400_000, nearHiMs = nowMs + nearHours * 3_600_000;
 
-  // gather blind euro fixtures near kickoff
+  // gather blind fixtures near kickoff. R2(в): not only euro-cup pairs — ANY funded football comp
+  // (Romania rou.1, Peru per.1, domestic leagues) whose match went blind gets probed here, so its top
+  // provider candidates + rejection reason (name / not-on-board / no-league) are printed per match
+  // instead of a silent ?:?. Euro cups are funded too, so budget>0 subsumes them (OR keeps the intent explicit).
   const targets: { home: string; away: string; league: string; day: string; espnLeague: string | null }[] = [];
-  for (const comp of R.listCompetitions(db).filter((c) => c.sport_id === "football" && isEuroCupLeague(c.external_league))) {
+  for (const comp of R.listCompetitions(db).filter((c) => c.sport_id === "football" && (c.budget > 0 || isEuroCupLeague(c.external_league)))) {
     for (const m of R.listMatches(db, comp.id)) {
       const koMs = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
       if (!Number.isFinite(koMs) || koMs < loMs || koMs > nearHiMs) continue;

@@ -82,8 +82,8 @@ export async function GET(req: Request) {
     // ?report=sv_cohort → P1.1 measured comeback rate: retro (from snapshot history) + shadow (frozen
     // forward), binned by frozen favourite strength × ATP/WTA — the number that replaces the 0.5 constant.
     if (new URL(req.url).searchParams.get("report") === "sv_cohort") {
-      const { buildSvCohort } = await import("@/lib/tennisSetValueShadow");
-      return NextResponse.json({ ok: true, cohort: buildSvCohort(db) });
+      const { buildSvCohort, svCohortAccrual } = await import("@/lib/tennisSetValueShadow");
+      return NextResponse.json({ ok: true, cohort: buildSvCohort(db), accrual: svCohortAccrual(db, new Date().toISOString()) });
     }
     // ?report=sv_sizing_audit → per-profile set_value sizing on one fixed setup (P0.6): the knobs +
     // stake each profile would size, with an inversion flag if a "lite" profile outsizes "aggressive".
@@ -134,6 +134,45 @@ export async function GET(req: Request) {
       const { metaGet } = await import("@/lib/repo");
       let pruned: unknown = null; try { pruned = JSON.parse(metaGet(db, "pruned_matches_recent") ?? "null"); } catch { pruned = null; }
       return NextResponse.json({ ok: true, pruned, note: "матчи со ставками не удаляются НИКОГДА. Завершённые без ставок теперь архив (хранятся до cap MATCH_LOG_ARCHIVE_MAX). Удаляются только: зависшие НЕ-завершённые импорты (старше окна) + сломанные-без-ставок (заброшенный мусор). Старые записи с причиной «finished … старше окна review» — из прежнего пруна до decouple." });
+    }
+    // ?report=league_map_audit → R2(а): category-name↔league-id cross-mapping validation. `mismatches`
+    // = comps whose stored external_league disagrees with current inference (dry-run, NOT applied here —
+    // the lifecycle repairLeagueMap step applies them); `fixes` = the audit ring of corrections already made.
+    if (new URL(req.url).searchParams.get("report") === "league_map_audit") {
+      const { repairCategoryLeagues } = await import("@/lib/engine");
+      const { metaGet } = await import("@/lib/repo");
+      const mismatches = repairCategoryLeagues(db, new Date().toISOString(), { apply: false });
+      let fixes: unknown = []; try { fixes = JSON.parse(metaGet(db, "league_map_fixes_recent") ?? "[]"); } catch { fixes = []; }
+      return NextResponse.json({ ok: true, mismatches, fixes, note: "mismatches — расхождения имя-категории↔слаг-лиги по текущему инференсу (dry-run); применяет их шаг lifecycle repairLeagueMap. fixes — кольцо уже исправленных (from→to)." });
+    }
+    // ?report=weekly_selfreport → R4: the self-declaring weekly digest in ONE place — tennis link-rate,
+    // set_value cohort_accrual (forward tempo + ETA), the dry_fill_watch verdict, and the blind-funded-football
+    // count — so «гейты и когорты объявляют себя сами» next to link-rate instead of across five endpoints.
+    if (new URL(req.url).searchParams.get("report") === "weekly_selfreport") {
+      const { buildTennisLinkRate } = await import("@/lib/tennisScout");
+      const { svCohortAccrual } = await import("@/lib/tennisSetValueShadow");
+      const { buildDryFillWatch } = await import("@/lib/executor/dryFillWatch");
+      const { listBlindFundedFootball, metaGet } = await import("@/lib/repo");
+      const now = new Date().toISOString();
+      const lr = buildTennisLinkRate(db);
+      let dryFillWatch: unknown = null; try { dryFillWatch = buildDryFillWatch(db, process.env); } catch { dryFillWatch = null; }
+      let noFeed: unknown = null; try { noFeed = JSON.parse(metaGet(db, "blind_pairs_daily") ?? "null"); } catch { noFeed = null; }
+      return NextResponse.json({ ok: true, at: now,
+        linkRate: { inDiscoveryLinkPct: lr.inDiscoveryLinkPct, auto: lr.auto, listable: lr.inDiscoveryEvents, note: lr.note },
+        cohortAccrual: svCohortAccrual(db, now),
+        dryFillWatch,
+        blindFundedCount: listBlindFundedFootball(db, { nowMs: Date.parse(now) || Date.now() }).length,
+        noFeedDigest: noFeed,
+      });
+    }
+    // ?report=blind_funded → R2(б): funded football matches that ran past kickoff with NO provider bind
+    // (не молчаливая слепота). `live` = current detection; `persisted` = the ring the lifecycle step wrote.
+    // reason: no_league (comp unmapped) vs unbound (league set, bind failed — tier/name/dark).
+    if (new URL(req.url).searchParams.get("report") === "blind_funded") {
+      const { listBlindFundedFootball, metaGet } = await import("@/lib/repo");
+      const live = listBlindFundedFootball(db, { nowMs: Date.now() });
+      let persisted: unknown = null; try { persisted = JSON.parse(metaGet(db, "blind_funded_matches_recent") ?? "null"); } catch { persisted = null; }
+      return NextResponse.json({ ok: true, live, persisted, note: "funded-футбол прошёл kickoff без привязки провайдера. no_league — комп без external_league; unbound — лига есть, но бинд не случился (tier/name-fold/тёмная доска). Причину по каждому классифицирует ?report=no_feed_coverage&probe=1." });
     }
     // ?report=schedule_gaps → scheduler sleep-window monitor: recorded gaps (count, longest, last, recent list)
     // where the in-process loop was down and deterministic stops sat unmanaged / ran at the gap bottom on wake.

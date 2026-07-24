@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { recordSvShadowSignal, resolveSvShadowSignals, buildSvShadowCalibration, svRetroCohort, buildSvCohort, set2PathCoverage, SV_SHADOW_EPOCH } from "../src/lib/tennisSetValueShadow.js";
+import { recordSvShadowSignal, resolveSvShadowSignals, buildSvShadowCalibration, svRetroCohort, buildSvCohort, set2PathCoverage, svCohortAccrual, SV_SHADOW_EPOCH } from "../src/lib/tennisSetValueShadow.js";
 
 const TRIG = "2026-07-22T18:14:00.000Z";  // set-2 trigger time
 const NOW = "2026-07-22T19:30:00.000Z";
@@ -170,4 +170,45 @@ test("T5 set2PathCoverage / calibration: a set-2 path holed by a scheduler sleep
   assert.equal(covSparse.sparse, true, "too few set-2 snapshots → sparse");
   const cal = buildSvShadowCalibration(db);
   assert.equal(cal.counts.sparsePath, 1, "exactly the sparse row is flagged");
+});
+
+test("R1 frozen-src provenance: a late-bound match (first priced snap already mid-match) is tagged first_snapshot, quarantined from the verdict, and counted in the bias share; a true prematch anchor stays in", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "pm-wta", sport_id: "tennis", name: "WTA", budget: 0, external_league: null, created_at: "t" });
+  const mkSnap = (mid: string) => (o: any) => R.insertTennisSnapshot(db, { event_key: mid, provider: "apitennis", p1: "Fav", p2: "Opp", tournament: "WTA Palermo", event_type: "WTA Singles", game_points: null, server: null, pm_match_id: mid, pm_mid_cents: null, raw: "{}", ...o } as any);
+  const addMatch = (mid: string) => R.insertMatch(db, { id: mid, competition_id: "pm-wta", home: "Fav", away: "Opp", state: "finished", lineup_out: true, kickoff_at: "t", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: mid } as any);
+
+  // GOOD: first PRICED snapshot is a true prematch anchor (sets 0-0, fav 72¢), fav loses set 1, comes back 2-1
+  addMatch("good"); const g = mkSnap("good");
+  g({ batch_at: "2026-07-22T16:50:00Z", live: 1, status: "Set 1", sets_p1: 0, sets_p2: 0, set_num: 0, games_p1: 0, games_p2: 0, pm_p1_cents: 72, pm_p2_cents: 28 });
+  g({ batch_at: "2026-07-22T17:40:00Z", live: 1, status: "Set 1", sets_p1: 0, sets_p2: 1, set_num: 1, games_p1: 5, games_p2: 7, pm_p1_cents: 35, pm_p2_cents: 65 });
+  g({ batch_at: "2026-07-22T19:10:00Z", live: 0, status: "Finished", sets_p1: 2, sets_p2: 1, set_num: 3, games_p1: 6, games_p2: 4, pm_p1_cents: 100, pm_p2_cents: 0 });
+
+  // LATE: scout bound AFTER set 1 — the first PRICED snapshot already shows sets 0-1 (fav still the higher
+  // price at 62¢, but the anchor is no longer a true prematch mark). fav loses set 1, comes back 2-1.
+  addMatch("late"); const l = mkSnap("late");
+  l({ batch_at: "2026-07-22T17:45:00Z", live: 1, status: "Set 2", sets_p1: 0, sets_p2: 1, set_num: 2, games_p1: 2, games_p2: 3, pm_p1_cents: 62, pm_p2_cents: 38 });
+  l({ batch_at: "2026-07-22T18:30:00Z", live: 1, status: "Set 2", sets_p1: 0, sets_p2: 1, set_num: 2, games_p1: 4, games_p2: 5, pm_p1_cents: 66, pm_p2_cents: 34 });
+  l({ batch_at: "2026-07-22T19:10:00Z", live: 0, status: "Finished", sets_p1: 2, sets_p2: 1, set_num: 3, games_p1: 6, games_p2: 4, pm_p1_cents: 100, pm_p2_cents: 0 });
+
+  const retro = svRetroCohort(db);
+  assert.equal(retro.find((r) => r.prematchCents === 72)?.frozenSrc, "prematch");
+  assert.equal(retro.find((r) => r.prematchCents === 62)?.frozenSrc, "first_snapshot");
+
+  const cohort = buildSvCohort(db);
+  assert.ok(cohort.frozenSrcShare > 0, "bias share reflects the late-bound row");
+  assert.equal(cohort.firstSnapQuarantined, 1);
+  // the 72¢ prematch row lands in the 70-80 verdict bin; the 62¢ first_snapshot row is quarantined OUT
+  assert.ok(cohort.bins.some((b) => /70-80/.test(b.label)), "true-prematch fav feeds a verdict bin");
+  assert.ok(!cohort.bins.some((b) => /60-70/.test(b.label)), "the depressed late 62¢ price does NOT feed a verdict bin");
+
+  // band5560 readiness shape (no 55-60 rows here → not ready)
+  assert.equal(cohort.band5560Promotable.ready, false);
+  assert.equal(cohort.band5560Promotable.n, 0);
+
+  const acc = svCohortAccrual(db, "2026-07-25T00:00:00Z");
+  assert.equal(acc.verdictBinN, 40);
+  assert.ok(acc.biggestBinN >= 1);
+  assert.ok(typeof acc.note === "string" && acc.note.length > 0);
 });

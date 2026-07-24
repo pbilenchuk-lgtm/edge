@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase, migrateRetireFable } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision, winsOnEventOccurrence } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure, stopContradictsGameState, terminalProtectiveHold, throttleZombieLog } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure, stopContradictsGameState, terminalProtectiveHold, throttleZombieLog, ftBlindEnterable, isFtSettledMarket } from "../src/lib/lifecycle.js";
 import { analyzeMatch, runStrategists } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
@@ -2140,4 +2140,27 @@ test("Z4 (batch-5): reassess audit — storm composition + conservative at-risk 
   assert.equal(pm.discretionaryExits, 1, "only the «стратег:» exit is discretionary");
   assert.equal(pm.atRiskExits, 1, "the discretionary exit near a 'time' reassessment is at-risk; the deterministic one is not");
   assert.equal(a.verdict, "not_safe", "any at-risk discretionary exit → do not enable");
+});
+
+test("R3 ftBlindEnterable: gates the deep-tree analysis skip — ft off → never enterable; ft on needs an FT-settled market", () => {
+  const db = openDb(":memory:");
+  R.upsertSport(db, "football", "Football");
+  R.upsertCompetition(db, { id: "pm-romania-1", sport_id: "football", name: "Romania 1", budget: 8000, external_league: "rou.1", created_at: "t" });
+  const mid = "m-blind";
+  R.insertMatch(db, { id: mid, competition_id: "pm-romania-1", home: "Argeș", away: "Petrolul", state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Argeș Over 0.5", price: 50, ai_prob: null, liquidity: "1000", external_ref: "tok1", snapshot_at: "t", is_closing: false });
+
+  // ft OFF → never enterable regardless of markets
+  assert.equal(ftBlindEnterable(db, R.getMatch(db, mid)!, { FT_BLIND_ENABLED: "false" }), false);
+  // ft ON + an FT-settled (final-score) market present → enterable (must NOT skip analysis)
+  assert.equal(ftBlindEnterable(db, R.getMatch(db, mid)!, { FT_BLIND_ENABLED: "true" }), true);
+  // sanity on the market classifier: a progression market is NOT FT-settled
+  assert.equal(isFtSettledMarket("Argeș Over 0.5"), true);
+  assert.equal(isFtSettledMarket("FC Petrolul to Advance"), false);
+
+  // ft ON but the ONLY market is a non-FT (progression) one → not enterable → skip still applies
+  const mid2 = "m-blind2";
+  R.insertMatch(db, { id: mid2, competition_id: "pm-romania-1", home: "X", away: "Y", state: "upcoming", lineup_out: false, kickoff_at: null, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid2 });
+  R.insertMarket(db, { id: R.uid(), match_id: mid2, label: "Y to Advance", price: 50, ai_prob: null, liquidity: "1000", external_ref: "tok2", snapshot_at: "t", is_closing: false });
+  assert.equal(ftBlindEnterable(db, R.getMatch(db, mid2)!, { FT_BLIND_ENABLED: "true" }), false);
 });

@@ -13,7 +13,7 @@
 
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
-import type { Bet, Match, MatchState } from "./types.js";
+import type { Bet, Competition, Match, MatchState } from "./types.js";
 import type { SportsMatchStatus } from "./sports.js";
 import { reassessNarrative, effectiveEnv } from "./llm.js";
 import { settleBet, resolveFootballMarket, matchPhase, isResolutionSettle } from "./settlement.js";
@@ -774,10 +774,55 @@ function ensureCategoryComp(db: Database, sport: string, series: string | null, 
   const existing = R.listCompetitions(db).find((c) => c.id === id);
   if (!existing) {
     R.upsertCompetition(db, { id, sport_id: sport, name: SERIES_RU[slug] ?? series ?? slug, budget: 0, external_league: league, created_at: now });
-  } else if (league && !existing.external_league) {
-    R.setCompetitionLeague(db, id, league); // backfill without touching budget/shares
+  } else if (league && league !== existing.external_league) {
+    // R2(а): correct a STALE/WRONG slug, not just fill a null. A comp created before a
+    // LEAGUE_NAME_ESPN rule existed keeps the old (wrong) inference forever otherwise —
+    // e.g. "Denmark Superliga" was stamped tur.1 before the den.1 rule landed, so its
+    // matches queried the Turkish board and went blind on a league ESPN fully covers.
+    // Only overwrite when the fresh inference is confident (non-null) and disagrees;
+    // never clear a stored league to null. Self-limiting: once fixed, want === stored.
+    const from = existing.external_league;
+    R.setCompetitionLeague(db, id, league);
+    recordLeagueMapFix(db, { comp: id, name: existing.name, from, to: league }, now);
   }
   return id;
+}
+
+/** The ESPN league an EXISTING category comp should map to, recomputed from its own
+ *  name + id-slug (mirrors espnLeagueForSeries at creation, plus a de-hyphen fallback
+ *  so a slug like "denmark-superliga" still resolves via the name rules). */
+function reinferCompLeague(comp: Competition): string | null {
+  const slug = comp.id.replace(/^pm-/, "");
+  return espnLeagueForSeries(comp.name, slug) ?? inferEspnLeague(slug.replace(/[-_]+/g, " "));
+}
+
+export interface LeagueMapFix { comp: string; name: string; from: string | null; to: string }
+/** Append a corrected league-map to the audit ring (bounded), so the profiles report can
+ *  show which comps were repaired and from what. */
+function recordLeagueMapFix(db: Database, fix: LeagueMapFix, now: string): void {
+  let ring: (LeagueMapFix & { at: string })[] = [];
+  try { ring = JSON.parse(R.metaGet(db, "league_map_fixes_recent") ?? "[]"); } catch { ring = []; }
+  ring.unshift({ ...fix, at: now });
+  R.metaSet(db, "league_map_fixes_recent", JSON.stringify(ring.slice(0, 50)), now);
+}
+
+/**
+ * R2(а): sweep every FOOTBALL category comp and correct any external_league that
+ * disagrees with the current inference — catches comps stamped before a mapping rule
+ * existed and that aren't re-discovered often enough for ensureCategoryComp to self-heal.
+ * Never clears a league to null (inference-unknown ⇒ leave the stored value alone).
+ * `apply:false` = dry-run (audit only). Returns the discrepancies found.
+ */
+export function repairCategoryLeagues(db: Database, now: string, opts: { apply?: boolean } = {}): LeagueMapFix[] {
+  const fixes: LeagueMapFix[] = [];
+  for (const c of R.listCompetitions(db)) {
+    if (c.sport_id !== "football") continue;
+    const want = reinferCompLeague(c);
+    if (!want || want === c.external_league) continue;
+    fixes.push({ comp: c.id, name: c.name, from: c.external_league ?? null, to: want });
+    if (opts.apply !== false) { R.setCompetitionLeague(db, c.id, want); recordLeagueMapFix(db, { comp: c.id, name: c.name, from: c.external_league ?? null, to: want }, now); }
+  }
+  return fixes;
 }
 
 export interface DiscoverItem { sport: string; match: string; created: boolean; markets: number }
@@ -955,6 +1000,10 @@ const TEAM_EXONYMS: Record<string, string> = {
   // Polymarket/ESPN spelling to the OTHER's so the distinctive-token subset gate bridges them (no false match:
   // the remaining tokens stay distinct). larnakas↔larnaca, polissya↔polissia, tobyl↔tobol, varteks↔varazdin.
   larnakas: "larnaca", polissya: "polissia", tobyl: "tobol", varteks: "varazdin",
+  // R2(б) batch-8: Swedish å romanized as "aa" on Polymarket ("Vasteraas") but folded from å
+  // to a single "a" on ESPN ("Västerås" → "vasteras"), so the token never matched and a fully
+  // ESPN-covered swe.1 fixture (Örgryte at Västerås) went blind. Map the doubled-vowel spelling.
+  vasteraas: "vasteras",
 };
 function teamTokens(name: string): Set<string> {
   // Keep tokens ≥3 chars, OR short ones that carry a digit — esports orgs are
