@@ -932,7 +932,8 @@ const TEAM_STOPWORDS = new Set(["fc", "afc", "sc", "cf", "ac", "as", "cd", "sv",
 function foldLetters(s: string): string {
   return s
     .replace(/ø/g, "o").replace(/æ/g, "ae").replace(/œ/g, "oe").replace(/ß/g, "ss")
-    .replace(/đ/g, "d").replace(/ð/g, "d").replace(/ł/g, "l").replace(/þ/g, "th").replace(/ħ/g, "h").replace(/ı/g, "i");
+    .replace(/đ/g, "d").replace(/ð/g, "d").replace(/ł/g, "l").replace(/þ/g, "th").replace(/ħ/g, "h").replace(/ı/g, "i")
+    .replace(/ə/g, "a"); // schwa (Azerbaijani) — NFD leaves it intact; "Zirə" → "Zira" (P3 batch-7)
 }
 // F1: city EXONYMS — Polymarket carries the native spelling, ESPN/StatPal the English one, and diacritic
 // folding alone can't bridge a translated city ("Wien"→"Vienna", "Barysaŭ"→"Borisov"). Without this the
@@ -950,6 +951,10 @@ const TEAM_EXONYMS: Record<string, string> = {
   athina: "athens", bucuresti: "bucharest", kobenhavn: "copenhagen",
   milano: "milan", torino: "turin", genova: "genoa", roma: "rome",
   sevilla: "seville", venezia: "venice", firenze: "florence",
+  // P3 batch-7: club-name variants surfaced by the &probe audit against ESPN's actual spelling. Each maps a
+  // Polymarket/ESPN spelling to the OTHER's so the distinctive-token subset gate bridges them (no false match:
+  // the remaining tokens stay distinct). larnakas↔larnaca, polissya↔polissia, tobyl↔tobol, varteks↔varazdin.
+  larnakas: "larnaca", polissya: "polissia", tobyl: "tobol", varteks: "varazdin",
 };
 function teamTokens(name: string): Set<string> {
   // Keep tokens ≥3 chars, OR short ones that carry a digit — esports orgs are
