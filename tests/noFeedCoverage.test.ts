@@ -93,6 +93,35 @@ test("noFeedCoverage: a fixture with no Polymarket market is NOT a link candidat
   assert.equal(r.overall.total, 0, "no candidates: one has no market, one is out of window");
 });
 
+test("noFeedCoverage: near-kickoff slice strips future fixtures ESPN hasn't boarded yet", () => {
+  const db = seed();
+  comp(db, "ucl", "uefa.champions");
+  // an imminent blind pair (kicks off in 12h — ESPN should have it) and a far-future blind pair (+10 days).
+  match(db, "soon", "ucl", "A", "B", "2026-07-25T00:00:00Z");         // +12h → near
+  match(db, "far", "ucl", "C", "D", "2026-08-03T12:00:00Z");          // +10d → future noise
+  const r = buildNoFeedCoverage(db, { nowMs: NOW_MS });
+  assert.equal(r.euro.total, 2, "full window counts both (link-rate deflated by the future pair)");
+  assert.equal(r.nearKickoff.euro.total, 1, "near-kickoff counts only the imminent fixture");
+  assert.equal(r.nearKickoff.euro.blind, 1);
+  assert.equal(r.nearKickoff.withinHours, 48);
+});
+
+test("noFeedCoverage: bind rejections surface with a 1–3 day gap flagged as a possible reschedule", () => {
+  const db = seed();
+  comp(db, "ucl", "uefa.champions");
+  match(db, "m1", "ucl", "A", "B");
+  R.metaSet(db, "fixture_bind_rejections", JSON.stringify({ at: NOW, rejects: [
+    { home: "Raków", away: "Karabakh", recordKickoff: NOW, espnDate: "2026-07-26T12:00:00Z", gapHours: 48, league: "uefa.champions", reason: "date_gap" },     // +2d → reschedule-suspect
+    { home: "Bohemian", away: "Ballkani", recordKickoff: NOW, espnDate: "2026-07-31T12:00:00Z", gapHours: 168, league: "uefa.champions", reason: "date_gap" }, // +7d → genuine other leg
+  ] }), NOW);
+  const r = buildNoFeedCoverage(db, { nowMs: NOW_MS });
+  assert.equal(r.bindRejections.length, 2);
+  const rakow = r.bindRejections.find((x) => x.home === "Raków")!;
+  const boh = r.bindRejections.find((x) => x.home === "Bohemian")!;
+  assert.equal(rakow.possibleReschedule, true, "a +2d gap could be a real match the gate over-tightly cut");
+  assert.equal(boh.possibleReschedule, false, "a +7d gap is a genuine other leg — correctly rejected");
+});
+
 test("persistNoFeedCoverage: writes the blind_pairs_daily digest", () => {
   const db = seed();
   comp(db, "ucl", "uefa.champions");

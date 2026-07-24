@@ -997,6 +997,14 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
   // same-match timezone jitter yet catches a 2-day reschedule and a week-apart second leg.
   const LEG_GAP_MS = Math.max(1, Number(deps.env?.FOOTBALL_LEG_GAP_HOURS ?? process.env.FOOTBALL_LEG_GAP_HOURS ?? 30)) * 3_600_000;
   const legTally = { dateGap: 0, suffix: 0, orient: 0 };
+  // P3-audit (batch-7): capture each bind rejection so the tally's 17 date-gaps can be INSPECTED — a gap of a
+  // week is a genuine other-leg; a gap of 1–3 days is a possible RESCHEDULE the gate may be over-tightly cutting.
+  const legRejects: { home: string; away: string; recordKickoff: string | null; espnDate: string | null; gapHours: number | null; league: string; reason: string }[] = [];
+  const recordReject = (home: string, away: string, ko: string | null, espn: string | null, league: string, reason: string) => {
+    const koMs = ko ? Date.parse(ko) : NaN, evMs = espn ? Date.parse(espn) : NaN;
+    const gapHours = Number.isFinite(koMs) && Number.isFinite(evMs) ? Math.round(Math.abs(evMs - koMs) / 3_600_000) : null;
+    if (legRejects.length < 60) legRejects.push({ home, away, recordKickoff: ko, espnDate: espn, gapHours, league, reason });
+  };
   const qualBase = (lg: string | null | undefined) => String(lg ?? "").replace(/_qual$/i, "");
   // Build the (sport, league) scoreboards to poll. Football (and any other
   // ESPN-linked competition) contributes its mapped league; the provider also
@@ -1042,6 +1050,7 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
         if (twoLeg.length) {
           legTally.dateGap++;
           const c0 = twoLeg[0];
+          recordReject(c0.home, c0.away, c0.kickoff_at, s.date ?? null, league, "two_leg_no_datematch");
           console.warn(`[enrich] fixture_leg_mismatch two_leg_no_datematch: «${c0.home}–${c0.away}» запись ${c0.kickoff_at ?? "—"} vs ESPN ${s.date ?? "—"} (${league}) — НЕ привязано (двухматчевая пара требует совпадения даты ≤${Math.round(LEG_GAP_MS / 3_600_000)}ч)`);
           continue; // never team-name-bind a two-leg fixture without a positive date match
         }
@@ -1050,6 +1059,7 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
           if (!m) {
             legTally.dateGap++;
             const c0 = candidates[0];
+            recordReject(c0.home, c0.away, c0.kickoff_at, s.date ?? null, league, "date_gap");
             console.warn(`[enrich] fixture_leg_mismatch date_gap: «${c0.home}–${c0.away}» запись ${c0.kickoff_at} vs ESPN ${s.date} (${league}) — НЕ привязано (чужой круг/перенос)`);
             continue; // the date says this event is not any of these records — never wire a foreign leg
           }
@@ -1068,6 +1078,7 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       const mirrored = nameMatch(m.home, s.away) && nameMatch(m.away, s.home);
       if (straight === mirrored) {
         legTally.orient++;
+        recordReject(m.home, m.away, m.kickoff_at, s.date ?? null, league, "ambiguous_orientation");
         console.warn(`[enrich] ambiguous_orientation «${m.home}–${m.away}» vs ESPN «${s.home}–${s.away}» (${league}) — НЕ привязано (ориентация счёта неоднозначна)`);
         continue;
       }
@@ -1114,6 +1125,8 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
   // P0.1: surface the leg-mismatch tally (blocking date_gap vs informational suffix) for ops/audit.
   if (legTally.dateGap || legTally.suffix || legTally.orient) {
     try { R.metaSet(db, "fixture_leg_mismatch", JSON.stringify({ ...legTally, at: now }), now); } catch { /* never block on a marker */ }
+    // P3-audit: persist the per-rejection detail (bounded) so the tally can be inspected for false rejects.
+    try { if (legRejects.length) R.metaSet(db, "fixture_bind_rejections", JSON.stringify({ at: now, rejects: legRejects }), now); } catch { /* best-effort */ }
   }
   return out;
 }
