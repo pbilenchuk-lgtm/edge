@@ -412,6 +412,38 @@ export async function listSportEvents(
   return [...byId.values()];
 }
 
+/** Resolution state for a set of CLOB tokens, read from Gamma — the source that RETAINS the resolved
+ *  `outcomePrices` and the `closed` flag even after a market is archived (CLOB /price returns nothing for a
+ *  redeemed token, so it can't back a historical backfill). Best-effort, hard-timeout per token, capped, and
+ *  parallel: a failed/slow/unknown token is simply ABSENT from the map (the caller treats absence as
+ *  unresolved). Used only by the PM-resolution settle path. */
+export async function fetchTokenResolution(
+  cfg: PolymarketConfig,
+  tokenIds: string[],
+  deps: FetchDeps = {},
+  cap = 60,
+): Promise<Record<string, { priceCents: number | null; closed: boolean }>> {
+  const out: Record<string, { priceCents: number | null; closed: boolean }> = {};
+  if (!cfg.enabled || !tokenIds.length) return out;
+  const doFetch = deps.fetchImpl ?? fetch;
+  await Promise.all(tokenIds.slice(0, cap).map(async (id) => {
+    try {
+      const res = await withTimeout(cfg.timeoutMs, (signal) => doFetch(`${cfg.gammaBase}/markets?clob_token_ids=${encodeURIComponent(id)}`, { signal }));
+      if (!res.ok) return;
+      const rows = (await res.json()) as any[];
+      const m = Array.isArray(rows) ? (rows.find((r) => parseJsonArray(r.clobTokenIds).includes(id)) ?? rows[0]) : null;
+      if (!m) return;
+      const toks = parseJsonArray(m.clobTokenIds);
+      const prices = parseJsonArray(m.outcomePrices);
+      const idx = toks.indexOf(id);
+      const raw = idx >= 0 ? prices[idx] : undefined;
+      const p = raw != null && raw !== "" ? Number(raw) : NaN;
+      out[id] = { priceCents: Number.isFinite(p) ? round1(p * 100) : null, closed: m.closed === true || m.closed === "true" };
+    } catch { /* absent → the caller reads it as unresolved */ }
+  }));
+  return out;
+}
+
 /** Direct lookup by event slug (e.g. "atp-alcaraz-sinner-2026-07-04"). */
 export async function fetchEventBySlug(
   cfg: PolymarketConfig,

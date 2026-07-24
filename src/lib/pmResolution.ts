@@ -28,7 +28,7 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { settleBet } from "./settlement.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
-import { loadPolymarketConfig, getQuotes } from "./polymarket.js";
+import { loadPolymarketConfig, fetchTokenResolution } from "./polymarket.js";
 
 export interface PmResolutionConfig {
   hiCents: number;        // ≥ this = the winning side
@@ -191,36 +191,12 @@ function suspectLog(db: Database, c: { betId: string; matchId: string }, t: Toke
   R.insertTradeLog(db, { id: R.uid(), match_id: c.matchId, strategy_id: b.strategy_id, minute: "финал", type: "skip", text: `${b.market_label}: resolution_orientation_suspect — токен ${t.priceCents ?? "?"}¢ и комплемент ${comp?.priceCents ?? "?"}¢ не образуют ~0/~100 пары; НЕ сеттлю, разбор вручную`, created_at: now });
 }
 
-/** Default resolver: live prices via getQuotes; the Gamma closed flag is read best-effort per market (unknown
- *  → false, which safely routes to the conservative stable-price fallback). */
+/** Default resolver: Gamma market state per token (closed flag + resolved outcomePrices) — the source that
+ *  survives archival, so a historical backfill resolves correctly. Bounded + hard-timeout inside
+ *  fetchTokenResolution; an unknown token is absent from the map → the caller reads it as unresolved. */
 function defaultResolveTokens(deps: EngineDeps): ResolveTokensFn {
   return async (tokenIds: string[]) => {
-    const out: Record<string, TokenResolution> = {};
-    if (!tokenIds.length) return out;
     const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
-    const quotes = await getQuotes(tokenIds.map((tokenId) => ({ tokenId })), poly, { fetchImpl: deps.fetchImpl, now: deps.now });
-    const closed = await fetchClosedFlags(tokenIds, poly, deps).catch(() => ({} as Record<string, boolean>));
-    for (const q of quotes) out[q.tokenId] = { priceCents: q.priceCents, closed: closed[q.tokenId] === true };
-    for (const id of tokenIds) if (!out[id]) out[id] = { priceCents: null, closed: closed[id] === true };
-    return out;
+    return fetchTokenResolution(poly, tokenIds, { fetchImpl: deps.fetchImpl });
   };
-}
-
-/** Best-effort Gamma read of the `closed` flag per CLOB token. Any failure → empty map (→ closed:false → the
- *  fallback stable-price path safely resolves). Kept isolated so the uncertain endpoint can never break settle. */
-async function fetchClosedFlags(tokenIds: string[], poly: ReturnType<typeof loadPolymarketConfig>, deps: EngineDeps): Promise<Record<string, boolean>> {
-  const out: Record<string, boolean> = {};
-  if (!poly.enabled || !tokenIds.length) return out;
-  const doFetch = deps.fetchImpl ?? fetch;
-  // Gamma exposes markets by CLOB token id; a resolved market carries closed:true. Query in small batches.
-  for (const id of tokenIds) {
-    try {
-      const r = await doFetch(`${poly.gammaBase}/markets?clob_token_ids=${encodeURIComponent(id)}`);
-      if (!r.ok) continue;
-      const rows = (await r.json()) as any[];
-      const m = Array.isArray(rows) ? rows[0] : null;
-      if (m && (m.closed === true || m.closed === "true")) out[id] = true;
-    } catch { /* leave unknown → false */ }
-  }
-  return out;
 }

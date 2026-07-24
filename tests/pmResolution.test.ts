@@ -105,3 +105,16 @@ test("a finished fixture WITH our score is NOT touched (the normal settleMatch p
   assert.equal(r.candidates, 0, "a scored fixture is not a PM-only candidate");
   assert.equal(R.getBet(db, "sc1")!.status, "open", "left for settleMatch");
 });
+
+import { fetchTokenResolution, loadPolymarketConfig } from "../src/lib/polymarket.js";
+
+test("fetchTokenResolution: parses Gamma closed flag + resolved outcomePrices per token; failure → absent", async () => {
+  const poly = loadPolymarketConfig({ POLYMARKET_ENABLED: "true" });
+  const rows = [{ clobTokenIds: JSON.stringify(["TA", "TB"]), outcomePrices: JSON.stringify(["1", "0"]), closed: true }];
+  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => rows })) as any;
+  const r = await fetchTokenResolution(poly, ["TA", "TB"], { fetchImpl });
+  assert.deepEqual(r.TA, { priceCents: 100, closed: true }, "outcome[0] token → its resolved price");
+  assert.deepEqual(r.TB, { priceCents: 0, closed: true }, "outcome[1] token → the complement price");
+  const r2 = await fetchTokenResolution(poly, ["TZ"], { fetchImpl: (async () => ({ ok: false, status: 500, json: async () => [] })) as any });
+  assert.equal(r2.TZ, undefined, "a failed fetch leaves the token absent (unresolved)");
+});
