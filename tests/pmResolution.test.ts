@@ -106,6 +106,41 @@ test("a finished fixture WITH our score is NOT touched (the normal settleMatch p
   assert.equal(R.getBet(db, "sc1")!.status, "open", "left for settleMatch");
 });
 
+// P2 [batch-7]: a state_suspect FREEZE (F2 premature/unflagged finish) — its score, if any, is untrusted, so
+// once aged past the grace window it joins the PM-resolution queue. Athletic–São Bernardo (Draw-No hanging) is this.
+function seedFrozenSuspect(db: any, opts: { betId: string; token: string; token2?: string; kickoffAt: string; scoreHome?: number | null; scoreAway?: number | null }) {
+  const comp = R.listCompetitions(db).find((c: any) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Athletic", away: "São Bernardo", state: "finished", lineup_out: true, kickoff_at: opts.kickoffAt, minute: 46, score_home: opts.scoreHome ?? null, score_away: opts.scoreAway ?? null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid } as any);
+  R.metaSet(db, `state_suspect:${mid}`, "finish_premature_46", opts.kickoffAt); // F2 freeze
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Draw — No", price: 60, ai_prob: 0.6, liquidity: "2000", external_ref: opts.token, token_second: opts.token2 ?? null, snapshot_at: "t", is_closing: false } as any);
+  R.insertBet(db, { id: opts.betId, match_id: mid, strategy_id: strat.id, risk_profile_id: "medium", market_label: "Draw — No", status: "open", proposed_price: 60, entry_price: 60, current_price: 60, closing_price: null, ai_prob: 0.6, stake: 50, rationale: "ft", entered_minute: "предматч", result: null, payout: null, created_at: opts.kickoffAt } as any);
+  return mid;
+}
+
+test("P2: an aged state_suspect freeze (WITH a premature score) joins the PM-resolution queue and settles", async () => {
+  const db = openDb(":memory:"); seedDatabase(db);
+  // premature 1:0 frozen at 46'; kickoff 2 days ago → well past the 6h grace window.
+  seedFrozenSuspect(db, { betId: "fs1", token: "TW", token2: "TL", kickoffAt: "2026-07-22T16:00:00Z", scoreHome: 1, scoreAway: 0 });
+  const r = await settlePmResolutionBets(db, { now: () => "2026-07-24T16:00:00Z", resolveTokens: resolver({ TW: { priceCents: 100, closed: true }, TL: { priceCents: 0, closed: true } }) });
+  assert.equal(r.candidates, 1, "the frozen suspect is a candidate despite its premature score");
+  assert.equal(r.frozenSuspect, 1, "counted as pulled via the state_suspect extension");
+  assert.equal(r.won, 1);
+  const b = R.getBet(db, "fs1")!;
+  assert.equal(b.status, "settled_won");
+  assert.equal(b.settled_by, "pm_resolution", "resolved from PM, not the untrusted frozen score");
+});
+
+test("P2: a state_suspect freeze still inside the grace window is NOT yet queued", async () => {
+  const db = openDb(":memory:"); seedDatabase(db);
+  // kickoff 3h ago → expected finish ~0.5h ago, inside the 6h suspectAge grace window.
+  seedFrozenSuspect(db, { betId: "fs2", token: "TW", token2: "TL", kickoffAt: "2026-07-24T13:00:00Z", scoreHome: 1, scoreAway: 0 });
+  const r = await settlePmResolutionBets(db, { now: () => "2026-07-24T16:00:00Z", resolveTokens: resolver({ TW: { priceCents: 100, closed: true }, TL: { priceCents: 0, closed: true } }) });
+  assert.equal(r.candidates, 0, "not aged past the grace window → give our feed time to un-freeze first");
+  assert.equal(R.getBet(db, "fs2")!.status, "open");
+});
+
 import { fetchTokenResolution, loadPolymarketConfig } from "../src/lib/polymarket.js";
 
 test("fetchTokenResolution: parses Gamma closed flag + resolved outcomePrices per token; failure → absent", async () => {
