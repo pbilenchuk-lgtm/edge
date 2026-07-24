@@ -18,6 +18,13 @@ export async function GET(req: Request) {
       const { buildDryFillWatch } = await import("@/lib/executor/dryFillWatch");
       return NextResponse.json({ ok: true, watch: buildDryFillWatch(db, process.env) });
     }
+    // ?report=exit_honesty → decompose the dry realized-vs-hold gap by twin outcome: benign early sales of
+    // eventual winners vs the optimism pile (proceeds booked on positions that settled 0). Read-only measure
+    // BEFORE any exit-model change (Petro's requirement #2). Read-only.
+    if (new URL(req.url).searchParams.get("report") === "exit_honesty") {
+      const { buildExitHonesty } = await import("@/lib/executor/exitHonesty");
+      return NextResponse.json({ ok: true, honesty: buildExitHonesty(db, process.env) });
+    }
     // ?report=overreaction_gate → the football Overreaction sample gate: clean-epoch (≥e5), same-epoch,
     // resolution-settled cycles counted against the pre-set n≥30 verdict threshold ("6/30" made loud). Read-only.
     if (new URL(req.url).searchParams.get("report") === "overreaction_gate") {
