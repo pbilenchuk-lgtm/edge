@@ -127,6 +127,14 @@ export async function GET(req: Request) {
       const { buildCleanFavouriteBacktest } = await import("@/lib/cleanFavouriteBacktest");
       return NextResponse.json({ ok: true, report: buildCleanFavouriteBacktest(db, { env: process.env }) });
     }
+    // ?report=pruned_matches → the audit trail of which no-bet matches pruneStaleMatches deleted and WHY
+    // («куда попропали матчи из логов»). A no-bet match survives while its provider_snapshots live
+    // (SNAPSHOT_RETENTION_DAYS), then is pruned; bet-bearing matches are never pruned. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "pruned_matches") {
+      const { metaGet } = await import("@/lib/repo");
+      let pruned: unknown = null; try { pruned = JSON.parse(metaGet(db, "pruned_matches_recent") ?? "null"); } catch { pruned = null; }
+      return NextResponse.json({ ok: true, pruned, note: "матчи со ставками не удаляются никогда; без ставок — после истечения снапшотов (SNAPSHOT_RETENTION_DAYS=5д)" });
+    }
     // ?report=schedule_gaps → scheduler sleep-window monitor: recorded gaps (count, longest, last, recent list)
     // where the in-process loop was down and deterministic stops sat unmanaged / ran at the gap bottom on wake.
     if (new URL(req.url).searchParams.get("report") === "schedule_gaps") {

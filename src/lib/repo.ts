@@ -657,25 +657,39 @@ const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "analysis_artif
  * bounds the Polymarket catch-all discovery flood (up to ~200 matches/sport/day
  * into unfunded `pm-*` comps). Returns the number of matches removed.
  */
-export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number } = {}): number {
+export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number; now?: string } = {}): number {
   const rows = db.prepare(
-    `SELECT m.id AS id, m.state AS state, m.kickoff_at AS kickoff_at, c.budget AS budget FROM matches m
+    `SELECT m.id AS id, m.state AS state, m.kickoff_at AS kickoff_at, m.home AS home, m.away AS away,
+            c.budget AS budget, c.name AS comp, c.external_league AS league FROM matches m
        JOIN competitions c ON c.id = m.competition_id
        WHERE NOT EXISTS (SELECT 1 FROM bets b WHERE b.match_id = m.id)
          AND NOT EXISTS (SELECT 1 FROM provider_snapshots ps WHERE ps.match_id = m.id)`,
-  ).all() as { id: string; state: string; kickoff_at: string | null; budget: number }[];
+  ).all() as { id: string; state: string; kickoff_at: string | null; home: string; away: string; budget: number; comp: string; league: string | null }[];
   const doomed: string[] = [];
+  // Audit trail: WHY each match is pruned, so a silent DELETE becomes visible («куда попропало»). Bounded ring.
+  const audit: { match: string; comp: string; league: string | null; kickoff: string | null; state: string; reason: string }[] = [];
   const stale = (k: string | null) => opts.staleBeforeMs != null && k != null && /^\d{4}-\d\d-\d\dT/.test(k) && !isNaN(Date.parse(k)) && Date.parse(k) < opts.staleBeforeMs;
   for (const r of rows) {
+    let reason: string | null = null;
     if (r.state === "finished") {
       // FUNDED comps (a tournament we actually play): keep a finished no-bet
       // match for review until it ages past the stale window — losing a match we
       // just tested the moment it ends is bad. UNFUNDED catch-all comps: prune
       // immediately (that's the Polymarket discovery flood we must bound).
-      if ((r.budget ?? 0) <= 0 || stale(r.kickoff_at)) doomed.push(r.id);
-      continue;
+      if ((r.budget ?? 0) <= 0) reason = "finished, без ставок, unfunded-комп (Polymarket-флуд) — снапшоты уже истекли";
+      else if (stale(r.kickoff_at)) reason = "finished, без ставок, funded-комп, старше окна review (3д)";
+    } else if (stale(r.kickoff_at)) {
+      reason = "не завершился, без ставок, старше окна — зависший импорт"; // stale import that never resolved
     }
-    if (stale(r.kickoff_at)) doomed.push(r.id); // stale import that never resolved
+    if (reason) { doomed.push(r.id); audit.push({ match: `${r.home}—${r.away}`, comp: r.comp, league: r.league, kickoff: r.kickoff_at, state: r.state, reason }); }
+  }
+  if (doomed.length) {
+    try {
+      const now = opts.now ?? new Date().toISOString();
+      const prev = (() => { try { return JSON.parse(metaGet(db, "pruned_matches_recent") ?? "null")?.pruned ?? []; } catch { return []; } })();
+      const ring = [...audit.map((a) => ({ ...a, at: now })), ...prev].slice(0, 100);
+      metaSet(db, "pruned_matches_recent", JSON.stringify({ at: now, total: audit.length, pruned: ring }), now);
+    } catch { /* never block the prune on the audit write */ }
   }
   return deleteMatches(db, doomed);
 }

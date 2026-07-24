@@ -2099,7 +2099,7 @@ export async function runAutoCycle(
   // Bound the matches table: drop finished/stale matches that carry NO bets (the
   // Polymarket discovery flood). Never touches a match with betting history, so
   // metrics/P&L are preserved. Keeps buildAppData's per-poll scan bounded (§502).
-  stepSync("pruneMatches", () => R.pruneStaleMatches(db, { staleBeforeMs: (Date.parse(nowFn(deps)()) || Date.now()) - 3 * 86400_000 }), 0);
+  stepSync("pruneMatches", () => R.pruneStaleMatches(db, { staleBeforeMs: (Date.parse(nowFn(deps)()) || Date.now()) - 3 * 86400_000, now: nowFn(deps)() }), 0);
   // Drop categories we no longer track: untracked sports (cricket) + non-ATP
   // tennis. No-bet only, never a seeded comp. Discovery already stops importing
   // them; this clears the ones imported before the rule changed.
