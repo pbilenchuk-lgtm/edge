@@ -343,6 +343,53 @@ export function settleStaleOpenBets(db: Database, deps: EngineDeps = {}): number
   return settled;
 }
 
+/**
+ * P1(в) [batch-7]: RE-SETTLE the two-leg suspects by the corrected binding. footballIntegrity flags a settled
+ * bet on a two-leg comp `settle_suspect` because its grade may have come off the OTHER leg (Raków won 3:1 but
+ * "Raków — Yes" booked settled_lost). markUefaSettleSuspect catches; nothing re-grades — so a genuine win is an
+ * eternal suspect. This closes the loop: for each suspect whose match binding we can PROVE clean — the match is
+ * finished with a known score, not a feed-drop freeze, and its bound ESPN event date sits within ±LEG_GAP of
+ * kickoff (the same proof backfillEspnEventDates uses to clear the flag) — the stored score IS the right leg's,
+ * so recompute the honest outcome and re-grade the bet (status/result/payout/pnl + a «пересчёт» log), then
+ * clear the flag. Suspects we can't prove clean (no event date, unfinished/state_suspect, or an unresolvable
+ * label) are left for the PM-resolution settler (P2) and counted `deferred`. Idempotent; recomputes metrics for
+ * every strategy whose grade actually moved.
+ */
+export function reSettleSuspectBets(db: Database, deps: EngineDeps = {}): { regraded: number; confirmed: number; deferred: number } {
+  const now = nowFn(deps)();
+  const gap = Math.max(1, Number(deps.env?.FOOTBALL_LEG_GAP_HOURS ?? process.env.FOOTBALL_LEG_GAP_HOURS ?? 30)) * 3_600_000;
+  const rows = db.prepare(`SELECT id FROM bets WHERE settle_suspect=1 AND status LIKE 'settled%'`).all() as { id: string }[];
+  let regraded = 0, confirmed = 0, deferred = 0;
+  const affected = new Set<string>();
+  for (const { id } of rows) {
+    const bet = R.getBet(db, id);
+    if (!bet) { deferred++; continue; }
+    const m = R.getMatch(db, bet.match_id);
+    // Only re-grade against a trustworthy score: finished, known score, not a feed-drop freeze (F2).
+    if (!m || m.state !== "finished" || m.score_home == null || m.score_away == null || isStateSuspect(db, m.id)) { deferred++; continue; }
+    // PROVE the binding is the right leg: the bound ESPN event date must sit within ±LEG_GAP of kickoff.
+    const live = R.getMatchLive(db, m.id);
+    const koMs = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
+    const evMs = live?.espn_event_date ? Date.parse(live.espn_event_date) : NaN;
+    if (!(Number.isFinite(koMs) && Number.isFinite(evMs) && Math.abs(evMs - koMs) <= gap)) { deferred++; continue; } // → PM-resolution (P2)
+    const won = resolveOutcome(bet, m, {});
+    if (won == null) { deferred++; continue; } // unresolvable label with a known score → PM-resolution / void (P2)
+    const nextStatus = won ? "settled_won" : "settled_lost";
+    if (bet.status === nextStatus) { db.prepare(`UPDATE bets SET settle_suspect=0 WHERE id=?`).run(id); confirmed++; continue; } // already honest
+    const patch = settleBet({ entry_price: bet.entry_price, stake: bet.stake }, won, bet.closing_price ?? null);
+    db.prepare(`UPDATE bets SET status=?, result=?, payout=?, settled_by='match_score', settled_at=?, settle_suspect=0 WHERE id=?`)
+      .run(patch.status, patch.result, patch.payout, now, id);
+    R.insertTradeLog(db, {
+      id: R.uid(), match_id: m.id, strategy_id: bet.strategy_id, minute: "пересчёт", type: "settle",
+      text: `${bet.market_label}: ПЕРЕСЧЁТ по исправленной привязке (two-leg ${m.score_home}:${m.score_away}) — ${won ? "выигрыш" : "проигрыш"} → ${fmt(patch.payout)} (P&L ${fmt(patch.pnl)}; был ${bet.status})`,
+      created_at: now,
+    });
+    regraded++; affected.add(bet.strategy_id);
+  }
+  for (const sid of affected) recomputeMetrics(db, sid, deps);
+  return { regraded, confirmed, deferred };
+}
+
 function resolveOutcome(bet: Bet, match: Match, overrides: Record<string, boolean>): boolean | null {
   if (bet.market_label in overrides) return overrides[bet.market_label];
   if (match.score_home == null || match.score_away == null) return null;

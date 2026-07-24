@@ -6,7 +6,7 @@ import { seedDatabase } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { parseEspnEvent, parseEspnSummary, MockSportsProvider, eventType } from "../src/lib/sports.js";
 import {
-  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch, settleStaleOpenBets, settleMatch, syncCompetitions, nameMatch, sameTeams,
+  canReassess, syncMatchStatus, refreshMatchOdds, recomputeMetrics, enrichFromEspn, upsertImportedMatch, settleStaleOpenBets, settleMatch, reSettleSuspectBets, syncCompetitions, nameMatch, sameTeams,
 } from "../src/lib/engine.js";
 import { matchContext } from "../src/lib/analysis.js";
 import type { SportsMatchStatus, SportsProvider, MatchDetail } from "../src/lib/sports.js";
@@ -338,6 +338,46 @@ test("P0.1 settle_suspect: settled bets on a UEFA two-leg comp are quarantined o
   assert.equal(settleSuspectCount(db), 1);
   const after = betRecords(db).filter((r: any) => r.matchId === mid).length;
   assert.equal(after, 0, "quarantined bet no longer feeds the verdict cut");
+});
+
+test("P1(в7) reSettleSuspectBets: a proven-clean two-leg suspect is re-graded off the corrected score", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertCompetition(db, { id: "pm-ucl", sport_id: "football", name: "UEFA Champions League", budget: 8000, external_league: "uefa.champions", created_at: "t" });
+  const strat = R.listStrategies(db).find((s) => s.sport_id === "football")!.id;
+  // Raków-class: home won 3:1, but "Raków — Yes" was booked settled_LOST off the other leg.
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-ucl", home: "Raków", away: "Karabakh", state: "finished", lineup_out: true, kickoff_at: "2026-07-22T18:00:00Z", minute: null, score_home: 3, score_away: 1, final_score: "3:1", kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: mid });
+  // bound ESPN event date == kickoff → binding PROVEN clean; the 3:1 is the right leg's score.
+  R.upsertMatchLive(db, { match_id: mid, espn_event_id: "E1", league: "uefa.champions", espn_event_date: "2026-07-22T18:05:00Z", home_lineup: null, away_lineup: null, stats: null, updated_at: "t" });
+  const bid = R.uid();
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat, risk_profile_id: null, market_label: "Raków — Yes", status: "settled_lost", proposed_price: 40, entry_price: 40, current_price: 0, closing_price: 40, ai_prob: 0.6, stake: 50, rationale: "x", entered_minute: "предматч", result: "lost", payout: 0, settled_by: "match_score", settled_at: "t", entry_meta: null, code_version: "e5", decision_id: null, created_at: "t" } as any);
+  assert.equal(markUefaSettleSuspect(db), 1, "the mislabeled bet is quarantined");
+
+  const r = reSettleSuspectBets(db, {});
+  assert.equal(r.regraded, 1, "the proven-clean suspect was re-graded");
+  const bet = R.getBet(db, bid)!;
+  assert.equal(bet.status, "settled_won", "Raków — Yes now honestly WON on the 3:1 corrected score");
+  assert.ok((bet.payout ?? 0) > 0, "payout restored on the corrected win");
+  assert.equal(settleSuspectCount(db), 0, "flag cleared — no longer an eternal suspect");
+});
+
+test("P1(в7) reSettleSuspectBets: an unprovable suspect (no ESPN date) is DEFERRED, not re-graded", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertCompetition(db, { id: "pm-ucl", sport_id: "football", name: "UEFA Champions League", budget: 8000, external_league: "uefa.champions", created_at: "t" });
+  const strat = R.listStrategies(db).find((s) => s.sport_id === "football")!.id;
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-ucl", home: "Raków", away: "Karabakh", state: "finished", lineup_out: true, kickoff_at: "2026-07-22T18:00:00Z", minute: null, score_home: 3, score_away: 1, final_score: "3:1", kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: mid });
+  // NO match_live / espn_event_date → the binding can't be proven clean → must NOT re-grade off a maybe-wrong score.
+  const bid = R.uid();
+  R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat, risk_profile_id: null, market_label: "Raków — Yes", status: "settled_lost", proposed_price: 40, entry_price: 40, current_price: 0, closing_price: 40, ai_prob: 0.6, stake: 50, rationale: "x", entered_minute: "предматч", result: "lost", payout: 0, settled_by: "match_score", settled_at: "t", entry_meta: null, code_version: "e5", decision_id: null, created_at: "t" } as any);
+  markUefaSettleSuspect(db);
+  const r = reSettleSuspectBets(db, {});
+  assert.equal(r.regraded, 0);
+  assert.equal(r.deferred, 1, "unprovable suspect deferred to PM-resolution (P2)");
+  assert.equal(R.getBet(db, bid)!.status, "settled_lost", "left untouched — no re-grade off an unproven score");
+  assert.equal(settleSuspectCount(db), 1, "stays flagged for the PM-resolution settler");
 });
 
 test("P0.5 football epoch: new bets carry the clean epoch; pre-fix bets are epoch_unknown + dropped from cuts", () => {
