@@ -872,6 +872,20 @@ test("pruneStaleMatches keeps funded finished matches but drops unfunded/stale n
   assert.ok(audit.pruned.some((p: any) => /unfunded/.test(p.reason)), "the unfunded prune reason is captured");
 });
 
+test("pruneStaleMatches: a RECENTLY-finished unfunded no-bet match is kept within the grace window (scheduler-gap import)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const unfunded = R.listCompetitions(db).find((c) => c.sport_id === "football" && (c.budget ?? 0) <= 0)!;
+  const mk = (id: string, kickoff: string) => R.insertMatch(db, { id, competition_id: unfunded.id, home: "A" + id, away: "B" + id, state: "finished", lineup_out: false, kickoff_at: kickoff, minute: 90, score_home: 1, score_away: 0, final_score: "1:0", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+  mk("gap-recent", "2026-07-24T10:00:00Z");  // finished 2h ago (a gap import) → within grace → KEEP for review
+  mk("gap-old", "2026-07-22T10:00:00Z");     // finished 2 days ago → past grace → prune
+  const nowMs = Date.parse("2026-07-24T12:00:00Z");
+  const removed = R.pruneStaleMatches(db, { staleBeforeMs: nowMs - 3 * 86400_000, graceBeforeMs: nowMs - 36 * 3_600_000, now: "2026-07-24T12:00:00Z" });
+  assert.equal(removed, 1, "only the old one is pruned");
+  assert.ok(R.getMatch(db, "gap-recent"), "the recent gap-import survives the grace window → visible in Логи");
+  assert.equal(R.getMatch(db, "gap-old"), null, "the old no-bet match is pruned past grace");
+});
+
 test("strategyCompExposure / strategyCompRealized aggregate across the whole competition", async () => {
   const { strategyCompExposure, strategyCompRealized } = await import("../src/lib/analysis.js");
   const db = openDb(":memory:");

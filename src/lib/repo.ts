@@ -657,7 +657,7 @@ const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "analysis_artif
  * bounds the Polymarket catch-all discovery flood (up to ~200 matches/sport/day
  * into unfunded `pm-*` comps). Returns the number of matches removed.
  */
-export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number; now?: string } = {}): number {
+export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number; graceBeforeMs?: number; now?: string } = {}): number {
   const rows = db.prepare(
     `SELECT m.id AS id, m.state AS state, m.kickoff_at AS kickoff_at, m.home AS home, m.away AS away,
             c.budget AS budget, c.name AS comp, c.external_league AS league FROM matches m
@@ -668,16 +668,21 @@ export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number; 
   const doomed: string[] = [];
   // Audit trail: WHY each match is pruned, so a silent DELETE becomes visible («куда попропало»). Bounded ring.
   const audit: { match: string; comp: string; league: string | null; kickoff: string | null; state: string; reason: string }[] = [];
-  const stale = (k: string | null) => opts.staleBeforeMs != null && k != null && /^\d{4}-\d\d-\d\dT/.test(k) && !isNaN(Date.parse(k)) && Date.parse(k) < opts.staleBeforeMs;
+  const olderThan = (k: string | null, before?: number) => before != null && k != null && /^\d{4}-\d\d-\d\dT/.test(k) && !isNaN(Date.parse(k)) && Date.parse(k) < before;
+  const stale = (k: string | null) => olderThan(k, opts.staleBeforeMs);
   for (const r of rows) {
     let reason: string | null = null;
     if (r.state === "finished") {
       // FUNDED comps (a tournament we actually play): keep a finished no-bet
-      // match for review until it ages past the stale window — losing a match we
-      // just tested the moment it ends is bad. UNFUNDED catch-all comps: prune
-      // immediately (that's the Polymarket discovery flood we must bound).
-      if ((r.budget ?? 0) <= 0) reason = "finished, без ставок, unfunded-комп (Polymarket-флуд) — снапшоты уже истекли";
-      else if (stale(r.kickoff_at)) reason = "finished, без ставок, funded-комп, старше окна review (3д)";
+      // match for review until it ages past the stale window (3д). UNFUNDED catch-all comps: the Polymarket
+      // discovery flood — bound it, but keep a RECENTLY-finished one a GRACE window so a scheduler-gap import
+      // (kickoff+finish both inside a sleep → discovered already-finished, no snapshots/bets) still surfaces in
+      // Логи for review instead of vanishing before it's ever seen («провал во времени»). A no-kickoff row can't
+      // be dated → it's pure flood junk, prune it.
+      if ((r.budget ?? 0) <= 0) {
+        if (r.kickoff_at == null) reason = "finished, без ставок, unfunded, без kickoff — флуд-мусор";
+        else if (olderThan(r.kickoff_at, opts.graceBeforeMs)) reason = "finished, без ставок, unfunded — старше grace-окна review";
+      } else if (stale(r.kickoff_at)) reason = "finished, без ставок, funded-комп, старше окна review (3д)";
     } else if (stale(r.kickoff_at)) {
       reason = "не завершился, без ставок, старше окна — зависший импорт"; // stale import that never resolved
     }
