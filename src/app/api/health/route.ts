@@ -40,6 +40,12 @@ export async function GET() {
       accountingSuspect: (() => { try { const n = Number(metaGet(db, "accounting_suspect_count") ?? 0); return { count: Number.isFinite(n) ? n : 0, last: (() => { try { return JSON.parse(metaGet(db, "accounting_suspect_last") ?? "null"); } catch { return null; } })() }; } catch { return { count: 0, last: null }; } })(),
       // Decision-1 condition-1: last PM-resolution settle sweep (PM-only fixtures + the backfilled open tail).
       pmResolution: (() => { try { return JSON.parse(metaGet(db, "pm_resolution_last") ?? "null"); } catch { return null; } })(),
+      // Pre-F gate self-announces: the dry-fill verdict + all-time count, so a gate that passed weeks ago
+      // (279 dry-fills, unnoticed) is visible at a glance instead of waiting for the 5th manual query.
+      dryFill: await (async () => { try { const { buildDryFillWatch } = await import("@/lib/executor/dryFillWatch"); const w = buildDryFillWatch(db); return { verdict: w.verdict, allTime: w.dryFillsAllTime, inWindow: w.dryFillsInWindow, openDry: w.openDryPositions }; } catch { return null; } })(),
+      // Overreaction sample gate self-announces its progress ("6/30") so the strategy-verdict readiness is
+      // visible at a glance instead of living in chat memory. Full breakdown at ?report=overreaction_gate.
+      overreactionGate: await (async () => { try { const { buildOverreactionGate } = await import("@/lib/overreactionGate"); const g = buildOverreactionGate(db); return { progress: g.progress, cleanCycles: g.cleanCycles, target: g.target, verdict: g.verdict }; } catch { return null; } })(),
       tennisLinkRate,
     });
   } catch (e) {
