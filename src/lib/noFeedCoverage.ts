@@ -22,6 +22,8 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { UEFA_TWO_LEG } from "./footballIntegrity.js";
+import { espnLeagueVariants } from "./engine.js";
+import type { SportsProvider } from "./sports.js";
 
 const qualBase = (lg: string | null | undefined) => String(lg ?? "").replace(/_qual$/i, "");
 /** A euro/CONMEBOL two-leg cup — the priority coverage cohort. */
@@ -163,6 +165,65 @@ export function buildNoFeedCoverage(db: Database, opts: { nowMs?: number; window
     bindRejections,
     note,
   };
+}
+
+// ── P3(a) live provider-probe: reveal ESPN's ACTUAL names for the blind euro fixtures ─────────────────────────
+// The near-kickoff euro blind are NAME-match failures (they never became candidates). To fix canonicalization by
+// DATA not by guessing, fetch the ESPN board for each blind fixture's league and show the closest-name events —
+// so «Polymarket "Neftçi PFK" ↔ ESPN "Neftchi Baku"» becomes visible and aliasable. Needs the provider (network).
+const foldTok = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[øœ]/g, "o").replace(/[æ]/g, "a").replace(/ß/g, "ss").replace(/đ/g, "d").replace(/ł/g, "l").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 4);
+const STOP = new Set(["town","city","united","club","futbol","football","calcio","sport","sporting"]);
+function overlapScore(a: string, b: string): number {
+  const ta = new Set(foldTok(a).filter((t) => !STOP.has(t))), tb = new Set(foldTok(b).filter((t) => !STOP.has(t)));
+  let n = 0; for (const t of ta) if (tb.has(t)) n++; return n;
+}
+
+export interface ProbeCandidate { espnHome: string; espnAway: string; espnDate: string | null; score: number }
+export interface ProbeRow { match: string; league: string; day: string; boardLeague: string | null; verdict: "name_mismatch_fixable" | "not_on_board" | "no_board"; candidates: ProbeCandidate[] }
+
+/** For each near-kickoff blind euro fixture, fetch its league board and rank events by name overlap. Reveals the
+ *  ESPN spelling so aliases are added from data. Bounded; network. */
+export async function buildNoFeedProbe(db: Database, provider: SportsProvider, opts: { nowMs?: number; nearKickoffHours?: number; max?: number; env?: Record<string, string | undefined> } = {}): Promise<{ probed: number; rows: ProbeRow[] }> {
+  const env = opts.env ?? process.env;
+  const nowMs = opts.nowMs ?? Date.now();
+  const nearHours = opts.nearKickoffHours ?? Math.max(1, Number(env.COVERAGE_NEAR_KICKOFF_HOURS ?? 48));
+  const windowDays = Number(env.COVERAGE_PROBE_WINDOW_DAYS ?? 5);
+  const max = opts.max ?? 25;
+  const loMs = nowMs - windowDays * 86_400_000, nearHiMs = nowMs + nearHours * 3_600_000;
+
+  // gather blind euro fixtures near kickoff
+  const targets: { home: string; away: string; league: string; day: string; espnLeague: string | null }[] = [];
+  for (const comp of R.listCompetitions(db).filter((c) => c.sport_id === "football" && isEuroCupLeague(c.external_league))) {
+    for (const m of R.listMatches(db, comp.id)) {
+      const koMs = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
+      if (!Number.isFinite(koMs) || koMs < loMs || koMs > nearHiMs) continue;
+      if (R.latestMarkets(db, m.id).length === 0 || R.getMatchLive(db, m.id)) continue;
+      targets.push({ home: m.home, away: m.away, league: String(comp.external_league || comp.name), day: dayOf(m.kickoff_at), espnLeague: comp.external_league ?? null });
+      if (targets.length >= max) break;
+    }
+    if (targets.length >= max) break;
+  }
+
+  // fetch each needed board once (main + _qual variants)
+  const boardCache = new Map<string, { home: string; away: string; date?: string | null }[]>();
+  const fetchBoard = async (league: string): Promise<{ home: string; away: string; date?: string | null }[]> => {
+    const out: { home: string; away: string; date?: string | null }[] = [];
+    for (const v of espnLeagueVariants(league)) {
+      if (!boardCache.has(v)) { try { boardCache.set(v, (await provider.scoreboard("football", v)).map((e) => ({ home: e.home, away: e.away, date: e.date }))); } catch { boardCache.set(v, []); } }
+      out.push(...(boardCache.get(v) ?? []));
+    }
+    return out;
+  };
+
+  const rows: ProbeRow[] = [];
+  for (const t of targets) {
+    if (!t.espnLeague) { rows.push({ match: `${t.home}—${t.away}`, league: t.league, day: t.day, boardLeague: null, verdict: "no_board", candidates: [] }); continue; }
+    const board = await fetchBoard(t.espnLeague);
+    const ranked = board.map((e) => ({ espnHome: e.home, espnAway: e.away, espnDate: e.date ?? null, score: overlapScore(t.home, e.home) + overlapScore(t.away, e.away) + overlapScore(t.home, e.away) + overlapScore(t.away, e.home) }))
+      .filter((c) => c.score > 0).sort((a, b) => b.score - a.score).slice(0, 3);
+    rows.push({ match: `${t.home}—${t.away}`, league: t.league, day: t.day, boardLeague: espnLeagueVariants(t.espnLeague).join("|"), verdict: ranked.length ? "name_mismatch_fixable" : "not_on_board", candidates: ranked });
+  }
+  return { probed: rows.length, rows };
 }
 
 /** Persist the "blind pairs × league × day" digest for the weekly report. One meta key; best-effort. */

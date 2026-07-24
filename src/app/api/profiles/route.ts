@@ -105,8 +105,18 @@ export async function GET(req: Request) {
     // target, "blind pairs × league × day", and a derived rejection reason per blind euro pair. Optional &days=N
     // (default 14). Read-only.
     if (new URL(req.url).searchParams.get("report") === "no_feed_coverage") {
+      const url = new URL(req.url);
+      // &probe=1 → live provider-probe: for each near-kickoff blind euro fixture, the ESPN board's closest-name
+      // events, so canonicalization aliases are added from data (needs the provider; network).
+      if (url.searchParams.get("probe") === "1") {
+        const { buildNoFeedProbe } = await import("@/lib/noFeedCoverage");
+        const { loadSportsProvider } = await import("@/lib/sports");
+        const provider = loadSportsProvider();
+        if (!provider) return NextResponse.json({ ok: false, error: "провайдер выключен (нет SPORTS_ENABLED / STATPAL ключа)" }, { status: 503 });
+        return NextResponse.json({ ok: true, probe: await buildNoFeedProbe(db, provider, { env: process.env }) });
+      }
       const { buildNoFeedCoverage } = await import("@/lib/noFeedCoverage");
-      const daysRaw = Number(new URL(req.url).searchParams.get("days"));
+      const daysRaw = Number(url.searchParams.get("days"));
       const windowDays = Number.isFinite(daysRaw) && daysRaw > 0 ? daysRaw : undefined;
       return NextResponse.json({ ok: true, report: buildNoFeedCoverage(db, { windowDays }) });
     }
