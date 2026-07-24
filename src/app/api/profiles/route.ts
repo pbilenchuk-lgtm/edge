@@ -15,6 +15,21 @@ export async function GET(req: Request) {
       const { buildPmvOriginCut } = await import("@/lib/pmvOriginCut");
       return NextResponse.json({ ok: true, cut: buildPmvOriginCut(db) });
     }
+    // ?report=pm_resolution → Decision-1 condition-1: settle Polymarket-only (score-less) finished fixtures
+    // from PM resolution. Default returns the LAST stored sweep summary (read-only); &run=1 RUNS the sweep
+    // now and returns it — an on-demand validation independent of the (slow/dormant) auto cycle.
+    if (new URL(req.url).searchParams.get("report") === "pm_resolution") {
+      const url = new URL(req.url);
+      if (url.searchParams.get("run") === "1") {
+        const { settlePmResolutionBets } = await import("@/lib/pmResolution");
+        const { loadPolymarketConfig } = await import("@/lib/polymarket");
+        const result = await settlePmResolutionBets(db, { polymarket: loadPolymarketConfig(process.env) });
+        return NextResponse.json({ ok: true, ran: true, result });
+      }
+      const { metaGet } = await import("@/lib/repo");
+      let last: unknown = null; try { last = JSON.parse(metaGet(db, "pm_resolution_last") ?? "null"); } catch { last = null; }
+      return NextResponse.json({ ok: true, ran: false, last, hint: "add &run=1 to run the sweep now" });
+    }
     // ?report=pmv_shadow_calibration → tennis PMV flag-only shadow scoring (Brier markov vs implied on
     // frozen-mid, win%-vs-theo, unresolved share) — the «немой ноль» fix. Read-only.
     if (new URL(req.url).searchParams.get("report") === "pmv_shadow_calibration") {
