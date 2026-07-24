@@ -677,6 +677,11 @@ export function listMatchLogs(db: Database, limit = 1000): MatchLogRow[] {
         AND NOT (c.sport_id = 'tennis' AND (
              instr(${HAY}, 'itf') > 0 OR instr(${HAY}, 'challenger') > 0 OR instr(${HAY}, 'doubles') > 0
           OR instr(${HAY}, 'qualif') > 0 OR instr(${HAY}, '125') > 0))
+        -- BROKEN + no-bet = an abandoned / no-feed import (nothing happened, nothing traded) — zero review value,
+        -- and with a recent kickoff it sorts to the top and buries the useful logs. Drop it. A BROKEN match WITH
+        -- a real bet is kept (a bet on a match that broke IS worth reviewing).
+        AND NOT (COALESCE(m.end_note,'') LIKE '⚠ поломан%'
+                 AND NOT EXISTS (SELECT 1 FROM bets b3 WHERE b3.match_id = m.id AND b3.status NOT IN ('proposed','not_filled')))
       ORDER BY COALESCE(m.end_time, m.kickoff_at) DESC
       LIMIT ?`,
   ).all(Math.max(1, limit)) as { id: string; home: string; away: string; final_score: string | null; end_time: string | null; kickoff_at: string | null; end_note: string | null; sport: string; comp_name: string; bet_count: number }[];
@@ -687,18 +692,24 @@ export function listMatchLogs(db: Database, limit = 1000): MatchLogRow[] {
   }));
 }
 
-/** Backstop cap on the no-bet finished-match ARCHIVE: keep the newest `keep`, delete older no-bet finished
- *  matches. "Effectively forever" for review yet bounded against unbounded growth (like the tennis-snapshot cap).
- *  Bet-bearing matches are never touched (they carry P&L/metrics). Returns the number removed. */
+/** Backstop cap on the no-bet finished-match ARCHIVE. Two tiers, bet-bearing matches NEVER touched:
+ *   1. BROKEN + no-bet = abandoned / no-feed junk (never shown in Логи, zero review value) → always pruned.
+ *      This was pruned before the archive decouple too, so it's restoring prior behaviour, not new loss.
+ *   2. CLEAN (non-broken) no-bet finished → keep the newest `keep` for review, prune older. "Effectively forever"
+ *      yet bounded against unbounded growth (like the tennis-snapshot cap).
+ *  Returns the number removed. */
 export function capMatchLogArchive(db: Database, keep = 20000): number {
-  const doomed = db.prepare(
+  const noBet = "NOT EXISTS (SELECT 1 FROM bets b WHERE b.match_id = m.id AND b.status NOT IN ('proposed','not_filled'))";
+  const brokenJunk = db.prepare(
+    `SELECT m.id AS id FROM matches m WHERE m.state = 'finished' AND m.end_note LIKE '⚠ поломан%' AND ${noBet}`,
+  ).all() as { id: string }[];
+  const overflow = db.prepare(
     `SELECT m.id AS id FROM matches m
-      WHERE m.state = 'finished'
-        AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.match_id = m.id)
+      WHERE m.state = 'finished' AND (m.end_note IS NULL OR m.end_note NOT LIKE '⚠ поломан%') AND ${noBet}
       ORDER BY COALESCE(m.end_time, m.kickoff_at) DESC
       LIMIT -1 OFFSET ?`,
   ).all(Math.max(0, keep)) as { id: string }[];
-  return deleteMatches(db, doomed.map((r) => r.id));
+  return deleteMatches(db, [...brokenJunk, ...overflow].map((r) => r.id));
 }
 
 export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number; graceBeforeMs?: number; now?: string } = {}): number {
