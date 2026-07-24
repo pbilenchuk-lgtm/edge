@@ -16,7 +16,7 @@ import * as R from "./repo.js";
 import type { Bet, Match, MatchState } from "./types.js";
 import type { SportsMatchStatus } from "./sports.js";
 import { reassessNarrative, effectiveEnv } from "./llm.js";
-import { settleBet, resolveFootballMarket, matchPhase } from "./settlement.js";
+import { settleBet, resolveFootballMarket, matchPhase, isResolutionSettle } from "./settlement.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig } from "./polymarket.js";
 import { liquidationCents } from "./execution.js";
@@ -219,7 +219,7 @@ export async function refreshActiveOdds(db: Database, deps: EngineDeps = {}, opt
 export function recomputeMetrics(db: Database, strategyId: string, deps: EngineDeps = {}): void {
   // Only bets settled by the REAL match outcome measure prediction quality.
   // Early/partial cash-outs are booked by P&L sign and would bias Brier/CLV.
-  const bets = R.settledBetsForStrategy(db, strategyId).filter((b) => b.settled_by == null);
+  const bets = R.settledBetsForStrategy(db, strategyId).filter((b) => isResolutionSettle(b.settled_by));
   const samples: MetricSample[] = bets.map((b) => ({
     aiProb: b.ai_prob ?? 0, outcome: (b.result === "won" ? 1 : 0) as 0 | 1,
     entryPrice: b.entry_price ?? 0, closingPrice: b.closing_price,
@@ -286,7 +286,9 @@ export function settleMatch(
     const preMatch = b.entered_minute == null || /предматч/i.test(b.entered_minute);
     const closing = preMatch ? (kickoff[b.market_label] ?? b.entry_price ?? null) : (b.entry_price ?? null);
     const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, closing);
-    R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price, settled_at: now });
+    // Provenance (Decision-1 condition 5): this resolution came from OUR match score. Explicit tag so an audit
+    // can tell it apart from a pm_resolution settle; isResolutionSettle keeps both in the metric/verdict cohort.
+    R.updateBet(db, b.id, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price, settled_at: now, settled_by: "match_score" });
     releaseShadow(b.id);
     R.insertTradeLog(db, {
       id: R.uid(), match_id: match.id, strategy_id: b.strategy_id, minute: "финал",

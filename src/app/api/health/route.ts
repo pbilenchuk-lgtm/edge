@@ -38,6 +38,8 @@ export async function GET() {
       scheduleGaps: scheduleGaps ? { count: scheduleGaps.count, longestSec: scheduleGaps.longestSec, last: scheduleGaps.last } : null,
       // Z2(b): running count of payout-inconsistent settles (decimal-shift class); >0 warrants a look.
       accountingSuspect: (() => { try { const n = Number(metaGet(db, "accounting_suspect_count") ?? 0); return { count: Number.isFinite(n) ? n : 0, last: (() => { try { return JSON.parse(metaGet(db, "accounting_suspect_last") ?? "null"); } catch { return null; } })() }; } catch { return { count: 0, last: null }; } })(),
+      // Decision-1 condition-1: last PM-resolution settle sweep (PM-only fixtures + the backfilled open tail).
+      pmResolution: (() => { try { return JSON.parse(metaGet(db, "pm_resolution_last") ?? "null"); } catch { return null; } })(),
       tennisLinkRate,
     });
   } catch (e) {

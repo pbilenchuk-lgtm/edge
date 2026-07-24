@@ -42,6 +42,14 @@ export interface SettlePatch {
  * Settle one open bet given the resolved outcome and the market's closing
  * price (for CLV). Returns the fields to persist plus the realized P&L.
  */
+// A bet HELD TO THE REAL OUTCOME (not an early/partial cash-out, not a void). These are the only settles that
+// measure prediction quality (Brier/CLV) and count as decisive win/loss. `null` = the legacy match-score
+// settle (before the provenance field existed); "match_score" and "pm_resolution" are the two explicit
+// sources (Decision-1 condition 5). Early/partial/void/void_timeout are NOT held-to-settle.
+export function isResolutionSettle(settledBy: string | null | undefined): boolean {
+  return settledBy == null || settledBy === "match_score" || settledBy === "pm_resolution";
+}
+
 export function settleBet(
   bet: Pick<Bet, "entry_price" | "stake">,
   won: boolean,

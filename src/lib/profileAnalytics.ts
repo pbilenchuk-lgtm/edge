@@ -11,6 +11,7 @@ import * as R from "./repo.js";
 import { parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { winsOnEventOccurrence } from "./thresholds.js";
 import { canonicalProfileId } from "./riskProfiles.js";
+import { isResolutionSettle } from "./settlement.js";
 
 export interface ProfileFilter {
   fromMs?: number; toMs?: number;      // created_at window
@@ -58,7 +59,7 @@ export function classifyExitTrigger(text: string, settledBy: string | null | und
   if (/take_price|тейк|на пике|цена (дош|дости|пришла)|фикс/.test(t)) return "take_price";
   if (/edge (исчерп|закры|gone|closed)|эдж/.test(t)) return "edge_closed";
   if (/хард-стоп|hard[_-]?stop|\bстоп\b|\bstop\b/.test(t)) return "hard_stop";
-  if (settledBy == null) return "settle";
+  if (isResolutionSettle(settledBy)) return "settle";
   return "discretionary";
 }
 
@@ -178,7 +179,7 @@ export function profileComparison(recs: BetRec[]): ProfileStats[] {
     }
     const trigCount: Record<string, number> = {};
     const closed = rs.filter((r) => r.outcome !== "open");
-    for (const r of closed) { const trg = (r.exits[r.exits.length - 1]?.trigger) ?? (r.settledBy == null ? "settle" : "discretionary"); trigCount[trg] = (trigCount[trg] ?? 0) + 1; }
+    for (const r of closed) { const trg = (r.exits[r.exits.length - 1]?.trigger) ?? (isResolutionSettle(r.settledBy) ? "settle" : "discretionary"); trigCount[trg] = (trigCount[trg] ?? 0) + 1; }
     const triggerMix: Record<string, number> = {};
     for (const [k, v] of Object.entries(trigCount)) triggerMix[k] = closed.length ? r2((v / closed.length) * 100) : 0;
     return {
@@ -262,7 +263,7 @@ export function tails(recs: BetRec[], finalByMatchLabel?: Map<string, number>): 
   const closed = recs.filter((r) => r.pnl != null);
   const worst = closed.slice().sort((a, b) => a.pnl! - b.pnl!).slice(0, 10).map((r) => ({
     matchLabel: r.matchLabel, market: r.market, profileId: r.profileId, pnl: r.pnl!,
-    trigger: r.exits[r.exits.length - 1]?.trigger ?? (r.settledBy == null ? "settle" : "discretionary"), finalScore: r.finalScore,
+    trigger: r.exits[r.exits.length - 1]?.trigger ?? (isResolutionSettle(r.settledBy) ? "settle" : "discretionary"), finalScore: r.finalScore,
   }));
   // hard-stop exits: was the stop price better or worse than where the market ended?
   const hs = recs.flatMap((r) => r.exits.filter((e) => e.trigger === "hard_stop" && e.priceCents != null).map((e) => ({ r, e })));

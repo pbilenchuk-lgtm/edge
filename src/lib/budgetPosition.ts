@@ -14,6 +14,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { loadShadowConfig, shadowPoolState } from "./shadow.js";
 import { summarizeFillCosts } from "./fillCosts.js";
+import { isResolutionSettle } from "./settlement.js";
 
 export interface BudgetPosition {
   bank: number;            // the real betting bank ($5000)
@@ -91,7 +92,7 @@ export function budgetPosition(db: Database, nowIso?: string): BudgetPosition {
       const at = s.settled_at ?? null; // same bank-scaled pnl, placed on its settle day for the curve
       if (at && /^\d{4}-\d\d-\d\dT/.test(at)) timed.push({ at, pnl }); else untimedPnl += pnl;
     }
-    if (parentSettled && b.settled_by == null) { settled++; if (b.result === "won") won++; else lost++; }
+    if (parentSettled && isResolutionSettle(b.settled_by)) { settled++; if (b.result === "won") won++; else lost++; }
   }
 
   // In-progress: the bank's OPEN reserves, marked to the freshest quote per market.

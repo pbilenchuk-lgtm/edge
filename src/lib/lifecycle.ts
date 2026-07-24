@@ -18,6 +18,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries } from "./engine.js";
+import { settlePmResolutionBets } from "./pmResolution.js";
 import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
 import { classifyOrderBook, paperBuyFill, paperSellFill, scaleCost, ENTRY_PHANTOM_DIVERGENCE, type FillCost, type EntryFillResult, type SellFillResult } from "./executor/paperFill.js";
@@ -1975,6 +1976,15 @@ export async function runAutoCycle(
   stepSync("advanceClocks", () => advanceClocks(db, deps), undefined); // flip lineup_out ~1h before kickoff
   stepSync("stats", () => recordMatchStats(db, deps), 0); // 5-min match-stats snapshot into the events feed
   stepSync("settleStale", () => settleStaleOpenBets(db, deps), 0); // re-settle a finish that raced ahead of the score sync
+  // Decision-1 condition-1: settle Polymarket-ONLY (score-less) finished fixtures from PM market resolution —
+  // the score-based settleMatch can't (no score → open forever). Also clears the hidden already-open tail
+  // (rule 6). Async (getQuotes + Gamma); slow-cadence auto cycle is the right home. Summary persisted for the report.
+  await step("pmResolution", async () => {
+    const r = await settlePmResolutionBets(db, deps);
+    const at = deps.now?.() ?? new Date().toISOString();
+    try { R.metaSet(db, "pm_resolution_last", JSON.stringify({ ...r, at }), at); } catch { /* best-effort */ }
+    return r;
+  }, { candidates: 0 } as any);
   stepSync("captureLiveOpens", () => captureLiveOpens(db, deps), undefined); // kickoff-price baseline
   // Analyze BEFORE reassessment: analyzeMatch wipes a match's proposed bets to
   // replace them with the fresh stage's, which would otherwise delete brand-new
