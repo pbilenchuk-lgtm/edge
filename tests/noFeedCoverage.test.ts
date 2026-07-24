@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { buildNoFeedCoverage, isEuroCupLeague, persistNoFeedCoverage } from "../src/lib/noFeedCoverage.js";
+import { buildNoFeedCoverage, buildNoFeedProbe, isEuroCupLeague, persistNoFeedCoverage } from "../src/lib/noFeedCoverage.js";
+import type { SportsProvider } from "../src/lib/sports.js";
 
 const NOW = "2026-07-24T12:00:00.000Z";
 const NOW_MS = Date.parse(NOW);
@@ -120,6 +121,28 @@ test("noFeedCoverage: bind rejections surface with a 1–3 day gap flagged as a 
   const boh = r.bindRejections.find((x) => x.home === "Bohemian")!;
   assert.equal(rakow.possibleReschedule, true, "a +2d gap could be a real match the gate over-tightly cut");
   assert.equal(boh.possibleReschedule, false, "a +7d gap is a genuine other leg — correctly rejected");
+});
+
+test("noFeedProbe: reveals the ESPN spelling for a blind euro fixture (name_mismatch_fixable) vs not_on_board", async () => {
+  const db = seed();
+  comp(db, "uel", "uefa.europa");
+  match(db, "b1", "uel", "Rīgas Futbola Skola", "ÍF Vestri", "2026-07-24T18:00:00Z");   // blind, near kickoff
+  match(db, "b2", "uel", "Nonexistent Club", "Ghost FC", "2026-07-24T18:00:00Z");        // blind, not on board
+  // ESPN board carries "RFS" (the aliasable spelling) and Vestri — but nothing for the ghost fixture.
+  const provider: SportsProvider = {
+    name: "mock",
+    async scoreboard(_sport: string, league: string) {
+      if (!/uefa\.europa/.test(league)) return [];
+      return [{ externalRef: "E1", home: "RFS Riga", away: "Vestri", state: "upcoming", minute: null, scoreHome: null, scoreAway: null, final: false, date: "2026-07-24T18:00:00Z" }] as any;
+    },
+    async matchDetail() { return null; },
+  };
+  const r = await buildNoFeedProbe(db, provider, { nowMs: NOW_MS });
+  const b1 = r.rows.find((x) => /Rīgas/.test(x.match))!;
+  const b2 = r.rows.find((x) => /Nonexistent/.test(x.match))!;
+  assert.equal(b1.verdict, "name_mismatch_fixable", "the board has a close-name event → aliasable");
+  assert.ok(b1.candidates.some((c) => /RFS|Vestri/.test(c.espnHome + c.espnAway)), "shows ESPN's actual spelling");
+  assert.equal(b2.verdict, "not_on_board", "no board candidate → ESPN doesn't carry it");
 });
 
 test("persistNoFeedCoverage: writes the blind_pairs_daily digest", () => {
