@@ -634,7 +634,7 @@ export interface StrategistInput {
   strategyName: string; strategyPrompt: string;
   match: { home: string; away: string; sport: string; state: string; minute: number | null; scoreHome: number | null; scoreAway: number | null; minuteApprox?: number | null };
   assessment: { confidence: string; short: string; verdict: string };
-  markets: { label: string; priceCents: number; aiProb: number | null; liquidity?: number | null; openCents?: number | null; conflict?: string | null; liveProbAdjusted?: { prob: number; note: string } | null }[];
+  markets: { id?: string; label: string; priceCents: number; aiProb: number | null; liquidity?: number | null; openCents?: number | null; conflict?: string | null; liveProbAdjusted?: { prob: number; note: string } | null }[];
   openPositions: { market: string; entryCents: number; currentCents: number }[];
   context?: string; // real lineups + in-match events (ESPN) — the reassessment triggers
 }
@@ -650,6 +650,10 @@ export interface StrategistExitPlan {
 }
 export interface StrategistPick {
   label: string; conviction: "низкая" | "средняя" | "высокая"; reason: string; prob?: number;
+  // P4 [batch-7]: the market chosen BY ID from the listed catalog — identity by reference, not a free-text
+  // paraphrase of the label (a paraphrase miss silently dropped Lugano ML @44¢/78%). The engine matches on
+  // this id; `label` is retained for display + a transitional fallback when the model omits the id.
+  marketId?: string;
   // v3 tree-reasoning metadata (optional). The ENGINE still sizes from `prob`
   // (§9.6 invariant); these are captured for the battle sheet / display / audit,
   // NOT used to compute stakes.
@@ -724,7 +728,7 @@ export function normalizeStrategistJson(j: any): Omit<StrategistDecision, "ok" |
     ...(Array.isArray(j.actions) ? j.actions.filter((a: any) => a && isAdd(a.action)) : []),
   ];
   const picks: StrategistPick[] = rawEntries
-    .filter((p: any) => p && (typeof p.label === "string" || typeof p.market === "string"))
+    .filter((p: any) => p && (typeof p.label === "string" || typeof p.market === "string" || str(p.market_id ?? p.marketId ?? p.id)))
     .map((p: any) => {
       const probRaw = Number.isFinite(p.prob) ? p.prob : Number.isFinite(p.our_prob) ? p.our_prob : null;
       const ex = p.exit && typeof p.exit === "object" ? p.exit : null;
@@ -739,7 +743,8 @@ export function normalizeStrategistJson(j: any): Omit<StrategistDecision, "ok" |
         ? { ...(str(ex.take_price) ? { take_price: str(ex.take_price) } : {}), ...(str(ex.thesis_stop) ? { thesis_stop: str(ex.thesis_stop) } : {}), ...(str(ex.counter_scenario_stop) ? { counter_scenario_stop: str(ex.counter_scenario_stop) } : {}), ...(timeStop ? { time_stop: timeStop } : {}) }
         : undefined;
       return {
-        label: String(p.label ?? p.market),
+        label: String(p.label ?? p.market ?? ""),
+        ...(str(p.market_id ?? p.marketId ?? p.id) ? { marketId: str(p.market_id ?? p.marketId ?? p.id) } : {}),
         conviction: conv(p.conviction),
         reason: String(p.reason ?? p.phantom_check ?? ""),
         ...(probRaw != null ? { prob: clamp01(probRaw) } : {}),
@@ -823,7 +828,9 @@ export async function strategistDecide(
       ? `, game-state P=${(m.liveProbAdjusted.prob * 100).toFixed(0)}% (${m.liveProbAdjusted.note})`
       : "";
     const conflict = m.conflict ? `  ${m.conflict}` : "";
-    return `- ${m.label}: ${m.priceCents}¢${move}${liq}${ai}${gsAdj}${conflict}`;
+    // P4: prefix the stable catalog id so the pick can reference the market by reference, not a paraphrase.
+    const idTag = m.id ? `[${m.id}] ` : "";
+    return `- ${idTag}${m.label}: ${m.priceCents}¢${move}${liq}${ai}${gsAdj}${conflict}`;
   }).join("\n");
   const posList = input.openPositions.length
     ? input.openPositions.map((p) => `- ${p.market}: вход ${p.entryCents}¢ → сейчас ${p.currentCents}¢`).join("\n")
@@ -845,7 +852,8 @@ export async function strategistDecide(
       "ВАЖНО ПРО РАЗМЕР: РАЗМЕР СЧИТАЕТ ДВИЖОК по твоему prob и риск-профилю (Kelly, кэпы). Твои size_pct/kelly_fraction/role — справочные, на реальную ставку НЕ влияют; честный prob — единственное, что двигает размер. " +
       "ФОРМАТ ВЫХОДА — строгий JSON. Ключи входов и выходов могут называться как в твоей методологии, все они принимаются как синонимы: " +
       "ВХОДЫ — picks ИЛИ pre_match_positions ИЛИ actions с action:'add'/'open_new'; поля входа: {label|market (ДОСЛОВНО из списка), prob|our_prob, conviction:'низкая'|'средняя'|'высокая'(опц.), reason, и опционально role:'anchor'|'satellite', lives_in_branches:[], branch_weight_sum, phantom_check, total_check, exit:{take_price,thesis_stop,counter_scenario_stop, time_stop:{minute,condition,action:'close_full'|'close_half'} — для тающего опциона минута, после которой не досиживаешь до нуля, если событие не наступило}}. " +
-      "В ЛЮБОМ входе, включая actions(add/open_new), поле prob ОБЯЗАТЕЛЬНО — без него движок посчитает размер по УСТАРЕВШЕЙ предматч-оценке. И бери market как ПОЛНЫЙ ярлык из списка ДОСЛОВНО (сторона уже в ярлыке: «… — No», «Over 2.5» и т.п.); НЕ дроби на market+side отдельными полями — иначе рынок не найдётся и вход потеряется. " +
+      "В ЛЮБОМ входе, включая actions(add/open_new), поле prob ОБЯЗАТЕЛЬНО — без него движок посчитает размер по УСТАРЕВШЕЙ предматч-оценке. " +
+      "ВЫБОР РЫНКА ПО ID: у каждого рынка в списке в начале стоит идентификатор в квадратных скобках, напр. «[m3] …». В КАЖДОМ входе укажи market_id РОВНО этот id из списка (напр. market_id:'m3') — это надёжнее ярлыка. Поле market/label оставь как ПОЛНЫЙ ярлык ДОСЛОВНО (резервный путь), но именно market_id определяет рынок. НЕ дроби на market+side отдельными полями и не выдумывай id, которого нет в списке. " +
       "ВЫХОДЫ — exits ИЛИ actions с action:'reduce'/'close' ИЛИ exit_checks с сработавшим trigger_hit; поля выхода: {market|position (ДОСЛОВНО, ПОЛНЫЙ ярлык), fraction (или action reduce≈частично/close=1), reason, trigger/trigger_hit (напр. take_price/thesis_stop/counter_scenario/goal_scored)}. Закрытие можно указать в exits, в actions ИЛИ в exit_checks — движок объединит и не закроет дважды. " +
       "Опционально на верхнем уровне: match_shape, current_branch (лайв), portfolio_correlation:{both_lose_on_scores,both_lose_weight,coverage_note}, rejected_markets:[{market,reason}], flagged:[{market,reason}], note/notes. " +
       "Пусто — значит воздержаться. Без текста вне JSON." +

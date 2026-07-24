@@ -235,6 +235,12 @@ export async function runStrategists(
   // Only replace existing proposals if we actually have usable probabilities — a
   // degenerate state must not wipe the previous good proposals with nothing.
   if (!freshMarkets.some((m) => m.ai_prob != null)) return { betsCreated: 0, decisions: [] };
+  // P4 [batch-7]: a stable in-cycle catalog id (m1..mN) per market so the strategist selects BY REFERENCE, not
+  // by a free-text paraphrase of the label (a paraphrase miss silently dropped Lugano ML @44¢/78%). Built once
+  // from freshMarkets (fetched once), so the id the prompt shows and the id the match loop reads are identical.
+  const catId = new Map<string, string>();
+  freshMarkets.forEach((m, i) => catId.set(m.id, `m${i + 1}`));
+  const catIdSet = new Set(catId.values());
   R.clearProposedBets(db, matchId);
   // Calibration for the min_calibration gate: caller-supplied (fresh analysis),
   // else the stored distribution artifact, else the word-confidence band.
@@ -285,7 +291,7 @@ export async function runStrategists(
         strategyName: strat.name, strategyPrompt: strat.prompt,
         match: { home: match.home, away: match.away, sport, state: match.state, minute: match.minute, scoreHome: match.score_home, scoreAway: match.score_away },
         assessment: { confidence: assessment.confidence ?? "средняя", short: assessment.short ?? "", verdict: assessment.verdict ?? "" },
-        markets: freshMarkets.map((m) => ({ label: m.label, priceCents: m.price, aiProb: m.ai_prob, conflict: conflicts.get(m.label) ?? null })),
+        markets: freshMarkets.map((m) => ({ id: catId.get(m.id), label: m.label, priceCents: m.price, aiProb: m.ai_prob, conflict: conflicts.get(m.label) ?? null })),
         openPositions: openPos.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
         context: stratCtx,
       }, stratModel, { fetchImpl: deps.fetchImpl, env });
@@ -322,7 +328,11 @@ export async function runStrategists(
       .map((m) => { const implied = impliedMap.get(m.label)?.implied ?? m.price / 100; return { m, implied, edge: (m.ai_prob as number) - implied }; })
       .sort((x, y) => y.edge - x.edge);
     for (const { m, implied } of ranked) {
-      const pick = picksArr?.find((p) => sameMarketLabel(p.label, m.label));
+      // P4: match by catalog id first (identity by reference); fall back to label ONLY for a pick the model left
+      // id-less (transitional non-compliance) — a tagged pick can never be lost to a paraphrase again.
+      const mCatId = catId.get(m.id);
+      const pick = picksArr?.find((p) => p.marketId && p.marketId === mCatId)
+        ?? picksArr?.find((p) => !p.marketId && sameMarketLabel(p.label, m.label));
       if (picksArr && !pick) { skipped++; continue; }
       if (pick?.hold) { skipped++; continue; } // T2.2: a hold ticket never opens — no-op prematch too
       if (rejectedSet.has(norm(m.label))) { skipped++; battle.push({ market: m.label, status: "skip", reason: "в rejected — вход заблокирован (rejected_market_block)" }); continue; } // T3.2
@@ -378,10 +388,21 @@ export async function runStrategists(
     // silently — the ranked loop only iterates markets, so an unmatched pick is
     // never seen. Surface it in the battle sheet + trade log so it's visible, not lost.
     if (picksArr) {
-      const unresolved = picksArr.filter((p) => !freshMarkets.some((m) => sameMarketLabel(p.label, m.label)));
-      if (unresolved.length) {
-        for (const p of unresolved) battle.push({ market: p.label, status: "unresolved", reason: "нет совпадающего рынка (проверь ярлык/сторону)" });
-        R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `стратег назвал рынок(и) без совпадения: ${unresolved.slice(0, 3).map((p) => `«${p.label}»`).join(", ")}`, created_at: now() });
+      // P4: a pick resolves iff its catalog id exists, OR (id-less) its label fuzzy-matches a real market.
+      const resolves = (p: typeof picksArr[number]) => p.marketId ? catIdSet.has(p.marketId) : freshMarkets.some((m) => sameMarketLabel(p.label, m.label));
+      const unresolved = picksArr.filter((p) => !resolves(p));
+      // A pick that named a market_id NOT in the catalog is a HARD error (the model invented an id), not a quiet
+      // skip — it's exactly the class of silent drop P4 exists to kill. Surface it loudly + distinctly.
+      const badId = unresolved.filter((p) => p.marketId && !catIdSet.has(p.marketId));
+      if (badId.length) {
+        for (const p of badId) battle.push({ market: p.label || p.marketId!, status: "unresolved", reason: `market_id «${p.marketId}» отсутствует в каталоге — HARD ERROR (выдуманный id), вход не открыт` });
+        console.error(`[strategist] ${strat.id} @ ${matchId}: несуществующий market_id: ${badId.map((p) => `«${p.marketId}»`).join(", ")} — рынки каталога: ${[...catIdSet].join(",")}`);
+        R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `стратег назвал НЕсуществующий market_id: ${badId.slice(0, 3).map((p) => `«${p.marketId}»`).join(", ")} — вход потерян (hard error, не тихий дроп)`, created_at: now() });
+      }
+      const labelMiss = unresolved.filter((p) => !p.marketId);
+      if (labelMiss.length) {
+        for (const p of labelMiss) battle.push({ market: p.label, status: "unresolved", reason: "нет market_id и ярлык без совпадения (проверь ярлык/сторону)" });
+        R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `стратег назвал рынок(и) без id и без совпадения ярлыка: ${labelMiss.slice(0, 3).map((p) => `«${p.label}»`).join(", ")}`, created_at: now() });
       }
     }
     try { R.saveArtifact(db, { match_id: matchId, kind: "battle_sheet", label: pairLabel, stage, content: JSON.stringify({ pair: pairLabel, profile, budget, calibration, positions: battle, flagged, ...(dec.ok && dec.liveTriggersArmed ? { live_triggers_armed: dec.liveTriggersArmed } : {}), ...(dec.ok && dec.liveEntryConfig ? { live_entry_config: dec.liveEntryConfig } : {}), strategist_plan: dec.ok ? dec : { ok: false } }, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }

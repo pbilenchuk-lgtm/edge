@@ -255,6 +255,23 @@ test("normalizeStrategistJson: minimal {picks,exits,note} still parses (back-com
   assert.equal(d.note, "n");
 });
 
+test("P4 normalizeStrategistJson: market_id is captured (by any alias); label falls back to '' when only id given", () => {
+  const d = normalizeStrategistJson({
+    picks: [
+      { market_id: "m3", label: "Lugano — Yes", prob: 0.78, reason: "value" }, // the Lugano case: id + label
+      { marketId: "m7", prob: 0.6, reason: "id-only, no label" },               // id alias, no label
+      { label: "Over 2.5", prob: 0.5, reason: "legacy id-less pick" },          // no id → transitional fallback
+    ],
+    note: "n",
+  });
+  assert.equal(d.picks.length, 3);
+  assert.equal(d.picks[0].marketId, "m3");
+  assert.equal(d.picks[0].label, "Lugano — Yes");
+  assert.equal(d.picks[1].marketId, "m7");
+  assert.equal(d.picks[1].label, "", "id-only pick still parses (label empty, id resolves it)");
+  assert.equal(d.picks[2].marketId, undefined, "an id-less pick keeps the label-fallback path");
+});
+
 test("T2.2 normalizeStrategistJson: a HOLD ticket is flagged hold (explicit action OR «не новый вход» reason), a real pick isn't", () => {
   const d = normalizeStrategistJson({
     picks: [

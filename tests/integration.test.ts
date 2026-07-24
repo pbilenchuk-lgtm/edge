@@ -104,6 +104,29 @@ test("analyzeMatch tags proposed bets with the pair's risk profile", async () =>
   assert.ok(bets.every((b) => b.risk_profile_id === "aggressive"), "every bet carries the pair's profile");
 });
 
+test("P4: a strategist pick selected by market_id resolves even when its label is a non-matching paraphrase", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.clearShares(db, "wc2026");
+  R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", risk_profile_id: "medium", pct: 60 });
+  // Catalog ids are assigned m1..mN over latestMarkets order — find the id for our target market.
+  const labels = R.latestMarkets(db, "m-lineup").map((m) => m.label);
+  const targetIdx = labels.findIndex((l) => /over 2\.5/i.test(l));
+  assert.ok(targetIdx >= 0, "the seed lists an Over 2.5 market");
+  const targetCatId = `m${targetIdx + 1}`;
+  // ONE pick, chosen BY ID, but with a label that deliberately fails sameMarketLabel (different numbers/words).
+  // Pre-P4 this pick vanished silently (the Lugano bug); now the id resolves it.
+  const analysis = {
+    match_type: "group", match_type_reason: "t", core: { xg_home: 2.4, xg_away: 1.6, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 },
+    overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.7, scenario_confidence: 0.6, sample_size: 12, notes: "" }, unknowns: [],
+    picks: [{ market_id: targetCatId, label: "Тотал голов больше двух с половиной", conviction: "высокая", reason: "value", prob: 0.75 }], exits: [],
+  };
+  await analyzeMatch(db, "m-lineup", { fetchImpl: mockLLM(analysis), env: { ANTHROPIC_API_KEY: "k" } });
+  const bets = R.betsForMatch(db, "m-lineup", "edge").filter((b) => b.status === "proposed");
+  assert.equal(bets.length, 1, "exactly the id-selected market was entered");
+  assert.match(bets[0].market_label, /Over 2\.5/, "resolved to the real catalog market by id, not the paraphrase");
+});
+
 test("analysis duel (ANALYSIS_DUEL=on): a match is analysed by one arm and its bets carry that arm's code_version tag", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
