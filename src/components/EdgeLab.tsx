@@ -1906,6 +1906,7 @@ function LogsScreen({ events, onDownloaded, onGoMatches }: any) {
   const [filter, setFilter] = useState("todo");         // default view: what I haven't grabbed yet
   const [busyId, setBusyId] = useState<string | null>(null);
   const [bulk, setBulk] = useState<{ done: number; total: number } | null>(null);
+  const [subtab, setSubtab] = useState("matches");      // «Логи матчей» (per-match .md) | «Файлы» (report/export downloads)
   // localStorage is client-only — resolve the "already downloaded" marks in an effect, not
   // during render (avoids a hydration mismatch). Re-run when the event list changes so a
   // newly-finished match is counted immediately.
@@ -1961,12 +1962,17 @@ function LogsScreen({ events, onDownloaded, onGoMatches }: any) {
           <div style={S.feedTitle}>Логи</div>
           <div style={S.feedSub}>Логи завершённых событий по всем категориям — новые сверху. Скачивай для разбора на баги; отметка «скачан» хранится в этом браузере.</div>
         </div>
-        {todo.length > 0 && (
+        {subtab === "matches" && todo.length > 0 && (
           <button onClick={downloadAll} disabled={!!bulk} style={{ ...S.artifactBtn, opacity: bulk ? 0.6 : 1, whiteSpace: "nowrap" }} title="Скачать по очереди все ещё не скачанные логи (браузер может спросить разрешение на несколько файлов)">
             {bulk ? `Качаю ${bulk.done}/${bulk.total}…` : `📥 Скачать все не скачанные (${todo.length})`}
           </button>
         )}
       </div>
+      <div style={S.feedFilters}>
+        <button onClick={() => setSubtab("matches")} style={{ ...S.feedFilterBtn, ...(subtab === "matches" ? S.feedFilterOn : {}) }}>Логи матчей</button>
+        <button onClick={() => setSubtab("files")} style={{ ...S.feedFilterBtn, ...(subtab === "files" ? S.feedFilterOn : {}) }}>📊 Файлы (аналитика)</button>
+      </div>
+      {subtab === "files" ? <FilesPanel /> : (<>
       <div style={S.feedFilters}>
         {filters.map(([k, lbl]) => <button key={k} onClick={() => setFilter(k)} style={{ ...S.feedFilterBtn, ...(filter === k ? S.feedFilterOn : {}) }}>{lbl}</button>)}
       </div>
@@ -2000,7 +2006,97 @@ function LogsScreen({ events, onDownloaded, onGoMatches }: any) {
           );
         })}
       </div>
+      </>)}
     </main>
+  );
+}
+
+// ── «Логи → Файлы» — one-click downloads of every useful analytics report + raw export ──────
+// A non-programmer place to grab the stats we analyse together: each row fetches a report endpoint
+// and saves it as a file (no URLs to paste, no curl). JSON reports save as .json; the raw bet/exit
+// exports save as .csv/.json straight from /api/profiles-export.
+const FILE_GROUPS: { title: string; items: { label: string; url: string; file: string; hint?: string }[] }[] = [
+  { title: "Стратегии × профили риска", items: [
+    { label: "Все стратегии и профили (общий)", url: "/api/profiles?report=profiles", file: "profiles-all.json", hint: "P&L, ROI, CLV по каждому риск-профилю + калибровка + хвосты. Внизу vocab — точные названия стратегий/категорий." },
+    { label: "Футбол Pre-match Value — LIVE входы", url: "/api/profiles?report=profiles&strategyId=prematch_value&phase=live", file: "pmv-football-live.json", hint: "Разрез той же стратегии по фазе входа." },
+    { label: "Футбол Pre-match Value — PREMATCH входы", url: "/api/profiles?report=profiles&strategyId=prematch_value&phase=prematch", file: "pmv-football-prematch.json", hint: "Сравни с live-файлом — есть ли смысл разделять." },
+    { label: "Футбол PMV — разрез origin × рынок", url: "/api/profiles?report=pmv_origin_cut", file: "pmv-origin-cut.json" },
+    { label: "Футбол PMV — выход vs додержать до конца", url: "/api/profiles?report=pmv_exit_counterfactual", file: "pmv-exit-counterfactual.json" },
+    { label: "Overreaction — гейт выборки", url: "/api/real?report=overreaction_gate", file: "overreaction-gate.json" },
+    { label: "Только overreaction (по профилям)", url: "/api/profiles?report=profiles&strategyId=overreaction", file: "profiles-overreaction.json" },
+  ] },
+  { title: "Теннис", items: [
+    { label: "Теннис PMV — калибровка (Brier, win%, OVER-крен)", url: "/api/profiles?report=pmv_shadow_calibration", file: "tennis-pmv-calibration.json", hint: "Включает новый sideBias/biasFlags — измеренный over-крен тоталов." },
+    { label: "Set-value — когорта камбэков", url: "/api/profiles?report=sv_cohort", file: "sv-cohort.json" },
+    { label: "Set-value — калибровка shadow", url: "/api/profiles?report=sv_shadow_calibration", file: "sv-shadow-calibration.json" },
+    { label: "Теннис — link-rate скаута", url: "/api/tennis-scout?report=link_rate", file: "tennis-link-rate.json" },
+  ] },
+  { title: "Покрытие · здоровье · экономия", items: [
+    { label: "Еженедельный самоотчёт (всё в одном)", url: "/api/profiles?report=weekly_selfreport", file: "weekly-selfreport.json", hint: "link-rate + cohort-accrual + dry-fill + слепой футбол." },
+    { label: "Слепой funded-футбол (нет привязки)", url: "/api/profiles?report=blind_funded", file: "blind-funded.json" },
+    { label: "Покрытие фидов (no-feed)", url: "/api/profiles?report=no_feed_coverage", file: "no-feed-coverage.json" },
+    { label: "Аудит маппинга лиг", url: "/api/profiles?report=league_map_audit", file: "league-map-audit.json" },
+    { label: "PM-резолюция (ft_blind сеттлер)", url: "/api/profiles?report=pm_resolution", file: "pm-resolution.json" },
+    { label: "Эффект троттла переоценок", url: "/api/profiles?report=reassess_efficiency", file: "reassess-efficiency.json" },
+    { label: "Крон-простои (gaps)", url: "/api/profiles?report=schedule_gaps", file: "schedule-gaps.json" },
+  ] },
+  { title: "Сырьё (таблицы для Excel)", items: [
+    { label: "Все ставки — JSON", url: "/api/profiles-export?type=bets-json", file: "bets.json" },
+    { label: "Все ставки — CSV (Excel)", url: "/api/profiles-export?type=bets-csv", file: "bets.csv" },
+    { label: "Все выходы — CSV (Excel)", url: "/api/profiles-export?type=exits-csv", file: "exits.csv" },
+  ] },
+];
+
+function FilesPanel() {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [bulk, setBulk] = useState<{ done: number; total: number } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const grab = async (url: string, file: string): Promise<boolean> => {
+    try {
+      const r = await fetch(url);
+      const text = await r.text();
+      // Pretty-print JSON so the saved file is readable; CSV/other passes through as-is.
+      let out = text; if (file.endsWith(".json")) { try { out = JSON.stringify(JSON.parse(text), null, 2); } catch { /* keep raw */ } }
+      const blob = new Blob([out], { type: file.endsWith(".csv") ? "text/csv" : "application/json" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = file; a.click(); URL.revokeObjectURL(a.href);
+      return true;
+    } catch { setErr(`не удалось скачать: ${file}`); return false; }
+  };
+  const one = async (url: string, file: string) => { setErr(null); setBusy(file); try { await grab(url, file); } finally { setBusy(null); } };
+  const all = async () => {
+    setErr(null);
+    const items = FILE_GROUPS.flatMap((g) => g.items);
+    setBulk({ done: 0, total: items.length });
+    for (let i = 0; i < items.length; i++) { await grab(items[i].url, items[i].file); setBulk({ done: i + 1, total: items.length }); }
+    setBulk(null);
+  };
+  return (
+    <div style={S.feedList}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
+        <button onClick={all} disabled={!!bulk} style={{ ...S.artifactBtn, opacity: bulk ? 0.6 : 1, whiteSpace: "nowrap" }} title="Скачать по очереди все файлы ниже (браузер может спросить разрешение на несколько файлов)">
+          {bulk ? `Качаю ${bulk.done}/${bulk.total}…` : "📥 Скачать всё разом"}
+        </button>
+        <span style={{ fontSize: 11, color: MUTE }}>Каждая кнопка сохраняет файл — потом кидай их сюда в чат, разберём вместе.</span>
+      </div>
+      {err && <div style={{ fontSize: 11, color: "#ff6b6b", marginBottom: 8 }}>{err}</div>}
+      {FILE_GROUPS.map((g) => (
+        <div key={g.title} style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, color: MUTE, textTransform: "uppercase", letterSpacing: 0.5, margin: "6px 0" }}>{g.title}</div>
+          {g.items.map((it) => (
+            <div key={it.file} style={{ ...S.feedItem, alignItems: "center" }}>
+              <div style={S.feedBody}>
+                <div style={{ ...S.feedText, fontWeight: 600 }}>{it.label}</div>
+                {it.hint && <div style={{ fontSize: 11, color: MUTE }}>{it.hint}</div>}
+                <div style={{ fontSize: 10, color: MUTE, opacity: 0.7 }}>{it.file}</div>
+              </div>
+              <button onClick={() => one(it.url, it.file)} disabled={busy === it.file || !!bulk} style={{ ...S.artifactBtn, fontSize: 11, padding: "3px 10px", flexShrink: 0, opacity: (busy === it.file || bulk) ? 0.6 : 1 }}>
+                {busy === it.file ? "качаю…" : "📥 скачать"}
+              </button>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
   );
 }
 function eventTagChar(t: string) { return ({ goal: "⚽", red_card: "🟥", yellow_card: "🟨", sub: "⇄", stats: "📊" } as any)[t] || "•"; }
