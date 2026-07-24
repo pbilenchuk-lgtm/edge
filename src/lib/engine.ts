@@ -25,6 +25,7 @@ import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { recordComebackLatency } from "./overreactionLatency.js";
 import { isIso, finishStamp } from "./time.js";
 import type { SportsProvider } from "./sports.js";
+import { UEFA_TWO_LEG } from "./footballIntegrity.js";
 
 export interface EngineConfig {
   reassessGapMinutes: number; // §9.7 rate limit
@@ -948,7 +949,7 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
   // record's kickoff before it's treated as ANOTHER leg / a reschedule (not this match). ~30h clears
   // same-match timezone jitter yet catches a 2-day reschedule and a week-apart second leg.
   const LEG_GAP_MS = Math.max(1, Number(deps.env?.FOOTBALL_LEG_GAP_HOURS ?? process.env.FOOTBALL_LEG_GAP_HOURS ?? 30)) * 3_600_000;
-  const legTally = { dateGap: 0, suffix: 0 };
+  const legTally = { dateGap: 0, suffix: 0, orient: 0 };
   const qualBase = (lg: string | null | undefined) => String(lg ?? "").replace(/_qual$/i, "");
   // Build the (sport, league) scoreboards to poll. Football (and any other
   // ESPN-linked competition) contributes its mapped league; the provider also
@@ -980,26 +981,50 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       const candidates = dbMatches.filter((dm) => compSport.get(dm.competition_id) === sport && sameTeams(dm.home, dm.away, s.home, s.away));
       if (!candidates.length) continue;
       const evMs = s.date ? Date.parse(s.date) : NaN;
-      let m: typeof candidates[number] | undefined;
-      if (Number.isFinite(evMs)) {
-        m = candidates.find((c) => { const ko = c.kickoff_at ? Date.parse(c.kickoff_at) : NaN; return Number.isFinite(ko) && Math.abs(evMs - ko) <= LEG_GAP_MS; })
-          ?? candidates.find((c) => !c.kickoff_at); // a record with no kickoff can't be date-checked → allow
-        if (!m) {
+      const dateOk = (c: typeof candidates[number]) => { const ko = c.kickoff_at ? Date.parse(c.kickoff_at) : NaN; return Number.isFinite(evMs) && Number.isFinite(ko) && Math.abs(evMs - ko) <= LEG_GAP_MS; };
+      // P1(б7) TWO-LEG BINDING: a two-leg tie replays the SAME teams a week apart, so team names bind either
+      // leg — the settle-contamination root (Raków won 3:1, "Raków — Yes" booked settled_lost off the other
+      // leg). For a two-leg competition a POSITIVE date-match is MANDATORY: both escape hatches are closed —
+      // (1) a no-kickoff record can't be date-checked → NOT bound; (2) a missing ESPN date → NOT bound. Keyed
+      // on the board league OR the candidate's own competition, so a _qual variant or a suffix-filed comp is
+      // still protected. Single-leg fixtures keep the legacy fallbacks unchanged.
+      const boardTwoLeg = UEFA_TWO_LEG.has(qualBase(league));
+      let m: typeof candidates[number] | undefined = candidates.find(dateOk); // a positive date-match always wins
+      if (!m) {
+        const twoLeg = candidates.filter((c) => boardTwoLeg || UEFA_TWO_LEG.has(qualBase(compLeague.get(c.competition_id))));
+        if (twoLeg.length) {
           legTally.dateGap++;
-          const c0 = candidates[0];
-          console.warn(`[enrich] fixture_leg_mismatch date_gap: «${c0.home}–${c0.away}» запись ${c0.kickoff_at} vs ESPN ${s.date} (${league}) — НЕ привязано (чужой круг/перенос)`);
-          continue; // the date says this event is not any of these records — never wire a foreign leg
+          const c0 = twoLeg[0];
+          console.warn(`[enrich] fixture_leg_mismatch two_leg_no_datematch: «${c0.home}–${c0.away}» запись ${c0.kickoff_at ?? "—"} vs ESPN ${s.date ?? "—"} (${league}) — НЕ привязано (двухматчевая пара требует совпадения даты ≤${Math.round(LEG_GAP_MS / 3_600_000)}ч)`);
+          continue; // never team-name-bind a two-leg fixture without a positive date match
         }
-      } else {
-        m = candidates[0]; // no event date → can't gate; legacy team-name binding
+        if (Number.isFinite(evMs)) {
+          m = candidates.find((c) => !c.kickoff_at); // single-leg: a record with no kickoff can't be gated → allow
+          if (!m) {
+            legTally.dateGap++;
+            const c0 = candidates[0];
+            console.warn(`[enrich] fixture_leg_mismatch date_gap: «${c0.home}–${c0.away}» запись ${c0.kickoff_at} vs ESPN ${s.date} (${league}) — НЕ привязано (чужой круг/перенос)`);
+            continue; // the date says this event is not any of these records — never wire a foreign leg
+          }
+        } else {
+          m = candidates[0]; // single-leg, no event date → can't gate; legacy team-name binding
+        }
       }
       // Suffix mismatch (record league vs board league) is LEGAL — PM files quals under the main league and
       // we cross-poll _qual on purpose. Count at INFO for traceability; NEVER blocks (only the date does).
       if (qualBase(compLeague.get(m.competition_id)) === qualBase(league) && compLeague.get(m.competition_id) !== league) legTally.suffix++;
-      // sameTeams is order-insensitive: the DB match's home/away orientation
-      // (from the Polymarket title) may be the reverse of ESPN's. Align scores
-      // and lineups to the DB match's home/away so nothing gets mirrored.
-      const flip = nameMatch(m.home, s.away); // DB home is ESPN's away side → scores/lineups mirrored
+      // sameTeams is order-insensitive: the DB match's home/away orientation (from the Polymarket title) may be
+      // the reverse of ESPN's. Resolve orientation from BOTH sides and require it UNAMBIGUOUS — a name set that
+      // matches straight AND mirrored (or neither) could put the score on the wrong side (the secondary two-leg
+      // contamination vector). Don't guess: skip + loud log rather than risk a mirrored score/lineup.
+      const straight = nameMatch(m.home, s.home) && nameMatch(m.away, s.away);
+      const mirrored = nameMatch(m.home, s.away) && nameMatch(m.away, s.home);
+      if (straight === mirrored) {
+        legTally.orient++;
+        console.warn(`[enrich] ambiguous_orientation «${m.home}–${m.away}» vs ESPN «${s.home}–${s.away}» (${league}) — НЕ привязано (ориентация счёта неоднозначна)`);
+        continue;
+      }
+      const flip = mirrored; // DB home is ESPN's away side → scores/lineups mirrored
       const scoreHome = flip ? s.scoreAway : s.scoreHome;
       const scoreAway = flip ? s.scoreHome : s.scoreAway;
       // Did THIS enrich transition the match into "finished"? Settlement lives
@@ -1040,7 +1065,7 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
     }
   }
   // P0.1: surface the leg-mismatch tally (blocking date_gap vs informational suffix) for ops/audit.
-  if (legTally.dateGap || legTally.suffix) {
+  if (legTally.dateGap || legTally.suffix || legTally.orient) {
     try { R.metaSet(db, "fixture_leg_mismatch", JSON.stringify({ ...legTally, at: now }), now); } catch { /* never block on a marker */ }
   }
   return out;
