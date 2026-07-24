@@ -38,6 +38,29 @@ function seedScan(db: ReturnType<typeof openDb>, mlCents: number, props: { label
   return mid;
 }
 
+test("P6-T3 (batch-7): an ambiguous «+/-1.5» set-handicap blocks by default, resolves family-aware when unblocked", () => {
+  const label = Q + "Set Handicap"; // no explicit «(-1.5)» side
+  // DEFAULT (flag off): provenance block, unchanged.
+  delete process.env.TENNIS_SET_HANDICAP_UNBLOCK;
+  const db1 = openDb(":memory:");
+  const mid1 = seedScan(db1, 65, [{ label, mid: 40, liq: 3000 }]);
+  const c1 = scanMatchProps(db1, mid1, { p1: "Kawa", p2: "Waltert" }, "wta", "WTA").candidates.find((c) => c.label === label)!;
+  assert.equal(c1.action, "provenance_review", "default: ambiguous ±1.5 stays blocked");
+
+  // UNBLOCKED: Kawa is the moneyline favourite (65¢) → carries −1.5 → priced as P(Kawa 2-0), NOT blocked.
+  process.env.TENNIS_SET_HANDICAP_UNBLOCK = "1";
+  try {
+    const theo = tennisTheo(0.65, BASE_HOLD.wta);
+    const parsed = { family: "set_handicap", scope: "match", setNum: null, line: 1.5, side: "first", handicapOnFirst: true } as any;
+    const theoCents = Math.round(theoForProp(parsed, theo, true)! * 100); // handicapOnFirst=true (Kawa fav) → a20
+    const db2 = openDb(":memory:");
+    const mid2 = seedScan(db2, 65, [{ label, mid: theoCents - 10, liq: 3000 }]); // dev +10 → enter
+    const c2 = scanMatchProps(db2, mid2, { p1: "Kawa", p2: "Waltert" }, "wta", "WTA").candidates.find((c) => c.label === label)!;
+    assert.notEqual(c2.action, "provenance_review", "unblocked → side resolved from favourite, not blocked");
+    assert.equal(c2.action, "enter", "family-aware priced → a +10¢ dev is an entry");
+  } finally { delete process.env.TENNIS_SET_HANDICAP_UNBLOCK; }
+});
+
 test("scan П4 (batch-3): a big-dev set_winner is BLOCKED even with side resolved (void/retire risk) — Bronzetti Set 2 Winner +24.8¢ case", () => {
   const db = openDb(":memory:");
   const theo = tennisTheo(0.65, BASE_HOLD.wta);

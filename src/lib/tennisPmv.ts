@@ -55,6 +55,12 @@ const PMV_DEV_PROVENANCE = num(process.env.TENNIS_PMV_DEV_PROVENANCE, 18); // �
 const PMV_PRICE_MIN = num(process.env.TENNIS_PMV_PRICE_MIN, 8);        // price band: tails eaten by spread → skip
 const PMV_PRICE_MAX = num(process.env.TENNIS_PMV_PRICE_MAX, 92);
 const PMV_BOOK_MIN = num(process.env.TENNIS_PMV_BOOK_MIN, 500);        // prop book gate ($) — same as Gate 0.1
+// P6-T3 (batch-7): family-aware set-handicap side resolution. When a «Set Handicap +/-1.5» label carries no
+// explicit «(-1.5)», the side is read from the moneyline FAVOURITE (the −1.5 carrier) + token, NOT the literal.
+// Gated OFF until the outcome-index convention is empirically confirmed on settled ±1.5 markets (spec: «решения
+// по критериям»); default OFF keeps the provenance block. Flip TENNIS_SET_HANDICAP_UNBLOCK=1 after confirmation.
+// Read at call time (not module load) so the gate is togglable per run/test.
+const setHandicapUnblocked = () => /^(1|true|on|yes)$/i.test(String(process.env.TENNIS_SET_HANDICAP_UNBLOCK ?? ""));
 const PMV_MAX_PROPS = Math.max(1, Math.round(num(process.env.TENNIS_PMV_MAX_PROPS, 2))); // correlation: ≤ N props/match, diff families
 // Void-on-incompletion (Gate 0.2): Total Sets & Set Handicap VOID on any mid-match retire, so their
 // fair value is conditional on the match COMPLETING. Fold the interim completion rate into the theo so
@@ -227,9 +233,15 @@ export function scanMatchProps(db: Database, matchId: string, players: { p1: str
       out.candidates.push({ label: mk.label, family: parsed.family, side: parsed.side, cluster: corrCluster(parsed.family), midCents: mid, theoCents, deviation: dev, bookUsd: Math.round(book), action, reason, firstIsP1: first });
     // (P4.1) Placeholder: a prop pinned at ~50¢ is an untraded default, not a real price → skip.
     if (Math.abs(mid - 50) <= PMV_PLACEHOLDER_BAND) { push("skip", `плейсхолдер ~50¢ (нет реальной цены)`); continue; }
-    // (P4.3) Set Handicap with an ambiguous "+/-1.5" (no explicit "(-1.5)" side) → we can't tell which
-    // player the line favours → block (provenance), don't guess.
-    if (parsed.family === "set_handicap" && !/\(\s*[-−]\s*1\.5\s*\)/.test(mk.label)) { push("provenance_review", `сторона гандикапа неоднозначна (нет явного «(-1.5)») — провенанс, не торгуем`); continue; }
+    // (P4.3 / P6-T3) Set Handicap with an ambiguous "+/-1.5" (no explicit "(-1.5)" side). Default: block
+    // (provenance), don't guess. With TENNIS_SET_HANDICAP_UNBLOCK on and the sides mappable, resolve FAMILY-AWARE:
+    // the moneyline favourite carries −1.5, so label-first carries −1.5 iff label-first IS the favourite.
+    if (parsed.family === "set_handicap" && !/\(\s*[-−]\s*1\.5\s*\)/.test(mk.label)) {
+      const unblock = setHandicapUnblocked();
+      if (!unblock || first == null) { push("provenance_review", `сторона гандикапа неоднозначна (нет явного «(-1.5)»)${unblock ? ", стороны не сопоставлены" : ""} — провенанс, не торгуем`); continue; }
+      const favIsP1 = ml.p1Cents >= 50;          // moneyline favourite (P(scout-p1) ≥ 50¢) is the −1.5 carrier
+      parsed.handicapOnFirst = first === favIsP1; // label-first carries −1.5 iff it is the favourite
+    }
     // theoForProp orients set_winner AND set_handicap off `first` (single source); null on a
     // player-specific family means the sides couldn't be mapped → provenance skip (don't guess).
     const theoProb = theoForProp(parsed, theo, first);
