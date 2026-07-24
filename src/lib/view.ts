@@ -211,6 +211,21 @@ export function buildAppData(db: Database, env = process.env): AppData {
   const matchesByComp = new Map(comps.map((c) => [c.id, R.listMatches(db, c.id)]));
   const sharesByComp = new Map(comps.map((c) => [c.id, R.sharesForComp(db, c.id)]));
 
+  // ALL bets in one query, grouped — built up-front so both the competitions map and the match loop can read
+  // the bet-count (which decides the log-archive exclusion below) without a per-match scan.
+  const betsByMatch = new Map<string, Bet[]>();
+  const betsByStrategy = new Map<string, Bet[]>();
+  for (const b of R.allBets(db)) {
+    (betsByMatch.get(b.match_id) ?? betsByMatch.set(b.match_id, []).get(b.match_id)!).push(b);
+    (betsByStrategy.get(b.strategy_id) ?? betsByStrategy.set(b.strategy_id, []).get(b.strategy_id)!).push(b);
+  }
+  const hasRealBet = (mid: string) => (betsByMatch.get(mid) ?? []).some((b) => b.status !== "proposed" && b.status !== "not_filled");
+  // LOG-ARCHIVE DECOUPLE: a FINISHED match with NO real bets belongs to the «Логи» archive, served lean via
+  // /api/logs — it does NOT ride the hot buildAppData payload (that's the Polymarket discovery flood we used to
+  // prune away; now we keep it out of the payload instead of deleting it). Active/upcoming and any bet-bearing
+  // match stay in the payload for Матчи / Портфель / stats.
+  const inHotPayload = (m: Match) => m.state !== "finished" || hasRealBet(m.id);
+
   const compBudget: Record<string, number> = {};
   const shares: Record<string, Record<string, number>> = {};
   const shareRows: Record<string, { strategyId: string; profileId: string; pct: number }[]> = {};
@@ -227,7 +242,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
     // Tennis is ATP/WTA-singles only (tennisTourOf → null for ITF/Challenger/doubles/125/quali).
     // An out-of-scope tour is NEVER traded, so the UI must not show it as a funded "$12k движок".
     const inScope = c.sport_id === "tennis" ? tennisTourOf(c) != null : true;
-    return { id: c.id, sport: c.sport_id, name: c.name, inScope, matches: (matchesByComp.get(c.id) ?? []).map((m) => m.id) };
+    return { id: c.id, sport: c.sport_id, name: c.name, inScope, matches: (matchesByComp.get(c.id) ?? []).filter(inHotPayload).map((m) => m.id) };
   });
 
   const catalog: StrategyView[] = strategies.map((s) => ({
@@ -242,15 +257,6 @@ export function buildAppData(db: Database, env = process.env): AppData {
     else analysis.byComp[p.scope_id] = p.body;
   }
 
-  // ALL bets in one query, grouped — the match loop, stats and quality then read
-  // from these maps instead of a per-match betsForMatch scan (×M each pass).
-  const betsByMatch = new Map<string, Bet[]>();
-  const betsByStrategy = new Map<string, Bet[]>();
-  for (const b of R.allBets(db)) {
-    (betsByMatch.get(b.match_id) ?? betsByMatch.set(b.match_id, []).get(b.match_id)!).push(b);
-    (betsByStrategy.get(b.strategy_id) ?? betsByStrategy.set(b.strategy_id, []).get(b.strategy_id)!).push(b);
-  }
-
   // matches
   const matchDb: Record<string, MatchView> = {};
   const allMatches: Match[] = [];
@@ -258,6 +264,7 @@ export function buildAppData(db: Database, env = process.env): AppData {
   const pricesByMatch = new Map<string, Record<string, number>>(); // freshest quote per label
   for (const c of comps) {
     for (const m of matchesByComp.get(c.id) ?? []) {
+      if (!inHotPayload(m)) continue; // no-bet finished → log archive (/api/logs), not the hot payload
       allMatches.push(m); matchById.set(m.id, m);
       // COLD-START GUARD. buildAppData is a synchronous node:sqlite pass, and the ~12
       // per-match detail queries below (assessments, markets, reassessments, trade log,

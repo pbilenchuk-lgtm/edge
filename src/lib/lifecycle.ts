@@ -2099,7 +2099,12 @@ export async function runAutoCycle(
   // Bound the matches table: drop finished/stale matches that carry NO bets (the
   // Polymarket discovery flood). Never touches a match with betting history, so
   // metrics/P&L are preserved. Keeps buildAppData's per-poll scan bounded (§502).
-  stepSync("pruneMatches", () => { const nowMs = Date.parse(nowFn(deps)()) || Date.now(); const graceH = Math.max(1, Number(deps.env?.FOOTBALL_LOG_GRACE_HOURS ?? process.env.FOOTBALL_LOG_GRACE_HOURS ?? 36)); return R.pruneStaleMatches(db, { staleBeforeMs: nowMs - 3 * 86400_000, graceBeforeMs: nowMs - graceH * 3_600_000, now: nowFn(deps)() }); }, 0);
+  stepSync("pruneMatches", () => { const nowMs = Date.parse(nowFn(deps)()) || Date.now(); return R.pruneStaleMatches(db, { staleBeforeMs: nowMs - 3 * 86400_000, now: nowFn(deps)() }); }, 0);
+  // The finished-match LOG ARCHIVE is decoupled from the hot payload (buildAppData excludes no-bet finished; the
+  // «Логи» page reads it via /api/logs). So finished matches are kept for review as long as this cap allows —
+  // «долго/вечно» — bounded only against catastrophic growth (like the tennis-snapshot cap). Bet-bearing matches
+  // are never touched. Default 20000; tunable via MATCH_LOG_ARCHIVE_MAX.
+  stepSync("capLogArchive", () => R.capMatchLogArchive(db, Math.max(1000, Number(deps.env?.MATCH_LOG_ARCHIVE_MAX ?? process.env.MATCH_LOG_ARCHIVE_MAX ?? 20000))), 0);
   // Drop categories we no longer track: untracked sports (cricket) + non-ATP
   // tennis. No-bet only, never a seeded comp. Discovery already stops importing
   // them; this clears the ones imported before the rule changed.

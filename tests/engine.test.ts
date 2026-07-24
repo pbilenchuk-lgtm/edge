@@ -847,43 +847,55 @@ test("pruneStaleMatches keeps funded finished matches but drops unfunded/stale n
 
   // give fin-withbet a settled bet + child rows on fin-unfunded to prove cascade
   R.insertBet(db, { id: "b-keep", match_id: "fin-withbet", strategy_id: strat.id, market_label: "Over 1.5", status: "settled_won", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: 55, ai_prob: 0.6, stake: 100, rationale: null, entered_minute: "3'", result: "won", payout: 120, settled_by: null, created_at: "t" });
-  R.insertMarket(db, { id: R.uid(), match_id: "fin-unfunded", label: "Over 2.5", price: 50, ai_prob: null, liquidity: null, external_ref: "tk", snapshot_at: "t", is_closing: false });
-  R.insertReassessment(db, { id: R.uid(), match_id: "fin-unfunded", strategy_id: strat.id, minute: "10'", body: "x", confidence: null, trigger: "time", created_at: "t" });
+  // child rows on the ONLY match this now prunes (upcoming-stale) to prove the cascade.
+  R.insertMarket(db, { id: R.uid(), match_id: "upcoming-stale", label: "Over 2.5", price: 50, ai_prob: null, liquidity: null, external_ref: "tk", snapshot_at: "t", is_closing: false });
+  R.insertReassessment(db, { id: R.uid(), match_id: "upcoming-stale", strategy_id: strat.id, minute: "10'", body: "x", confidence: null, trigger: "time", created_at: "t" });
 
   const removed = R.pruneStaleMatches(db, { staleBeforeMs: Date.parse("2020-01-01T00:00:00Z") });
-  assert.equal(removed, 3, "fin-funded-stale + fin-unfunded + upcoming-stale pruned");
-  assert.ok(R.getMatch(db, "fin-funded"), "funded finished match kept for review");
-  assert.equal(R.getMatch(db, "fin-funded-stale"), null);
-  assert.equal(R.getMatch(db, "fin-unfunded"), null);
-  assert.equal(R.getMatch(db, "upcoming-stale"), null);
+  // NEW contract: FINISHED matches are the log archive — NEVER age-pruned here; only a stale NON-finished
+  // import (upcoming that never resolved) is pruned. capMatchLogArchive bounds the finished archive by count.
+  assert.equal(removed, 1, "only the stale upcoming import is pruned; finished matches are archived");
+  assert.ok(R.getMatch(db, "fin-funded"), "funded finished kept");
+  assert.ok(R.getMatch(db, "fin-funded-stale"), "even an OLD finished no-bet match is kept (archive)");
+  assert.ok(R.getMatch(db, "fin-unfunded"), "even an unfunded finished no-bet match is kept (archive)");
+  assert.equal(R.getMatch(db, "upcoming-stale"), null, "the stale upcoming import (never finished) is pruned");
   assert.ok(R.getMatch(db, "fin-withbet"), "match with betting history kept");
   assert.ok(R.getMatch(db, "live-nobet"), "live match kept");
   assert.ok(R.getMatch(db, "upcoming-fresh"), "future match kept");
   // children of the pruned match are gone (no FK-orphan / no leftover rows)
-  assert.equal(R.latestMarkets(db, "fin-unfunded").length, 0);
-  assert.equal(R.reassessmentsForMatch(db, "fin-unfunded").length, 0);
-  // the kept bet survives
+  assert.equal(R.latestMarkets(db, "upcoming-stale").length, 0);
+  assert.equal(R.reassessmentsForMatch(db, "upcoming-stale").length, 0);
   assert.ok(R.getBet(db, "b-keep"));
-  // audit trail: every pruned match is recorded with a reason («куда попропало») — a silent DELETE no more.
+  // audit trail: the one pruned match is recorded with a reason («куда попропало»).
   const audit = JSON.parse(R.metaGet(db, "pruned_matches_recent") as string);
-  assert.equal(audit.total, 3);
-  assert.equal(audit.pruned.length, 3);
-  assert.ok(audit.pruned.every((p: any) => typeof p.reason === "string" && p.match && p.at), "each carries match + reason + timestamp");
-  assert.ok(audit.pruned.some((p: any) => /unfunded/.test(p.reason)), "the unfunded prune reason is captured");
+  assert.equal(audit.total, 1);
+  assert.ok(audit.pruned.every((p: any) => typeof p.reason === "string" && p.match && p.at), "carries match + reason + timestamp");
+  assert.ok(audit.pruned.some((p: any) => /не завершился/.test(p.reason)), "the stale-import reason is captured");
 });
 
-test("pruneStaleMatches: a RECENTLY-finished unfunded no-bet match is kept within the grace window (scheduler-gap import)", () => {
+test("listMatchLogs + capMatchLogArchive: the archive lists finished matches and the cap keeps the newest no-bet ones", () => {
   const db = openDb(":memory:");
   seedDatabase(db);
-  const unfunded = R.listCompetitions(db).find((c) => c.sport_id === "football" && (c.budget ?? 0) <= 0)!;
-  const mk = (id: string, kickoff: string) => R.insertMatch(db, { id, competition_id: unfunded.id, home: "A" + id, away: "B" + id, state: "finished", lineup_out: false, kickoff_at: kickoff, minute: 90, score_home: 1, score_away: 0, final_score: "1:0", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
-  mk("gap-recent", "2026-07-24T10:00:00Z");  // finished 2h ago (a gap import) → within grace → KEEP for review
-  mk("gap-old", "2026-07-22T10:00:00Z");     // finished 2 days ago → past grace → prune
-  const nowMs = Date.parse("2026-07-24T12:00:00Z");
-  const removed = R.pruneStaleMatches(db, { staleBeforeMs: nowMs - 3 * 86400_000, graceBeforeMs: nowMs - 36 * 3_600_000, now: "2026-07-24T12:00:00Z" });
-  assert.equal(removed, 1, "only the old one is pruned");
-  assert.ok(R.getMatch(db, "gap-recent"), "the recent gap-import survives the grace window → visible in Логи");
-  assert.equal(R.getMatch(db, "gap-old"), null, "the old no-bet match is pruned past grace");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  const strat = R.listStrategies(db, "football")[0];
+  const fin = (id: string, end: string) => R.insertMatch(db, { id, competition_id: comp.id, home: "H" + id, away: "A" + id, state: "finished", lineup_out: false, kickoff_at: end, minute: 90, score_home: 1, score_away: 0, final_score: "1:0", kickoff_time: null, end_time: end, duration: null, end_note: null, external_ref: id });
+  fin("old1", "2026-07-20T10:00:00Z");
+  fin("old2", "2026-07-21T10:00:00Z");
+  fin("new1", "2026-07-23T10:00:00Z");
+  fin("bet1", "2026-07-19T10:00:00Z"); // has a bet → never capped
+  R.insertBet(db, { id: R.uid(), match_id: "bet1", strategy_id: strat.id, market_label: "Over 1.5", status: "settled_won", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: 55, ai_prob: 0.6, stake: 100, rationale: null, entered_minute: "3'", result: "won", payout: 120, settled_by: null, created_at: "t" });
+
+  const logs = R.listMatchLogs(db, 100);
+  assert.ok(logs.length >= 4, "all finished matches listed");
+  assert.equal(logs[0].id, "new1", "newest finish first");
+  assert.equal(logs.find((l) => l.id === "bet1")!.betCount, 1, "bet count surfaced");
+
+  // cap to the newest 2 NO-BET finished → old1 (oldest no-bet) pruned; new1+old2 kept; bet1 never touched.
+  const removed = R.capMatchLogArchive(db, 2);
+  assert.equal(removed, 1);
+  assert.equal(R.getMatch(db, "old1"), null, "oldest no-bet finished pruned past the cap");
+  assert.ok(R.getMatch(db, "new1") && R.getMatch(db, "old2"), "newest no-bet kept");
+  assert.ok(R.getMatch(db, "bet1"), "bet-bearing match never capped");
 });
 
 test("strategyCompExposure / strategyCompRealized aggregate across the whole competition", async () => {
