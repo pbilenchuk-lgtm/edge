@@ -145,6 +145,26 @@ export async function GET(req: Request) {
       let fixes: unknown = []; try { fixes = JSON.parse(metaGet(db, "league_map_fixes_recent") ?? "[]"); } catch { fixes = []; }
       return NextResponse.json({ ok: true, mismatches, fixes, note: "mismatches — расхождения имя-категории↔слаг-лиги по текущему инференсу (dry-run); применяет их шаг lifecycle repairLeagueMap. fixes — кольцо уже исправленных (from→to)." });
     }
+    // ?report=weekly_selfreport → R4: the self-declaring weekly digest in ONE place — tennis link-rate,
+    // set_value cohort_accrual (forward tempo + ETA), the dry_fill_watch verdict, and the blind-funded-football
+    // count — so «гейты и когорты объявляют себя сами» next to link-rate instead of across five endpoints.
+    if (new URL(req.url).searchParams.get("report") === "weekly_selfreport") {
+      const { buildTennisLinkRate } = await import("@/lib/tennisScout");
+      const { svCohortAccrual } = await import("@/lib/tennisSetValueShadow");
+      const { buildDryFillWatch } = await import("@/lib/executor/dryFillWatch");
+      const { listBlindFundedFootball, metaGet } = await import("@/lib/repo");
+      const now = new Date().toISOString();
+      const lr = buildTennisLinkRate(db);
+      let dryFillWatch: unknown = null; try { dryFillWatch = buildDryFillWatch(db, process.env); } catch { dryFillWatch = null; }
+      let noFeed: unknown = null; try { noFeed = JSON.parse(metaGet(db, "blind_pairs_daily") ?? "null"); } catch { noFeed = null; }
+      return NextResponse.json({ ok: true, at: now,
+        linkRate: { inDiscoveryLinkPct: lr.inDiscoveryLinkPct, auto: lr.auto, listable: lr.inDiscoveryEvents, note: lr.note },
+        cohortAccrual: svCohortAccrual(db, now),
+        dryFillWatch,
+        blindFundedCount: listBlindFundedFootball(db, { nowMs: Date.parse(now) || Date.now() }).length,
+        noFeedDigest: noFeed,
+      });
+    }
     // ?report=blind_funded → R2(б): funded football matches that ran past kickoff with NO provider bind
     // (не молчаливая слепота). `live` = current detection; `persisted` = the ring the lifecycle step wrote.
     // reason: no_league (comp unmapped) vs unbound (league set, bind failed — tier/name/dark).
