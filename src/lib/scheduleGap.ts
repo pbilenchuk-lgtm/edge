@@ -92,7 +92,22 @@ export function recordScheduleGap(
   } catch { /* meta best-effort */ }
   // P0.6: only a HARMFUL gap (a live match at wake) arms the protective-exit reprice window.
   if (inPlay) markGapWake(db, nowMs, sec, env);
+  // PETRO #1: fire an external alert on a HARMFUL gap so someone is actually WOKEN — the journal alone is a
+  // chronicle no one reads. Best-effort, fire-and-forget; a missing/failed webhook never affects the loop.
+  if (inPlay) fireGapWebhook(env, mins, startIso, at);
   return gap;
+}
+
+/** POST a one-line alert to SCHEDULE_GAP_WEBHOOK_URL when a live-in-play sleep is recorded. The body carries
+ *  BOTH `content` (Discord) and `text` (Slack/Mattermost/generic) so a plain incoming webhook works unchanged.
+ *  Off when the env var is unset. Never throws, never awaited — the scheduler must not depend on the network. */
+function fireGapWebhook(env: Record<string, string | undefined>, mins: number, startIso: string, at: string): void {
+  const url = env.SCHEDULE_GAP_WEBHOOK_URL;
+  if (!url) return;
+  const msg = `⚠️ EDGE LAB: планировщик спал ~${mins}м во время ЛАЙВА (${startIso.slice(11, 16)}Z→${at.slice(11, 16)}Z) — позиции были без управления, стопы могли исполниться по дну гэпа.`;
+  try {
+    void fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: msg, text: msg }) }).catch(() => { /* best-effort */ });
+  } catch { /* fetch unavailable / bad URL — never break the loop */ }
 }
 
 export interface GapRepriceSummary {

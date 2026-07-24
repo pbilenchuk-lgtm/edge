@@ -71,3 +71,34 @@ test("F7 recordScheduleGap: a live blackout since kickoff with no prior marker i
   // a healthy loop (recent prevMs) is unaffected even when a kickoff floor is supplied — prevMs wins
   assert.equal(recordScheduleGap(db, firstTick - 20_000, firstTick, true, {}, kickoff), null);
 });
+
+test("PETRO#1 recordScheduleGap: a harmful (live-in-play) gap fires the external webhook when configured", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const start = Date.parse("2026-07-22T17:07:00Z");
+  const end = Date.parse("2026-07-22T18:05:00Z");
+  const calls: { url: string; body: string }[] = [];
+  const orig = globalThis.fetch;
+  (globalThis as any).fetch = async (url: string, init: any) => { calls.push({ url, body: String(init?.body ?? "") }); return { ok: true, status: 200, json: async () => ({}) }; };
+  try {
+    recordScheduleGap(db, start, end, true, { SCHEDULE_GAP_WEBHOOK_URL: "https://hooks.example/abc" });
+    assert.equal(calls.length, 1, "one webhook POST for a harmful gap");
+    assert.equal(calls[0].url, "https://hooks.example/abc");
+    assert.match(calls[0].body, /планировщик спал ~58м во время ЛАЙВА/);
+    assert.match(calls[0].body, /"content"/); assert.match(calls[0].body, /"text"/); // Discord + Slack shapes
+  } finally { (globalThis as any).fetch = orig; }
+});
+
+test("PETRO#1 recordScheduleGap: NO webhook when the URL is unset, or when the gap is benign (no live match)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const start = Date.parse("2026-07-22T17:07:00Z"), end = Date.parse("2026-07-22T18:05:00Z");
+  const calls: any[] = [];
+  const orig = globalThis.fetch;
+  (globalThis as any).fetch = async (...a: any[]) => { calls.push(a); return { ok: true, status: 200, json: async () => ({}) }; };
+  try {
+    recordScheduleGap(db, start, end, true, {}); // harmful but no URL
+    recordScheduleGap(db, start, end, false, { SCHEDULE_GAP_WEBHOOK_URL: "https://hooks.example/abc" }); // benign (no live)
+    assert.equal(calls.length, 0, "no alert without a URL, and none for a non-live gap");
+  } finally { (globalThis as any).fetch = orig; }
+});
