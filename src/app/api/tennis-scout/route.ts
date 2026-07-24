@@ -61,6 +61,13 @@ export async function GET(req: Request) {
       if (format === "json") return NextResponse.json(rep);
       return new NextResponse(scout.tennisLinkRateMarkdown(rep), { status: 200, headers: { "Content-Type": "text/markdown; charset=utf-8" } });
     }
+    // ?report=maturity → P6 STOP-1 (batch-7): shadow-cohort maturity — how far PMV Brier (n/40) and Set-Value
+    // shadow (verdict-bin n/40, total n/80) are from their pre-fixed criteria, + ETA at the current rate. The
+    // flag_only signals are NOT unblocked on anecdotes; decisions come from these criteria. Read-only.
+    if (url.searchParams.get("report") === "maturity") {
+      const { buildTennisMaturity } = await import("@/lib/tennisMaturity");
+      return NextResponse.json({ ok: true, maturity: buildTennisMaturity(getDb()) });
+    }
     // ?report=ovr_runner → П3 (batch-3): read-only EV of a "take 50% + hold runner to settle" overreaction
     // structure on the ALREADY-accumulated cohort (no money moved) — the go/no-go gate before any re-enable.
     if (url.searchParams.get("report") === "ovr_runner") {

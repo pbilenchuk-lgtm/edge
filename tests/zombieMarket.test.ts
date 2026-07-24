@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classifyZombie, outcomeKey, notationSpreads, loadZombieConfig, type ZombieConfig } from "../src/lib/zombieMarket.js";
 
-const CFG: ZombieConfig = { staleBookMin: 30, notationSpreadCents: 12, resolvedMarginCents: 12, placeholderBandCents: 0.5, placeholderStaleMin: 10, staleExtremeCents: 2 };
+const CFG: ZombieConfig = { staleBookMin: 30, notationSpreadCents: 12, resolvedMarginCents: 12, resolvedScoreCertainFloorCents: 5, placeholderBandCents: 0.5, placeholderStaleMin: 10, staleExtremeCents: 2 };
 
 test("P1 classifyZombie (a): a game-state-resolved leg priced far below 100¢ is a resolved_price zombie", () => {
   // both teams scored → BTTS-Yes gsProb ≈ 1, but the book still sits at 50¢ (Vardar)
@@ -13,6 +13,23 @@ test("P1 classifyZombie (a): a game-state-resolved leg priced far below 100¢ is
 test("P1 classifyZombie (a): a resolved leg already priced near 100¢ is NOT a zombie (book caught up)", () => {
   const z = classifyZombie({ label: "BTTS — Yes", priceCents: 96, gsProb: 1, groupSpreadCents: null, bookAgeMin: 2, live: true }, CFG);
   assert.equal(z, null);
+});
+
+test("P6 (batch-7) classifyZombie (a): a SCORE-CERTAIN Over (gsProb=1, goals locked) stays TRADEABLE below the 88¢ cap", () => {
+  // "Team Over 1.5" with the team already on 2 → mathematically locked. A cheap executable price is a REAL buy
+  // (+edge to 100¢), NOT a stale book — so it must NOT be quarantined (Shelbourne Over 1.5 @84¢).
+  assert.equal(classifyZombie({ label: "Shelbourne Over 1.5", priceCents: 84, askCents: 84, gsProb: 1, groupSpreadCents: null, bookAgeMin: 2, live: true }, CFG), null, "locked Over @84¢ is tradeable, not a zombie");
+  // even a deep-discount locked Over is a buy, down to the small broken/void floor (5¢).
+  assert.equal(classifyZombie({ label: "Shelbourne Over 1.5", priceCents: 20, askCents: 20, gsProb: 1, groupSpreadCents: null, bookAgeMin: 2, live: true }, CFG), null, "locked Over @20¢ still tradeable");
+  // an absurd sub-floor price on a "locked" Over is a broken/void book → still quarantined.
+  assert.equal(classifyZombie({ label: "Shelbourne Over 1.5", priceCents: 3, askCents: 3, gsProb: 1, groupSpreadCents: null, bookAgeMin: 2, live: true }, CFG)?.code, "resolved_price");
+});
+
+test("P6 (batch-7) classifyZombie (a): MODEL-ONLY P≈1 (not score-locked) keeps the cautious 88¢ cap; BTTS untouched", () => {
+  // gsProb 0.996 from the MODEL (not exactly 1) → cautious 88¢ cap still applies.
+  assert.equal(classifyZombie({ label: "Home Over 1.5", priceCents: 84, askCents: 84, gsProb: 0.996, groupSpreadCents: null, bookAgeMin: 2, live: true }, CFG)?.code, "resolved_price");
+  // score-certain BTTS (the original Vardar catch) is NOT an Over family → keeps the 88¢ cap.
+  assert.equal(classifyZombie({ label: "BTTS — Yes", priceCents: 50, askCents: 50, gsProb: 1, groupSpreadCents: null, bookAgeMin: 2, live: true }, CFG)?.code, "resolved_price");
 });
 
 test("P1 classifyZombie (b): duplicate notations desynced beyond tolerance → notation_desync", () => {
@@ -104,8 +121,9 @@ test("F5 classifyZombie: an extreme-priced (≤2 / ≥98) stale book is exempt f
 test("F6 classifyZombie: resolved_price evaluates the live ask, not a lagging stored mid", () => {
   // Debreceni Over 0.5 @62': stored mid 77.5¢ (lagged) but live book already ~100¢ (ask 99.9) → NOT a zombie
   assert.equal(classifyZombie({ label: "Debreceni VSC Over 0.5", priceCents: 77.5, askCents: 99.9, gsProb: 1, groupSpreadCents: null, bookAgeMin: 5, live: true }, CFG), null);
-  // a resolved leg whose live ask is genuinely below the margin stays quarantined (suspicious near-arb → skip)
-  assert.equal(classifyZombie({ label: "Debreceni VSC Over 0.5", priceCents: 77.5, askCents: 74, gsProb: 1, groupSpreadCents: null, bookAgeMin: 5, live: true }, CFG)?.code, "resolved_price");
+  // a MODEL-ONLY resolved leg (gsProb 0.997, not score-locked) whose live ask is below the 88¢ margin stays
+  // quarantined — the live ask, not the mid, is evaluated. (A score-certain Over here would instead be tradeable.)
+  assert.equal(classifyZombie({ label: "Debreceni VSC Over 0.5", priceCents: 77.5, askCents: 74, gsProb: 0.997, groupSpreadCents: null, bookAgeMin: 5, live: true }, CFG)?.code, "resolved_price");
   // no live book (ask null) → fall back to the stored mid (unchanged fail-closed behaviour)
   assert.equal(classifyZombie({ label: "x", priceCents: 74, askCents: null, gsProb: 1, groupSpreadCents: null, bookAgeMin: 5, live: true }, CFG)?.code, "resolved_price");
 });

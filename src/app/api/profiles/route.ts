@@ -100,6 +100,23 @@ export async function GET(req: Request) {
       const windowDays = Number.isFinite(daysRaw) && daysRaw > 0 ? daysRaw : undefined;
       return NextResponse.json({ ok: true, report: buildUnfillableEdge(db, { windowDays }) });
     }
+    // ?report=no_feed_coverage → P3/B2: link-rate over the current football cohort (covered = has a match_live
+    // provider row, blind = Polymarket-listed with none), overall + per league + the euro cups against the ≥85%
+    // target, "blind pairs × league × day", and a derived rejection reason per blind euro pair. Optional &days=N
+    // (default 14). Read-only.
+    if (new URL(req.url).searchParams.get("report") === "no_feed_coverage") {
+      const { buildNoFeedCoverage } = await import("@/lib/noFeedCoverage");
+      const daysRaw = Number(new URL(req.url).searchParams.get("days"));
+      const windowDays = Number.isFinite(daysRaw) && daysRaw > 0 ? daysRaw : undefined;
+      return NextResponse.json({ ok: true, report: buildNoFeedCoverage(db, { windowDays }) });
+    }
+    // ?report=clean_favourite → P5 (batch-7): retro-backtest of the «clean favourite» hypothesis (derived
+    // P(win) ≥70%, liquid consistent main-line, prematch) over settled history. The ABSTAINED (anti-phantom-
+    // rejected) cohort's EV after fees against the ≥3pp @ n≥50 criterion → enable_small_cap / buried. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "clean_favourite") {
+      const { buildCleanFavouriteBacktest } = await import("@/lib/cleanFavouriteBacktest");
+      return NextResponse.json({ ok: true, report: buildCleanFavouriteBacktest(db, { env: process.env }) });
+    }
     // ?report=schedule_gaps → scheduler sleep-window monitor: recorded gaps (count, longest, last, recent list)
     // where the in-process loop was down and deterministic stops sat unmanaged / ran at the gap bottom on wake.
     if (new URL(req.url).searchParams.get("report") === "schedule_gaps") {
