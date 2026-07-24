@@ -85,11 +85,17 @@ export interface PmvShadowCalibration {
   brierImplied: number | null;    // implied from the FROZEN mid (same timestamp)
   criterion: { needN: number; haveN: number; matured: boolean; markovBeatsImplied: boolean | null };
   clv: string;
+  // C (batch-8 follow-up): per family×side realized-vs-theo, to MEASURE the OVER-lean the uniformity guard
+  // only flags heuristically. optimismPp = mean theo − realized win% (positive = model overpriced that side).
+  sideBias: { family: string; side: string; n: number; winPctActual: number; theoMeanPct: number; optimismPp: number }[];
+  biasFlags: string[];             // (family,side) with n≥BIAS_MIN_N and optimismPp ≥ BIAS_FLAG_PP — a measured, sized lean
   verdict: "go" | "no_go" | "insufficient";
   note: string;
 }
 
 const NEED_N = 40; // 40–60 resolved cases before the Brier criterion is read
+const BIAS_MIN_N = 10;             // per-side sample floor before a lean is reportable
+const BIAS_FLAG_PP = 8;            // theo−actual gap (pp) that marks a side as systematically over-priced
 
 /** Score the resolved shadow signals: Brier(markov) vs Brier(implied@frozen-mid), win%-vs-theo, unresolved
  *  share. No CLV (no shadow closing book). verdict is mechanical from the criteria; insufficient until n≥40. */
@@ -108,6 +114,15 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
   const brierImplied = scored ? mean(scoredRows.map((r) => ((r.m / 100) - (r.status === "won" ? 1 : 0)) ** 2)) : null;
   const matured = scored >= NEED_N;
   const markovBeatsImplied = brierMarkov != null && brierImplied != null ? brierMarkov <= brierImplied : null;
+
+  // C: per family×side realized win% vs the model's mean theo — a MEASUREMENT of the OVER-lean
+  // (the uniformity guard stops a family in-slate but never records whether the lean is a real bias).
+  const bRows = db.prepare(`SELECT family, side, theo_cents t, status FROM pmv_shadow_signals WHERE status IN ('won','lost')`).all() as { family: string; side: string; t: number; status: string }[];
+  const grp = new Map<string, { family: string; side: string; n: number; won: number; theoSum: number }>();
+  for (const r of bRows) { const k = `${r.family}·${r.side}`; const g = grp.get(k) ?? { family: r.family, side: r.side, n: 0, won: 0, theoSum: 0 }; g.n++; if (r.status === "won") g.won++; g.theoSum += r.t / 100; grp.set(k, g); }
+  const r1 = (x: number) => Math.round(x * 10) / 10;
+  const sideBias = [...grp.values()].map((g) => { const actual = (g.won / g.n) * 100, theo = (g.theoSum / g.n) * 100; return { family: g.family, side: g.side, n: g.n, winPctActual: r1(actual), theoMeanPct: r1(theo), optimismPp: r1(theo - actual) }; }).sort((a, b) => b.n - a.n);
+  const biasFlags = sideBias.filter((b) => b.n >= BIAS_MIN_N && b.optimismPp >= BIAS_FLAG_PP).map((b) => `${b.family}·${b.side}: модель ${b.theoMeanPct}% vs факт ${b.winPctActual}% (переоценка +${b.optimismPp}пп, n=${b.n}) — систематический крен, срезать theo этой стороны`);
 
   const verdict: PmvShadowCalibration["verdict"] = !matured ? "insufficient" : markovBeatsImplied ? "go" : "no_go";
   const note = !matured
@@ -131,6 +146,7 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
     brierMarkov: r3(brierMarkov), brierImplied: r3(brierImplied),
     criterion: { needN: NEED_N, haveN: scored, matured, markovBeatsImplied },
     clv: "n/a — closing-книга по shadow не пишется; считаем только win%-vs-theo и Brier",
+    sideBias, biasFlags,
     verdict, note,
   };
 }
