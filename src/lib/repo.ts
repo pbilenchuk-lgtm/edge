@@ -663,12 +663,20 @@ export interface MatchLogRow { id: string; match: string; sport: string; compNam
  *  buildAppData payload. This is what decouples the log archive from the per-poll payload: keep finished matches
  *  as long as you like without bloating what the browser downloads each tick. Newest-first; bounded by `limit`. */
 export function listMatchLogs(db: Database, limit = 1000): MatchLogRow[] {
+  // Out-of-perimeter tennis (ITF / Challenger / WTA-ATP 125 / qualifying / doubles) is NEVER traded, so its logs
+  // are noise for review — exclude them from the archive. This mirrors tennisTourOf() (tennisScout.ts, the
+  // single source of truth) as a SQL port so the LIMIT counts only KEPT rows; tennisScout can't be imported here
+  // (it imports repo → cycle). If tennisTourOf's token list changes, update this WHERE with it.
+  const HAY = "lower(c.id || ' ' || c.name || ' ' || COALESCE(c.external_league,''))";
   const rows = db.prepare(
     `SELECT m.id AS id, m.home AS home, m.away AS away, m.final_score AS final_score, m.end_time AS end_time,
             m.kickoff_at AS kickoff_at, m.end_note AS end_note, c.sport_id AS sport, c.name AS comp_name,
             (SELECT COUNT(*) FROM bets b WHERE b.match_id = m.id AND b.status NOT IN ('proposed','not_filled')) AS bet_count
        FROM matches m JOIN competitions c ON c.id = m.competition_id
       WHERE m.state = 'finished'
+        AND NOT (c.sport_id = 'tennis' AND (
+             instr(${HAY}, 'itf') > 0 OR instr(${HAY}, 'challenger') > 0 OR instr(${HAY}, 'doubles') > 0
+          OR instr(${HAY}, 'qualif') > 0 OR instr(${HAY}, '125') > 0))
       ORDER BY COALESCE(m.end_time, m.kickoff_at) DESC
       LIMIT ?`,
   ).all(Math.max(1, limit)) as { id: string; home: string; away: string; final_score: string | null; end_time: string | null; kickoff_at: string | null; end_note: string | null; sport: string; comp_name: string; bet_count: number }[];
