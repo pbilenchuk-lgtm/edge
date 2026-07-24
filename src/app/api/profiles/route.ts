@@ -20,6 +20,25 @@ export async function GET(req: Request) {
     // now and returns it — an on-demand validation independent of the (slow/dormant) auto cycle.
     if (new URL(req.url).searchParams.get("report") === "pm_resolution") {
       const url = new URL(req.url);
+      // &probe=1 — validate the Gamma resolver against REAL resolved football tokens from the DB (read-only,
+      // no settle). Confirms fetchTokenResolution returns a sensible closed flag + resolved price before any FT
+      // entry relies on it — the resolver never runs in the sweep while candidates=0.
+      if (url.searchParams.get("probe") === "1") {
+        const R = await import("@/lib/repo");
+        const { fetchTokenResolution, loadPolymarketConfig } = await import("@/lib/polymarket");
+        const samples: { token: string; label: string; match: string; score: string }[] = [];
+        outer: for (const c of R.listCompetitions(db).filter((x) => x.sport_id === "football")) {
+          for (const m of R.listMatches(db, c.id)) {
+            if (m.state !== "finished") continue;
+            for (const mk of R.latestMarkets(db, m.id)) {
+              if (mk.external_ref) { samples.push({ token: mk.external_ref, label: mk.label, match: `${m.home}—${m.away}`, score: `${m.score_home ?? "?"}:${m.score_away ?? "?"}` }); }
+              if (samples.length >= 8) break outer;
+            }
+          }
+        }
+        const map = await fetchTokenResolution(loadPolymarketConfig(process.env), samples.map((s) => s.token));
+        return NextResponse.json({ ok: true, probe: samples.map((s) => ({ ...s, resolution: map[s.token] ?? null })) });
+      }
       if (url.searchParams.get("run") === "1") {
         const { settlePmResolutionBets } = await import("@/lib/pmResolution");
         const { loadPolymarketConfig } = await import("@/lib/polymarket");
