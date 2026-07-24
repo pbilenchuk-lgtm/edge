@@ -31,6 +31,12 @@ export interface ZombieConfig {
   notationSpreadCents: number;
   /** (a) a game-state-RESOLVED (P≈1) leg priced at or below (100 − margin)¢ contradicts the event. */
   resolvedMarginCents: number;
+  /** (a, P6 batch-7) SCORE-CERTAIN floor: when the Over is mathematically LOCKED by the actual score
+   *  (gsProb === 1 — the goals already happened, not a model estimate), a low executable price is a REAL fillable
+   *  buy on a locked outcome (+edge to 100¢), NOT a stale book to hide. So quarantine ONLY at an absurd price at
+   *  or below this floor (default 5¢ = a broken/void book); everything above stays tradeable — capturing the
+   *  cheap locked buys the 88¢ cap wrongly hid (Shelbourne Over 1.5 @84¢). Model-only P≈1 keeps the 88¢ cap. */
+  resolvedScoreCertainFloorCents: number;
   /** F4: half-width (cents) of the mid-placeholder band — a book within 50±this is a mid-placeholder CANDIDATE.
    *  It only counts as a placeholder if it has ALSO sat unchanged ≥ placeholderStaleMin (an untraded default
    *  never moves) — so a fresh, legitimately-neutral 50¢ market is NOT falsely blocked. */
@@ -50,6 +56,7 @@ export function loadZombieConfig(env: Record<string, string | undefined> = proce
     staleBookMin: num("FOOTBALL_ZOMBIE_STALE_MIN", 30),
     notationSpreadCents: num("FOOTBALL_ZOMBIE_NOTATION_SPREAD", 12),
     resolvedMarginCents: num("FOOTBALL_ZOMBIE_RESOLVED_MARGIN", 12),
+    resolvedScoreCertainFloorCents: num("FOOTBALL_ZOMBIE_RESOLVED_SCORE_CERTAIN_FLOOR", 5),
     placeholderBandCents: num("FOOTBALL_ZOMBIE_PLACEHOLDER_BAND", 0.5),
     placeholderStaleMin: num("FOOTBALL_ZOMBIE_PLACEHOLDER_STALE_MIN", 10),
     staleExtremeCents: num("FOOTBALL_ZOMBIE_STALE_EXTREME", 2),
@@ -80,8 +87,17 @@ export function classifyZombie(inp: ZombieInput, cfg: ZombieConfig): ZombieReaso
   // at ~100¢ (only the stored mid lagged) is NOT a phantom and must not flap-quarantine; only quarantine when
   // the price a buy would actually pay is itself below the margin (stale/no-book → fall back to the stored mid).
   const resolvedPx = inp.askCents ?? inp.priceCents;
-  if (inp.gsProb != null && inp.gsProb >= 0.995 && resolvedPx <= 100 - cfg.resolvedMarginCents) {
-    return { code: "resolved_price", detail: `game-state P≈1 (событие свершилось), но исполнимая цена ${Math.round(resolvedPx)}¢ ≤ ${100 - cfg.resolvedMarginCents}¢ — книга не догнала исход` };
+  // P6 (batch-7): SCORE-CERTAIN vs MODEL-ONLY. gsProb === 1 (exactly) only when the ACTUAL score already locks
+  // the Over — the goals happened, liveAdjustedProb short-circuits need<=0 → prob 1; a Poisson MODEL estimate is
+  // always < 1. A mathematically-locked Over at a low executable price is a REAL fillable buy (+edge to 100¢),
+  // NOT a stale book — so it's quarantined ONLY below a small floor (a broken/void book), staying tradeable across
+  // the normal range. Model-only P≈1 keeps the cautious 88¢ cap (a wrong model could make a cheap price genuine).
+  // Scoped to OVER families (spec: «score-certain Over-семей»): a "Team Over N.5" locked by the score. BTTS-Yes
+  // and others keep the cautious 88¢ cap (the original Vardar resolved_price catch is unchanged).
+  const scoreCertain = inp.gsProb != null && inp.gsProb >= 1 && /\bover\b/i.test(inp.label);
+  const threshold = scoreCertain ? cfg.resolvedScoreCertainFloorCents : 100 - cfg.resolvedMarginCents;
+  if (inp.gsProb != null && inp.gsProb >= 0.995 && resolvedPx <= threshold) {
+    return { code: "resolved_price", detail: `game-state P${scoreCertain ? "=1 (счёт запер исход)" : "≈1"}, но исполнимая цена ${Math.round(resolvedPx)}¢ ≤ ${threshold}¢ — ${scoreCertain ? "аномально дёшево для запертого счётом Over (битая книга/риск void)" : "книга не догнала исход"}` };
   }
   // (b) duplicate notations of one outcome desynced beyond tolerance.
   if (inp.groupSpreadCents != null && inp.groupSpreadCents >= cfg.notationSpreadCents) {
