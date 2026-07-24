@@ -42,9 +42,25 @@ test("exitHonesty: selling future-ZEROs at ~100¢ → material_optimism, suspect
   const r = buildExitHonesty(db, { EXIT_HONESTY_MATERIAL_USD: "50" });
   assert.equal(r.lostExits, 3);
   assert.equal(r.suspectLostProceedsUsd, 240, "3 × $80 booked on positions that settled 0");
+  assert.equal(r.suspectHighPriceUsd, 240, "all sold at 99.5¢ ≥ 90¢ floor → true optimism");
+  assert.equal(r.suspectLowPriceUsd, 0);
   assert.equal(r.verdict, "material_optimism");
   assert.equal(r.avgSuspectExitCents, 99.5);
   assert.equal(r.topSuspect[0].proceedsUsd, 80);
+  assert.equal(r.topSuspect[0].band, "high");
+});
+
+test("exitHonesty: cheap defensive cuts of future-ZEROs are NOT optimism → benign", () => {
+  const db = seed();
+  for (let i = 0; i < 5; i++) exit(db, "won-" + i, "settled_won", 99.9, 50);
+  // future-0s sold cheaply (defensive cuts that recovered value) — must NOT count as optimism.
+  for (let i = 0; i < 4; i++) exit(db, "cut-" + i, "settled_lost", 20, 60);
+  const r = buildExitHonesty(db, { EXIT_HONESTY_MATERIAL_USD: "50" });
+  assert.equal(r.lostExits, 4);
+  assert.equal(r.suspectLostProceedsUsd, 240, "gross pile still $240");
+  assert.equal(r.suspectHighPriceUsd, 0, "none sold above the 90¢ optimism floor");
+  assert.equal(r.suspectLowPriceUsd, 240, "all $240 are cheap defensive cuts");
+  assert.equal(r.verdict, "benign", "cheap cuts of future-0s are the exit working, not optimism");
 });
 
 test("exitHonesty: unresolved twins are quarantined; too few resolved → insufficient", () => {
