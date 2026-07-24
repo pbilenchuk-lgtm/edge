@@ -133,7 +133,7 @@ export async function GET(req: Request) {
     if (new URL(req.url).searchParams.get("report") === "pruned_matches") {
       const { metaGet } = await import("@/lib/repo");
       let pruned: unknown = null; try { pruned = JSON.parse(metaGet(db, "pruned_matches_recent") ?? "null"); } catch { pruned = null; }
-      return NextResponse.json({ ok: true, pruned, note: "матчи со ставками не удаляются никогда; без ставок — после истечения снапшотов (SNAPSHOT_RETENTION_DAYS=5д)" });
+      return NextResponse.json({ ok: true, pruned, note: "матчи со ставками не удаляются НИКОГДА. Завершённые без ставок теперь архив (хранятся до cap MATCH_LOG_ARCHIVE_MAX). Удаляются только: зависшие НЕ-завершённые импорты (старше окна) + сломанные-без-ставок (заброшенный мусор). Старые записи с причиной «finished … старше окна review» — из прежнего пруна до decouple." });
     }
     // ?report=schedule_gaps → scheduler sleep-window monitor: recorded gaps (count, longest, last, recent list)
     // where the in-process loop was down and deterministic stops sat unmanaged / ran at the gap bottom on wake.
