@@ -14,11 +14,11 @@ function seed() {
   R.insertMatch(db, { id: "m1", competition_id: "epl", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: NOW, minute: 90, score_home: 2, score_away: 1, final_score: "2:1", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: null } as any);
   return db;
 }
-// an exit fill on a twin bet with a given settle status.
-function exit(db: any, decision: string, betStatus: string, exitCents: number, proceeds: number) {
+// an exit fill on a twin bet with a given settle status (optionally flagged settle_suspect).
+function exit(db: any, decision: string, betStatus: string, exitCents: number, proceeds: number, settleSuspect = 0) {
   const bid = R.uid();
   R.insertBet(db, { id: bid, match_id: "m1", strategy_id: "prematch_value", risk_profile_id: "medium", market_label: "Over 2.5", status: "open", proposed_price: 40, entry_price: 40, current_price: 40, closing_price: null, ai_prob: 0.5, stake: 40, rationale: "r", entered_minute: null, result: null, payout: null, decision_id: decision, created_at: NOW } as any);
-  db.prepare(`UPDATE bets SET status=? WHERE id=?`).run(betStatus, bid);
+  db.prepare(`UPDATE bets SET status=?, settle_suspect=? WHERE id=?`).run(betStatus, settleSuspect, bid);
   const oid = R.uid();
   RR.insertRealOrder(db, { id: oid, client_order_id: oid, exchange_order_id: null, decision_id: decision, strategy_id: "prematch_value", profile_id: "medium", match_id: "m1", token_id: "0xT", side: "SELL", leg: "exit", limit_price_cents: 95, size_usd: proceeds, tif_sec: 30, code_version: "e7", whitelist_version: 1, note: "x", created_at: NOW } as any);
   RR.insertRealFill(db, { order_id: oid, client_order_id: oid, token_id: "0xT", side: "SELL", size_usd: proceeds, price_cents: exitCents, fee_usd: 0, dry: 1, at: NOW, created_at: NOW });
@@ -61,6 +61,22 @@ test("exitHonesty: cheap defensive cuts of future-ZEROs are NOT optimism → ben
   assert.equal(r.suspectHighPriceUsd, 0, "none sold above the 90¢ optimism floor");
   assert.equal(r.suspectLowPriceUsd, 240, "all $240 are cheap defensive cuts");
   assert.equal(r.verdict, "benign", "cheap cuts of future-0s are the exit working, not optimism");
+});
+
+test("exitHonesty: settle_suspect two-leg legs are excluded from the optimism verdict (P1б)", () => {
+  const db = seed();
+  // enough clean winners to clear the resolved≥5 gate, plus REAL optimism (future-0 sold high, not suspect).
+  for (let i = 0; i < 5; i++) exit(db, "won-" + i, "settled_won", 99.9, 50);
+  for (let i = 0; i < 2; i++) exit(db, "opt-" + i, "settled_lost", 99.5, 40); // genuine optimism: $80
+  // three two-leg mislabels: genuine wins booked settled_lost, sold near 100¢ — the LOUDEST fake optimism.
+  // They must NOT inflate suspectHighPrice; they are quarantined and counted separately.
+  for (let i = 0; i < 3; i++) exit(db, "susp-" + i, "settled_lost", 99.8, 90, 1);
+  const r = buildExitHonesty(db, { EXIT_HONESTY_MATERIAL_USD: "50" });
+  assert.equal(r.settleSuspectExcluded, 3, "3 two-leg suspect legs quarantined");
+  assert.equal(r.lostExits, 2, "only the 2 genuine future-0s count as lost exits");
+  assert.equal(r.suspectHighPriceUsd, 80, "honest optimism is $80, NOT $80 + $270 of mislabel");
+  assert.equal(r.verdict, "material_optimism", "$80 ≥ $50 floor → still material, but on the honest number");
+  assert.match(r.note, /исключено 3 суспект-выходов/);
 });
 
 test("exitHonesty: unresolved twins are quarantined; too few resolved → insufficient", () => {

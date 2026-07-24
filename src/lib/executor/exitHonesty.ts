@@ -21,6 +21,13 @@
 // of eventual winners) and NO model change is warranted. If it's large, THAT number is what an honest
 // bid-corroborated exit model must claw back — and only then do we flip the model + mark the epoch. Read-only.
 // Exposed at GET /api/real?report=exit_honesty.
+//
+// P1(б) [batch-7]: a "settled 0" is only trustworthy if the SETTLEMENT itself is trustworthy. Two-leg
+// contamination (engine.ts:980-1004) mislabels genuine wins as settled_lost — Raków won 3:1 but "Raków — Yes"
+// booked settled_lost. Those legs, sold near 100¢ and then mislabeled 0, are the LOUDEST fake "optimism" in the
+// pile. footballIntegrity flags them settle_suspect=1; here we EXCLUDE them from the verdict so the reported
+// suspectHighPrice/material_optimism is the HONEST optimism number, not a settlement-mislabel artefact. The
+// excluded count is surfaced (settleSuspectExcluded) — quarantined, not hidden.
 // ============================================================
 
 import type { Database } from "../db.js";
@@ -28,6 +35,7 @@ import type { Database } from "../db.js";
 export interface ExitHonesty {
   exits: number;                       // dry SELL fills examined
   wonExits: number; lostExits: number; unresolvedExits: number;
+  settleSuspectExcluded: number;       // legs on settle_suspect twins (two-leg mislabel) — quarantined from verdict
   soldProceedsUsd: number;             // total $ the dry booked from selling (all resolved exits)
   benignWonProceedsUsd: number;        // proceeds on exits whose twin WON (early sale ≈ hold, honest)
   benignWonForgoneUsd: number;         // the hair given up vs holding to 100¢ (negative delta, benign)
@@ -56,20 +64,23 @@ export function buildExitHonesty(db: Database, env: Record<string, string | unde
   const rows = db.prepare(
     `SELECT f.price_cents AS exit_cents, f.size_usd AS proceeds_usd, f.created_at AS at,
             o.decision_id AS decision_id, b.status AS bet_status, b.market_label AS label,
-            m.home AS home, m.away AS away
+            b.settle_suspect AS settle_suspect, m.home AS home, m.away AS away
        FROM real_fills f
        JOIN real_orders o ON o.id = f.order_id
        LEFT JOIN bets b ON b.decision_id = o.decision_id
        LEFT JOIN matches m ON m.id = b.match_id
       WHERE f.side = 'SELL' AND f.dry = 1`,
-  ).all() as { exit_cents: number; proceeds_usd: number; at: string; decision_id: string | null; bet_status: string | null; label: string | null; home: string | null; away: string | null }[];
+  ).all() as { exit_cents: number; proceeds_usd: number; at: string; decision_id: string | null; bet_status: string | null; label: string | null; settle_suspect: number | null; home: string | null; away: string | null }[];
 
-  let wonExits = 0, lostExits = 0, unresolvedExits = 0;
+  let wonExits = 0, lostExits = 0, unresolvedExits = 0, settleSuspectExcluded = 0;
   let benignWonProceeds = 0, benignWonForgone = 0, suspectLostProceeds = 0, suspectHigh = 0, suspectLow = 0, soldProceeds = 0;
   const suspectPrices: number[] = [];
   const suspect: { match: string | null; label: string; exitCents: number; proceedsUsd: number; at: string; band: "high" | "low" }[] = [];
   for (const r of rows) {
     const proceeds = Number(r.proceeds_usd) || 0, exitCents = Number(r.exit_cents) || 0;
+    // P1(б): a two-leg-mislabel twin (settle_suspect=1) cannot certify "settled 0" — its "optimism" is a
+    // settlement artefact, not exit-model overreach. Quarantine from the verdict; count it, don't hide it.
+    if (Number(r.settle_suspect) === 1) { settleSuspectExcluded++; continue; }
     if (r.bet_status === "settled_won") {
       wonExits++; soldProceeds += proceeds; benignWonProceeds += proceeds;
       // hair given up vs holding to 100¢: shares × (100 − exit)/100 = proceeds × (100/exit − 1)
@@ -94,13 +105,15 @@ export function buildExitHonesty(db: Database, env: Record<string, string | unde
   // verdict keys on the HIGH-price optimism only — a future-0 sold cheaply is the exit working, not a fault.
   const verdict: ExitHonesty["verdict"] = resolved < 5 ? "insufficient" : suspectHigh >= materialUsd ? "material_optimism" : "benign";
   const hi = Math.round(suspectHigh), lo = Math.round(suspectLow);
+  // P1(б): once suspects are quarantined, THIS suspectHigh is the honest optimism number. Name the quarantine.
+  const suspTail = settleSuspectExcluded > 0 ? ` (исключено ${settleSuspectExcluded} суспект-выходов two-leg — settle_suspect=1, не считаются оптимизмом)` : "";
   const note = verdict === "insufficient"
-    ? `недостаточно закрытых выходов (${resolved}<5) — вердикт преждевременен`
+    ? `недостаточно закрытых выходов (${resolved}<5) — вердикт преждевременен${suspTail}`
     : verdict === "material_optimism"
-      ? `⚠️ ОПТИМИЗМ МАТЕРИАЛЕН: $${hi} выручки книжено продажами будущих-0 по ≥${optimismFloorCents}¢ — это НАСТОЯЩАЯ переоценка exit-модели (продали ~по 100¢ то, что стоило 0). Отдельно $${lo} — защитные сбросы будущих-0 дешевле ${optimismFloorCents}¢ (выход РАБОТАЛ, вернул часть; в вину не идёт). Честная bid-модель должна отыграть высокоценовой хвост $${hi}; смена exit-модели оправдана (граница эпохи + пересчёт гейта)`
-      : `✅ доброкачественно: настоящий оптимизм всего $${hi} (продажи будущих-0 по ≥${optimismFloorCents}¢, порог $${materialUsd}); ещё $${lo} — защитные сбросы дешевле ${optimismFloorCents}¢ (выход работал). Менять модель/эпоху не требуется`;
+      ? `⚠️ ОПТИМИЗМ МАТЕРИАЛЕН: $${hi} выручки книжено продажами будущих-0 по ≥${optimismFloorCents}¢ — это НАСТОЯЩАЯ переоценка exit-модели (продали ~по 100¢ то, что стоило 0). Отдельно $${lo} — защитные сбросы будущих-0 дешевле ${optimismFloorCents}¢ (выход РАБОТАЛ, вернул часть; в вину не идёт). Честная bid-модель должна отыграть высокоценовой хвост $${hi}; смена exit-модели оправдана (граница эпохи + пересчёт гейта)${suspTail}`
+      : `✅ доброкачественно: настоящий оптимизм всего $${hi} (продажи будущих-0 по ≥${optimismFloorCents}¢, порог $${materialUsd}); ещё $${lo} — защитные сбросы дешевле ${optimismFloorCents}¢ (выход работал). Менять модель/эпоху не требуется${suspTail}`;
   return {
-    exits: rows.length, wonExits, lostExits, unresolvedExits,
+    exits: rows.length, wonExits, lostExits, unresolvedExits, settleSuspectExcluded,
     soldProceedsUsd: Math.round(soldProceeds * 100) / 100,
     benignWonProceedsUsd: Math.round(benignWonProceeds * 100) / 100,
     benignWonForgoneUsd: Math.round(benignWonForgone * 100) / 100,

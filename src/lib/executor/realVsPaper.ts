@@ -29,7 +29,7 @@ export function realVsPaperReport(db: Database): RealVsPaperReport {
   const entries = db.prepare(
     `SELECT o.id, o.decision_id, o.status, o.leg, o.avg_fill_cents, o.filled_size_usd, o.match_id,
             m.competition_id AS category, b.entry_price AS paper_entry, b.payout AS paper_payout, b.stake AS paper_stake,
-            b.status AS paper_status, b.entry_meta AS paper_meta
+            b.status AS paper_status, b.entry_meta AS paper_meta, b.settle_suspect AS paper_suspect
      FROM real_orders o
      LEFT JOIN matches m ON m.id = o.match_id
      LEFT JOIN bets b ON b.decision_id = o.decision_id
@@ -62,8 +62,10 @@ export function realVsPaperReport(db: Database): RealVsPaperReport {
     const b = RR.realOrderLatencyMs(db, e.id, "placed", "filled") ?? RR.realOrderLatencyMs(db, e.id, "placed", "partial"); if (b != null) pf.push(b);
   }
 
-  // missed fills — an EXPIRED entry whose paper twin nonetheless realized P&L = edge we couldn't capture
-  const missed = entries.filter((e) => e.status === "expired");
+  // missed fills — an EXPIRED entry whose paper twin nonetheless realized P&L = edge we couldn't capture.
+  // P1(б): a settle_suspect twin (two-leg mislabel) carries a wrong payout, so its "edge lost" is fictitious —
+  // drop it from the P&L cut (still counted in fill-rate/latency above, which are execution mechanics).
+  const missed = entries.filter((e) => e.status === "expired" && Number(e.paper_suspect) !== 1);
   const edgeLostUsd = r2(missed.reduce((s, e) => s + ((e.paper_payout ?? 0) - (e.paper_stake ?? 0)), 0)) ?? 0;
 
   // costs (fees + gas) and turnover
@@ -71,9 +73,10 @@ export function realVsPaperReport(db: Database): RealVsPaperReport {
   const feeUsd = -(byKind.fee ?? 0), gasUsd = -(byKind.gas ?? 0);
   const turnover = (db.prepare(`SELECT COALESCE(SUM(size_usd),0) t FROM real_fills`).get() as any).t ?? 0;
 
-  // realized P&L (real) vs the twins' P&L
+  // realized P&L (real) vs the twins' P&L. P1(б): exclude settle_suspect twins — their payout is a two-leg
+  // mislabel (a genuine win booked as 0, or vice-versa), so summing it poisons the paper-vs-real comparison.
   const realRealized = r2(RR.listRealPositions(db).reduce((s, p) => s + (p.realized_pnl_usd ?? 0), 0)) ?? 0;
-  const twinPnl = r2(entries.reduce((s, e) => s + ((e.paper_payout ?? 0) - (e.paper_stake ?? 0)), 0)) ?? 0;
+  const twinPnl = r2(entries.filter((e) => Number(e.paper_suspect) !== 1).reduce((s, e) => s + ((e.paper_payout ?? 0) - (e.paper_stake ?? 0)), 0)) ?? 0;
 
   return {
     orders: entries.length,
