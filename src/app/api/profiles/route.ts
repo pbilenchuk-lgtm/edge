@@ -201,6 +201,28 @@ export async function GET(req: Request) {
       const { buildReassessEfficiency } = await import("@/lib/reassessEfficiency");
       return NextResponse.json({ ok: true, report: buildReassessEfficiency(db) });
     }
+    // ?report=profiles → the risk-profile analytics (same as POST /api/profiles) but reachable by a plain
+    // LINK, so a non-programmer can open it in the browser. Filters come from the query string:
+    //   &strategyId=prematch_value  &phase=live|prematch  &competitionId=<catId>  &codeVersion=  &fromMs=  &toMs=
+    // No filter → all strategies/profiles. Always returns .vocab (exact strategy + category ids).
+    if (new URL(req.url).searchParams.get("report") === "profiles") {
+      const R = await import("@/lib/repo");
+      const { profileAnalytics } = await import("@/lib/profileAnalytics");
+      const q = new URL(req.url).searchParams;
+      const num = (v: string | null) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
+      const ph = q.get("phase");
+      const filter = {
+        fromMs: num(q.get("fromMs")), toMs: num(q.get("toMs")),
+        competitionId: q.get("competitionId") || undefined,
+        strategyId: q.get("strategyId") || undefined,
+        phase: ph === "prematch" || ph === "live" ? (ph as "prematch" | "live") : undefined,
+        codeVersion: q.get("codeVersion") || undefined,
+      };
+      const analytics = profileAnalytics(db, filter);
+      const categories = R.listCompetitions(db).map((c) => ({ id: c.id, name: c.name }));
+      const strategies = R.listStrategies(db).map((s) => ({ id: s.id, name: s.name }));
+      return NextResponse.json({ ok: true, analytics, vocab: { categories, strategies } });
+    }
     return NextResponse.json({ ok: false, error: "unknown report" }, { status: 400 });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
