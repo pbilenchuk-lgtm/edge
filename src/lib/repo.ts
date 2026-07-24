@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import { resolveBetOrigin, CODE_VERSION } from "./betMeta.js";
+import { warsawLabel } from "./time.js";
 import type { Database } from "./db.js";
 import type {
   AnalysisJob,
@@ -657,6 +658,41 @@ const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "analysis_artif
  * bounds the Polymarket catch-all discovery flood (up to ~200 matches/sport/day
  * into unfunded `pm-*` comps). Returns the number of matches removed.
  */
+export interface MatchLogRow { id: string; match: string; sport: string; compName: string; finalScore: string | null; endIso: string | null; kickoffAt: string | null; endLabel: string | null; endNote: string | null; broken: boolean; betCount: number }
+/** Lean archive query for the «Логи» page — ONE row per finished match, straight from SQL, NOT the fat
+ *  buildAppData payload. This is what decouples the log archive from the per-poll payload: keep finished matches
+ *  as long as you like without bloating what the browser downloads each tick. Newest-first; bounded by `limit`. */
+export function listMatchLogs(db: Database, limit = 1000): MatchLogRow[] {
+  const rows = db.prepare(
+    `SELECT m.id AS id, m.home AS home, m.away AS away, m.final_score AS final_score, m.end_time AS end_time,
+            m.kickoff_at AS kickoff_at, m.end_note AS end_note, c.sport_id AS sport, c.name AS comp_name,
+            (SELECT COUNT(*) FROM bets b WHERE b.match_id = m.id AND b.status NOT IN ('proposed','not_filled')) AS bet_count
+       FROM matches m JOIN competitions c ON c.id = m.competition_id
+      WHERE m.state = 'finished'
+      ORDER BY COALESCE(m.end_time, m.kickoff_at) DESC
+      LIMIT ?`,
+  ).all(Math.max(1, limit)) as { id: string; home: string; away: string; final_score: string | null; end_time: string | null; kickoff_at: string | null; end_note: string | null; sport: string; comp_name: string; bet_count: number }[];
+  return rows.map((r) => ({
+    id: r.id, match: `${r.home}–${r.away}`, sport: r.sport, compName: r.comp_name, finalScore: r.final_score,
+    endIso: r.end_time, kickoffAt: r.kickoff_at, endLabel: warsawLabel(r.end_time) ?? warsawLabel(r.kickoff_at),
+    endNote: r.end_note, broken: (r.end_note ?? "").startsWith("⚠ поломан"), betCount: Number(r.bet_count) || 0,
+  }));
+}
+
+/** Backstop cap on the no-bet finished-match ARCHIVE: keep the newest `keep`, delete older no-bet finished
+ *  matches. "Effectively forever" for review yet bounded against unbounded growth (like the tennis-snapshot cap).
+ *  Bet-bearing matches are never touched (they carry P&L/metrics). Returns the number removed. */
+export function capMatchLogArchive(db: Database, keep = 20000): number {
+  const doomed = db.prepare(
+    `SELECT m.id AS id FROM matches m
+      WHERE m.state = 'finished'
+        AND NOT EXISTS (SELECT 1 FROM bets b WHERE b.match_id = m.id)
+      ORDER BY COALESCE(m.end_time, m.kickoff_at) DESC
+      LIMIT -1 OFFSET ?`,
+  ).all(Math.max(0, keep)) as { id: string }[];
+  return deleteMatches(db, doomed.map((r) => r.id));
+}
+
 export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number; graceBeforeMs?: number; now?: string } = {}): number {
   const rows = db.prepare(
     `SELECT m.id AS id, m.state AS state, m.kickoff_at AS kickoff_at, m.home AS home, m.away AS away,
@@ -670,23 +706,16 @@ export function pruneStaleMatches(db: Database, opts: { staleBeforeMs?: number; 
   const audit: { match: string; comp: string; league: string | null; kickoff: string | null; state: string; reason: string }[] = [];
   const olderThan = (k: string | null, before?: number) => before != null && k != null && /^\d{4}-\d\d-\d\dT/.test(k) && !isNaN(Date.parse(k)) && Date.parse(k) < before;
   const stale = (k: string | null) => olderThan(k, opts.staleBeforeMs);
+  void opts.graceBeforeMs; // (retained in the signature for back-compat; finished matches are no longer age-pruned)
   for (const r of rows) {
-    let reason: string | null = null;
-    if (r.state === "finished") {
-      // FUNDED comps (a tournament we actually play): keep a finished no-bet
-      // match for review until it ages past the stale window (3д). UNFUNDED catch-all comps: the Polymarket
-      // discovery flood — bound it, but keep a RECENTLY-finished one a GRACE window so a scheduler-gap import
-      // (kickoff+finish both inside a sleep → discovered already-finished, no snapshots/bets) still surfaces in
-      // Логи for review instead of vanishing before it's ever seen («провал во времени»). A no-kickoff row can't
-      // be dated → it's pure flood junk, prune it.
-      if ((r.budget ?? 0) <= 0) {
-        if (r.kickoff_at == null) reason = "finished, без ставок, unfunded, без kickoff — флуд-мусор";
-        else if (olderThan(r.kickoff_at, opts.graceBeforeMs)) reason = "finished, без ставок, unfunded — старше grace-окна review";
-      } else if (stale(r.kickoff_at)) reason = "finished, без ставок, funded-комп, старше окна review (3д)";
-    } else if (stale(r.kickoff_at)) {
-      reason = "не завершился, без ставок, старше окна — зависший импорт"; // stale import that never resolved
+    // A FINISHED match is the log ARCHIVE now — NEVER age-pruned here (kept for review as long as the cap
+    // allows; capMatchLogArchive bounds it by count, buildAppData keeps it out of the hot payload). Only a
+    // NON-finished STALE import (an upcoming/lineup fixture that never resolved — pure Polymarket discovery
+    // junk, no bets, no snapshots, kickoff long past) is pruned.
+    if (r.state !== "finished" && stale(r.kickoff_at)) {
+      doomed.push(r.id);
+      audit.push({ match: `${r.home}—${r.away}`, comp: r.comp, league: r.league, kickoff: r.kickoff_at, state: r.state, reason: "не завершился, без ставок, старше окна — зависший импорт (не дошёл до финала)" });
     }
-    if (reason) { doomed.push(r.id); audit.push({ match: `${r.home}—${r.away}`, comp: r.comp, league: r.league, kickoff: r.kickoff_at, state: r.state, reason }); }
   }
   if (doomed.length) {
     try {

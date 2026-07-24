@@ -20,6 +20,11 @@ test("buildAppData: old finished matches build LIGHT (detail skipped); recent st
   R.insertMatch(db, { id: old, competition_id: "epl", home: "C", away: "D", state: "finished", lineup_out: true, kickoff_at: iso(now - 40 * 86_400_000), minute: null, score_home: 2, score_away: 2, final_score: "2:2", kickoff_time: null, end_time: iso(now - 40 * 86_400_000), duration: null, end_note: null, external_ref: old } as any);
   const mkt = (mid: string, tok: string) => R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 2.5", price: 50, ai_prob: 0.5, liquidity: "1000", external_ref: tok, snapshot_at: "t", is_closing: false } as any);
   mkt(recent, "t1"); mkt(old, "t2");
+  // A finished match rides the hot payload only if it has a real bet (no-bet finished → the /api/logs archive).
+  // Give both a settled bet so the LIGHT-vs-FULL detail distinction (the thing under test) is what's exercised.
+  R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: "t", color: null, version: 1, prompt: "p", prompt_live: null, params: {}, model: null, model_live: null, created_at: "t" } as any);
+  const bet = (mid: string) => R.insertBet(db, { id: R.uid(), match_id: mid, strategy_id: "prematch_value", risk_profile_id: "medium", market_label: "Over 2.5", status: "settled_won", proposed_price: 50, entry_price: 50, current_price: 100, closing_price: 55, ai_prob: 0.5, stake: 40, rationale: "r", entered_minute: "3'", result: "won", payout: 80, settled_by: null, created_at: "t" } as any);
+  bet(recent); bet(old);
 
   const app = buildAppData(db) as any;
   assert.ok(app.matchDb[recent].markets.length > 0, "recent finished keeps its markets (full detail)");

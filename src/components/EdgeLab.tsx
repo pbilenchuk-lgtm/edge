@@ -359,10 +359,25 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
   const [riskProfiles, setRiskProfiles] = useState<any[]>(initial.riskProfiles || []);
   const [analysis, setAnalysis] = useState(initial.analysis);
   const [matchDb, setMatchDb] = useState(initial.matchDb);
-  // «Логи» page: flat, newest-first list of finished events with a reviewable log, plus a
-  // per-browser "not yet downloaded" count that drives the nav badge. localStorage is only
-  // touched in an effect (never during render) to avoid a hydration mismatch.
-  const logEvents = useMemo(() => collectLogEvents(COMPETITIONS, matchDb), [COMPETITIONS, matchDb]);
+  // «Логи» page: the finished-match ARCHIVE, fetched from /api/logs (a lean per-poll-independent list) rather
+  // than derived from the hot buildAppData payload — that's what lets the archive be kept long/forever without
+  // bloating what every poll downloads. Loaded on mount (for the nav badge) and whenever the Логи tab opens.
+  const [logEvents, setLogEvents] = useState<any[]>([]);
+  const loadLogs = useCallback(async () => {
+    try {
+      const j = await (await fetch("/api/logs?limit=2000")).json();
+      if (j && j.ok && Array.isArray(j.logs)) {
+        const SPL: Record<string, string> = { football: "Футбол", tennis: "Теннис" };
+        setLogEvents(j.logs.map((r: any) => ({
+          id: r.id, match: r.match, finalScore: r.finalScore, sport: r.sport, sportLabel: SPL[r.sport] ?? r.sport,
+          compName: r.compName, broken: !!r.broken, endLabel: r.endLabel, endNote: r.endNote, betCount: r.betCount ?? 0,
+          sortKey: Date.parse(r.endIso || r.kickoffAt || "") || 0,
+        })));
+      }
+    } catch { /* keep the current list on a transient failure */ }
+  }, []);
+  useEffect(() => { loadLogs(); }, [loadLogs]);                       // once on mount → badge count
+  useEffect(() => { if (screen === "logs") loadLogs(); }, [screen, loadLogs]); // refresh each time the tab opens
   const [logsUnread, setLogsUnread] = useState(0);
   const recountLogs = useCallback(() => {
     // Badge counts only FRESH un-downloaded logs (newer than the newest already grabbed), not the whole
