@@ -15,6 +15,18 @@ export async function GET(req: Request) {
       const { buildPmvOriginCut } = await import("@/lib/pmvOriginCut");
       return NextResponse.json({ ok: true, cut: buildPmvOriginCut(db) });
     }
+    // ?report=draw_empirics → B1 step 1: the EMPIRICAL pass over settled draw bets — did they resolve as a
+    // 90'-draw contract MUST? Confirms/refutes the "HT vs 90'" contract model before any canon settles money.
+    if (new URL(req.url).searchParams.get("report") === "draw_empirics") {
+      const { buildDrawNotationEmpirics } = await import("@/lib/drawCanon");
+      return NextResponse.json({ ok: true, empirics: buildDrawNotationEmpirics(db) });
+    }
+    // ?report=draw_canon → B1 step 2: the canonicalizer — pick the sum-consistent (market 1X2) draw book per
+    // match, tag the rest "different condition"; quarantine when no candidate is coherent. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "draw_canon") {
+      const { buildDrawCanon } = await import("@/lib/drawCanon");
+      return NextResponse.json({ ok: true, report: buildDrawCanon(db) });
+    }
     // ?report=pm_resolution → Decision-1 condition-1: settle Polymarket-only (score-less) finished fixtures
     // from PM resolution. Default returns the LAST stored sweep summary (read-only); &run=1 RUNS the sweep
     // now and returns it — an on-demand validation independent of the (slow/dormant) auto cycle.
