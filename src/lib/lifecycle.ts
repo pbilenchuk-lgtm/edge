@@ -526,6 +526,11 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
     // до составов). Silently skip; it becomes eligible the tick after the provider publishes
     // lineups. A live match is never held (awaitingLineup is false once state=live).
     if (R.awaitingLineup(db, m, sportByComp.get(comp) ?? "football")) continue;
+    // R3 (e7) deep-tree economy: a BLIND football match (no provider bind — un-manageable in
+    // play) that no mode can enter — ft_blind off, or on but no FT-settled market to hold — gets
+    // NO pre-match analysis. Nothing is recorded, so it analyses fresh the tick it binds; a
+    // covered fixture normally binds before kickoff, so only genuinely-dark matches stay skipped.
+    if ((sportByComp.get(comp) ?? "football") === "football" && !hasLiveData(db, m) && !ftBlindEnterable(db, m, deps.env ?? process.env)) continue;
     const stage = m.lineup_out ? "post_lineup" : "pre_lineup";
     // Time gate: pre-match assessment only within ~12h of kickoff. Matches with no known
     // kickoff (e.g. an ESPN live match) aren't gated.
@@ -734,6 +739,16 @@ function ftBlindEligible(db: Database, m: Match, b: { origin?: string | null; ma
   if (!isFtSettledMarket(b.market_label)) return false;
   if (R.getMatchLive(db, m.id)) return false;     // has a provider row → covered, not blind
   return true;
+}
+// R3 (e7): would ANY entry mode be able to take a position on this blind match? Only ft_blind
+// can — and only when it's enabled AND the match exposes at least one FT-settled (final-score)
+// market to hold. If not, a blind football match is un-enterable by every mode, so the deep
+// pre-match tree is pure LLM waste (its proposals can only ever sit as un-fillable previews —
+// the FC Argeș case). Used to skip such matches' analysis entirely (regression-safe: no
+// assessment is written, so the match analyses fresh the moment it binds and hasLiveData flips).
+export function ftBlindEnterable(db: Database, m: Match, env: Record<string, string | undefined>): boolean {
+  if (!ftBlindConfig(env).enabled) return false;
+  return R.latestMarkets(db, m.id).some((mk) => isFtSettledMarket(mk.label));
 }
 export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<AutoEnterItem[]> {
   const now = nowFn(deps)();
