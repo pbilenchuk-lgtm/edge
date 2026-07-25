@@ -28,6 +28,11 @@ export const CODE_VERSION = "e8";
  *  the instant the bet was proposed/filled — never re-read later. All optional so a
  *  minimal/legacy path can still record what it has. */
 export interface BetEntryMeta {
+  // [P4 / batch-9] Which draw book the canon picked for this bet, and how many mirrors it cut — so the
+  // Draw-family cohort can be audited after the fact (was this the tradeable contract or a mirror?).
+  drawCanonLabel?: string;
+  drawCanonPriceCents?: number;
+  drawMirrorsCut?: number;
   phase: "prematch" | "live";
   minute: number | null;            // match minute at entry (null = prematch)
   scoreHome: number | null;         // score at entry

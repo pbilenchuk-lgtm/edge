@@ -1065,6 +1065,19 @@ export function updateBet(db: Database, id: string, patch: Partial<Bet>): void {
       const settledBy = (p.settled_by ?? row.settled_by ?? null) as string | null;
       if (stake > 0 && entry > 0 && Number.isFinite(payout)) {
         const early = settledBy === "early" || settledBy === "partial";
+        // [Z2(б) / batch-9] An EARLY settle with no exit price recorded used to set expected := payout, i.e.
+        // the invariant compared the payout to ITSELF and could never fire — a silent self-disable on exactly
+        // the path the batch-9 case lives on (тек.39.3 with payout↔выход ~17¢ and no accounting_suspect). An
+        // un-checkable settle must be LOUD, not quietly blessed: flag it accounting_unverifiable and count it,
+        // so the gap is visible as a number instead of masquerading as a clean row.
+        if (early && !Number.isFinite(closing)) {
+          p.accounting_unverifiable = 1;
+          try {
+            const n = Number(metaGet(db, "accounting_unverifiable_count") ?? 0) + 1;
+            metaSet(db, "accounting_unverifiable_count", String(n), new Date().toISOString());
+            metaSet(db, "accounting_unverifiable_last", JSON.stringify({ betId: id, status: p.status, settledBy, stake, entry, payout, why: "early-выход без записанной цены выхода (closing_price) — ожидание не с чем сверить" }), new Date().toISOString());
+          } catch { /* best-effort telemetry */ }
+        }
         const expected = early
           ? (Number.isFinite(closing) ? stake * (closing / entry) : payout) // trading cash-out: stake·exit/entry
           : (p.status === "settled_won" ? stake * (100 / entry) : 0);        // held to settle: won→100¢, lost→0

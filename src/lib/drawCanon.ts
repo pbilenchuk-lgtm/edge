@@ -32,7 +32,13 @@ import { outcomeKey } from "./zombieMarket.js";
 import { isResolutionSettle } from "./settlement.js";
 
 /** The draw-YES outcome keys (the P(draw) leg). "drawno" is the complement — not a leg we sum. */
-const DRAW_YES_KEYS = new Set(["draw", "drawyes"]);
+export const DRAW_YES_KEYS = new Set(["draw", "drawyes"]);
+// [P4 / batch-9] Master switch for enforcing the canon at the FILL CHOKE (report-only until ratified).
+// Ratified 25.07 on model_confirmed empirics (6/6 settled draw bets resolved as the 90' contract, zero
+// disagreements), so the default is ON; DRAW_CANON_ENFORCE=false reverts to report-only without a deploy.
+export function drawCanonEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return (env.DRAW_CANON_ENFORCE ?? "true").toLowerCase() !== "false";
+}
 
 export function drawCanonConfig(env: Record<string, string | undefined> = process.env): { vigCents: number; underSlackCents: number; minEmpirics: number } {
   const vig = Number(env.FOOTBALL_DRAW_CANON_VIG_CENTS);

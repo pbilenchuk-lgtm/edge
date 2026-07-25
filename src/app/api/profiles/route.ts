@@ -259,6 +259,14 @@ export async function GET(req: Request) {
       } : undefined;
       return NextResponse.json({ ok: true, cleanEpochFloor: includeAllEpochs ? null : CLEAN_EPOCH_FLOOR, cohort, ...(diagnostic ? { diagnostic } : {}) });
     }
+    // ?report=leg_consistency → [Z2(а) / batch-9] one market = one contract, so its settled legs must not
+    // carry BOTH directions. Groups settled bets by (match × canonical market × strategy) and separates the
+    // legitimate shape (a partial cut + the held remainder → labelled, and the signal collapses to void [M6])
+    // from a real defect (a HELD leg disagreeing with a HELD sibling = double settle / mislabel). Read-only.
+    if (new URL(req.url).searchParams.get("report") === "leg_consistency") {
+      const { buildLegConsistency } = await import("@/lib/legConsistency");
+      return NextResponse.json({ ok: true, report: buildLegConsistency(db) });
+    }
     // ?report=stop_counterfactual → [P3 / batch-9] were the defensive cuts selling a dead thesis or a noise
     // bottom? For every protective exit: the best price the SAME market printed in the next N minutes vs the
     // price we took. Criterion fixed BEFORE the data: median shortfall ≥5¢ AND ≥20% of the cut price on n≥30
