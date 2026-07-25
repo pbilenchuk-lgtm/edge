@@ -181,8 +181,9 @@ function overlapScore(a: string, b: string): number {
 export interface ProbeCandidate { espnHome: string; espnAway: string; espnDate: string | null; score: number }
 export interface ProbeRow { match: string; league: string; day: string; boardLeague: string | null; verdict: "name_mismatch_fixable" | "not_on_board" | "no_board"; candidates: ProbeCandidate[] }
 
-/** For each near-kickoff blind euro fixture, fetch its league board and rank events by name overlap. Reveals the
- *  ESPN spelling so aliases are added from data. Bounded; network. */
+/** For each blind fixture (near-kickoff OR kickoff-null with a mapped league), fetch its league board and rank
+ *  events by name overlap. Reveals the ESPN spelling so aliases are added from data. Euro-first, then
+ *  near-kickoff, then soonest, before the `max` cut — so euro qualifiers aren't starved. Bounded; network. */
 export async function buildNoFeedProbe(db: Database, provider: SportsProvider, opts: { nowMs?: number; nearKickoffHours?: number; max?: number; env?: Record<string, string | undefined> } = {}): Promise<{ probed: number; rows: ProbeRow[] }> {
   const env = opts.env ?? process.env;
   const nowMs = opts.nowMs ?? Date.now();
@@ -195,17 +196,31 @@ export async function buildNoFeedProbe(db: Database, provider: SportsProvider, o
   // (Romania rou.1, Peru per.1, domestic leagues) whose match went blind gets probed here, so its top
   // provider candidates + rejection reason (name / not-on-board / no-league) are printed per match
   // instead of a silent ?:?. Euro cups are funded too, so budget>0 subsumes them (OR keeps the intent explicit).
-  const targets: { home: string; away: string; league: string; day: string; espnLeague: string | null }[] = [];
+  //
+  // S11 fix: a fixture with NO parseable kickoff (kickoff_at null — common for euro-cup qualifiers listed
+  // before their matchday time is set) could never enter the near-window gate, so the whole euro qualifier
+  // long tail was SILENTLY skipped — the probe returned only domestic fixtures that happened to carry a
+  // kickoff, and there was no ESPN candidate data to alias euro pairs from. Now a kickoff-null fixture with a
+  // MAPPED league (a board exists to fetch) is a valid target too; and candidates are RANKED euro-first, then
+  // near-kickoff, then soonest, so the euro priority isn't starved by domestic fixtures before the `max` cut.
+  type Cand = { home: string; away: string; league: string; day: string; espnLeague: string | null; euro: boolean; nearKo: boolean; koMs: number };
+  const cands: Cand[] = [];
   for (const comp of R.listCompetitions(db).filter((c) => c.sport_id === "football" && (c.budget > 0 || isEuroCupLeague(c.external_league)))) {
+    const euro = isEuroCupLeague(comp.external_league);
     for (const m of R.listMatches(db, comp.id)) {
+      if (R.latestMarkets(db, m.id).length === 0 || R.getMatchLive(db, m.id)) continue; // not listed, or already bound
       const koMs = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
-      if (!Number.isFinite(koMs) || koMs < loMs || koMs > nearHiMs) continue;
-      if (R.latestMarkets(db, m.id).length === 0 || R.getMatchLive(db, m.id)) continue;
-      targets.push({ home: m.home, away: m.away, league: String(comp.external_league || comp.name), day: dayOf(m.kickoff_at), espnLeague: comp.external_league ?? null });
-      if (targets.length >= max) break;
+      const finite = Number.isFinite(koMs);
+      const nearKo = finite && koMs >= loMs && koMs <= nearHiMs;
+      const koNull = !finite;
+      if (!nearKo && !koNull) continue;                    // finite kickoff outside the window → skip
+      if (koNull && !comp.external_league) continue;        // no board to fetch → nothing to probe (no_league surfaced elsewhere)
+      cands.push({ home: m.home, away: m.away, league: String(comp.external_league || comp.name), day: dayOf(m.kickoff_at), espnLeague: comp.external_league ?? null, euro, nearKo, koMs: finite ? koMs : Infinity });
     }
-    if (targets.length >= max) break;
   }
+  const targets = cands
+    .sort((a, b) => (Number(b.euro) - Number(a.euro)) || (Number(b.nearKo) - Number(a.nearKo)) || a.koMs - b.koMs)
+    .slice(0, max);
 
   // fetch each needed board once (main + _qual variants)
   const boardCache = new Map<string, { home: string; away: string; date?: string | null }[]>();

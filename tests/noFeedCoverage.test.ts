@@ -145,6 +145,39 @@ test("noFeedProbe: reveals the ESPN spelling for a blind euro fixture (name_mism
   assert.equal(b2.verdict, "not_on_board", "no board candidate → ESPN doesn't carry it");
 });
 
+test("noFeedProbe: a kickoff-null euro fixture (no matchday time yet) is now probed — was silently skipped", async () => {
+  const db = seed();
+  comp(db, "uecl", "uefa.europa.conf");
+  // a euro qualifier LISTED before its kickoff time is set (kickoff_at null) — the exact case that never
+  // entered the near-window gate before the S11 fix, so the whole euro qualifier tail went un-probed.
+  match(db, "kn", "uecl", "Neftçi PFK", "FK Dynama-Minsk", null as any);
+  const provider: SportsProvider = {
+    name: "mock",
+    async scoreboard(_sport: string, league: string) {
+      if (!/uefa\.europa\.conf/.test(league)) return [];
+      return [{ externalRef: "E1", home: "Neftchi Baku", away: "Dinamo Minsk", state: "upcoming", minute: null, scoreHome: null, scoreAway: null, final: false, date: null }] as any;
+    },
+    async matchDetail() { return null; },
+  };
+  const r = await buildNoFeedProbe(db, provider, { nowMs: NOW_MS });
+  const kn = r.rows.find((x) => /Neftçi/.test(x.match));
+  assert.ok(kn, "the kickoff-null euro fixture is a probe target now");
+  assert.equal(kn!.verdict, "name_mismatch_fixable");
+  assert.ok(kn!.candidates.some((c) => /Neftchi|Dinamo/.test(c.espnHome + c.espnAway)), "reveals ESPN spelling to alias from");
+});
+
+test("noFeedProbe: euro fixtures rank ahead of domestic before the max cut (not starved)", async () => {
+  const db = seed();
+  comp(db, "bra", "bra.1"); comp(db, "uecl", "uefa.europa.conf");
+  // fill with 25 domestic blind fixtures (all near-kickoff) + one euro kickoff-null; max=1 must pick the euro.
+  for (let i = 0; i < 25; i++) match(db, "d" + i, "bra", "Dom" + i, "Rival" + i);
+  match(db, "euroK", "uecl", "EuroHome", "EuroAway", null as any);
+  const provider: SportsProvider = { name: "mock", async scoreboard() { return []; }, async matchDetail() { return null; } };
+  const r = await buildNoFeedProbe(db, provider, { nowMs: NOW_MS, max: 1 });
+  assert.equal(r.rows.length, 1);
+  assert.equal(r.rows[0].match, "EuroHome—EuroAway", "euro sorts first despite 25 domestic candidates ahead in scan order");
+});
+
 test("persistNoFeedCoverage: writes the blind_pairs_daily digest", () => {
   const db = seed();
   comp(db, "ucl", "uefa.champions");
