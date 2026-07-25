@@ -272,7 +272,7 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: true, ...(aliasResult ? { aliasResult } : {}), sprint: buildCoverageSprint(db, { windowDays }) });
     }
     // ?report=profile_epoch_cut → S6: profile × clean-epoch × strategy SIGNAL-level cut + the conservative
-    // anomaly per strategy. Same filters as profiles (&strategyId=&phase=&competitionId=&fromMs=&toMs=); the
+    // anomaly per strategy. Same filters as profiles (&strategyId=&phase=&competitionId=&codeVersion=&fromMs=&toMs=); the
     // e5 clean floor is always applied on top (&floor=N overrides). `grid` = one cell per (strategy×profile)
     // with ≥1 clean signal (win/CLV/P&L tests + ROI + beat-close + verdict); `conservativeAnomalies` = the
     // CLV/beat-close deficit of conservative vs its peers plus the signals its entry bar SKIPPED. Read-only.
@@ -281,7 +281,7 @@ export async function GET(req: Request) {
       const q = new URL(req.url).searchParams;
       const num = (v: string | null) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
       const ph = q.get("phase");
-      const filter = { fromMs: num(q.get("fromMs")), toMs: num(q.get("toMs")), competitionId: q.get("competitionId") || undefined, strategyId: q.get("strategyId") || undefined, phase: ph === "prematch" || ph === "live" ? (ph as "prematch" | "live") : undefined };
+      const filter = { fromMs: num(q.get("fromMs")), toMs: num(q.get("toMs")), competitionId: q.get("competitionId") || undefined, strategyId: q.get("strategyId") || undefined, phase: ph === "prematch" || ph === "live" ? (ph as "prematch" | "live") : undefined, codeVersion: q.get("codeVersion") || undefined };
       const floorRaw = num(q.get("floor"));
       return NextResponse.json({ ok: true, cut: buildProfileEpochCut(db, filter, floorRaw ?? CLEAN_EPOCH_FLOOR) });
     }

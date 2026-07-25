@@ -43,8 +43,14 @@ export interface BetRec {
   winsOnEvent: boolean; codeVersion: string | null;
   status: string; settledBy: string | null; outcome: "won" | "lost" | "void" | "open";
   stake: number; payout: number | null; pnl: number | null; clvCents: number | null; finalScore: string | null;
+  // bookPnl [Phase-0 H2]: the record's P&L ONLY when it was realized on a real book fill; null when the exit
+  // rode a stale/modelled price (no live bid would have paid) — so the signal P&L verdict/bootstrap/
+  // concentration never lean on a price that couldn't have transacted. Distinct from `pnl` (gross, incl. those).
+  bookPnl: number | null;
   decisionId: string | null; // S4: strategist decision id (per-bet-unique in this schema — NOT a signal group)
-  createdAt: string | null;   // S4-fix: the signal grouping key uses match×market×strategy×episode(day of this)
+  createdAt: string | null;   // S4-fix: fallback episode key
+  kickoffAt: string | null;   // [Phase-0 M7] the match kickoff — the authoritative episode key (UTC-stable per fixture)
+  exitCodeVersion: string | null; // [Phase-0 X2] exit-time code epoch — a cross-epoch cycle is quarantined from clean cuts
   exits: ExitRec[];
 }
 
@@ -118,6 +124,10 @@ export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
         const pnlV = pnlM ? (pnlM[1] === "-" ? -1 : 1) * Number(pnlM[2]) : 0;
         return { trigger: classifyExitTrigger(e.text, b.settled_by), minute: minuteFrom(e.minute), priceCents: Number.isFinite(pc) ? pc : null, pnl: pnlV, partial: /частичн/.test(e.text), modelFill: /\[model_fill\]/.test(e.text), text: e.text };
       });
+    // [H2] book P&L = the realized pnl UNLESS the exit rode a stale/modelled price (no live bid). Such a leg's
+    // money is barred from the win-rate already (staleExit→void); this bars it from the P&L verdict too.
+    const modelFilled = exits.some((e) => e.modelFill);
+    const bookPnl = pnl != null && !staleExit && !modelFilled ? pnl : null;
     out.push({
       id: b.id, matchId: b.match_id, matchLabel: `${m.home} — ${m.away}`, competitionId: m.competition_id, category: comp?.name ?? m.competition_id,
       // canonicalProfileId folds legacy `rp-lite*` → `max` so pre-rename history glues to the renamed
@@ -132,8 +142,8 @@ export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
       calibration: em?.calibration ?? null, branchWeightSum: em?.branchWeightSum ?? null, thinnessUsd: em?.marketThinnessUsd ?? null,
       winsOnEvent: em?.winsOnEvent ?? winsOnEventOccurrence(b.market_label), codeVersion: b.code_version ?? null,
       status: b.status, settledBy: b.settled_by ?? null, outcome,
-      stake, payout: num(b.payout), pnl, clvCents, finalScore: m.final_score ?? null,
-      decisionId: b.decision_id ?? null, createdAt: b.created_at ?? null, exits,
+      stake, payout: num(b.payout), pnl, bookPnl, clvCents, finalScore: m.final_score ?? null,
+      decisionId: b.decision_id ?? null, createdAt: b.created_at ?? null, kickoffAt: m.kickoff_at ?? null, exitCodeVersion: b.exit_code_version ?? null, exits,
     });
   }
   return out;
@@ -173,8 +183,10 @@ export function profileComparison(recs: BetRec[]): ProfileStats[] {
     const volume = settled.reduce((s, r) => s + r.stake, 0);
     const pnl = pnls.reduce((a, b) => a + b, 0);
     const clvs = rs.map((r) => r.clvCents).filter((x): x is number => x != null);
-    // Equity curve (chronological) → max drawdown; loss streak.
-    const chron = settled.slice().sort((a, b) => a.id.localeCompare(b.id));
+    // Equity curve (chronological) → max drawdown; loss streak. [H2/H1] Order by createdAt — `id` is a v4
+    // UUID with NO time component, so sorting by it built the curve over a RANDOM permutation, making every
+    // maxDrawdown/longestLossStreak meaningless. Fall back to id only when two bets share a timestamp.
+    const chron = settled.slice().sort((a, b) => ((Date.parse(a.createdAt ?? "") || 0) - (Date.parse(b.createdAt ?? "") || 0)) || a.id.localeCompare(b.id));
     let eq = 0, peak = 0, maxDd = 0, streak = 0, longest = 0;
     for (const r of chron) {
       eq += r.pnl!; peak = Math.max(peak, eq); maxDd = Math.max(maxDd, peak - eq);

@@ -23,7 +23,7 @@
 import type { Database } from "./db.js";
 import { betRecords, betRecordsExcluded, type BetRec, type ProfileFilter } from "./profileAnalytics.js";
 import { collapseToSignals, signalCohort, signalKey, SIGNAL_N_PRELIM, SIGNAL_N_STABLE, type SignalCohort } from "./signals.js";
-import { epochNum } from "./codeEpoch.js";
+import { epochNum, crossEpoch } from "./codeEpoch.js";
 
 /** e5 clean floor — bets whose ENTRY code-epoch is below this are pre-clean and excluded from the cut. Kept
  *  identical to footballIntegrity's backfill floor so the two agree by construction. */
@@ -31,10 +31,13 @@ export const CLEAN_EPOCH_FLOOR = 5;
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
-/** Keep only clean-epoch records: entry code-epoch ≥ e5. (Football epoch_unknown is already gone in
- *  betRecords; this adds the same code-epoch honesty for tennis and re-affirms it for football.) */
+/** Keep only clean-epoch records: entry code-epoch ≥ e5 AND not a cross-epoch cycle. (Football epoch_unknown
+ *  is already gone in betRecords; this adds the same code-epoch honesty for tennis and re-affirms it for
+ *  football.) [X2] The `!crossEpoch` half restores the invariant the docstring always claimed — a bet entered
+ *  at e5 but SETTLED under e6/e7 was governed by two rule-sets and is quarantined by the football backfill and
+ *  the overreaction gate; it must be quarantined here too, so all three per-epoch cuts agree by construction. */
 export function cleanEpochRecords(recs: BetRec[], floor = CLEAN_EPOCH_FLOOR): BetRec[] {
-  return recs.filter((r) => epochNum(r.codeVersion) >= floor);
+  return recs.filter((r) => epochNum(r.codeVersion) >= floor && !crossEpoch({ code_version: r.codeVersion, exit_code_version: r.exitCodeVersion }));
 }
 
 export interface ProfileStratCell {
