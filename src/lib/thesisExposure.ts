@@ -20,22 +20,25 @@ export function thesisCapUsd(env: Record<string, string | undefined> = process.e
   return Number.isFinite(n) && n > 0 ? n : 0; // 0 = no enforcement (report only)
 }
 
-/** Live $ already staked on one match's thesis (open bets sharing the correlationKey), across EVERY
- *  strategy and profile — the correlated group, not the per-pair slice. */
-export function matchThesisExposure(db: Database, matchId: string, cKey: string, home: string, away: string): number {
+/** Live $ staked on one match's thesis (bets sharing the correlationKey), across EVERY strategy and profile —
+ *  the correlated group, not the per-pair slice. [X1] Counts PROPOSED as well as OPEN by default so the
+ *  proposal-time room check sees siblings already proposed this run (many pairs propose before any fill); the
+ *  fill-time re-check in autoEnter passes `["open"]` to count only COMMITTED exposure. */
+export function matchThesisExposure(db: Database, matchId: string, cKey: string, home: string, away: string, statuses: readonly string[] = ["open", "proposed"]): number {
   let sum = 0;
   for (const b of R.betsForMatch(db, matchId)) {
-    if (b.status !== "open") continue;
+    if (!statuses.includes(b.status)) continue;
     if (correlationKey(b.market_label, home, away) === cKey) sum += b.stake ?? 0;
   }
   return Math.round(sum * 100) / 100;
 }
 
-/** Remaining room for a thesis before the match cap. Infinity when the cap is disabled (0). */
-export function matchThesisRoom(db: Database, matchId: string, cKey: string, home: string, away: string, env: Record<string, string | undefined> = process.env): number {
+/** Remaining room for a thesis before the match cap. Infinity when the cap is disabled (0). `statuses` picks
+ *  which exposure counts (default proposed+open; autoEnter uses open-only for the authoritative fill gate). */
+export function matchThesisRoom(db: Database, matchId: string, cKey: string, home: string, away: string, env: Record<string, string | undefined> = process.env, statuses: readonly string[] = ["open", "proposed"]): number {
   const cap = thesisCapUsd(env);
   if (cap <= 0) return Infinity;
-  return Math.max(0, cap - matchThesisExposure(db, matchId, cKey, home, away));
+  return Math.max(0, cap - matchThesisExposure(db, matchId, cKey, home, away, statuses));
 }
 
 export interface ThesisRow { matchId: string; match: string; category: string; thesis: string; stakeUsd: number; bets: number; markets: string[]; strategies: string[]; overCap: boolean }

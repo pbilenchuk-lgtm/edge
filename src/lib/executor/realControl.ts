@@ -11,6 +11,8 @@ import type { Database } from "../db.js";
 import * as RR from "../realRepo.js";
 import { effectiveTradingMode, isLoosening, type TradingMode } from "./safety.js";
 import { addWhitelistRow, setWhitelistEnabled, type AddWhitelistInput } from "./whitelist.js";
+import { buildPhaseFReadiness } from "./phaseFReadiness.js";
+import { thesisCapUsd } from "../thesisExposure.js";
 
 const VALID: TradingMode[] = ["off", "dry_run", "exits_only", "on"];
 
@@ -56,7 +58,7 @@ export function operatorStop(db: Database, actor: string, now: string): ControlR
  *   • loosening to `on` (REAL MONEY) — a TYPED phrase (ON_CONFIRM_PHRASE), never a click. A bare
  *     confirm:true is rejected with needPhrase; only the exact phrase arms it.
  *  Always logged with before/after (and, for `on`, that the phrase gate was cleared). */
-export function setOperatorModeControl(db: Database, target: string, confirm: boolean, actor: string, now: string, phrase?: string): ControlResult {
+export function setOperatorModeControl(db: Database, target: string, confirm: boolean, actor: string, now: string, phrase?: string, readinessOverride = false): ControlResult {
   if (!VALID.includes(target as TradingMode)) return { ok: false, note: `неизвестный режим «${target}»` };
   const before = effectiveTradingMode(db, process.env);
   if (target === "on") {
@@ -64,6 +66,18 @@ export function setOperatorModeControl(db: Database, target: string, confirm: bo
     if ((phrase ?? "").trim().toUpperCase() !== ON_CONFIRM_PHRASE) {
       return { ok: false, needPhrase: true, note: `включение РЕАЛЬНЫХ денег: введи фразу «${ON_CONFIRM_PHRASE}» (не кнопку)` };
     }
+    // [C2] The readiness "4 conditions" are ENFORCED here, not advisory: arming real money REFUSES unless the
+    // Phase-F readiness verdict is `go` AND the correlated-exposure blocker (THESIS_MATCH_CAP_USD) is set. The
+    // failing checks are printed. An explicit, LOGGED override (readinessOverride) is the only bypass.
+    const failing: string[] = [];
+    const readiness = buildPhaseFReadiness(db, process.env);
+    if (readiness.verdict !== "go") failing.push(`phase_f_readiness=${readiness.verdict} (${readiness.counts.fail} провал/${readiness.counts.warn} предупр.: ${readiness.checks.filter((c) => c.status !== "pass").map((c) => c.id).join(", ") || "—"})`);
+    if (thesisCapUsd(process.env) <= 0) failing.push(`THESIS_MATCH_CAP_USD не задан — коррелированный кэп (R0.5) выключен`);
+    if (failing.length && !readinessOverride) {
+      RR.logControl(db, "set_mode_blocked", JSON.stringify({ target, failing }), actor, now);
+      return { ok: false, note: `⛔ включение РЕАЛА заблокировано готовностью: ${failing.join("; ")}. Закрой их (см. ?report=phase_f_readiness) или подтверди явный override.` };
+    }
+    if (failing.length && readinessOverride) RR.logControl(db, "set_mode_override", JSON.stringify({ target, failing, actor }), actor, now);
   } else if (isLoosening(before, target as TradingMode) && !confirm) {
     return { ok: false, needConfirm: true, note: `подтверди повышение ${before}→${target} (даёт больше реальных действий)` };
   }

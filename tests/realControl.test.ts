@@ -97,8 +97,10 @@ test("setOperatorModeControl: 'on' is the STRONG barrier — a bare confirm is N
     assert.equal(wrong.ok, false);
     assert.equal(wrong.needPhrase, true);
     assert.equal(RR.getOperatorMode(d), null);
-    // the exact phrase (case/space-insensitive) arms it — confirm irrelevant.
-    const armed = setOperatorModeControl(d, "on", false, "owner", NOW, `  ${ON_CONFIRM_PHRASE.toLowerCase()} `);
+    // the exact phrase (case/space-insensitive) arms it — confirm irrelevant. readinessOverride isolates the
+    // PHRASE barrier from the C2 readiness gate (fresh DB → readiness=hold); the gate itself is covered in
+    // realEnableGate.test.ts.
+    const armed = setOperatorModeControl(d, "on", false, "owner", NOW, `  ${ON_CONFIRM_PHRASE.toLowerCase()} `, true);
     assert.equal(armed.ok, true);
     assert.equal(RR.getOperatorMode(d), "on");
     const det = JSON.parse(String(RR.listControlLog(d, 5).find((e) => e.action === "set_mode")!.detail));
@@ -118,7 +120,7 @@ test("setOperatorModeControl: tightening never needs confirm", () => {
 test("setOperatorModeControl: env caps the request — asking for 'on' under env=dry_run only reaches dry_run", () => {
   withEnv("dry_run", () => {
     const d = db();
-    const r = setOperatorModeControl(d, "on", false, "owner", NOW, ON_CONFIRM_PHRASE);
+    const r = setOperatorModeControl(d, "on", false, "owner", NOW, ON_CONFIRM_PHRASE, true); // readinessOverride: isolate env-cap behaviour from the C2 gate
     assert.equal(r.ok, true);
     assert.equal(RR.getOperatorMode(d), "on", "operator override stored as requested…");
     assert.match(r.note, /действует dry_run/, "…but the effective note reflects the env ceiling");

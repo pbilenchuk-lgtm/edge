@@ -46,7 +46,7 @@ export async function POST(req: Request) {
         result = C.operatorStop(db, actor, now);
         break;
       case "set_mode":
-        result = C.setOperatorModeControl(db, String(body.mode ?? ""), body.confirm === true, actor, now, typeof body.phrase === "string" ? body.phrase : undefined);
+        result = C.setOperatorModeControl(db, String(body.mode ?? ""), body.confirm === true, actor, now, typeof body.phrase === "string" ? body.phrase : undefined, body.readinessOverride === true);
         break;
       case "clear_pause":
         result = C.clearAutoPauseControl(db, actor, now);
