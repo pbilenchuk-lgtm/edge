@@ -285,12 +285,41 @@ export function tails(recs: BetRec[], finalByMatchLabel?: Map<string, number>): 
 export interface ProfileAnalytics {
   filter: ProfileFilter; totalBets: number; codeVersions: string[];
   comparison: ProfileStats[]; edge: EdgeZonesBlock; calibration: CalibrationBlock; tails: TailsBlock;
+  excluded: { matchedScope: number; kept: number; excluded: Record<string, number> } | null; // S3a: why an empty/thin slice is empty
 }
+/**
+ * S3a: WHY a filter is empty. betRecords silently drops several bet classes (proposed/not_filled,
+ * settle_suspect, epoch_unknown football, token-flip-poisoned) — so a strategyId with real bets that are
+ * ALL pre-clean-epoch (overreaction: every bet epoch_unknown) returns 0 with no explanation, reading like a
+ * broken filter. This counts the drops for the SAME strategy/comp scope so the report can say "0 в срезе —
+ * но N ставок исключено: все epoch_unknown" instead of a bare empty.
+ */
+export function betRecordsExcluded(db: Database, filter: ProfileFilter = {}): { matchedScope: number; kept: number; excluded: Record<string, number> } {
+  const ex: Record<string, number> = { proposed_or_not_filled: 0, settle_suspect: 0, epoch_unknown: 0, token_flip_poisoned: 0 };
+  let matched = 0, kept = 0;
+  for (const b of R.allBets(db)) {
+    if (filter.strategyId && b.strategy_id !== filter.strategyId) continue;
+    // competition scope needs the match; only resolve when a comp filter is set (keeps this cheap otherwise)
+    if (filter.competitionId) { const m = R.getMatch(db, b.match_id); if (!m || m.competition_id !== filter.competitionId) continue; }
+    matched++;
+    if (b.status === "proposed" || b.status === "not_filled") { ex.proposed_or_not_filled++; continue; }
+    if (b.settle_suspect) { ex.settle_suspect++; continue; }
+    if (b.football_epoch === "epoch_unknown") { ex.epoch_unknown++; continue; }
+    try { if (parseEntryMeta(b.entry_meta)?.tokenFlipPoisoned === true) { ex.token_flip_poisoned++; continue; } } catch { /* keep */ }
+    kept++;
+  }
+  return { matchedScope: matched, kept, excluded: ex };
+}
+
 export function profileAnalytics(db: Database, filter: ProfileFilter = {}): ProfileAnalytics {
   const recs = betRecords(db, filter);
+  // Only compute the (slightly heavier) exclusion diagnostic when the slice is empty/thin — that's the only
+  // time the «почему пусто?» question is asked. Turns a silent 0 into a self-validating breakdown.
+  const excluded = recs.length < 5 ? betRecordsExcluded(db, filter) : null;
   return {
     filter, totalBets: recs.length,
     codeVersions: [...new Set(recs.map((r) => r.codeVersion).filter((x): x is string => !!x))].sort(),
     comparison: profileComparison(recs), edge: edgeZones(recs), calibration: calibration(recs), tails: tails(recs),
+    excluded,
   };
 }

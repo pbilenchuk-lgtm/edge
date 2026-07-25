@@ -23,6 +23,7 @@ import { simulateBuy, simulateSell, takerFeeCents } from "../execution.js";
 import { classifyOrderBook } from "./paperFill.js";
 import * as RR from "../realRepo.js";
 import { transact, type Database } from "../db.js";
+import { effectiveCodeVersion } from "../codeEpoch.js";
 import { effectiveTradingMode, modeCaps, enforceCaps, conformOrderToMarket, resolveSafetyCaps, type SafetyCaps } from "./safety.js";
 import type { Executor, OrderRequest, OrderAck, CancelAck, Fill, Position, Balance, ExecutorHealth } from "./types.js";
 
@@ -147,7 +148,9 @@ export class DryRunExecutor implements Executor {
         side: order.side, leg: order.leg, limit_price_cents: limit, size_usd: sizeUsd, tif_sec: order.timeInForceSec,
         expiry_mode: order.expiryMode ?? null,
         client_cancel_deadline: order.expiryMode === "client-cancel" ? new Date(nowMs + order.timeInForceSec * 1000).toISOString() : null,
-        code_version: null, whitelist_version: this.ctx.whitelistVersion ?? null,
+        // S3b: stamp the ENTRY epoch (same source as bets.code_version) so dry-order cuts read a real
+        // epoch instead of collapsing every fill into «legacy» — a verdict is only readable per clean epoch.
+        code_version: effectiveCodeVersion(db), whitelist_version: this.ctx.whitelistVersion ?? null,
         note: `dry-run${cap.clamped ? ` · урезан кэпом до $${sizeUsd}` : ""}`, created_at: nowIso,
       });
       RR.transitionRealOrder(db, orderId, "placed", nowIso, { note: "dry-run placed (не отправлено)" });
