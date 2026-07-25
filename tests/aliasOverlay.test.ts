@@ -37,6 +37,17 @@ test("SAFETY: an alias cannot force a FALSE match — the distinctive-token subs
   assert.equal(nameMatch("Wolverhampton Wanderers", "Wolverhampton Rovers"), true);
 });
 
+test("H3 (Phase 3.1): a 2-char club binds via a persisted alias (map-before-filter); un-aliased 2-char still drops", () => {
+  const d = db();
+  refreshTeamAliasOverlay(d);
+  assert.equal(nameMatch("KÍ", "KI Klaksvik"), false, "2-char name → empty token set → no bind without an alias");
+  addTeamAlias(d, "ki", "klaksvik", now); // the alias the probe would surface
+  refreshTeamAliasOverlay(d);
+  assert.equal(nameMatch("KÍ", "KI Klaksvik"), true, "ki→klaksvik (8 chars) now survives the ≥3 filter → binds");
+  // the ≥3 floor is unchanged: an un-aliased 2-char noise token still can't create a false match
+  assert.equal(nameMatch("FC", "SC"), false, "bare 2-char club-type tokens still drop (no false match)");
+});
+
 test("reset: empty DB overlay restores the no-op", () => {
   const d = db();
   refreshTeamAliasOverlay(d);

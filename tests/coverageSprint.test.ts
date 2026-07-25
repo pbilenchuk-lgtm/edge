@@ -42,6 +42,11 @@ test("buildCoverageSprint: names the blind funded fixtures with class + action, 
   assert.match(noLeague!.action, /привязать лигу|external_league/i);
   assert.equal(s.unboundByClass.no_league, 1);
   assert.equal(s.unboundByClass.name_or_dark, 1);
+  // [M17 / Phase 3.4] dollar-weighted blind view: both funded comps ($8000 + $5000) have a blind match.
+  assert.equal(s.moneyBlind.fundedBudgetUsd, 13000);
+  assert.equal(s.moneyBlind.blindBudgetUsd, 13000);
+  assert.equal(s.moneyBlind.blindBudgetPct, 100);
+  assert.equal(s.moneyBlind.blindComps.length, 2);
   // euro-first ordering
   assert.ok(s.unbound.indexOf(euro!) < s.unbound.indexOf(noLeague!), "euro sorts before non-euro");
   assert.equal(s.target.euroTargetPct, 85);

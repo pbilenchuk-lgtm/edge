@@ -23,6 +23,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { UEFA_TWO_LEG } from "./footballIntegrity.js";
 import { espnLeagueVariants } from "./engine.js";
+import { foldLetters } from "./nameFold.js";
 import type { SportsProvider } from "./sports.js";
 
 const qualBase = (lg: string | null | undefined) => String(lg ?? "").replace(/_qual$/i, "");
@@ -171,7 +172,10 @@ export function buildNoFeedCoverage(db: Database, opts: { nowMs?: number; window
 // The near-kickoff euro blind are NAME-match failures (they never became candidates). To fix canonicalization by
 // DATA not by guessing, fetch the ESPN board for each blind fixture's league and show the closest-name events —
 // so «Polymarket "Neftçi PFK" ↔ ESPN "Neftchi Baku"» becomes visible and aliasable. Needs the provider (network).
-const foldTok = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[øœ]/g, "o").replace(/[æ]/g, "a").replace(/ß/g, "ss").replace(/đ/g, "d").replace(/ł/g, "l").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 4);
+// [M14] Reuse the LIVE-path fold (foldLetters) so the probe scores the exact hard cases it exists for —
+// Azerbaijani schwa (Zirə→zira), Icelandic þ/ð, ħ, ı — instead of its old private fold that dropped them and
+// scored those pairs 0. Floor ≥3 (was ≥4, which discarded distinctive 3-letter tokens like "RFS").
+const foldTok = (s: string) => foldLetters(s.toLowerCase()).normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 3);
 const STOP = new Set(["town","city","united","club","futbol","football","calcio","sport","sporting"]);
 function overlapScore(a: string, b: string): number {
   const ta = new Set(foldTok(a).filter((t) => !STOP.has(t))), tb = new Set(foldTok(b).filter((t) => !STOP.has(t)));
@@ -184,7 +188,8 @@ export interface ProbeRow { match: string; league: string; day: string; boardLea
 /** For each blind fixture (near-kickoff OR kickoff-null with a mapped league), fetch its league board and rank
  *  events by name overlap. Reveals the ESPN spelling so aliases are added from data. Euro-first, then
  *  near-kickoff, then soonest, before the `max` cut — so euro qualifiers aren't starved. Bounded; network. */
-export async function buildNoFeedProbe(db: Database, provider: SportsProvider, opts: { nowMs?: number; nearKickoffHours?: number; max?: number; env?: Record<string, string | undefined> } = {}): Promise<{ probed: number; rows: ProbeRow[] }> {
+export interface BoardFreshness { league: string; events: number; freshestDate: string | null; ageDaysOfFreshest: number | null; stale: boolean }
+export async function buildNoFeedProbe(db: Database, provider: SportsProvider, opts: { nowMs?: number; nearKickoffHours?: number; max?: number; env?: Record<string, string | undefined> } = {}): Promise<{ probed: number; rows: ProbeRow[]; boards: BoardFreshness[] }> {
   const env = opts.env ?? process.env;
   const nowMs = opts.nowMs ?? Date.now();
   const nearHours = opts.nearKickoffHours ?? Math.max(1, Number(env.COVERAGE_NEAR_KICKOFF_HOURS ?? 48));
@@ -241,7 +246,16 @@ export async function buildNoFeedProbe(db: Database, provider: SportsProvider, o
       .filter((c) => c.score > 0).sort((a, b) => b.score - a.score).slice(0, 3);
     rows.push({ match: `${t.home}—${t.away}`, league: t.league, day: t.day, boardLeague: espnLeagueVariants(t.espnLeague).join("|"), verdict: ranked.length ? "name_mismatch_fixable" : "not_on_board", candidates: ranked });
   }
-  return { probed: rows.length, rows };
+  // [M16] board-freshness: a league can be "linked" yet its ESPN board is stale/off-season (the rou.1 case:
+  // 2025-dated events) — a linked-but-dark league reads as coverage-eligible but binds single-leg fixtures to a
+  // wrong candidate. Flag each fetched board whose FRESHEST event is older than the stale window.
+  const staleMs = Math.max(1, Number(env.COVERAGE_BOARD_STALE_DAYS ?? 45)) * 86_400_000;
+  const boards = [...boardCache.entries()].map(([league, evs]) => {
+    const dates = evs.map((e) => (e.date ? Date.parse(e.date) : NaN)).filter((n) => Number.isFinite(n)) as number[];
+    const maxMs = dates.length ? Math.max(...dates) : null;
+    return { league, events: evs.length, freshestDate: maxMs != null ? new Date(maxMs).toISOString().slice(0, 10) : null, ageDaysOfFreshest: maxMs != null ? Math.round((nowMs - maxMs) / 86_400_000) : null, stale: maxMs != null && nowMs - maxMs > staleMs };
+  }).sort((a, b) => (Number(b.stale) - Number(a.stale)) || (b.ageDaysOfFreshest ?? -1e9) - (a.ageDaysOfFreshest ?? -1e9));
+  return { probed: rows.length, rows, boards };
 }
 
 /** Persist the "blind pairs × league × day" digest for the weekly report. One meta key; best-effort. */
