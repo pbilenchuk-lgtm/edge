@@ -244,6 +244,33 @@ export async function GET(req: Request) {
       } : undefined;
       return NextResponse.json({ ok: true, cohort, ...(diagnostic ? { diagnostic } : {}) });
     }
+    // ?report=coverage_sprint → S11: the ONE prioritized coverage worksheet. euro near-kickoff link-rate vs
+    // the 85% target + how many binds close it; worst-league leaderboard (link-rate asc, gap + binds-needed);
+    // and the «поимённый unbound» — every currently-blind FUNDED fixture named with its class (no_league vs
+    // name_or_dark) and the concrete fix. Read-only synthesis over no_feed_coverage + blind_funded.
+    //   &addAlias=<from>~<to> (or from:to) — persist a name alias so a blind fixture binds on the next enrich
+    //   pass (e.g. &addAlias=neftci~neftchi from a &probe candidate); &removeAlias=<from> drops one. The alias
+    //   overlay is additive over the static exonyms and only canonicalizes a token — nameMatch's subset gate
+    //   still blocks a false match. Mutating GET (consistent with pm_resolution&run=1), tiny meta write.
+    if (new URL(req.url).searchParams.get("report") === "coverage_sprint") {
+      const q = new URL(req.url).searchParams;
+      const { buildCoverageSprint } = await import("@/lib/coverageSprint");
+      const now = new Date().toISOString();
+      let aliasResult: unknown = undefined;
+      const add = q.get("addAlias");
+      const rm = q.get("removeAlias");
+      if (add) {
+        const { addTeamAlias } = await import("@/lib/teamAliases");
+        const [from, to] = add.split(/[~:|]/, 2);
+        aliasResult = from && to ? addTeamAlias(db, from, to, now) : { ok: false, error: "формат: addAlias=<from>~<to>" };
+      } else if (rm) {
+        const { removeTeamAlias } = await import("@/lib/teamAliases");
+        aliasResult = removeTeamAlias(db, rm, now);
+      }
+      const daysRaw = Number(q.get("days"));
+      const windowDays = Number.isFinite(daysRaw) && daysRaw > 0 ? daysRaw : undefined;
+      return NextResponse.json({ ok: true, ...(aliasResult ? { aliasResult } : {}), sprint: buildCoverageSprint(db, { windowDays }) });
+    }
     // ?report=profile_epoch_cut → S6: profile × clean-epoch × strategy SIGNAL-level cut + the conservative
     // anomaly per strategy. Same filters as profiles (&strategyId=&phase=&competitionId=&fromMs=&toMs=); the
     // e5 clean floor is always applied on top (&floor=N overrides). `grid` = one cell per (strategy×profile)

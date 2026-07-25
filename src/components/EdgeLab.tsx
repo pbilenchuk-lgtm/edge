@@ -2033,6 +2033,7 @@ const FILE_GROUPS: { title: string; items: { label: string; url: string; file: s
     { label: "Теннис — link-rate скаута", url: "/api/tennis-scout?report=link_rate", file: "tennis-link-rate.json" },
   ] },
   { title: "Покрытие · здоровье · экономия", items: [
+    { label: "Coverage-спринт (цель 85%, поимённый unbound)", url: "/api/profiles?report=coverage_sprint", file: "coverage-sprint.json", hint: "S11: link-rate евро у kickoff vs 85% + сколько привязок нужно; худшие лиги; поимённый список слепых funded-матчей с конкретным фиксом (лига/псевдоним/тёмная доска)." },
     { label: "Еженедельный самоотчёт (всё в одном)", url: "/api/profiles?report=weekly_selfreport", file: "weekly-selfreport.json", hint: "link-rate + cohort-accrual + dry-fill + слепой футбол." },
     { label: "Слепой funded-футбол (нет привязки)", url: "/api/profiles?report=blind_funded", file: "blind-funded.json" },
     { label: "Покрытие фидов (no-feed)", url: "/api/profiles?report=no_feed_coverage", file: "no-feed-coverage.json" },

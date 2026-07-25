@@ -26,6 +26,8 @@ import { recordComebackLatency } from "./overreactionLatency.js";
 import { isIso, finishStamp } from "./time.js";
 import type { SportsProvider } from "./sports.js";
 import { UEFA_TWO_LEG } from "./footballIntegrity.js";
+import { foldLetters } from "./nameFold.js";
+import { getTeamAliases } from "./teamAliases.js";
 
 export interface EngineConfig {
   reassessGapMinutes: number; // §9.7 rate limit
@@ -974,12 +976,14 @@ const TEAM_STOPWORDS = new Set(["fc", "afc", "sc", "cf", "ac", "as", "cd", "sv",
 // this, "Tromsø" (Polymarket) and "Tromso" (ESPN) tokenized to different tokens and
 // nameMatch failed → the same fixture imported twice (an ESPN-only twin with no
 // quotes and a raw non-ISO kickoff string). Fold BEFORE NFD so the two paths agree.
-function foldLetters(s: string): string {
-  return s
-    .replace(/ø/g, "o").replace(/æ/g, "ae").replace(/œ/g, "oe").replace(/ß/g, "ss")
-    .replace(/đ/g, "d").replace(/ð/g, "d").replace(/ł/g, "l").replace(/þ/g, "th").replace(/ħ/g, "h").replace(/ı/g, "i")
-    .replace(/ə/g, "a"); // schwa (Azerbaijani) — NFD leaves it intact; "Zirə" → "Zira" (P3 batch-7)
-}
+// foldLetters now lives in the leaf module nameFold.ts (shared with the persisted alias store so the two
+// canonicalize identically). Imported above.
+// S11: the persisted alias overlay (getTeamAliases) is merged OVER TEAM_EXONYMS in teamTokens. It's read from
+// a module-level cache that enrichFromEspn/reconcile refresh once per pass (refreshTeamAliasOverlay), so the
+// hot name-match path stays a pure map lookup. Empty overlay (default) ⇒ byte-for-byte the old behavior.
+let TEAM_ALIAS_OVERLAY: Record<string, string> = {};
+/** Reload the DB-backed alias overlay into the module cache. Called at the top of each enrich/reconcile pass. */
+export function refreshTeamAliasOverlay(db: Database): void { TEAM_ALIAS_OVERLAY = getTeamAliases(db); }
 // F1: city EXONYMS — Polymarket carries the native spelling, ESPN/StatPal the English one, and diacritic
 // folding alone can't bridge a translated city ("Wien"→"Vienna", "Barysaŭ"→"Borisov"). Without this the
 // fixture never links → no match_live → phantom kickoff clock, zero entries, forced ?:? finish (Santa
@@ -1011,7 +1015,8 @@ function teamTokens(name: string): Set<string> {
   // with an EMPTY token set, so nameMatch always failed and the fixture could
   // never reconcile with the provider (it hung "live" forever on the timer).
   const toks = foldLetters(name.toLowerCase()).normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 3 || /\d/.test(w));
-  return new Set(toks.map((w) => TEAM_EXONYMS[w] ?? w));   // F1: canonicalize known city exonyms
+  // F1 static city exonyms, then the S11 persisted overlay (last wins). Overlay empty by default ⇒ unchanged.
+  return new Set(toks.map((w) => TEAM_ALIAS_OVERLAY[w] ?? TEAM_EXONYMS[w] ?? w));
 }
 /** Do two team names refer to the same club/nation? Requires every token of the
  *  shorter name to appear in the longer (so "West Ham" ⊂ "West Ham United" ok,
@@ -1042,6 +1047,7 @@ export interface EnrichResult { enriched: number; newEvents: { matchId: string; 
 
 export async function enrichFromEspn(db: Database, provider: SportsProvider, deps: EngineDeps = {}): Promise<EnrichResult> {
   if (!provider.matchDetail) return { enriched: 0, newEvents: [] };
+  refreshTeamAliasOverlay(db); // S11: pull persisted name aliases into the hot match path for this pass
   const now = nowFn(deps)();
   const comps0 = R.listCompetitions(db);
   const compSport = new Map(comps0.map((c) => [c.id, c.sport_id]));
