@@ -399,3 +399,37 @@ test("п.4 (batch-4): match-scope Total Games gets the void haircut in theo AND 
   const fsDone: FinalSets = { sets: [{ p1: 6, p2: 4 }, { p1: 7, p2: 5 }], setsWonP1: 2, setsWonP2: 0, matchGames: 22 };
   assert.equal(resolveTennisProp("Swiss Open: Draxl vs Trotter Match Over 21.5", fsDone, { retired: false, canceled: false, firstIsP1: true }), true, "22 games > 21.5 → Over wins when the match completes");
 });
+
+test("S9 paper mode: total_games·under is quarantined (no bet, shadow still writes), bets carry the paper epoch + micro-cap", async () => {
+  const db = openDb(":memory:");
+  process.env.TENNIS_PMV_FLAG_ONLY = "false";      // paper trading ON
+  process.env.TENNIS_PMV_PAPER_MAX_STAKE = "15";
+  delete process.env.TENNIS_PMV_UNDER_QUARANTINE;  // default → quarantine ON
+  migrateTennisPmvStrategy(db);
+  const theo = tennisTheo(0.65, BASE_HOLD.wta);
+  const cents = (label: string) => Math.round(theoForProp(parseProp(label)!, theo, true)! * 100);
+  const lUnder = Q + "Match Under 20.5";     // total_games · under → QUARANTINED
+  const lSets = Q + "Total Sets: Over 2.5";  // total_sets → tradeable (different family)
+  const mid = seedScan(db, 65, [
+    { label: lUnder, mid: cents(lUnder) - 12, liq: 4000 },
+    { label: lSets, mid: cents(lSets) - 12, liq: 4000 },
+  ]);
+  const opened = await tennisPmvTickImport(db);
+  const bets = R.betsForMatch(db, mid, "tennis_pmv").filter((b) => b.status === "open");
+
+  // no money on the under side; the quarantine is logged
+  assert.ok(!bets.some((b) => /Under/i.test(b.market_label)), "total_games·under placed NO bet");
+  assert.ok(R.tradeLogForMatch(db, mid).some((x) => /under_quarantine/.test(x.text)), "quarantine logged");
+  assert.ok(opened > 0 && bets.some((b) => /Total Sets/i.test(b.market_label)), "the non-quarantined family still trades");
+
+  // paper epoch tag + micro-cap on the placed bets
+  for (const b of bets) {
+    assert.match(b.code_version ?? "", /tpmv-paper-m1/, "bet carries the paper epoch");
+    assert.ok((b.stake ?? 0) <= 15 + 1e-9, "micro-cap respected");
+  }
+  // shadow keeps writing in PARALLEL — including the quarantined under signal
+  const shadow = db.prepare(`SELECT market_label FROM pmv_shadow_signals`).all() as { market_label: string }[];
+  assert.ok(shadow.some((s) => /Under/i.test(s.market_label)), "the quarantined side is still recorded in shadow (free control)");
+
+  delete process.env.TENNIS_PMV_FLAG_ONLY; delete process.env.TENNIS_PMV_PAPER_MAX_STAKE;
+});
