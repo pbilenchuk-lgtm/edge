@@ -34,6 +34,7 @@ import { underThesisMarginGoals, resolveFootballMarket } from "./settlement.js";
 import { serializeEntryMeta, parseEntryMeta, isFtBlindBet, type BetEntryMeta } from "./betMeta.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
+import { matchThesisRoom, thesisCapUsd } from "./thesisExposure.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -809,7 +810,25 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
         continue;
       }
       // Condition 5: a rudderless FT-blind position gets HALF the normal size until its cohort matures.
-      const proposed = (b.stake ?? 0) * (ftBlind ? ftBlindConfig(deps.env ?? process.env).capFrac : 1);
+      let proposed = (b.stake ?? 0) * (ftBlind ? ftBlindConfig(deps.env ?? process.env).capFrac : 1);
+
+      // [X1] AUTHORITATIVE thesis-cap re-check at the fill choke. Proposals were sized against the room seen at
+      // PROPOSAL time, but many (strategy×profile) pairs propose before ANY fill, so that room can be stale by
+      // the time we fill. Re-check against the COMMITTED (open) exposure now — one fill at a time, mirroring the
+      // openKey dedup above — and clamp/skip so a correlated stack can't cross the match cap regardless of
+      // proposal ordering. Off when the cap is unset (room = Infinity → no-op; paper unchanged).
+      const thesisKey = correlationKey(b.market_label, m.home, m.away);
+      if (thesisKey) {
+        const room = matchThesisRoom(db, m.id, thesisKey, m.home, m.away, deps.env ?? process.env, ["open"]);
+        if (room < proposed) {
+          if (room < 1) {
+            R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `thesis_cap: тезис «${thesisKey}» на матче у кэпа — вход заблокирован на филле (R0.5)`) });
+            R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `thesis_cap «${b.market_label}»: тезис «${thesisKey}» у кэпа $${thesisCapUsd(deps.env ?? process.env)} — вход отклонён на филле`, created_at: now });
+            continue;
+          }
+          proposed = Math.round(room * 100) / 100; // clamp the fill request to the thesis' remaining room
+        }
+      }
 
       // Execute against the real order book: fill at VWAP (slippage), cap the size
       // to what the book can absorb while keeping edge AND not moving the price too
