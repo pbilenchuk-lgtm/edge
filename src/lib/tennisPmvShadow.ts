@@ -20,7 +20,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
-import { resolveTennisProp, finalSetsFromRaw, propFirstIsP1 } from "./tennisPmv.js";
+import { resolveTennisProp, finalSetsFromRaw, propFirstIsP1, PMV_STRATEGY, PMV_PAPER_EPOCH } from "./tennisPmv.js";
 import { tennisFinalResult } from "./tennisTrading.js";
 
 export const PMV_SHADOW_EPOCH = "shadow-s1"; // bump when the shadow-scoring logic changes
@@ -149,4 +149,75 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
     sideBias, biasFlags,
     verdict, note,
   };
+}
+
+// [Phase 4.2 / M21] LIVE side-quarantine haircut. From the measured sideBias, return every (family·side)
+// the model systematically OVER-prices (n≥BIAS_MIN_N and optimismPp≥BIAS_FLAG_PP) → the cents to shave off
+// that side's theo before the entry gate. Auto-tracks the sign: only over-optimistic sides get a haircut
+// (a pessimistic side would MANUFACTURE edge if inflated, so it never produces one). Data-driven — whichever
+// side the cohort proves biased is quarantined, replacing the hardcoded "under" binary block.
+export function pmvSideBiasHaircut(cal: PmvShadowCalibration): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const b of cal.sideBias)
+    if (b.n >= BIAS_MIN_N && b.optimismPp >= BIAS_FLAG_PP) m.set(`${b.family}·${b.side}`, b.optimismPp);
+  return m;
+}
+
+// [Phase 4.1 / M20] Measured calibration factor for sizePrematch, replacing the 0.6 hardcode. Until the
+// Brier criterion matures (n≥40) we keep the 0.6 prior; once matured, GO (model beats market) earns more
+// trust (0.65), NO_GO (it doesn't) earns less (0.5). A pure function of the cohort verdict — no free params.
+export function pmvMeasuredCalibration(cal: PmvShadowCalibration): number {
+  if (!cal.criterion.matured) return 0.6;
+  return cal.verdict === "go" ? 0.65 : 0.5;
+}
+
+// [Phase 4.4] PROMOTION LADDER — the formal shadow→paper→real progression with a gate at each transition.
+// The real leg is HARD-PINNED football-only (whitelist WHITELIST_SPORT + the mirror sport gate), so tennis
+// can NEVER auto-promote to real: this reports WHERE tennis-PMV stands and WHAT the paper cohort must prove
+// before an owner ratification is even eligible to be considered. Triple agreement = three independent
+// confirmations the edge is real: (1) shadow Brier beats implied (model > market at freeze), (2) no
+// UNHANDLED systematic side-lean (biasFlags empty — every measured lean is compensated by a haircut),
+// (3) paper cohort book-P&L ≥ 0. Plus a sample floor of n≥25 matured paper signals. All measured, no dials.
+const PMV_PROMO_NEED_SIGNALS = 25;
+export interface PmvPromotion {
+  stage: "shadow" | "paper";       // real is unreachable for tennis this era (football-only whitelist)
+  paperSignals: number;
+  needSignals: number;
+  paperPnlUsd: number;
+  agreements: { brierGo: boolean; sideBiasClear: boolean; paperPositive: boolean };
+  tripleAgreement: boolean;
+  realEligible: boolean;           // ALWAYS false for tennis — a separate owner ratification is mandatory
+  ladder: string[];
+  note: string;
+}
+export function buildPmvPromotion(db: Database, env: Record<string, string | undefined> = process.env): PmvPromotion {
+  const flagOnly = (env.TENNIS_PMV_FLAG_ONLY ?? "") !== "false";
+  const cal = buildPmvShadowCalibration(db);
+  // Distinct matured PAPER signals (one per match×market), and the cohort's realized book-P&L.
+  const paperSignals = (db.prepare(
+    `SELECT COUNT(*) n FROM (SELECT DISTINCT match_id, market_label FROM bets WHERE strategy_id=? AND code_version LIKE ? AND status LIKE 'settled%')`,
+  ).get(PMV_STRATEGY, `%${PMV_PAPER_EPOCH}%`) as { n: number }).n;
+  const pnlRow = db.prepare(
+    `SELECT COALESCE(SUM(CASE WHEN payout IS NOT NULL THEN payout - stake ELSE 0 END),0) pnl
+       FROM bets WHERE strategy_id=? AND code_version LIKE ? AND status LIKE 'settled%'`,
+  ).get(PMV_STRATEGY, `%${PMV_PAPER_EPOCH}%`) as { pnl: number };
+  const paperPnlUsd = Math.round((pnlRow.pnl ?? 0) * 100) / 100;
+  const agreements = {
+    brierGo: cal.verdict === "go",
+    sideBiasClear: cal.biasFlags.length === 0,
+    paperPositive: paperPnlUsd >= 0 && paperSignals > 0,
+  };
+  const tripleAgreement = agreements.brierGo && agreements.sideBiasClear && agreements.paperPositive && paperSignals >= PMV_PROMO_NEED_SIGNALS;
+  const stage: PmvPromotion["stage"] = flagOnly ? "shadow" : "paper";
+  const ladder = [
+    `shadow (flag-only): свободный контроль — сигнал заморожен, деньги ноль. ${flagOnly ? "◄ ТЕКУЩАЯ" : "пройдено"}`,
+    `paper (микро-кэп): деньги в sim, net-EV гейт + haircut. ${flagOnly ? "заблокировано (flag-only)" : "◄ ТЕКУЩАЯ"}`,
+    `real: ТОЛЬКО football (whitelist пришпилен). tennis-PMV → real невозможен до отдельной ратификации владельца.`,
+  ];
+  const note = flagOnly
+    ? `shadow-стадия: копим ${cal.scored} разрешённых shadow-кейсов (нужно ${cal.criterion.needN} для Brier-вердикта). Деньги не двигаются.`
+    : tripleAgreement
+      ? `paper-когорта СОЗРЕЛА для рассмотрения: n=${paperSignals}≥${PMV_PROMO_NEED_SIGNALS}, тройное согласие ✓ (Brier-GO, крен-чист, P&L $${paperPnlUsd}). Реал всё равно требует ЯВНОЙ ратификации владельца — авто-промоушена нет.`
+      : `paper-стадия: n=${paperSignals}/${PMV_PROMO_NEED_SIGNALS} сигналов; согласие Brier-GO=${agreements.brierGo}, крен-чист=${agreements.sideBiasClear}, P&L≥0=${agreements.paperPositive} ($${paperPnlUsd}). Реал недоступен (football-only) до созревания + ратификации.`;
+  return { stage, paperSignals, needSignals: PMV_PROMO_NEED_SIGNALS, paperPnlUsd, agreements, tripleAgreement, realEligible: false, ladder, note };
 }
