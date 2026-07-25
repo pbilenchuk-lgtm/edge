@@ -201,6 +201,22 @@ export async function GET(req: Request) {
       const { buildReassessEfficiency } = await import("@/lib/reassessEfficiency");
       return NextResponse.json({ ok: true, report: buildReassessEfficiency(db) });
     }
+    // ?report=signal_stats → S4: signal-level verdict for a cell (the units-fix, R0.1). Same filters as
+    // profiles (&strategyId=&phase=&competitionId=&codeVersion=&fromMs=&toMs=) plus &family=totals|btts|…
+    // Collapses the 4-profile fan-out to SIGNALS and runs binomial win-vs-implied, CLV t-stat, bootstrap
+    // P&L, and top-3 concentration; verdict at n≥25 (prelim) / n≥40 (stable). Headers carry both counts.
+    if (new URL(req.url).searchParams.get("report") === "signal_stats") {
+      const { betRecords } = await import("@/lib/profileAnalytics");
+      const { signalCohort, marketFamily } = await import("@/lib/signals");
+      const q = new URL(req.url).searchParams;
+      const num = (v: string | null) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
+      const ph = q.get("phase");
+      const filter = { fromMs: num(q.get("fromMs")), toMs: num(q.get("toMs")), competitionId: q.get("competitionId") || undefined, strategyId: q.get("strategyId") || undefined, phase: ph === "prematch" || ph === "live" ? (ph as "prematch" | "live") : undefined, codeVersion: q.get("codeVersion") || undefined };
+      let recs = betRecords(db, filter);
+      const fam = q.get("family");
+      if (fam) recs = recs.filter((r) => marketFamily(r.market) === fam);
+      return NextResponse.json({ ok: true, cohort: signalCohort(recs, { strategyId: filter.strategyId, phase: filter.phase, family: fam || undefined }) });
+    }
     // ?report=profiles → the risk-profile analytics (same as POST /api/profiles) but reachable by a plain
     // LINK, so a non-programmer can open it in the browser. Filters come from the query string:
     //   &strategyId=prematch_value  &phase=live|prematch  &competitionId=<catId>  &codeVersion=  &fromMs=  &toMs=
