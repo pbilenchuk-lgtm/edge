@@ -2051,6 +2051,7 @@ const FILE_GROUPS: { title: string; items: { label: string; url: string; file: s
     { label: "Еженедельный самоотчёт (всё в одном)", url: "/api/profiles?report=weekly_selfreport", file: "weekly-selfreport.json", hint: "link-rate + cohort-accrual + dry-fill + слепой футбол." },
     { label: "Слепой funded-футбол (нет привязки)", url: "/api/profiles?report=blind_funded", file: "blind-funded.json" },
     { label: "Покрытие фидов (no-feed)", url: "/api/profiles?report=no_feed_coverage", file: "no-feed-coverage.json" },
+    { label: "Провайдеры: что реально отдаётся (план vs лига)", url: "/api/profiles?report=provider_scope", file: "provider-scope.json", hint: "batch-9: вердикт по каждой паре провайдер×лига вместо сырого счётчика. out_of_plan = лига структурно не резолвится (подписка не покрывает) — решение экономическое, не инженерное. Прод-повод: Sportmonks отдавал только fifa.world, клубные лиги 16-235 неудач подряд, пять дней незаметно." },
     { label: "Аудит маппинга лиг", url: "/api/profiles?report=league_map_audit", file: "league-map-audit.json" },
     { label: "PM-резолюция (ft_blind сеттлер)", url: "/api/profiles?report=pm_resolution", file: "pm-resolution.json" },
     { label: "Эффект троттла переоценок", url: "/api/profiles?report=reassess_efficiency", file: "reassess-efficiency.json" },

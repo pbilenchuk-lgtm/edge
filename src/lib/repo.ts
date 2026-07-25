@@ -1274,6 +1274,10 @@ export interface ProviderCoverageRow {
 export function getProviderCoverage(db: Database, provider: string, league: string): ProviderCoverageRow | null {
   return (db.prepare(`SELECT * FROM provider_coverage WHERE provider=? AND league=?`).get(provider, league) as ProviderCoverageRow | undefined) ?? null;
 }
+/** [batch-9] Every (provider, league) coverage row — for the plan-scope report. Worst first. */
+export function listProviderCoverage(db: Database): ProviderCoverageRow[] {
+  return db.prepare(`SELECT * FROM provider_coverage ORDER BY consec_fail DESC`).all() as ProviderCoverageRow[];
+}
 export function upsertProviderCoverage(db: Database, r: ProviderCoverageRow): void {
   db.prepare(`INSERT INTO provider_coverage(provider,league,consec_fail,muted_until,last_probe_at,updated_at)
     VALUES(?,?,?,?,?,?)
