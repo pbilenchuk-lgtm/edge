@@ -34,7 +34,7 @@ import { underThesisMarginGoals, resolveFootballMarket } from "./settlement.js";
 import { serializeEntryMeta, parseEntryMeta, isFtBlindBet, type BetEntryMeta } from "./betMeta.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
-import { matchThesisRoom, thesisCapUsd } from "./thesisExposure.js";
+import { matchThesisRoom, thesisCapUsd, dailyClusterRoom, dailyClusterCapUsd } from "./thesisExposure.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -828,6 +828,21 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
             continue;
           }
           proposed = Math.round(room * 100) / 100; // clamp the fill request to the thesis' remaining room
+        }
+        // [M11] DAILY cross-match cluster cap: the same directional thesis stacked across the competition's
+        // other matches on this kickoff-day (five CL "favourite wins" = one directional bet). Clamp/skip against
+        // the daily ceiling too (default 2× the per-match cap). Off (Infinity) when the cap is disabled.
+        if (dailyClusterCapUsd(deps.env ?? process.env) > 0) {
+          const day = isIsoTs(m.kickoff_at) ? String(m.kickoff_at).slice(0, 10) : "";
+          const dRoom = dailyClusterRoom(db, m.competition_id, day, thesisKey, deps.env ?? process.env, ["open"]);
+          if (dRoom < proposed) {
+            if (dRoom < 1) {
+              R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `daily_cluster_cap: направление «${thesisKey}» по лиге за день у кэпа — вход заблокирован (M11)`) });
+              R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `daily_cluster_cap «${b.market_label}»: направление «${thesisKey}» по лиге за ${day} у дневного кэпа $${dailyClusterCapUsd(deps.env ?? process.env)} — вход отклонён`, created_at: now });
+              continue;
+            }
+            proposed = Math.round(dRoom * 100) / 100;
+          }
         }
       }
 
