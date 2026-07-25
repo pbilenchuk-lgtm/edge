@@ -19,7 +19,10 @@
 //       gap-monitor blackout + tennis set-value scope/quarantine/coverage + tour-scope (ITF out)
 //   e7  FT-mode: PM-resolution settle contour + blind (ft_blind) entries on Polymarket-only fixtures
 //       (dormant until FT_BLIND_ENABLED=true; a separate hold-to-settle risk cohort, half size)
-export const CODE_VERSION = "e7";
+//   e8  audit Phase 1: prematch_value money → totals-only (BTTS/1X2/handicap demoted to shadow) +
+//       conservative re-parameterized to a same-signal size-dial (entry thresholds = medium). Both change
+//       what a bet's SELECTION means, so the epoch bumps — pre-change cohorts stay distinctly labelled.
+export const CODE_VERSION = "e8";
 
 /** Decision-time snapshot stored as JSON on the bet. Every field is what was TRUE at
  *  the instant the bet was proposed/filled — never re-read later. All optional so a

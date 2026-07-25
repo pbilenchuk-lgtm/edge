@@ -193,8 +193,14 @@ export const RISK_PROFILE_DEFS: RiskProfileDef[] = [
   {
     id: "conservative", name: "Консервативный", sort: 2,
     values: {
-      config_version: "conservative-1.0",
-      entry_thresholds: { min_edge: 0.07, min_edge_low_liquidity: 0.10, min_calibration: 0.55, min_market_liquidity: 2000 },
+      // [Phase 1.3] conservative is now a SAME-SIGNAL, SMALLER-SIZE dial. Its old bar (edge 7% / cal 0.55 /
+      // liq $2000) systematically DECLINED the thin-book covered-summer-league totals edge its peers profit
+      // on (the conservativeAnomaly report proved it: worst cross-strategy CLV, ~15.5% beat-close) — that is
+      // declining alpha, not managing risk. Entry thresholds are now IDENTICAL to `medium`, so it enters the
+      // same signal SET; it differs only in SIZE (low Kelly 0.12 / max_pos 3%). The change is an epoch (global
+      // CODE_VERSION e7→e8) so the pre-change conservative cohort stays distinctly labelled.
+      config_version: "conservative-2.0",
+      entry_thresholds: { min_edge: 0.05, min_edge_low_liquidity: 0.07, min_calibration: 0.45, min_market_liquidity: 1000 },
       sizing: { kelly_fraction_base: 0.12, calibration_ref: 0.6, kelly_fraction_clamp: [0.04, 0.20], max_position_pct: 0.03, max_match_exposure_pct: 0.06 },
       bankroll_limits: { daily_loss_limit_pct: 0.10, max_concurrent_exposure_pct: 0.20, max_concurrent_positions: 5 },
       safeguards: { global_drawdown_killswitch_pct: 0.25, absurd_edge_block: 0.25, max_quote_age_seconds: 30, prob_sum_tolerance: 0.02 },

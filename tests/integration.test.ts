@@ -147,15 +147,15 @@ test("analysis duel (ANALYSIS_DUEL=on): a match is analysed by one arm and its b
   assert.ok(bets.length > 0, "at least one bet proposed");
   const tag = analysisModelTag(asmt.model!);
   assert.ok(bets.every((b) => (b.code_version ?? "").endsWith(`·${tag}`)), `every bet tagged with the arm (${tag}) — got ${bets[0].code_version}`);
-  assert.match(bets[0].code_version ?? "", /^e7·m1·(opus48|fable5)$/, "epoch × model-arm label");
+  assert.match(bets[0].code_version ?? "", /^e8·m1·(opus48|fable5)$/, "epoch × model-arm label");
 });
 
-test("module 3: the assigned risk profile gates entries + saves a battle_sheet (calibration differs)", async () => {
+test("module 3: conservative is a SAME-SIGNAL size-dial (Phase 1.3) + saves a battle_sheet per pair", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
-  // same strategy under TWO profiles: medium (min_calibration 0.45) and
-  // conservative (0.55). Analysis calibration 0.50 → medium enters, conservative
-  // is blocked purely by its profile threshold.
+  // [Phase 1.3] conservative's entry thresholds now EQUAL medium's (min_edge .05 / min_cal .45 / min_liq
+  // 1000), so at calibration 0.50 it enters the SAME markets as medium and differs only in SIZE (lower Kelly
+  // 0.12 / max_pos 3%). Previously its 0.55 calibration bar blocked it — that was declining alpha, not risk.
   R.clearShares(db, "wc2026");
   R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", risk_profile_id: "medium", pct: 40 });
   R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", risk_profile_id: "conservative", pct: 40 });
@@ -165,8 +165,10 @@ test("module 3: the assigned risk profile gates entries + saves a battle_sheet (
 
   const medBets = R.betsForMatch(db, "m-lineup", "edge").filter((b) => b.risk_profile_id === "medium" && b.status === "proposed");
   const conBets = R.betsForMatch(db, "m-lineup", "edge").filter((b) => b.risk_profile_id === "conservative" && b.status === "proposed");
-  assert.ok(medBets.length > 0, "medium (min_calibration 0.45) enters at calibration 0.50");
-  assert.equal(conBets.length, 0, "conservative (min_calibration 0.55) is blocked by its profile");
+  assert.ok(medBets.length > 0, "medium enters at calibration 0.50");
+  assert.equal(conBets.length, medBets.length, "conservative now enters the SAME signal set (size-dial, not a selection filter)");
+  const sum = (bs: any[]) => bs.reduce((s, b) => s + (b.stake ?? 0), 0);
+  assert.ok(sum(conBets) > 0 && sum(conBets) <= sum(medBets), "conservative sizes SMALLER (lower Kelly/max_pos), never larger");
 
   // battle_sheet artifact saved per pair, carrying the code-side edges
   const arts = R.artifactsForMatch(db, "m-lineup").filter((x) => x.kind === "battle_sheet");
