@@ -117,9 +117,19 @@ export function correlationKey(label: string, home: string, away: string): strin
   const under = /\bunder\b/.test(n);
   const bttsNo = (/\bboth teams to score\b/.test(n) || /\bbtts\b/.test(n)) && /\bno\b/.test(n);
   const negH = /[-−–]\s*\d/.test(n); // negative handicap → favourite's margin
-  // Exactly one team named + (Over team-total OR negative handicap): that team
-  // putting more goals in resolves it. Both such markets share the event.
-  if (hasH !== hasA && (over || negH)) return `dom:${hasH ? "home" : "away"}`;
+  // S5: a team's MONEYLINE (to-win) is the SAME dominance thesis as its Over-total / negative handicap —
+  // all resolve on that team outperforming — so ML+handicaps+Over of one side are ONE thesis, not three
+  // (R0.5: «91% P&L в 3 матчах» = correlated stacks read as independence). Detect a win/ML market
+  // conservatively: one team named, no totals/BTTS/draw qualifier, and an explicit win token (or a bare
+  // team-name market). Positive handicaps (underdog +N) are the OPPOSITE side → deliberately excluded.
+  const btts = /\bboth teams to score\b|\bbtts\b/.test(n);
+  const draw = /\bdraw\b/.test(n);
+  const posH = /[+]\s*\d/.test(n);
+  const bareTeam = n === h || n === a; // the market label IS just a team name → a Polymarket to-win market
+  const isWin = !over && !under && !btts && !draw && !posH && (/\b(to win|winner|moneyline|match ?winner|побед)\b/.test(n) || bareTeam);
+  // Exactly one team named + (Over team-total OR negative handicap OR its moneyline): that team
+  // outperforming resolves it. All such markets share the event → one dominance cluster.
+  if (hasH !== hasA && (over || negH || isWin)) return `dom:${hasH ? "home" : "away"}`;
   // Match-total Over with no single-team qualifier: a further goal by either side.
   if (over && hasH === hasA) return "total:over";
   // Symmetric LOW-total cluster (anti-pseudo-diversification): every "few goals" bet —

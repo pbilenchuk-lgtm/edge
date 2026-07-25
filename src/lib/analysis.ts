@@ -16,6 +16,7 @@ import { assessMatchLLM, assessFootballStructured, assessCategoryModifier, effec
 import { assembleFootball, type AssembledAnalysis } from "./assembler.js";
 import { footballLabelProb } from "./footballMarkets.js";
 import { impliedProbs, probSumFlags, sizePrematch, correlationKey } from "./strategist.js";
+import { matchThesisRoom } from "./thesisExposure.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
 import { winsOnEventOccurrence } from "./thresholds.js";
@@ -353,6 +354,16 @@ export async function runStrategists(
       const edgeSource: "executable" | "mid_fallback" = askUsable ? "executable" : "mid_fallback";
       const effImplied = askUsable ? execCents / 100 : implied;
       const r = sizePrematch({ ourProb, priceCents: execCents, implied: effImplied, calibration, liquidity: parseLiq(m.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg });
+      // S5 (R0.5): MATCH-WIDE thesis cap — a correlated stack (dom:/total: cluster) is one thesis across ALL
+      // strategies/profiles, so clamp the entry to the thesis' remaining room on the match (not just this
+      // pair's). Off by default (THESIS_MATCH_CAP_USD unset → room=Infinity → no-op); the real=on blocker.
+      if (r.status === "enter" && cKey) {
+        const room = matchThesisRoom(db, match.id, cKey, match.home, match.away, env);
+        if (room < r.stake) {
+          if (room < 1) { r.status = "skip"; r.reason = `thesis_cap: тезис «${cKey}» на матче уже у кэпа — вход заблокирован (R0.5)`; }
+          else { r.stake = Math.round(room * 100) / 100; r.reason = `${r.reason} · thesis_cap: урезан до остатка тезиса $${r.stake}`; }
+        }
+      }
       battle.push({ market: m.label, our_prob: round3(ourProb), implied: round3(implied), edge_pct: round3(r.edge * 100), status: r.status, stake: r.stake, kelly_fraction: round3(r.kellyFraction), reason: r.reason,
         ...(pick?.role ? { role: pick.role } : {}), ...(pick?.livesInBranches ? { lives_in_branches: pick.livesInBranches } : {}), ...(pick?.branchWeightSum != null ? { branch_weight_sum: pick.branchWeightSum } : {}), ...(pick?.phantomCheck ? { phantom_check: pick.phantomCheck } : {}), ...(pick?.totalCheck ? { total_check: pick.totalCheck } : {}), ...(pick?.exitPlan ? { exit: pick.exitPlan } : {}) });
       if (r.status === "flag") { flagged++; continue; }
