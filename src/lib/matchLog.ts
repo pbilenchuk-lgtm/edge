@@ -80,7 +80,65 @@ function liveDataStatus(db: Database, matchId: string): { ok: boolean; via: stri
   // fill here is a pre-match entry, no live feed needed.
   if (live) return { ok: true, via: `match_live row (составы ${live.home_lineup ? "есть" : "нет"}, статистика ${live.stats ? "есть" : "нет"}) — предматч, вход по подтверждённой фикстуре` };
   if (realEvents.length) return { ok: true, via: `${realEvents.length} реальных событий` };
-  return { ok: false, via: "НЕТ (нет match_live-строки, нет реальных событий) → autoEnter держит предложения как превью, не входит" };
+  return { ok: false, via: "НЕТ (нет match_live-строки, нет реальных событий) — сам по себе это ещё НЕ причина невхода: ft_blind может войти вслепую, см. «Почему не было входа»" };
+}
+
+// [V0.1 / batch-9] WHY there was no entry — the REAL blocker, not a guess.
+//
+// The old one-liner claimed «autoEnter держит предложения как превью» for every hasLiveData=НЕТ match. That
+// text is a lie on a blind FUNDED fixture where ft_blind is exactly the mode that MAY fill: it sent the
+// Samegrelo/Varnamo root-cause hunt at the preview branch, while the true blocker was upstream (a book parked
+// at 50¢ → placeholder_mid quarantine, and in Varnamo's case not a single proposal was ever produced).
+// This walks autoEnter's ACTUAL gate order and names the first gate that would stop each proposal, so the log
+// answers «на каком условии умирает вход» directly. Read-only, best-effort, never throws.
+const FT_SETTLED_RE = /\b(over|under|btts|both teams|draw|ничья|тотал)\b|[—-]\s*(yes|no|да|нет)\s*$/i;
+export function entryBlockerDiag(db: Database, matchId: string, env: Record<string, string | undefined> = process.env): string[] {
+  const out: string[] = [];
+  try {
+    const m = R.getMatch(db, matchId);
+    if (!m) return ["матч не найден"];
+    const sportId = R.listCompetitions(db).find((c) => c.id === m.competition_id)?.sport_id ?? "football";
+    const markets = R.latestMarkets(db, m.id);
+    const bets = R.betsForMatch(db, m.id);
+    const proposed = bets.filter((b) => b.status === "proposed");
+    const filled = bets.filter((b) => b.status === "open" || R.isSettled(b.status));
+    if (filled.length) out.push(`вход БЫЛ: ${filled.length} позиц. заполнено — блокеры ниже относятся только к оставшимся предложениям`);
+    // Gate 0 — quotes at all.
+    if (!markets.length) { out.push("НЕТ КОТИРОВОК: ни одного рынка в снапшотах — autoEnter выходит до всех гейтов"); return out; }
+    // Gate 0b — the book itself. A book parked at ~50¢ is an untraded placeholder: any «edge» against it is a
+    // phantom, and the zombie placeholder_mid rule blocks the fill. This is the Samegrelo/Varnamo case.
+    const parked = markets.filter((mk) => Math.abs((mk.price ?? 0) - 50) <= 0.6).length;
+    if (parked) out.push(`КНИГА НЕ РАЗМЕЧЕНА: ${parked}/${markets.length} рынков стоят на ~50¢ (неторгованный дефолт) → любой edge против них фантом; zombie placeholder_mid режет вход. Это не гейт входа, а отсутствие настоящей цены`);
+    // Gate 1 — pre-lineup preview hold (the branch the old text always blamed).
+    const preLineupHold = R.LINEUP_SPORTS.has(sportId) && !m.lineup_out && (m.state === "upcoming" || m.state === "lineup");
+    if (preLineupHold) out.push("ПРЕВЬЮ ДО СОСТАВОВ: lineup_out=false и состояние upcoming/lineup → предложения держатся как превью (это и есть ветка превью)");
+    else out.push(`превью-ветка НЕ активна (составы ${m.lineup_out ? "out" : "не out"}, состояние ${m.state}) — невход объясняется НЕ ею`);
+    // Gate 2 — was there anything to fill?
+    if (!proposed.length && !filled.length) { out.push("НЕТ ПРЕДЛОЖЕНИЙ: стратег не выдал ни одной ставки — заполнять было нечего (гейты входа даже не достигнуты)"); return out; }
+    if (!proposed.length) return out;
+    // Gate 3 — live coverage vs ft_blind eligibility, per proposal.
+    const ftEnabled = /^(1|true|on|yes)$/i.test(String(env.FT_BLIND_MODE ?? env.FOOTBALL_FT_BLIND ?? ""));
+    const hasLive = liveDataStatus(db, m.id).ok;
+    const hasMatchLive = !!R.getMatchLive(db, m.id);
+    for (const b of proposed) {
+      const why: string[] = [];
+      if (!hasLive) {
+        if (!ftEnabled) why.push("ft_blind ВЫКЛЮЧЕН (env)");
+        else if (b.origin !== "prematch") why.push(`origin=${b.origin ?? "?"} — ft_blind берёт только prematch`);
+        else if (!FT_SETTLED_RE.test(b.market_label)) why.push("рынок не FT-сеттлится — ft_blind держит только финальные тоталы/исходы");
+        else if (hasMatchLive) why.push("есть match_live-строка → фикстура покрыта, ft_blind неприменим");
+        else why.push("ft_blind ПРИМЕНИМ — если входа нет, блокер ниже по цепочке (карантин книги / дубль-позиция / нулевая котировка)");
+      }
+      const mk = markets.find((x) => x.label === b.market_label);
+      if (!mk) why.push("рынка нет в последнем снапшоте — котировка не найдена");
+      else if ((mk.price ?? 0) <= 0) why.push("котировка ≤0 — вход пропущен");
+      else if (Math.abs(mk.price - 50) <= 0.6) why.push("котировка ~50¢ — плейсхолдер, zombie-карантин режет филл");
+      out.push(`«${b.market_label}» [${b.strategy_id}/${b.risk_profile_id ?? "medium"}]: ${why.length ? why.join(" · ") : "гейты пройдены — вход ожидался"}`);
+    }
+  } catch (e) {
+    out.push(`диагностика не собралась: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  return out;
 }
 
 export function buildMatchLog(db: Database, matchId: string): string {
@@ -119,6 +177,10 @@ export function buildMatchLog(db: Database, matchId: string): string {
   const xg = R.latestLiveXg(db, m.id);
   L.push(`- live xG: ${xg ? `дом ${xg.home} – ${xg.away} гости (${xg.provider}${xg.minute != null ? `, ${xg.minute}'` : ""})` : "нет"}`);
   L.push(`- provider-refs: ${["sportmonks", "thestatsapi", "statpal"].map((p) => { const r = R.getProviderRef(db, m.id, p); return `${p}=${r?.provider_ref ?? "—"}`; }).join(" · ")}`);
+  // [V0.1 / batch-9] The REAL entry blocker, walked in autoEnter's own gate order — replaces the blanket
+  // «держит превью» claim that misdirected the ft_blind=0 root-cause hunt on blind FUNDED fixtures.
+  const blockers = entryBlockerDiag(db, m.id, process.env);
+  if (blockers.length) { L.push("- **Почему не было входа (по порядку гейтов autoEnter):**"); for (const b of blockers) L.push(`  - ${b}`); }
 
   // ── Current markets ──
   h("Рынки (текущие котировки + ai_prob)");

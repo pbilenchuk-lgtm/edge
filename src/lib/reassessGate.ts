@@ -78,7 +78,18 @@ const TIME_BUFFER_MIN = 10; // generous slack past a window before we treat a tr
 export interface LiveState {
   totalGoals: number;   // score_home + score_away
   minute: number | null; // provider minute, else the timer estimate; null when unknown
+  // [P5 / batch-9] Deterministic cost pre-filter inputs. Batch 9: overreaction produced ZERO entries across 18
+  // football matches while arming ~80 buyback triggers — every armed-and-in-window tick still woke the LLM.
+  // Freezing the strategy was REJECTED (a gate matures only through cycles; a freeze buries it without a
+  // verdict), so instead the call must also clear two measurable pre-conditions that any real buyback needs:
+  // a panic actually deep enough to buy back, and a book deep enough to fill. Both undefined → fail OPEN.
+  panicDropCents?: number | null;   // biggest adverse move (¢) on a tracked market since its pre-panic anchor
+  bookUsd?: number | null;          // depth of the deepest tracked market ($)
 }
+// Env-tunable floors; defaults are deliberately permissive so the filter cuts cost, never a real setup.
+const ovrNum = (v: string | undefined, d: number) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+export const OVR_MIN_PANIC_CENTS = () => ovrNum(process.env.OVR_MIN_PANIC_CENTS, 6);
+export const OVR_MIN_BOOK_USD = () => ovrNum(process.env.OVR_MIN_BOOK_USD, 500);
 
 /**
  * Should the OVERREACTION live strategist be CALLED on a periodic tick, given its armed
@@ -118,7 +129,17 @@ export function overreactionGate(battleSheet: string | null | undefined, live: L
       const redCardKeyed = /удал|красн|red[\s_-]?card/i.test(blob);
       if (!redCardKeyed) { dormant++; continue; } // goal-keyed trigger, but no goal yet → dormant
     }
-    return { call: true }; // at least one armed trigger is plausibly live → let the strategist judge
+    // [P5] An armed, in-window, event-matched trigger is necessary but no longer SUFFICIENT to pay for an LLM
+    // call. A buyback needs something to buy back (a real panic) on a book that can fill it. Both readings are
+    // optional: when either is absent we fail OPEN exactly as before, so nothing real is ever cut blind.
+    const panic = live.panicDropCents, book = live.bookUsd;
+    if (panic != null && panic < OVR_MIN_PANIC_CENTS()) {
+      return { call: false, reason: `триггер заряжен и в окне, но паника всего ${Math.round(panic)}¢ < порога ${OVR_MIN_PANIC_CENTS()}¢ — выкупать нечего (пре-фильтр стоимости)` };
+    }
+    if (book != null && book < OVR_MIN_BOOK_USD()) {
+      return { call: false, reason: `триггер заряжен и в окне, но книга $${Math.round(book)} < пола $${OVR_MIN_BOOK_USD()} — выкуп неисполним (пре-фильтр стоимости)` };
+    }
+    return { call: true }; // armed + in-window + event matched + panic/book clear the floors → let the strategist judge
   }
   // Every armed trigger is expired or not yet triggerable → deterministic skip (all disarmed by code).
   const n = a.list.length;

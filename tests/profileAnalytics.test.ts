@@ -25,6 +25,15 @@ test("classifyExitTrigger: honest trigger categories", () => {
   assert.equal(classifyExitTrigger("гол сломал тезис", "early"), "thesis_stop");
   assert.equal(classifyExitTrigger("тейк на пике", "early"), "take_price");
   assert.equal(classifyExitTrigger("хард-стоп −44%", "early"), "hard_stop");
+  // [P1 / batch-9] Direction beats wording. The strategist emits `take_price` as an ACTION code, so a
+  // capitulation carries BOTH phrases: «take_price — вход 40.2¢, сейчас 20.4¢, edge закрылся» at −69% was
+  // booked as a profit-take (batch 9's largest single loss), flattering triggerMix / exit_honesty / melt / F4.
+  const capText = "take_price — вход 40.2¢, сейчас 20.4¢, edge закрылся";
+  assert.equal(classifyExitTrigger(capText, "early", -30.24), "capitulation", "take-worded exit that LOST money is a capitulation");
+  assert.equal(classifyExitTrigger(capText, "early", 12.5), "take_price", "the same wording on a WINNING leg stays a real take");
+  assert.equal(classifyExitTrigger(capText, "early"), "take_price", "no P&L supplied → word-only behaviour is unchanged (nothing silently reclassifies)");
+  assert.equal(classifyExitTrigger("edge закрылся", "early", -5), "capitulation", "an edge-gone exit that lost is also a capitulation");
+  assert.equal(classifyExitTrigger("edge закрылся", "early", 5), "edge_closed", "edge-gone with a gain keeps its own class");
   assert.equal(classifyExitTrigger("выигрыш → сеттл", null), "settle");
   assert.equal(classifyExitTrigger("что-то", "early"), "discretionary");
 });

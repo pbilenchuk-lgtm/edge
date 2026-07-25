@@ -5,7 +5,7 @@ import { openDb } from "../src/lib/db.js";
 import { seedDatabase, migrateRetireFable } from "../src/lib/seed.js";
 import * as R from "../src/lib/repo.js";
 import { exitDecision, winsOnEventOccurrence } from "../src/lib/thresholds.js";
-import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure, stopContradictsGameState, terminalProtectiveHold, throttleZombieLog, ftBlindEnterable, isFtSettledMarket, reassessHoldSignature } from "../src/lib/lifecycle.js";
+import { autoEnter, evaluateExits, autoAnalyze, autoRunStrategists, strategistReassess, advanceClocks, runLiveCycle, recordMatchStats, formatMatchStats, verifyExitTrigger, parseScoreMinuteCondition, strategistHardBlocked, isHardStrategistFailure, stopContradictsGameState, terminalProtectiveHold, throttleZombieLog, footballZombieMap, ftBlindEnterable, isFtSettledMarket, reassessHoldSignature } from "../src/lib/lifecycle.js";
 import { analyzeMatch, runStrategists } from "../src/lib/analysis.js";
 import type { SportsProvider, MatchDetail } from "../src/lib/sports.js";
 
@@ -2177,4 +2177,56 @@ test("D reassessHoldSignature: identical state → identical signature (throttle
   assert.notEqual(reassessHoldSignature(1, 1, 65, [{ label: "Over 2.5", priceCents: 60 }, { label: "BTTS — Yes", priceCents: 45 }]), base);
   // a newly managed market → different
   assert.notEqual(reassessHoldSignature(1, 1, 55, [{ label: "Over 2.5", priceCents: 60 }]), base);
+});
+
+// [P2 / batch-9] Episode is keyed on the MARKET, not (market, code): a book that flips between two zombie
+// classes (a Draw parked at ~50¢ with desynced notations is BOTH) never became tradeable in between, so it
+// must stay ONE episode. Batch 9: 407 lines for 181 pairs, `Draw — Yes` alone wearing three codes.
+test("P2: a market flapping between two zombie codes stays ONE episode (no re-log per flip)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const strat = R.listStrategies(db, "football")[0];
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  const m = R.getMatch(db, mid)!;
+  const codes = ["notation_desync", "placeholder_mid", "notation_desync", "placeholder_mid", "notation_desync"];
+  codes.forEach((c, i) => throttleZombieLog(db, m, "Draw — Yes", c, `zombie_quarantine:${c} «Draw — Yes»: карантин`, strat.id, `2026-07-25T10:0${i}:00Z`));
+  const lines = R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip" && /«Draw — Yes»/.test(l.text));
+  assert.equal(lines.length, 1, "5 ticks flipping across 2 classes → still exactly 1 episode line");
+  const ep = JSON.parse(R.metaGet(db, `zombie_ep:${mid} Draw — Yes`)!);
+  assert.equal(ep.ticks, 5, "the silent counter still accrues every tick");
+  assert.deepEqual([...ep.codes].sort(), ["notation_desync", "placeholder_mid"], "both worn codes travel with the episode as a field");
+  // An escalation INTO resolved_price is a genuinely different class (book contradicts a decided outcome) → re-logs.
+  throttleZombieLog(db, m, "Draw — Yes", "resolved_price", `zombie_quarantine:resolved_price «Draw — Yes»: цена решена`, strat.id, "2026-07-25T10:06:00Z");
+  assert.equal(R.tradeLogForMatch(db, mid).filter((l) => l.type === "skip" && /«Draw — Yes»/.test(l.text)).length, 2, "escalation to resolved_price still re-logs once");
+});
+
+// [P2 / batch-9] The lift must be EARNED. Batch 9 logged 273 «рынок снова торгуем» lines, 15 of them on books
+// whose next quarantine line reported a LARGER staleness age (217м → 220м) — the book never revived.
+test("P2: a still-stale book (220m) is NOT lifted; a genuinely fresh one is, and prints the observed age", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.listStrategies(db, "football")[0];
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  const m = R.getMatch(db, mid)!;
+  const now = "2026-07-25T12:00:00Z";
+  // A book frozen at 40¢ since 220 minutes ago — provably stale, never refreshed.
+  const old = new Date(Date.parse(now) - 220 * 60_000).toISOString();
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 5.5", price: 40, ai_prob: null, liquidity: "1000", external_ref: "T1", snapshot_at: old, is_closing: false });
+  const markets = R.latestMarkets(db, mid);
+  // Open an episode for it, then re-evaluate with a map that (for whatever reason) doesn't carry the label.
+  R.metaSet(db, `zombie_ep:${mid} Over 5.5`, JSON.stringify({ code: "stale_book", ticks: 4, codes: ["stale_book"] }), now);
+  footballZombieMap(db, m, "football", markets.filter((x) => x.label !== "Over 5.5"), 30, {}, now);
+  assert.ok(!R.tradeLogForMatch(db, mid).some((l) => /zombie_lifted «Over 5.5»/.test(l.text)), "220m-stale book is NOT declared tradeable again");
+  assert.ok(R.metaGet(db, `zombie_ep:${mid} Over 5.5`), "its episode marker survives — the quarantine stands");
+  // Now the book genuinely refreshes (a new, different price stamped now) → it no longer classifies as a
+  // zombie, the re-measured age is ~0, and the lift is EARNED. The market stays in the list so the age is read.
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 5.5", price: 61, ai_prob: null, liquidity: "1000", external_ref: "T1", snapshot_at: now, is_closing: false });
+  footballZombieMap(db, m, "football", R.latestMarkets(db, mid), 30, {}, now);
+  const lift = R.tradeLogForMatch(db, mid).find((l) => /zombie_lifted «Over 5.5»/.test(l.text));
+  assert.ok(lift, "a demonstrably fresh book IS lifted");
+  assert.match(lift!.text, /книга свежая \(0м/, "the observed age is printed, so a premature lift can never hide again");
 });
