@@ -2023,6 +2023,7 @@ const FILE_GROUPS: { title: string; items: { label: string; url: string; file: s
     { label: "Футбол Pre-match Value — PREMATCH входы", url: "/api/profiles?report=profiles&strategyId=prematch_value&phase=prematch", file: "pmv-football-prematch.json", hint: "Сравни с live-файлом — есть ли смысл разделять." },
     { label: "Футбол PMV — разрез origin × рынок", url: "/api/profiles?report=pmv_origin_cut", file: "pmv-origin-cut.json" },
     { label: "Футбол PMV — выход vs додержать до конца", url: "/api/profiles?report=pmv_exit_counterfactual", file: "pmv-exit-counterfactual.json" },
+    { label: "Семьи: shadow-когорта + kill/promote", url: "/api/profiles?report=family_shadow", file: "family-shadow.json", hint: "Phase 1: prematch_value ставит деньги только в totals; BTTS/1X2/форы демоутнуты в shadow (would-be, без денег) и зреют до сигнального вердикта. killed — сняты по созревшему негативу." },
     { label: "Overreaction — гейт выборки", url: "/api/real?report=overreaction_gate", file: "overreaction-gate.json" },
     { label: "Только overreaction (по профилям)", url: "/api/profiles?report=profiles&strategyId=overreaction", file: "profiles-overreaction.json" },
   ] },
