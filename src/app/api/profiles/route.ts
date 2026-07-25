@@ -244,6 +244,20 @@ export async function GET(req: Request) {
       } : undefined;
       return NextResponse.json({ ok: true, cohort, ...(diagnostic ? { diagnostic } : {}) });
     }
+    // ?report=profile_epoch_cut → S6: profile × clean-epoch × strategy SIGNAL-level cut + the conservative
+    // anomaly per strategy. Same filters as profiles (&strategyId=&phase=&competitionId=&fromMs=&toMs=); the
+    // e5 clean floor is always applied on top (&floor=N overrides). `grid` = one cell per (strategy×profile)
+    // with ≥1 clean signal (win/CLV/P&L tests + ROI + beat-close + verdict); `conservativeAnomalies` = the
+    // CLV/beat-close deficit of conservative vs its peers plus the signals its entry bar SKIPPED. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "profile_epoch_cut") {
+      const { buildProfileEpochCut, CLEAN_EPOCH_FLOOR } = await import("@/lib/profileEpochCut");
+      const q = new URL(req.url).searchParams;
+      const num = (v: string | null) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
+      const ph = q.get("phase");
+      const filter = { fromMs: num(q.get("fromMs")), toMs: num(q.get("toMs")), competitionId: q.get("competitionId") || undefined, strategyId: q.get("strategyId") || undefined, phase: ph === "prematch" || ph === "live" ? (ph as "prematch" | "live") : undefined };
+      const floorRaw = num(q.get("floor"));
+      return NextResponse.json({ ok: true, cut: buildProfileEpochCut(db, filter, floorRaw ?? CLEAN_EPOCH_FLOOR) });
+    }
     // ?report=profiles → the risk-profile analytics (same as POST /api/profiles) but reachable by a plain
     // LINK, so a non-programmer can open it in the browser. Filters come from the query string:
     //   &strategyId=prematch_value  &phase=live|prematch  &competitionId=<catId>  &codeVersion=  &fromMs=  &toMs=
