@@ -417,9 +417,10 @@ test("S9 paper mode: total_games·under is quarantined (no bet, shadow still wri
   const opened = await tennisPmvTickImport(db);
   const bets = R.betsForMatch(db, mid, "tennis_pmv").filter((b) => b.status === "open");
 
-  // no money on the under side; the quarantine is logged
+  // no money on the under side; the [Phase 4.2] data-driven quarantine cuts it via the seed haircut +
+  // net-EV gate (the total_games·under prior shaves theo below the fee-adjusted break-even).
   assert.ok(!bets.some((b) => /Under/i.test(b.market_label)), "total_games·under placed NO bet");
-  assert.ok(R.tradeLogForMatch(db, mid).some((x) => /under_quarantine/.test(x.text)), "quarantine logged");
+  assert.ok(R.tradeLogForMatch(db, mid).some((x) => /net_ev_cut/.test(x.text) && /total_games·under/.test(x.text)), "under side cut by the haircut + net-EV gate");
   assert.ok(opened > 0 && bets.some((b) => /Total Sets/i.test(b.market_label)), "the non-quarantined family still trades");
 
   // paper epoch tag + micro-cap on the placed bets

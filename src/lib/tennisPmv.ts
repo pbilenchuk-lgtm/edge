@@ -16,7 +16,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit } from "./shadow.js";
-import { recordPmvShadowSignal, PMV_SHADOW_EPOCH } from "./tennisPmvShadow.js";
+import { recordPmvShadowSignal, PMV_SHADOW_EPOCH, buildPmvShadowCalibration, pmvSideBiasHaircut, pmvMeasuredCalibration } from "./tennisPmvShadow.js";
 import { tennisFinalResult, flagTennisManual } from "./tennisTrading.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { serializeEntryMeta, parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
@@ -78,7 +78,26 @@ export const PMV_PAPER_EPOCH = process.env.TENNIS_PMV_PAPER_EPOCH || "tpmv-paper
 const PMV_PAPER_MAX_STAKE = (() => { const n = Number(process.env.TENNIS_PMV_PAPER_MAX_STAKE); return Number.isFinite(n) && n > 0 ? n : 15; })(); // micro-cap $/prop
 // total_games·under is quarantined from PAPER (model +15.6пп optimism, n=21) until theo of that side is
 // recalibrated — shadow still records it, but no money rides it. Env-liftable once recalibrated.
-const PMV_UNDER_QUARANTINE = (process.env.TENNIS_PMV_UNDER_QUARANTINE ?? "true").toLowerCase() !== "false";
+// [Phase 4.2] This binary hardcode is now a SEED prior only: the live biasFlags haircut (pmvSideBiasHaircut)
+// supersedes it the moment the cohort proves the lean (n≥10). The seed is applied ONLY while the live map
+// lacks the key, so the quarantine never regresses during data accumulation but becomes data-driven after.
+const pmvUnderQuarantine = () => (process.env.TENNIS_PMV_UNDER_QUARANTINE ?? "true").toLowerCase() !== "false";
+const PMV_UNDER_SEED_HAIRCUT = num(process.env.TENNIS_PMV_UNDER_SEED_HAIRCUT, 15.6); // prior optimismPp (n=21) → cents shaved off total_games·under theo until live n≥10
+
+// [Phase 4.1 / M20] Net-EV gate on entry — mirror svComputeEv (fees + fill-drift + margin). A raw deviation
+// (theo−mid) is GROSS; the tradeable edge is net of a round-trip taker fee on the mid we pay plus an
+// adverse-fill haircut on a thin book. An entry whose NET EV falls below the margin is demoted to
+// shadow-only (still recorded, no money) — this is what stops a 7¢ gross on a thin book from being "edge".
+export interface PmvNetEv { grossCents: number; feeCents: number; fillDriftCents: number; marginCents: number; netCents: number; pass: boolean }
+export function pmvNetEvCents(theoCents: number, midCents: number, env: Record<string, string | undefined> = process.env): PmvNetEv {
+  const feeRate = Math.max(0, Number(env.POLYMARKET_TAKER_FEE_RATE ?? 0.02));
+  const fillDriftCents = Math.max(0, Number(env.TENNIS_PMV_EV_FILL_DRIFT_CENTS ?? 0)); // fed by fill logs later; 0 until measured
+  const marginCents = Math.max(0, Number(env.TENNIS_PMV_EV_MARGIN_CENTS ?? 2));         // net edge must clear this to trade
+  const grossCents = Math.round((theoCents - midCents) * 10) / 10;
+  const feeCents = Math.round(2 * feeRate * midCents * 10) / 10;                        // round-trip taker on the mid we pay
+  const netCents = Math.round((grossCents - feeCents - fillDriftCents) * 10) / 10;
+  return { grossCents, feeCents, fillDriftCents, marginCents, netCents, pass: netCents >= marginCents };
+}
 // FLAG-ONLY until the core is re-calibrated (momentum + base_hold from our own frequencies). The
 // scanner still logs every would-be entry so data accumulates, but places NO bets — the first-day
 // systematic one-sided edge was phantom value from the model's own math. Set env "false" to re-enable.
@@ -622,6 +641,20 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
     }
   }
 
+  // [Phase 4.1/4.2] Compute the live shadow calibration ONCE per run: the measured over-optimism haircuts
+  // (data-driven side quarantine) and the sizing calibration factor (0.6 prior → measured on maturity).
+  const pmvCal = buildPmvShadowCalibration(db);
+  const liveHaircuts = pmvSideBiasHaircut(pmvCal);
+  const pmvCalibration = pmvMeasuredCalibration(pmvCal);
+  // Effective haircut for a side: the live-measured optimismPp if the cohort has proven it, else the seed
+  // prior for the legacy total_games·under quarantine (until live n≥10 supersedes it), else 0.
+  const sideHaircut = (fam: PropFamily, side: string): number => {
+    const k = `${fam}·${side}`;
+    if (liveHaircuts.has(k)) return liveHaircuts.get(k)!;
+    if (pmvUnderQuarantine() && fam === "total_games" && side === "under") return PMV_UNDER_SEED_HAIRCUT;
+    return 0;
+  };
+
   // PASS 2: act per match.
   for (const { comp, matchId, players, scan, tour, tournament } of pending) {
     const c = { id: comp };
@@ -632,8 +665,17 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `provenance_review «${cand.label}»: ${cand.reason}`, created_at: now });
       // A stopped family's would-be entries are logged as uniformity_stop, never taken.
       const enters = scan.candidates.filter((x) => x.action === "enter" && !stoppedFamilies.has(x.family));
-      for (const cand of scan.candidates.filter((x) => x.action === "enter" && stoppedFamilies.has(x.family)))
-        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `uniformity_stop «${cand.label}»: ${stoppedFamilies.get(cand.family)}`, created_at: now });
+      for (const cand of scan.candidates.filter((x) => x.action === "enter" && stoppedFamilies.has(x.family))) {
+        // [Phase 4.3] Shadow-record the guard's would-be entry BEFORE it is dropped, so sideBias can later
+        // grade the uniformity stop itself — otherwise the guard's own decisions are the one class the
+        // shadow cohort never sees, and we can't tell a correct stop from an over-eager one. Tagged ·ustop.
+        recordPmvShadowSignal(db, {
+          matchId: m.id, label: cand.label, family: cand.family, side: cand.side, firstIsP1: cand.firstIsP1,
+          theoCents: cand.theoCents, midCents: cand.midCents, deviation: cand.deviation, delta: scan.delta ?? 0,
+          bookUsd: cand.bookUsd, tour, surface: surfaceOf(tournament), epoch: `${codeVer}·${PMV_SHADOW_EPOCH}·ustop`, at: now,
+        });
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `uniformity_stop «${cand.label}»: ${stoppedFamilies.get(cand.family)} — записано в shadow для грейда самого гварда`, created_at: now });
+      }
       if (!enters.length) { R.metaSet(db, PMV_ACTED + m.id, "no_edge", now); continue; }
       // FLAG-ONLY (default until re-calibrated): log the would-be entries, place NO bets.
       if (pmvFlagOnly()) {
@@ -656,43 +698,54 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
         theoCents: cand.theoCents, midCents: cand.midCents, deviation: cand.deviation, delta: scan.delta ?? 0,
         bookUsd: cand.bookUsd, tour, surface: surfaceOf(tournament), epoch: `${codeVer}·${PMV_SHADOW_EPOCH}`, at: now,
       });
-      // S9: total_games·under quarantined from PAPER (shadow above still records it, but no money).
-      const tradeableEnters = enters.filter((cand) => {
-        if (PMV_UNDER_QUARANTINE && cand.family === "total_games" && cand.side === "under") {
-          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `under_quarantine «${cand.label}»: total_games·under на карантине (модель +15.6пп оптимизма, n=21) — записано в shadow, деньги не ставим`, created_at: now });
-          return false;
+      // [Phase 4.2 / M21] DATA-DRIVEN side quarantine + [Phase 4.1 / M20] net-EV gate. For each enter:
+      // shave the theo by the measured over-optimism of its (family·side), then run the net-EV gate (fees +
+      // fill-drift + margin) on the HAIRCUT theo. A candidate that fails is demoted to shadow-only (already
+      // recorded above) — no binary block, no hardcoded side. The effective theo is carried to sizing so the
+      // money reflects the de-biased edge, not the raw model deviation.
+      const tradeableEnters: { cand: PmvCandidate; effTheoCents: number; ev: PmvNetEv }[] = [];
+      for (const cand of enters) {
+        const hc = sideHaircut(cand.family, cand.side);
+        const effTheoCents = Math.round((cand.theoCents - hc) * 10) / 10;
+        const ev = pmvNetEvCents(effTheoCents, cand.midCents, process.env);
+        if (!ev.pass) {
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `net_ev_cut «${cand.label}»: gross ${cand.deviation}¢${hc ? ` − haircut ${hc}¢ (крен ${cand.family}·${cand.side})` : ""} − комиссия ${ev.feeCents}¢ − дрифт ${ev.fillDriftCents}¢ = net ${ev.netCents}¢ < маржа ${ev.marginCents}¢ — записано в shadow, деньги не ставим`, created_at: now });
+          continue;
         }
-        return true;
-      });
+        tradeableEnters.push({ cand, effTheoCents, ev });
+      }
       // Correlation cap: ≤ MAX_PROPS of different CLUSTERS (games+sets = one length cluster).
-      const chosen: PmvCandidate[] = []; const clusters = new Set<string>();
-      for (const cand of tradeableEnters) { if (chosen.length >= PMV_MAX_PROPS) break; if (clusters.has(cand.cluster)) continue; clusters.add(cand.cluster); chosen.push(cand); }
+      const chosen: { cand: PmvCandidate; effTheoCents: number; ev: PmvNetEv }[] = []; const clusters = new Set<string>();
+      for (const te of tradeableEnters) { if (chosen.length >= PMV_MAX_PROPS) break; if (clusters.has(te.cand.cluster)) continue; clusters.add(te.cand.cluster); chosen.push(te); }
       R.metaSet(db, PMV_ACTED + m.id, `entered:${chosen.length}`, now); // one shot per match
       const heldByProfile = (profile: string) => R.betsForMatch(db, m.id, PMV_STRATEGY).filter((b) => b.status === "open" && b.risk_profile_id === profile);
-      for (const cand of chosen) {
-        const ourProb = cand.theoCents / 100, implied = cand.midCents / 100;
+      for (const { cand, effTheoCents, ev } of chosen) {
+        const ourProb = effTheoCents / 100, implied = cand.midCents / 100;
         for (const profile of profilesAll) {
           const cfg = getProfileConfig(db, profile);
           const held = heldByProfile(profile).reduce((s, b) => s + (b.stake ?? 0), 0);
-          const r = sizePrematch({ ourProb, priceCents: cand.midCents, implied, calibration: 0.6, liquidity: cand.bookUsd, budget: PMV_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: false, bankCeiling: PMV_BUDGET });
+          const r = sizePrematch({ ourProb, priceCents: cand.midCents, implied, calibration: pmvCalibration, liquidity: cand.bookUsd, budget: PMV_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: false, bankCeiling: PMV_BUDGET });
           if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `[${profile}] «${cand.label}» dev +${cand.deviation}¢, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
           // Thin-book cap: never stake more than 25% of the prop's book depth. S9: + a micro-cap ($/prop)
           // for the first-20-signal paper review — deliberately tiny while the paid contour is validated.
           const stake = Math.min(r.stake, 0.25 * cand.bookUsd, PMV_PAPER_MAX_STAKE);
           if (stake < 1) continue;
-          const meta = pmvEntryMeta({ theoCents: cand.theoCents, midCents: cand.midCents, deviation: cand.deviation, delta: scan.delta ?? 0, edge: r.edge, kelly: r.kellyFraction, stake, bookUsd: cand.bookUsd, family: cand.family, firstIsP1: cand.firstIsP1 });
+          // Entry meta carries the EFFECTIVE (haircut) theo so downstream edge/CLV reflect the de-biased
+          // decision, not the raw model deviation. The raw theo stays in the rationale for provenance.
+          const hcApplied = Math.round((cand.theoCents - effTheoCents) * 10) / 10;
+          const meta = pmvEntryMeta({ theoCents: effTheoCents, midCents: cand.midCents, deviation: Math.round((effTheoCents - cand.midCents) * 10) / 10, delta: scan.delta ?? 0, edge: r.edge, kelly: r.kellyFraction, stake, bookUsd: cand.bookUsd, family: cand.family, firstIsP1: cand.firstIsP1 });
           const betId = R.uid();
           R.insertBet(db, {
             id: betId, match_id: m.id, strategy_id: PMV_STRATEGY, risk_profile_id: profile, market_label: cand.label,
             status: "open", proposed_price: cand.midCents, entry_price: cand.midCents, current_price: cand.midCents, closing_price: null,
-            ai_prob: ourProb, stake, rationale: `PMV: манилайн δ=${scan.delta} → theo ${cand.theoCents}¢ vs mid ${cand.midCents}¢ (dev +${cand.deviation}¢), семья ${cand.family}, книга $${cand.bookUsd}`,
+            ai_prob: ourProb, stake, rationale: `PMV: манилайн δ=${scan.delta} → theo ${cand.theoCents}¢${hcApplied ? ` (haircut −${hcApplied}¢ → ${effTheoCents}¢)` : ""} vs mid ${cand.midCents}¢ (net ${ev.netCents}¢ после комиссий), семья ${cand.family}, книга $${cand.bookUsd}, калибровка ${pmvCalibration}`,
             entered_minute: "предматч", result: null, payout: null, settled_by: null, settled_at: null,
             // S9: stamp the fresh paper epoch so these bets segment away from legacy sim-v1 money (the
             // signal_stats legacy_diagnostic mark points at shadow; paper bets are isolable by this tag).
             entry_meta: serializeEntryMeta(meta), code_version: `${codeVer}·${PMV_PAPER_EPOCH}`, created_at: now,
           });
           try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: c.id, strategyId: PMV_STRATEGY, profileId: profile, size: stake, edge: r.edge, isLive: false }], shadowCfg, now); } catch { /* observe-only */ }
-          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "enter", text: `[${profile}] PMV «${cand.label}» @ ${cand.midCents}¢ · $${Math.round(stake)} (theo ${cand.theoCents}¢, dev +${cand.deviation}¢, δ=${scan.delta}, пороги:${PMV_EPOCH})`, created_at: now });
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "enter", text: `[${profile}] PMV «${cand.label}» @ ${cand.midCents}¢ · $${Math.round(stake)} (theo ${cand.theoCents}¢${hcApplied ? ` −${hcApplied}¢ haircut` : ""}, net ${ev.netCents}¢, δ=${scan.delta}, пороги:${PMV_EPOCH})`, created_at: now });
           opened++;
         }
       }
