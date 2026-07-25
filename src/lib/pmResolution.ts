@@ -234,9 +234,16 @@ function defaultResolveTokens(deps: EngineDeps): ResolveTokensFn {
 // FT-blind cohort (Decision-1 condition 2): the SEPARATE verdict row for blind Polymarket-only positions —
 // a different risk class (zero in-flight management), kept out of the managed prematch_value metrics and
 // measured on its own. Read-only.
-export interface FtBlindCohort { total: number; open: number; settled: number; won: number; lost: number; void: number; pnl: number; winPct: number | null }
-export function ftBlindCohort(db: Database): FtBlindCohort {
-  const c: FtBlindCohort = { total: 0, open: 0, settled: 0, won: 0, lost: 0, void: 0, pnl: 0, winPct: null };
+export interface FtBlindCohort { total: number; open: number; settled: number; won: number; lost: number; void: number; pnl: number; winPct: number | null;
+  // [Phase 1.4] The 50% cap is NOT lifted by a decision — only by a RATIFIED data condition: once the cohort
+  // has ≥30 DECIDED settles with clean metrics, the cap is REVIEWED against the data (Decision-1 condition 5
+  // stays). This surfaces whether that condition is met; the cap itself does not change here.
+  capFrac: number; capReview: { needDecided: number; haveDecided: number; met: boolean; note: string } }
+export function ftBlindCohort(db: Database, env: Record<string, string | undefined> = process.env): FtBlindCohort {
+  const capFracRaw = Number(env.FT_BLIND_CAP_FRAC);
+  const capFrac = Number.isFinite(capFracRaw) && capFracRaw > 0 && capFracRaw <= 1 ? capFracRaw : 0.5;
+  const CAP_REVIEW_MIN_DECIDED = 30;
+  const c: FtBlindCohort = { total: 0, open: 0, settled: 0, won: 0, lost: 0, void: 0, pnl: 0, winPct: null, capFrac, capReview: { needDecided: CAP_REVIEW_MIN_DECIDED, haveDecided: 0, met: false, note: "" } };
   for (const comp of R.listCompetitions(db).filter((x) => x.sport_id === "football")) {
     for (const m of R.listMatches(db, comp.id)) {
       for (const b of R.betsForMatch(db, m.id)) {
@@ -254,5 +261,12 @@ export function ftBlindCohort(db: Database): FtBlindCohort {
   c.pnl = Math.round(c.pnl * 100) / 100;
   const decided = c.won + c.lost;
   c.winPct = decided ? Math.round((c.won / decided) * 1000) / 10 : null;
+  const met = decided >= c.capReview.needDecided;
+  c.capReview = {
+    needDecided: c.capReview.needDecided, haveDecided: decided, met,
+    note: met
+      ? `✅ КРИТЕРИЙ ДОСТИГНУТ: ${decided} решённых ft_blind-сеттлов ≥ ${c.capReview.needDecided} — кэп ${Math.round(capFrac * 100)}% можно ПЕРЕСМОТРЕТЬ по данным (win ${c.winPct}%, P&L $${c.pnl}); условие 5 Решения-1 остаётся. Не авто-снятие — решение владельца.`
+      : `копим: ${decided}/${c.capReview.needDecided} решённых ft_blind-сеттлов до пересмотра кэпа ${Math.round(capFrac * 100)}% (аргумент «FT не нужен руль» уже учтён при установке 50% — снимается только по данным, не по мнению).`,
+  };
   return c;
 }
