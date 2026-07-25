@@ -15,6 +15,8 @@
 
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
+import { FOOTBALL_EPOCH } from "./repo.js";
+import { epochNum, crossEpoch } from "./codeEpoch.js";
 import type { EngineDeps } from "./engine.js";
 import type { SportsProvider } from "./sports.js";
 
@@ -94,4 +96,28 @@ export function migrateFootballEpochUnknown(db: Database): number {
   const ph = FOOTBALL_STRATS.map(() => "?").join(",");
   const r = db.prepare(`UPDATE bets SET football_epoch='epoch_unknown' WHERE football_epoch IS NULL AND strategy_id IN (${ph})`).run(...FOOTBALL_STRATS);
   return Number(r.changes ?? 0);
+}
+
+export interface EpochBackfillResult { scanned: number; recovered: number; stillUnknown: number; reasons: Record<string, number> }
+/**
+ * Petro-ratified: DETERMINISTIC epoch backfill. The blanket migrate above tagged EVERY null-epoch football
+ * bet `epoch_unknown`, but a bet's own `code_version` already records which code-epoch it was placed in —
+ * so a row placed in the CLEAN era (e5+) that was tagged unknown only because football_epoch stamping
+ * postdated it is legally recoverable, no new match needed (56% of history was invisible). Recover a row iff
+ * it uses the SAME clean predicate the e5-gate uses — entry epoch ≥ floor AND not cross-epoch (life didn't
+ * span a deploy). Anything ambiguous (entry < floor, no/legacy code_version, or cross-epoch) STAYS unknown —
+ * conservatism is NOT relaxed. Idempotent; reads only existing fields.
+ */
+export function backfillFootballEpoch(db: Database, cleanEpochMin = 5): EpochBackfillResult {
+  const ph = FOOTBALL_STRATS.map(() => "?").join(",");
+  const rows = db.prepare(`SELECT id, code_version, exit_code_version FROM bets WHERE football_epoch='epoch_unknown' AND strategy_id IN (${ph})`).all(...FOOTBALL_STRATS) as { id: string; code_version: string | null; exit_code_version: string | null }[];
+  const upd = db.prepare(`UPDATE bets SET football_epoch=? WHERE id=?`);
+  const reasons: Record<string, number> = { entry_pre_clean_or_unlabelled: 0, cross_epoch: 0 };
+  let recovered = 0;
+  for (const b of rows) {
+    if (epochNum(b.code_version) < cleanEpochMin) { reasons.entry_pre_clean_or_unlabelled++; continue; }
+    if (crossEpoch(b)) { reasons.cross_epoch++; continue; } // entry & exit epochs differ → two rule-sets → ambiguous
+    upd.run(FOOTBALL_EPOCH, b.id); recovered++;
+  }
+  return { scanned: rows.length, recovered, stillUnknown: rows.length - recovered, reasons };
 }

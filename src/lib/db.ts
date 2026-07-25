@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy, migrateTennisSetValueStrategy, migrateTennisPmvStrategy, migrateVoidOutOfScopePmv, migrateVoidAllOpenPmv, migrateResettleExtraTimeVoids, migrateResetTennisMarks, migrateRetireFable, migrateBetOrigin } from "./seed.js";
-import { markUefaSettleSuspect, migrateFootballEpochUnknown } from "./footballIntegrity.js";
+import { markUefaSettleSuspect, migrateFootballEpochUnknown, backfillFootballEpoch } from "./footballIntegrity.js";
 import { seedRiskProfiles, migrateRiskProfileExits, migrateRenameRpLiteToMax } from "./riskConfig.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
 import { migrateQuarantinePoisonedTennis } from "./tennisTrading.js";
@@ -269,6 +269,10 @@ export function initSchema(db: Database): void {
   try { const n = markUefaSettleSuspect(db); if (n > 0) console.log(`[migrate] settle_suspect quarantine (UEFA two-leg): ${n} settled bets tagged — excluded from verdict cuts until the ESPN date backfill proves them clean`); } catch { /* best-effort */ }
   // P0.5: tag pre-fix football bets epoch_unknown (clean era starts after P0.1-P0.3) — dropped from cuts.
   try { const n = migrateFootballEpochUnknown(db); if (n > 0) console.log(`[migrate] football_epoch: ${n} pre-fix football bets tagged epoch_unknown (excluded from verdict cuts)`); } catch { /* best-effort */ }
+  // Deterministic epoch backfill: recover rows that were tagged epoch_unknown ONLY because football_epoch
+  // stamping postdated them, but whose own code_version proves a clean (e5+) non-cross-epoch life. Unblocks
+  // ~half of history to the verdict cuts with no new match; ambiguous rows stay unknown.
+  try { const r = backfillFootballEpoch(db); if (r.recovered > 0) console.log(`[migrate] football_epoch backfill: recovered ${r.recovered}/${r.scanned} epoch_unknown → clean (e5+, non-cross-epoch); ${r.stillUnknown} stay unknown`); } catch { /* best-effort */ }
   // strategy_shares gained risk_profile_id + a 3-part PK. SQLite can't ALTER a
   // PK, so recreate the table when the old (2-part) one is detected, backfilling
   // every existing allocation onto the MEDIUM profile. Guarded + row-preserving.
