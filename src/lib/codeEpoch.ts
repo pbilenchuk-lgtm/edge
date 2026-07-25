@@ -36,6 +36,13 @@ export function effectiveCodeVersion(db: Database, modelTag?: string | null): st
  *  what the numbers mean bumps this; the model-epoch (·mN) and duel tag do not. Used by cross_epoch. */
 export function codeEpochOf(cv: string | null | undefined): string { return cv ? String(cv).split("·")[0] : ""; }
 
+/** Numeric code-epoch: "e5" → 5, "e7·m1·opus48" → 7, "" / legacy / null → 0. The clean-epoch gate compares
+ *  this against a floor (e5). Single source so the e5-gate and the epoch-backfill agree by construction. */
+export function epochNum(cv: string | null | undefined): number {
+  const m = /^e(\d+)/.exec(codeEpochOf(cv));
+  return m ? Number(m[1]) : 0;
+}
+
 /** п.2 (batch-4): a bet whose life spanned a deploy — its ENTRY code-epoch (code_version) differs from its
  *  EXIT code-epoch (exit_code_version, stamped at settle). Such cycles must be QUARANTINED from per-epoch
  *  verdict slices and exit-rule comparisons (the position was governed by two different rule-sets). Returns

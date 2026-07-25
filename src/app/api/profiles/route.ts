@@ -201,6 +201,15 @@ export async function GET(req: Request) {
       const { buildReassessEfficiency } = await import("@/lib/reassessEfficiency");
       return NextResponse.json({ ok: true, report: buildReassessEfficiency(db) });
     }
+    // ?report=epoch_backfill → the deterministic football-epoch recovery: how many epoch_unknown rows were
+    // recovered to clean (e5+, non-cross-epoch) from their own code_version, why the rest stay unknown, and
+    // the resulting football_epoch distribution. Runs idempotently (already applied at boot → 0 new here).
+    if (new URL(req.url).searchParams.get("report") === "epoch_backfill") {
+      const { backfillFootballEpoch } = await import("@/lib/footballIntegrity");
+      const result = backfillFootballEpoch(db);
+      const dist = db.prepare(`SELECT COALESCE(football_epoch,'(null)') e, COUNT(*) n FROM bets WHERE strategy_id IN ('prematch_value','overreaction','live_xg') GROUP BY football_epoch ORDER BY n DESC`).all();
+      return NextResponse.json({ ok: true, result, distribution: dist, note: "recovered — восстановлено в этом вызове (0, если бэкфилл уже отработал на буте). reasons — почему остальные остаются epoch_unknown (entry <e5 / нет code_version / cross-epoch). distribution — итоговое распределение football_epoch по футбольным ставкам." });
+    }
     // ?report=thesis_exposure → S5 (R0.5): live per-match thesis exposure across the whole open book. A
     // correlated stack (dom:/total: cluster — Over 0.5+Over 1.5 of one team, ML+handicap same side) is ONE
     // thesis; overCap flags any exceeding THESIS_MATCH_CAP_USD. The real=on blocker + the entry-time clamp.

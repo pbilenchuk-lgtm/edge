@@ -18,13 +18,8 @@
 // ============================================================
 
 import type { Database } from "./db.js";
-import { codeEpochOf, crossEpoch } from "./codeEpoch.js";
+import { codeEpochOf, crossEpoch, epochNum } from "./codeEpoch.js";
 
-/** e5 → 5, "e7·m1·opus48" → 7, "" / legacy → 0. The numeric code-epoch used for the clean-epoch gate. */
-function epochNum(cv: string | null | undefined): number {
-  const m = /^e(\d+)/.exec(codeEpochOf(cv));
-  return m ? Number(m[1]) : 0;
-}
 
 /** win% / P&L / CLV over a cohort — the SAME three verdict metrics, for the gate cohort and (diagnostically)
  *  the cash-out cohort side by side. */
