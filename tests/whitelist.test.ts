@@ -63,6 +63,16 @@ test("mirror: a whitelisted football entry builds a dry order at the PROPORTIONA
   assert.equal(ord.exchange_order_id, null, "dry");
 });
 
+// ── ft_blind is never real (Phase 2.3 / C1) ──────────────────────────────────────
+test("mirror: an ft_blind bet is NEVER mirrored to real (its 50% haircut isn't in the stored fraction)", async () => {
+  const d = db();
+  addWhitelistRow(d, { strategyId: "overreaction", categories: ["epl"], maxOrderUsd: 50, enabled: true }, "owner", NOW);
+  const r = await mirrorPaperEntryToReal(d, bet({ stake: 100, entry_meta: JSON.stringify({ phase: "prematch", ftBlind: true }) }), mirrorCtx());
+  assert.equal(r.mirrored, false, "ft_blind blocked from real even though the strategy IS whitelisted");
+  assert.match(r.note, /ft_blind/);
+  assert.equal(RR.listRealOrders(d).length, 0, "no real order built for a rudderless ft_blind bet");
+});
+
 // ── the `max` profile is never real (owner rule 23.07.2026 b) ────────────────────
 test("mirror: the `max` profile is NEVER mirrored to real on a whitelisted strategy (реал запрещён до ратификации)", async () => {
   const d = db();

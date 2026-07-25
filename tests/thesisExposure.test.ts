@@ -38,3 +38,18 @@ test("S5 thesis exposure: Over 0.5 + Over 1.5 + moneyline of ONE team = one thes
   assert.equal(matchThesisRoom(db, "m1", "dom:home", "Inter Miami", "Orlando City", { THESIS_MATCH_CAP_USD: "150" }), 20);
   assert.equal(matchThesisRoom(db, "m1", "dom:home", "Inter Miami", "Orlando City", {}), Infinity, "no cap → unbounded (paper unchanged)");
 });
+
+test("M9 (Phase 2.6): a SAME-LABEL multi-profile stack is visible + breach-flagged (was hidden by markets.size≥2)", () => {
+  const { db, bet } = seed();
+  // three profiles each buying the SAME market label — one distinct label, three bets, $210 on one thesis.
+  bet("s1", "Inter Miami Over 0.5", 90);
+  bet("s2", "Inter Miami Over 0.5", 70);
+  bet("s3", "Inter Miami Over 0.5", 50);
+  const rep = buildThesisExposure(db, { THESIS_MATCH_CAP_USD: "100" });
+  const home = rep.theses.find((t) => t.thesis === "dom:home");
+  assert.ok(home, "a same-label 3-bet stack IS reported (bet count ≥2), not dropped for having 1 distinct label");
+  assert.equal(home!.stakeUsd, 210, "combined stake of all three bets");
+  assert.equal(home!.bets, 3, "bets counts BETS, not distinct labels");
+  assert.ok(home!.overCap, "$210 > cap $100 → breach visible (was hidden before)");
+  assert.equal(rep.breaches, 1);
+});

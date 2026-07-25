@@ -166,17 +166,29 @@ export async function settlePmResolutionBets(
     const overdue = nowMs - finishMs >= cfg.voidTimeoutH * 3_600_000;
 
     // Rule 2: complement orientation check — only meaningful when we're about to call a resolving side.
-    const complementOk = (): boolean => {
-      if (!comp || comp.priceCents == null) return true;         // unknown complement → can't cross-check, allow
-      if (isWonSide(t.priceCents)) return isLostSide(comp.priceCents);
-      if (isLostSide(t.priceCents)) return isWonSide(comp.priceCents);
-      return true;
+    // [C4 / Phase 2.5] Three outcomes, not two: a genuine 'mismatch' (both prices known but NOT a ~0/~100
+    // pair) is a manual-review suspect; a 'missing' complement (single token, no cross-check) MUST NOT settle
+    // on one token when strict — a wrong outcome↔label mapping would book the win/loss INVERTED. Strict is the
+    // safe default (fail-closed); PM_RESOLUTION_REQUIRE_COMPLEMENT=false restores the old fail-open behaviour.
+    const strictComplement = ((deps.env ?? process.env).PM_RESOLUTION_REQUIRE_COMPLEMENT ?? "true").toLowerCase() !== "false";
+    const complementStatus = (): "ok" | "mismatch" | "missing" => {
+      if (!comp || comp.priceCents == null) return "missing";     // no usable complement → can't cross-check
+      if (isWonSide(t.priceCents)) return isLostSide(comp.priceCents) ? "ok" : "mismatch";
+      if (isLostSide(t.priceCents)) return isWonSide(comp.priceCents) ? "ok" : "mismatch";
+      return "ok";
     };
 
     // Rule 1 PRIMARY: the market is closed/resolved.
     if (t.closed) {
       if (isResolving(t.priceCents)) {
-        if (!complementOk()) { res.suspect++; suspectLog(db, c, t, comp, now); continue; }
+        const cs = complementStatus();
+        if (cs === "mismatch") { res.suspect++; suspectLog(db, c, t, comp, now); continue; }
+        if (cs === "missing" && strictComplement) {
+          // single-token market: hold (don't settle on an un-cross-checkable token); void only when overdue.
+          if (overdue) { voidBet(c.betId, "void", `одиночный токен без комплемента, просрочено ${cfg.voidTimeoutH}ч — не сеттлю на один токен (C4)`); }
+          else { res.pendingUnresolved++; suspectLog(db, c, t, comp, now); }
+          continue;
+        }
         settle(c.betId, isWonSide(t.priceCents), t.priceCents);
       } else {
         // Rule 3: closed with a non-resolving price = a real market void/refund.
@@ -190,7 +202,13 @@ export async function settlePmResolutionBets(
       const side: "won" | "lost" = isWonSide(t.priceCents) ? "won" : "lost";
       const prev = readObs(db, c.betId);
       if (prev && prev.side === side && (nowMs - (Date.parse(prev.at) || nowMs)) >= cfg.stableMin * 60_000) {
-        if (!complementOk()) { res.suspect++; suspectLog(db, c, t, comp, now); continue; }
+        const cs = complementStatus();
+        if (cs === "mismatch") { res.suspect++; suspectLog(db, c, t, comp, now); continue; }
+        if (cs === "missing" && strictComplement) { // single token, no cross-check → hold; void only when overdue
+          if (overdue) { voidBet(c.betId, "void", `одиночный токен без комплемента, просрочено ${cfg.voidTimeoutH}ч — не сеттлю на один токен (C4)`); }
+          else { res.pendingUnresolved++; }
+          continue;
+        }
         settle(c.betId, side === "won", t.priceCents);
       } else {
         if (!prev || prev.side !== side) writeObs(db, c.betId, side, now); // (re)start the stability clock

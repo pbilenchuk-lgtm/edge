@@ -55,10 +55,9 @@ export async function GET(req: Request) {
         return NextResponse.json({ ok: true, probe: samples.map((s) => ({ ...s, resolution: map[s.token] ?? null })) });
       }
       if (url.searchParams.get("run") === "1") {
-        const { settlePmResolutionBets } = await import("@/lib/pmResolution");
-        const { loadPolymarketConfig } = await import("@/lib/polymarket");
-        const result = await settlePmResolutionBets(db, { polymarket: loadPolymarketConfig(process.env) });
-        return NextResponse.json({ ok: true, ran: true, result });
+        // [C3 / Phase 2.4] a live settlement SWEEP mutates state — never on GET (a crawler/preview hitting the
+        // URL would trigger it). Use POST { report:"pm_resolution", run:true }.
+        return NextResponse.json({ ok: false, error: "мутация: используй POST { report:\"pm_resolution\", run:true } (GET только читает)" }, { status: 405 });
       }
       const { metaGet } = await import("@/lib/repo");
       const { ftBlindCohort } = await import("@/lib/pmResolution");
@@ -261,22 +260,14 @@ export async function GET(req: Request) {
     //   still blocks a false match. Mutating GET (consistent with pm_resolution&run=1), tiny meta write.
     if (new URL(req.url).searchParams.get("report") === "coverage_sprint") {
       const q = new URL(req.url).searchParams;
-      const { buildCoverageSprint } = await import("@/lib/coverageSprint");
-      const now = new Date().toISOString();
-      let aliasResult: unknown = undefined;
-      const add = q.get("addAlias");
-      const rm = q.get("removeAlias");
-      if (add) {
-        const { addTeamAlias } = await import("@/lib/teamAliases");
-        const [from, to] = add.split(/[~:|]/, 2);
-        aliasResult = from && to ? addTeamAlias(db, from, to, now) : { ok: false, error: "формат: addAlias=<from>~<to>" };
-      } else if (rm) {
-        const { removeTeamAlias } = await import("@/lib/teamAliases");
-        aliasResult = removeTeamAlias(db, rm, now);
+      // [C3 / Phase 2.4] alias writes mutate state → POST only (see the POST handler). GET just reads the sheet.
+      if (q.get("addAlias") || q.get("removeAlias")) {
+        return NextResponse.json({ ok: false, error: "мутация: используй POST { report:\"coverage_sprint\", addAlias:\"<from>~<to>\" } (или removeAlias)" }, { status: 405 });
       }
+      const { buildCoverageSprint } = await import("@/lib/coverageSprint");
       const daysRaw = Number(q.get("days"));
       const windowDays = Number.isFinite(daysRaw) && daysRaw > 0 ? daysRaw : undefined;
-      return NextResponse.json({ ok: true, ...(aliasResult ? { aliasResult } : {}), sprint: buildCoverageSprint(db, { windowDays }) });
+      return NextResponse.json({ ok: true, sprint: buildCoverageSprint(db, { windowDays }) });
     }
     // ?report=profile_epoch_cut → S6: profile × clean-epoch × strategy SIGNAL-level cut + the conservative
     // anomaly per strategy. Same filters as profiles (&strategyId=&phase=&competitionId=&codeVersion=&fromMs=&toMs=); the
@@ -334,6 +325,27 @@ export async function POST(req: Request) {
     const db = getDb();
     let body: any = {};
     try { body = await req.json(); } catch { body = {}; }
+    // [C3 / Phase 2.4] the state-MUTATING actions live on POST (a GET is assumed safe by the whole web).
+    if (body.report === "pm_resolution" && body.run === true) {
+      const { settlePmResolutionBets } = await import("@/lib/pmResolution");
+      const { loadPolymarketConfig } = await import("@/lib/polymarket");
+      const result = await settlePmResolutionBets(db, { polymarket: loadPolymarketConfig(process.env) });
+      return NextResponse.json({ ok: true, ran: true, result });
+    }
+    if (body.report === "coverage_sprint" && (body.addAlias || body.removeAlias)) {
+      const now = new Date().toISOString();
+      let aliasResult: unknown;
+      if (body.addAlias) {
+        const { addTeamAlias } = await import("@/lib/teamAliases");
+        const [from, to] = String(body.addAlias).split(/[~:|]/, 2);
+        aliasResult = from && to ? addTeamAlias(db, from, to, now) : { ok: false, error: "формат: addAlias=\"<from>~<to>\"" };
+      } else {
+        const { removeTeamAlias } = await import("@/lib/teamAliases");
+        aliasResult = removeTeamAlias(db, String(body.removeAlias), now);
+      }
+      const { buildCoverageSprint } = await import("@/lib/coverageSprint");
+      return NextResponse.json({ ok: true, aliasResult, sprint: buildCoverageSprint(db, {}) });
+    }
     const filter = {
       fromMs: Number.isFinite(body.fromMs) ? body.fromMs : undefined,
       toMs: Number.isFinite(body.toMs) ? body.toMs : undefined,

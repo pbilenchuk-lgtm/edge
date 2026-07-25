@@ -49,7 +49,7 @@ export interface ThesisExposureReport { capUsd: number; theses: ThesisRow[]; bre
 export function buildThesisExposure(db: Database, env: Record<string, string | undefined> = process.env): ThesisExposureReport {
   const cap = thesisCapUsd(env);
   const comps = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
-  const byKey = new Map<string, { matchId: string; match: string; category: string; thesis: string; stake: number; markets: Set<string>; strategies: Set<string> }>();
+  const byKey = new Map<string, { matchId: string; match: string; category: string; thesis: string; stake: number; bets: number; markets: Set<string>; strategies: Set<string> }>();
   for (const c of R.listCompetitions(db)) {
     for (const m of R.listMatches(db, c.id)) {
       const open = R.betsForMatch(db, m.id).filter((b) => b.status === "open");
@@ -58,14 +58,18 @@ export function buildThesisExposure(db: Database, env: Record<string, string | u
         const ck = correlationKey(b.market_label, m.home, m.away);
         if (!ck) continue; // uncorrelated single market — not a stacked thesis
         const key = `${m.id}::${ck}`;
-        const g = byKey.get(key) ?? byKey.set(key, { matchId: m.id, match: `${m.home} — ${m.away}`, category: comps.get(m.competition_id)?.name ?? m.competition_id, thesis: ck, stake: 0, markets: new Set(), strategies: new Set() }).get(key)!;
-        g.stake += b.stake ?? 0; g.markets.add(b.market_label); g.strategies.add(b.strategy_id);
+        const g = byKey.get(key) ?? byKey.set(key, { matchId: m.id, match: `${m.home} — ${m.away}`, category: comps.get(m.competition_id)?.name ?? m.competition_id, thesis: ck, stake: 0, bets: 0, markets: new Set(), strategies: new Set() }).get(key)!;
+        g.stake += b.stake ?? 0; g.bets++; g.markets.add(b.market_label); g.strategies.add(b.strategy_id);
       }
     }
   }
+  // [M9] A THESIS is ≥2 correlated BETS stacked — counted on BET COUNT, not distinct labels. The old
+  // `markets.size >= 2` HID a same-label stack (three profiles each buying "Inter Over 0.5" = 1 label →
+  // dropped, even over the cap), so enforcement (matchThesisExposure, which sums by key) and this human-
+  // oversight report disagreed on what a thesis is. Also always surface an over-cap cluster, single-label or not.
   const theses = [...byKey.values()]
-    .filter((g) => g.markets.size >= 2) // a THESIS is ≥2 correlated legs stacked; a lone leg isn't a stack
-    .map((g) => ({ matchId: g.matchId, match: g.match, category: g.category, thesis: g.thesis, stakeUsd: Math.round(g.stake * 100) / 100, bets: g.markets.size, markets: [...g.markets], strategies: [...g.strategies], overCap: cap > 0 && g.stake > cap }))
+    .filter((g) => g.bets >= 2 || (cap > 0 && g.stake > cap))
+    .map((g) => ({ matchId: g.matchId, match: g.match, category: g.category, thesis: g.thesis, stakeUsd: Math.round(g.stake * 100) / 100, bets: g.bets, markets: [...g.markets], strategies: [...g.strategies], overCap: cap > 0 && g.stake > cap }))
     .sort((a, b) => b.stakeUsd - a.stakeUsd);
   const breaches = theses.filter((t) => t.overCap).length;
   const note = cap <= 0
