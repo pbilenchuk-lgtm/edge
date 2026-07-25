@@ -39,6 +39,18 @@ test("condition-1: closed=true + token at ~0 with complement ~100 → settled_lo
   assert.equal(R.getBet(db, "l1")!.status, "settled_lost");
 });
 
+test("C4 (Phase 2.5): a SINGLE-token market (no complement) is NOT settled under strict default — held, not inverted", async () => {
+  const db = openDb(":memory:"); seedDatabase(db);
+  seedPmOnly(db, { betId: "st1", token: "TONLY" }); // no token2 → no orientation cross-check
+  const r = await settlePmResolutionBets(db, { now: () => "2026-07-24T10:00:00Z", resolveTokens: resolver({ TONLY: { priceCents: 100, closed: true } }) });
+  assert.equal(r.settled, 0, "strict default: won't settle on one un-cross-checkable token");
+  assert.equal(R.getBet(db, "st1")!.status, "open", "held (not booked, possibly inverted)");
+  // the escape hatch restores the old fail-open behaviour explicitly
+  const r2 = await settlePmResolutionBets(db, { env: { PM_RESOLUTION_REQUIRE_COMPLEMENT: "false" }, now: () => "2026-07-24T10:00:00Z", resolveTokens: resolver({ TONLY: { priceCents: 100, closed: true } }) });
+  assert.equal(r2.settled, 1, "PM_RESOLUTION_REQUIRE_COMPLEMENT=false → settles on the single token (old behaviour)");
+  assert.equal(R.getBet(db, "st1")!.status, "settled_won");
+});
+
 test("rule 2: complement mismatch → resolution_orientation_suspect, NOT settled", async () => {
   const db = openDb(":memory:"); seedDatabase(db);
   seedPmOnly(db, { betId: "s1", token: "TA", token2: "TB" });
@@ -60,8 +72,8 @@ test("rule 3: closed=true with a non-resolving price → market VOID (settled_by
 
 test("rule 1 fallback: no closed flag → a resolving price must be STABLE across two polls ≥30 min apart", async () => {
   const db = openDb(":memory:"); seedDatabase(db);
-  seedPmOnly(db, { betId: "f1", token: "TF" });
-  const res100 = resolver({ TF: { priceCents: 100, closed: false } });
+  seedPmOnly(db, { betId: "f1", token: "TF", token2: "TFC" }); // a valid complement so strict-mode (2.5) allows the settle
+  const res100 = resolver({ TF: { priceCents: 100, closed: false }, TFC: { priceCents: 0, closed: false } });
   // first poll: resolving price but not closed → pending, stability clock starts
   let r = await settlePmResolutionBets(db, { now: () => "2026-07-24T10:00:00Z", resolveTokens: res100 });
   assert.equal(r.pendingStable, 1); assert.equal(r.settled, 0);

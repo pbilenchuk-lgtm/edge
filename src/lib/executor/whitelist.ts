@@ -14,7 +14,7 @@ import type { OrderBookFetch, PolymarketConfig } from "../polymarket.js";
 import type { Bet } from "../types.js";
 import * as RR from "../realRepo.js";
 import { isSettled } from "../repo.js";
-import { parseEntryMeta } from "../betMeta.js";
+import { parseEntryMeta, isFtBlindBet } from "../betMeta.js";
 import { isMaxProfile } from "../riskProfiles.js";
 import { loadSafetyCaps, effectiveTradingMode, modeCaps, readTradingMode } from "./safety.js";
 import { DryRunExecutor } from "./dryRun.js";
@@ -138,6 +138,11 @@ export async function mirrorPaperEntryToReal(db: Database, bet: Bet, ctx: Mirror
     // whitelisted strategy — реал запрещён до отдельной ратификации владельца (решение 23.07.2026 b). Belt at
     // the mirror gate; the whitelist itself is per-strategy and has no profile column.
     if (isMaxProfile(bet.risk_profile_id)) return { mirrored: false, note: "max: реал запрещён до ратификации — только paper" };
+    // [C2 audit / Phase 2.3] ft_blind is a RUDDERLESS hold-to-settle cohort. Its 50% haircut is applied to the
+    // paper STAKE at fill, NOT to the stored kellyFraction the mirror sizes from — so mirroring it would send
+    // FULL conviction size to real (2× intended risk) on the highest-risk cohort. Hard-block it from real until
+    // its own maturation + a separate ratification (Decision-1 condition 5; the ft_blind cap-review criterion).
+    if (isFtBlindBet(bet)) return { mirrored: false, note: "ft_blind: rudderless hold-to-settle — реал запрещён до ратификации (условие 5), только paper/sim" };
     const row = matchWhitelist(db, { strategyId: bet.strategy_id, categoryId: ctx.categoryId });
     if (!row) return { mirrored: false, note: "не в whitelist — только paper" }; // expected, high-volume — stays silent
     // Past the whitelist = this entry was INTENDED for the real contour. ANY skip from here is a
