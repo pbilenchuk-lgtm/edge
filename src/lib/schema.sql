@@ -667,6 +667,35 @@ CREATE TABLE IF NOT EXISTS sv_shadow_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_sv_shadow_status ON sv_shadow_signals(status);
 
+-- prematch_value FAMILY SHADOW cohort [audit Phase 1.1]. prematch_value now stakes REAL money ONLY in the
+-- totals family (its proven edge, ~+59% ROI). A non-totals ENTER (BTTS / 1X2 / handicap / draw) is DEMOTED
+-- here as a would-be entry with ZERO money movement, so the weak family keeps accruing a signal-level cohort
+-- for a data-driven kill/promote verdict (R0.1) — NOT killed on pre-signal record-level history (BTTS is only
+-- ~n=2 signals; the "−30%" is record-level). Frozen at signal (never re-inferred): our_prob, implied, edge,
+-- would-be stake, entry cents, kickoff. Resolved from the final score via resolveFootballMarket. Dedup: one
+-- row per (match, market, strategy); repeats bump hits.
+CREATE TABLE IF NOT EXISTS family_shadow_signals (
+  id             TEXT PRIMARY KEY,
+  match_id       TEXT NOT NULL,
+  strategy_id    TEXT NOT NULL,
+  market_label   TEXT NOT NULL,
+  family         TEXT NOT NULL,
+  side           TEXT,
+  our_prob       REAL, implied REAL, edge REAL,
+  would_be_stake REAL,
+  entry_cents    REAL,
+  closing_cents  REAL,               -- market close at resolution, if captured (for a would-be CLV)
+  kickoff_at     TEXT,
+  code_version   TEXT,
+  hits           INTEGER NOT NULL DEFAULT 1,
+  status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','won','lost','void','unresolved')),
+  resolve_note   TEXT,
+  created_at     TEXT NOT NULL,
+  resolved_at    TEXT,
+  UNIQUE(match_id, market_label, strategy_id)
+);
+CREATE INDEX IF NOT EXISTS idx_family_shadow_status ON family_shadow_signals(status);
+
 -- Order-book DEPTH snapshots for MEASURED liquidity-capacity (vs the parametric model). Periodic (every
 -- N min on live in-scope matches) + on-fill, storing the top-N bid/ask levels so a future capacity curve
 -- can re-VWAP any scaled size against the REAL book — including skip moments («сколько мы НЕ смогли бы

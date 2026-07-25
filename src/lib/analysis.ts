@@ -17,6 +17,8 @@ import { assembleFootball, type AssembledAnalysis } from "./assembler.js";
 import { footballLabelProb } from "./footballMarkets.js";
 import { impliedProbs, probSumFlags, sizePrematch, correlationKey } from "./strategist.js";
 import { matchThesisRoom } from "./thesisExposure.js";
+import { marketFamily } from "./signals.js";
+import { recordFamilyShadowSignal, killedFamilies, isDemotedFamily } from "./familyShadow.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
 import { winsOnEventOccurrence } from "./thresholds.js";
@@ -261,6 +263,10 @@ export async function runStrategists(
   // divergent prices) — surfaced to every strategist and hard-blocked at entry, so a
   // phantom "edge" on a mispriced twin can't be traded even if a strategist misses it.
   const conflicts = duplicateOutcomeConflicts(freshMarkets.map((m) => ({ label: m.label, priceCents: m.price })));
+  // [Phase 1.1/1.2] Family governance, computed ONCE per match analysis: which (strategy, family) are KILLED
+  // (matured-negative signal verdict → no money, no shadow). The demote gate itself (pmv non-totals → shadow)
+  // is applied inline per market below.
+  const killedFams = killedFamilies(db);
 
   let betsCreated = 0;
   const decisions: AnalyzeResult["decisions"] = [];
@@ -362,6 +368,20 @@ export async function runStrategists(
         if (room < r.stake) {
           if (room < 1) { r.status = "skip"; r.reason = `thesis_cap: тезис «${cKey}» на матче уже у кэпа — вход заблокирован (R0.5)`; }
           else { r.stake = Math.round(room * 100) / 100; r.reason = `${r.reason} · thesis_cap: урезан до остатка тезиса $${r.stake}`; }
+        }
+      }
+      // [Phase 1.1/1.2] FAMILY GATE (money-path concentration). Applies to a sized ENTER only:
+      //   • a KILLED (matured-negative) family → skip entirely, no money and no shadow;
+      //   • prematch_value on a NON-totals family → DEMOTE to a shadow signal (would-be, zero money) so the
+      //     weak family keeps accruing a signal cohort, and skip the real bet.
+      // The traded family (totals) and all other strategies fall through to the normal money path.
+      if (r.status === "enter") {
+        const fam = marketFamily(m.label);
+        if (killedFams.has(`${strat.id}|${fam}`)) {
+          r.status = "skip"; r.reason = `family_kill: «${fam}» — созревший ОТРИЦАТЕЛЬНЫЙ сигнальный вердикт; семья снята и с денег, и с shadow (R0.1)`;
+        } else if (isDemotedFamily(strat.id, fam)) {
+          recordFamilyShadowSignal(db, { matchId, strategyId: strat.id, label: m.label, family: fam, ourProb, implied, edge: r.edge, wouldBeStake: r.stake, entryCents: execCents, kickoffAt: match.kickoff_at ?? null, codeVersion: effectiveCodeVersion(db, analysisTag), at: now() });
+          r.status = "skip"; r.reason = `family_shadow: prematch_value ставит деньги только в «totals» — «${fam}» демоутнут в shadow-когорту (kill/promote по созревшему R0.1-вердикту), капитал не выделен`;
         }
       }
       battle.push({ market: m.label, our_prob: round3(ourProb), implied: round3(implied), edge_pct: round3(r.edge * 100), status: r.status, stake: r.stake, kelly_fraction: round3(r.kellyFraction), reason: r.reason,

@@ -244,6 +244,13 @@ export async function GET(req: Request) {
       } : undefined;
       return NextResponse.json({ ok: true, cohort, ...(diagnostic ? { diagnostic } : {}) });
     }
+    // ?report=family_shadow → Phase 1.1/1.2: prematch_value stakes real money only in totals; BTTS/1X2/
+    // handicap/draw are demoted to a would-be SHADOW cohort (zero money) that matures to a signal verdict.
+    // Shows the per-family verdict + the kill (matured-negative → off money AND shadow) / promote lists.
+    if (new URL(req.url).searchParams.get("report") === "family_shadow") {
+      const { buildFamilyShadow } = await import("@/lib/familyShadow");
+      return NextResponse.json({ ok: true, report: buildFamilyShadow(db) });
+    }
     // ?report=coverage_sprint → S11: the ONE prioritized coverage worksheet. euro near-kickoff link-rate vs
     // the 85% target + how many binds close it; worst-league leaderboard (link-rate asc, gap + binds-needed);
     // and the «поимённый unbound» — every currently-blind FUNDED fixture named with its class (no_league vs

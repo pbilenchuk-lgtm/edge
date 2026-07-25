@@ -455,7 +455,7 @@ battle_sheet (live_triggers_armed), live-состояние (счёт, врем�
 }
 \`\`\``;
 
-export const STRAT_PMVALUE_PREMATCH = `# [ОКНО: ПРЕДМАТЧ] СТРАТЕГ 2 — PRE-MATCH VALUE (v3.3 · 6-branch)
+export const STRAT_PMVALUE_PREMATCH = `# [ОКНО: ПРЕДМАТЧ] СТРАТЕГ 2 — PRE-MATCH VALUE (v3.5 · 6-branch · деньги только в totals)
 
 Предматчевая часть стратега pre-match value. Основная фаза. Ты входишь до матча на расхождении оценки с очищенной ценой. Ты НЕ считаешь edge механически — ты РАССУЖДАЕШЬ ПО ДЕРЕВУ ИСХОДОВ (6 MECE-веток) как аналитик: смотришь, в каких ветвях живёт каждая ставка, строишь портфель. Live — только защита.
 
@@ -487,7 +487,8 @@ distribution, котировки, risk_config. В distribution:
 
 ### Шаг 2. Где имеешь право искать value (фильтр рынка)
 Надёжен ТОЛЬКО на тонких рынках:
-- Приоритет ПРОИЗВОДНЫМ (командные тоталы, 1H/2H, форы, BTTS) — меньше глаз.
+- **ДЕНЬГИ идут ТОЛЬКО в ТОТАЛЫ** (match-total Over/Under, командные тоталы, 1H/2H тоталы) — это единственная измеренно-прибыльная семья pre-match value. Ищи value здесь в первую очередь.
+- BTTS / 1X2 (draw, moneyline) / форы — семьи БЕЗ подтверждённого края: их пока НЕ финансируют, любой твой вход там уходит в измерительную shadow-когорту (без денег), где семья зреет до сигнального вердикта. Поэтому называй BTTS/1X2/фору ТОЛЬКО когда у неё есть СОБСТВЕННЫЙ, самостоятельный край с конкретной причиной — НЕ как «спутник» к тотальному якорю и НЕ ради заполнения портфеля. Манифактурить их = засорять shadow шумом.
 - На ГЛАВНОМ исходе ликвидного матча (advance/moneyline) рынок прав по умолчанию — вход только при экстремальном edge И высокой calibration. Большой edge тут = флаг ошибки.
 - Скепсис к себе растёт с ликвидностью.
 
@@ -505,7 +506,7 @@ distribution, котировки, risk_config. В distribution:
 - ЯКОРЬ: лучший edge + высокий вес в дереве + высокая calibration — движок САМ даст больший размер. Он крупнее ПОТОМУ ЧТО эти три выше, а не потому что «якорь».
 - СПУТНИК: в ТУ ЖЕ сторону тезиса; обычно меньше — потому что ниже edge/вес/калибровка. При истинном равенстве всех трёх размеры равны — это норма, не ошибка.
 - ПРОВЕРКА КОРРЕЛЯЦИИ ПО СЧЁТАМ (обязательна): по \`score_cluster\` веток выпиши, в каких счётах якорь и спутник падают ВМЕСТЕ. Идеал — взаимное покрытие (одна нога спасает при 1:1, другая при 2:0). Падение ОБЕИХ — на маловероятные счёта (суммарный вес их веток < ~15–20%).
-- Пример правильной связки: якорь Under 2.5 (живёт в fav_clean+draw_0_0+draw_scoring[1:1]+dog_clean) + спутник BTTS No (fav_clean+draw_0_0+dog_clean). При 1:1 Under спасает, при 2:0 обе живут. Падают вместе только на результативных концедах — проверь их суммарный вес.
+- Пример правильной связки (обе ноги — ТОТАЛЫ, семья с краем): якорь match-total Under 2.5 (живёт в fav_clean+draw_0_0+draw_scoring[1:1]+dog_clean) + спутник командный тотал Under 1.5 фаворита (живёт в тех же лёгких ветках + части 1:0/2:0). При 1:1 обе под давлением — проверь суммарный вес; при 0:0 обе живут. Спутник ТОЙ ЖЕ семьи (totals), не BTTS/1X2: связка должна концентрировать капитал в измеренно-хорошей семье, а не растаскивать по семьям без края.
 - НЕ маскируй ставку ПРОТИВ тезиса под «хедж».
 
 ### Шаг 5. Размер — три модификатора по порядку
@@ -827,13 +828,13 @@ const STRATEGIST_DEFS: Array<Pick<Parameters<typeof R.insertStrategy>[1], "id" |
 // never re-clobbers a later user edit that keeps the tag. Bumping the tag (e.g.
 // v3 → v3.1) re-applies once on the next boot. Archives the prior prompt via the
 // version bump, so the change is reversible.
-const PMVALUE_VERSION = "v3.4 · 6-branch · ТОЛЬКО защита"; // P0.3: live exception removed — defend-only
+const PMVALUE_VERSION = "v3.5 · 6-branch · деньги только в totals"; // Phase 1.1: family gate — money only in totals, BTTS/1X2/handicap → shadow
 export function migratePrematchValueV3(db: Database): void {
   const s = R.getStrategy(db, "prematch_value");
   if (!s) return;
-  if ((s.prompt_live ?? "").includes(PMVALUE_VERSION)) return; // only the LIVE prompt changed in v3.4
-  R.saveStrategyVersion(db, "prematch_value", STRAT_PMVALUE_PREMATCH, s.params, "live prompt → v3.4 (P0.3: removed the live-entry exception — defend-only)");
-  R.updateStrategy(db, "prematch_value", { prompt_live: STRAT_PMVALUE_LIVE });
+  if ((s.prompt ?? "").includes(PMVALUE_VERSION)) return; // the PREMATCH prompt marker (v3.5) — runs once per version
+  R.saveStrategyVersion(db, "prematch_value", s.prompt, s.params, "prematch prompt → v3.5 (Phase 1.1: money only in totals; BTTS/1X2/handicap demoted to shadow)");
+  R.updateStrategy(db, "prematch_value", { prompt: STRAT_PMVALUE_PREMATCH, prompt_live: STRAT_PMVALUE_LIVE });
 }
 // Same pattern for Overreaction: marker-guarded on "OVERREACTION (v3)" (present in
 // both window titles), so it re-applies once on an existing DB and respects edits.
