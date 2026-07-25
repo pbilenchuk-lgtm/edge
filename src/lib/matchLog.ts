@@ -116,18 +116,25 @@ export function entryBlockerDiag(db: Database, matchId: string, env: Record<stri
     // Gate 2 — was there anything to fill?
     if (!proposed.length && !filled.length) { out.push("НЕТ ПРЕДЛОЖЕНИЙ: стратег не выдал ни одной ставки — заполнять было нечего (гейты входа даже не достигнуты)"); return out; }
     if (!proposed.length) return out;
-    // Gate 3 — live coverage vs ft_blind eligibility, per proposal.
-    const ftEnabled = /^(1|true|on|yes)$/i.test(String(env.FT_BLIND_MODE ?? env.FOOTBALL_FT_BLIND ?? ""));
+    // Gate 3 — live coverage vs ft_blind eligibility, per proposal. The env flag is read by the SAME name and
+    // the SAME comparison ftBlindConfig uses (`FT_BLIND_ENABLED === "true"`, case-insensitive) — a diagnostic
+    // that guesses a different variable name is worse than none: it would report «ВЫКЛЮЧЕН» on a live mode and
+    // send the next root-cause hunt at the wrong gate all over again. The observed value is printed verbatim.
+    const ftRaw = env.FT_BLIND_ENABLED;
+    const ftEnabled = (ftRaw ?? "false").toLowerCase() === "true";
     const hasLive = liveDataStatus(db, m.id).ok;
     const hasMatchLive = !!R.getMatchLive(db, m.id);
+    if (!hasLive) out.push(`ft_blind режим: ${ftEnabled ? "ВКЛЮЧЁН" : "ВЫКЛЮЧЕН"} (FT_BLIND_ENABLED=${ftRaw === undefined ? "не задан" : `«${ftRaw}»`}; включается ровно значением "true")`);
     for (const b of proposed) {
       const why: string[] = [];
       if (!hasLive) {
-        if (!ftEnabled) why.push("ft_blind ВЫКЛЮЧЕН (env)");
+        // The pre-kickoff window is where ft_blind is SUPPOSED to fill (the zombie map is empty until the match
+        // goes live), so this chain — not the live quarantine — is what decides a blind funded fixture.
+        if (!ftEnabled) why.push(`ft_blind ВЫКЛЮЧЕН: FT_BLIND_ENABLED=${ftRaw === undefined ? "не задан" : `«${ftRaw}»`} ≠ "true"`);
         else if (b.origin !== "prematch") why.push(`origin=${b.origin ?? "?"} — ft_blind берёт только prematch`);
         else if (!FT_SETTLED_RE.test(b.market_label)) why.push("рынок не FT-сеттлится — ft_blind держит только финальные тоталы/исходы");
         else if (hasMatchLive) why.push("есть match_live-строка → фикстура покрыта, ft_blind неприменим");
-        else why.push("ft_blind ПРИМЕНИМ — если входа нет, блокер ниже по цепочке (карантин книги / дубль-позиция / нулевая котировка)");
+        else why.push("ft_blind ПРИМЕНИМ (предматч) — если входа нет, блокер ниже по цепочке (дубль-позиция / нулевая котировка / тезис-кэп / сайзинг)");
       }
       const mk = markets.find((x) => x.label === b.market_label);
       if (!mk) why.push("рынка нет в последнем снапшоте — котировка не найдена");
