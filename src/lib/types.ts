@@ -218,6 +218,10 @@ export interface Bet {
   /** Z2(b): set at settle when the recorded payout disagrees with the expected value for its settle kind
    *  (early/partial → stake·exit/entry; won → stake·100/entry; lost → 0) beyond a commission tolerance. */
   accounting_suspect?: number | null;
+  /** [Z2(б) / batch-9] Settle whose payout could not be CHECKED (early exit with no recorded exit price).
+   *  Distinct from accounting_suspect (checked and WRONG): this is checked-impossible, and must stay loud
+   *  rather than silently pass as clean. */
+  accounting_unverifiable?: number | null;
 }
 
 export interface Reassessment {

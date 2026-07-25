@@ -115,3 +115,81 @@ test("V0.1: the diagnostic names the parked 50¢ book and clears the preview bra
   assert.ok(d.some((x) => /превью-ветка НЕ активна/.test(x)), "the preview branch is explicitly cleared (lineups are out)");
   assert.ok(d.some((x) => /НЕТ ПРЕДЛОЖЕНИЙ/.test(x)), "zero proposals is stated outright — the Varnamo case");
 });
+
+// ── P4: Draw canon enforced at the fill choke ────────────────────────────────────────────────────
+// B1 built the canon; the empirics ratified it (6/6 settled draw bets resolved as the 90' contract, zero
+// disagreements → model_confirmed). A desynced draw group is ONE contract quoted twice, so exactly one
+// notation is tradeable and the mirrors are a DIFFERENT condition that must be physically cut at entry.
+import { canonicalizeDrawForMatch, drawCanonEnabled } from "../src/lib/drawCanon.js";
+
+function seedDrawGroup(db: any, opts: { p1: number; p2: number; canonPx: number; mirrorPx: number }) {
+  R.upsertSport(db, "football", "Football");
+  R.upsertCompetition(db, { id: "c1", sport_id: "football", name: "MK", budget: 1000, external_league: "mkd.1", created_at: "t" });
+  R.insertMatch(db, { id: "m1", competition_id: "c1", home: "FK Vardar Skopje", away: "Rīga FC", state: "live", lineup_out: true, kickoff_at: null, minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "m1" } as any);
+  const mk = (label: string, price: number, at: string) =>
+    R.insertMarket(db, { id: R.uid(), match_id: "m1", label, price, ai_prob: null, liquidity: "2000", external_ref: label, snapshot_at: at, is_closing: false } as any);
+  mk("FK Vardar Skopje", opts.p1, "t1");            // 1X2 anchor — home leg
+  mk("Rīga FC", opts.p2, "t1");                     // 1X2 anchor — away leg
+  mk("Draw — Yes", opts.canonPx, "t2");             // sum-consistent notation
+  mk("Draw (FK Vardar Skopje vs. Rīga FC) — Yes", opts.mirrorPx, "t1"); // the desynced mirror
+}
+
+test("P4 (Vardar): the canon picks the sum-consistent draw book and names the mirror as a different condition", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  // P1 40 + draw 28 + P2 33 = 101 ✓ within vig; the mirror at 50 would make the book sum 123 ✗.
+  seedDrawGroup(db, { p1: 40, p2: 33, canonPx: 28, mirrorPx: 50 });
+  const dc = canonicalizeDrawForMatch(db, "m1", {})!;
+  assert.equal(dc.verdict, "canon");
+  assert.equal(dc.canon!.label, "Draw — Yes", "the sum-consistent notation is the tradeable contract");
+  assert.deepEqual(dc.mirrors, ["Draw (FK Vardar Skopje vs. Rīga FC) — Yes"], "the incoherent notation is a mirror");
+  assert.equal(drawCanonEnabled({}), true, "enforcement is ON by default after the 25.07 ratification");
+  assert.equal(drawCanonEnabled({ DRAW_CANON_ENFORCE: "false" }), false, "…and revertible to report-only without a deploy");
+});
+
+test("P4: an incoherent draw contour (no sum-consistent notation) quarantines the whole group", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seedDrawGroup(db, { p1: 40, p2: 33, canonPx: 50, mirrorPx: 55 }); // 123 and 128 — neither coheres
+  const dc = canonicalizeDrawForMatch(db, "m1", {})!;
+  assert.equal(dc.verdict, "quarantine");
+  assert.equal(dc.canon, null, "nothing is tradeable when the whole draw contour is incoherent");
+  assert.equal(dc.mirrors.length, 2, "both notations are held out");
+});
+
+// ── Z2(а): one market is one contract ────────────────────────────────────────────────────────────
+import { buildLegConsistency } from "../src/lib/legConsistency.js";
+
+function seedLegs(db: any, legs: { profile: string; result: string; settledBy: string; closing: number | null; payout: number }[]) {
+  R.upsertSport(db, "football", "Football");
+  R.upsertCompetition(db, { id: "c1", sport_id: "football", name: "PE", budget: 1000, external_league: "per.1", created_at: "t" });
+  R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: null, color: null, version: 1, prompt: "", prompt_live: null, params: null, model: null, model_live: null, created_at: "t" } as any);
+  R.insertMatch(db, { id: "m1", competition_id: "c1", home: "Cusco FC", away: "Universitario", state: "finished", lineup_out: true, kickoff_at: "2026-07-25T00:00:00Z", minute: null, score_home: 2, score_away: 1, final_score: "2-1", kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: "m1" } as any);
+  legs.forEach((l, i) => db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,proposed_price,entry_price,current_price,closing_price,ai_prob,stake,rationale,entered_minute,result,payout,settled_by,settled_at,entry_meta,code_version,decision_id,origin,origin_source,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(`b${i}`, "m1", "prematch_value", l.profile, "Cusco FC Over 0.5", l.result === "won" ? "settled_won" : "settled_lost", 57, 57, 57, l.closing, 0.6, 100, "r", "предматч", l.result, l.payout, l.settledBy, "t", null, "e5", `d${i}`, "prematch", "decision", "2026-07-25T00:00:00Z"));
+}
+
+test("Z2(а) Cusco regression: partial cuts + a held winner disagree LEGITIMATELY — labelled, not silently clean", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  // The batch-9 shape: 4 legs cut early at 45.3¢ (money losses) + 4 legs held to a 95.5¢ winner.
+  seedLegs(db, [
+    ...["a", "b", "c", "d"].map((p) => ({ profile: p, result: "lost", settledBy: "partial", closing: 45.3, payout: 79 })),
+    ...["e", "f", "g", "h"].map((p) => ({ profile: p, result: "won", settledBy: "settle", closing: 95.5, payout: 175 })),
+  ]);
+  const rep = buildLegConsistency(db);
+  assert.equal(rep.disagreeing, 1, "the market is flagged as carrying both directions");
+  assert.equal(rep.partialExplained, 1);
+  assert.equal(rep.suspect, 0, "every minority leg was an early/partial cut → explained, not a defect");
+  assert.match(rep.groups[0].note, /объяснимо частичными/);
+  assert.match(rep.groups[0].note, /void/, "…and states WHY the signal collapses to void rather than a win [M6]");
+});
+
+test("Z2(а): two HELD legs of one contract disagreeing is a real defect (double settle / mislabel)", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seedLegs(db, [
+    { profile: "a", result: "lost", settledBy: "settle", closing: 0, payout: 0 },   // held, lost
+    { profile: "b", result: "won", settledBy: "settle", closing: 100, payout: 175 }, // held, won — impossible
+  ]);
+  const rep = buildLegConsistency(db);
+  assert.equal(rep.suspect, 1, "one contract cannot resolve two ways when both legs were held");
+  assert.equal(rep.groups[0].classification, "suspect");
+  assert.match(rep.groups[0].note, /ПОДОЗРИТЕЛЬНО/);
+});

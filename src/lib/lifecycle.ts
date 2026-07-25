@@ -27,11 +27,12 @@ import { readTradingMode } from "./executor/safety.js";
 import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
-import { classifyZombie, notationSpreads, loadZombieConfig, type ZombieReason } from "./zombieMarket.js";
+import { classifyZombie, notationSpreads, loadZombieConfig, outcomeKey, type ZombieReason } from "./zombieMarket.js";
 import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
 import { exitDecision, winsOnEventOccurrence, isStaleProposal, proposalDrift } from "./thresholds.js";
 import { underThesisMarginGoals, resolveFootballMarket } from "./settlement.js";
 import { serializeEntryMeta, parseEntryMeta, isFtBlindBet, type BetEntryMeta } from "./betMeta.js";
+import { canonicalizeDrawForMatch, drawCanonEnabled, DRAW_YES_KEYS } from "./drawCanon.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
 import { matchThesisRoom, thesisCapUsd, dailyClusterRoom, dailyClusterCapUsd } from "./thesisExposure.js";
@@ -809,6 +810,34 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
         // was redundant with footballZombieMap's episode line (throttleZombieLog) and drove ~44k of the storm.
         R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `zombie_quarantine:${zr.code} — ${zr.detail}`) });
         continue;
+      }
+      // [P4 / batch-9] DRAW CANON at the same fill choke, beside notation_desync. B1 built the canonicalizer and
+      // the empirics ratified it (6/6 settled draw bets resolved as the 90' contract, zero disagreements →
+      // model_confirmed): a desynced draw group is ONE contract quoted twice, so exactly one notation — the
+      // sum-consistent one against the market's own 1X2 anchor — is tradeable, and the MIRRORS are a different
+      // condition. Physically cutting mirrors at entry is what the canon is for; leaving it report-only meant a
+      // mirror could still be filled while its twin sat quarantined. The chosen book's id is stamped on the bet
+      // so the Draw-family cohort is auditable after the fact, and the rejection is episode-throttled under the
+      // same Z1 pattern (one line per continuous re-pick, not one per tick).
+      if (drawCanonEnabled(deps.env ?? process.env) && DRAW_YES_KEYS.has(outcomeKey(b.market_label))) {
+        const dc = canonicalizeDrawForMatch(db, m.id, deps.env ?? process.env);
+        if (dc && dc.verdict === "quarantine") {
+          R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `draw_canon:quarantine — ${dc.reason}`) });
+          throttleZombieLog(db, m, b.market_label, "draw_canon_quarantine", `draw_canon «${b.market_label}»: ${dc.reason} — вход отклонён`, b.strategy_id, now);
+          continue;
+        }
+        if (dc && dc.canon && dc.mirrors.includes(b.market_label)) {
+          R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `draw_canon:mirror — канон «${dc.canon.label}» ${dc.canon.priceCents}¢; эта нотация сумма-неконсистентна = ДРУГОЕ условие, не эта ничья`) });
+          throttleZombieLog(db, m, b.market_label, "draw_canon_mirror", `draw_canon «${b.market_label}»: зеркало отсечено — торгуемый канон «${dc.canon.label}» ${dc.canon.priceCents}¢ (${dc.reason})`, b.strategy_id, now);
+          continue;
+        }
+        // Trading the canon itself: stamp WHICH book was chosen, so the Draw cohort can be audited later.
+        if (dc && dc.canon && dc.canon.label === b.market_label) {
+          try {
+            const em = parseEntryMeta(b.entry_meta) ?? {};
+            R.updateBet(db, b.id, { entry_meta: serializeEntryMeta({ ...em, drawCanonLabel: dc.canon.label, drawCanonPriceCents: dc.canon.priceCents, drawMirrorsCut: dc.mirrors.length }) });
+          } catch { /* stamping must never block a fill */ }
+        }
       }
       // Condition 5: a rudderless FT-blind position gets HALF the normal size until its cohort matures.
       let proposed = (b.stake ?? 0) * (ftBlind ? ftBlindConfig(deps.env ?? process.env).capFrac : 1);

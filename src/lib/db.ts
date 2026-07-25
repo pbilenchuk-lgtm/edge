@@ -258,6 +258,7 @@ export function initSchema(db: Database): void {
     // Z2(b) (batch-5): payout-consistency flag — set at settle when |payout − expected| exceeds a
     // commission tolerance (a decimal shift like the Kansas «payout ≈ тек/10»). Caught at birth, not a week later.
     "ALTER TABLE bets ADD COLUMN accounting_suspect INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE bets ADD COLUMN accounting_unverifiable INTEGER NOT NULL DEFAULT 0",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }
