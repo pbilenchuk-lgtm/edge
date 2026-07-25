@@ -395,6 +395,60 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
   return written;
 }
 
+// S10 (R0.4): PREMATCH scout binding. collectTennisSnapshots only sees api-tennis LIVE events, so a match's
+// FIRST snapshot is already in-play — the "frozen prematch" price set_value anchors on is already panic-moved
+// (→ 100% of shadow-harvest sits in the first_snapshot quarantine, and the cohort can't mature). This pass
+// binds the match WHEN LISTED (before kickoff) and freezes a TRUE prematch moneyline every N hours, so a
+// sets-0-0 anchor exists. The first_snapshot quarantine RULE is untouched (R1) — we fix the CAUSE (late
+// binding), not soften the rule: a match that still binds only live keeps its first_snapshot tag.
+const TENNIS_PREMATCH_WINDOW_HOURS = (() => { const n = Number(process.env.TENNIS_PREMATCH_WINDOW_HOURS); return Number.isFinite(n) && n > 0 ? n : 48; })();
+const TENNIS_PREMATCH_SNAPSHOT_HOURS = (() => { const n = Number(process.env.TENNIS_PREMATCH_SNAPSHOT_HOURS); return Number.isFinite(n) && n > 0 ? n : 4; })();
+
+/**
+ * Freeze a prematch moneyline snapshot (sets 0-0, live=0) for each in-scope ATP/WTA singles match listed but
+ * not yet kicked off, throttled to once per N hours (prematch prices drift slowly). Shares pm_match_id with
+ * the live snapshots, so svRetroCohort sees the full series with a genuine prematch anchor. Best-effort;
+ * network only for the CLOB midpoint refine (falls back to the stored discovery moneyline). Returns count.
+ */
+export async function collectTennisPrematchSnapshots(db: Database, deps: EngineDeps = {}): Promise<number> {
+  const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
+  const batchAt = nowFn(deps)();
+  const nowMs = Date.parse(batchAt) || Date.now();
+  const OUT_OF_SCOPE_TIER = /\bitf\b|challenger|\b125\b|doubles|\bdbl\b|\bmixed\b/i;
+  const throttleMs = TENNIS_PREMATCH_SNAPSHOT_HOURS * 3_600_000;
+  const winHiMs = nowMs + TENNIS_PREMATCH_WINDOW_HOURS * 3_600_000;
+  let written = 0;
+  for (const c of R.listCompetitions(db)) {
+    if (c.sport_id !== "tennis" || tennisTourOf(c) == null) continue; // ATP/WTA singles only
+    for (const m of R.listMatches(db, c.id)) {
+      if (m.state === "finished" || m.state === "live") continue;
+      const k = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
+      if (!Number.isFinite(k) || k <= nowMs || k > winHiMs) continue;   // strictly BEFORE kickoff, within the window
+      if (OUT_OF_SCOPE_TIER.test(`${m.away ?? ""} ${c.name ?? ""}`)) continue;
+      const ml = tennisMoneyline(db, m.id, { p1: m.home, p2: m.away });
+      if (!ml) continue; // no moneyline → no honest prematch price
+      // Throttle: skip if a snapshot for this match already landed within the window (prematch OR an early live one).
+      const last = db.prepare(`SELECT MAX(batch_at) b FROM tennis_snapshots WHERE pm_match_id=?`).get(m.id) as { b?: string } | undefined;
+      if (last?.b && nowMs - (Date.parse(last.b) || 0) < throttleMs) continue;
+      let p1c: number | null = ml.p1Cents, p2c: number | null = ml.p2Cents;
+      const outOfScope = OUT_OF_SCOPE_TIER.test(`${m.away ?? ""} ${c.name ?? ""}`);
+      if (poly.enabled && ml.token && !outOfScope) {
+        const liveFirst = await fetchMidpointCents(ml.token, poly, { fetchImpl: deps.fetchImpl }).catch(() => null);
+        if (liveFirst != null) { p1c = ml.firstIsP1 ? liveFirst : Math.round((100 - liveFirst) * 10) / 10; p2c = Math.round((100 - p1c) * 10) / 10; }
+      }
+      if (p1c == null) continue;
+      R.insertTennisSnapshot(db, {
+        event_key: `prematch:${m.id}`, provider: "polymarket", batch_at: batchAt, p1: m.home, p2: m.away,
+        tournament: c.name, event_type: null, live: 0, status: "Scheduled",
+        sets_p1: 0, sets_p2: 0, set_num: 0, games_p1: 0, games_p2: 0, game_points: null, server: null,
+        pm_match_id: m.id, pm_mid_cents: p1c, pm_p1_cents: p1c, pm_p2_cents: p2c, raw: null,
+      } as Parameters<typeof R.insertTennisSnapshot>[1]);
+      written++;
+    }
+  }
+  return written;
+}
+
 // Scout observability markers (app_meta). OK = last COMPLETED collect ("ms|written"); ERR = last
 // provider fetch failure ("ms|message"). Read by tennisScoutSilence to classify a silence H1 vs H2.
 const TENNIS_SCOUT_OK_KEY = "tennis_scout_last_ok";
