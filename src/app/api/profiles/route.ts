@@ -259,6 +259,18 @@ export async function GET(req: Request) {
       } : undefined;
       return NextResponse.json({ ok: true, cleanEpochFloor: includeAllEpochs ? null : CLEAN_EPOCH_FLOOR, cohort, ...(diagnostic ? { diagnostic } : {}) });
     }
+    // ?report=stop_counterfactual → [P3 / batch-9] were the defensive cuts selling a dead thesis or a noise
+    // bottom? For every protective exit: the best price the SAME market printed in the next N minutes vs the
+    // price we took. Criterion fixed BEFORE the data: median shortfall ≥5¢ AND ≥20% of the cut price on n≥30
+    // → cuts are noise-driven (rudder moves to thesis state). Separately flags hard-stop-over-thesis-hold ≥10%.
+    // &windowMin= overrides the look-ahead window; standard profile filters narrow the base.
+    if (new URL(req.url).searchParams.get("report") === "stop_counterfactual") {
+      const { buildStopCounterfactual, STOP_CF_WINDOW_MIN } = await import("@/lib/stopCounterfactual");
+      const q = new URL(req.url).searchParams;
+      const num = (v: string | null) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
+      const filter = { fromMs: num(q.get("fromMs")), toMs: num(q.get("toMs")), competitionId: q.get("competitionId") || undefined, strategyId: q.get("strategyId") || undefined };
+      return NextResponse.json({ ok: true, counterfactual: buildStopCounterfactual(db, filter, num(q.get("windowMin")) ?? STOP_CF_WINDOW_MIN) });
+    }
     // ?report=portfolio → [Phase 5.2/5.3/5.4] the whole book in one JSON: every (strategy × market-family)
     // cell on the clean epoch as SIGNALS — verdict, money, CLV-t, maturity + a Week-over-Week P&L/CLV/verdict
     // delta; the CLV→realized correlation (per cell AND overall — the decisive validation); and a Benjamini-

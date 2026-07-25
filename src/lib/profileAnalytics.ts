@@ -25,7 +25,10 @@ export interface ProfileFilter {
 
 export type ExitTrigger =
   | "take_price" | "thesis_stop" | "counter_scenario" | "time_stop"
-  | "hard_stop" | "time_decay_floor" | "settle" | "edge_closed" | "discretionary";
+  | "hard_stop" | "time_decay_floor" | "settle" | "edge_closed" | "discretionary"
+  // [P1 / batch-9] A «take_price»-worded exit that actually realized a LOSS. The strategist emits take_price
+  // as an ACTION code («close at market»), not a verdict on profit — so the word alone flattered the book.
+  | "capitulation";
 
 export interface ExitRec {
   trigger: ExitTrigger; minute: number | null; priceCents: number | null; pnl: number; partial: boolean;
@@ -60,14 +63,28 @@ const num = (v: unknown): number | null => (typeof v === "number" && Number.isFi
 const minuteFrom = (label: string | null | undefined): number | null => { const m = String(label ?? "").match(/(\d{1,3})/); return m ? Number(m[1]) : null; };
 
 /** Classify an exit trade-log entry into an honest trigger category. */
-export function classifyExitTrigger(text: string, settledBy: string | null | undefined): ExitTrigger {
+/**
+ * [P1 / batch-9] Classify by REALIZED DIRECTION first, the word second.
+ *
+ * The strategist writes `take_price` as its ACTION code («close at the market price»), not as a claim that
+ * the position is up — so `take_price — вход 40.2¢, сейчас 20.4¢, edge закрылся` (a −69% capitulation, the
+ * single largest loss of batch 9) was counted as a profit-take. Because `take_price` was tested BEFORE
+ * `edge закрылся`, and both phrases sit in that one line, every such surrender was booked as a take. That
+ * poisons triggerMix, exit_honesty, the melt report and the F4 counterfactual — i.e. the whole input to the
+ * real-money decision, and it poisons it in the flattering direction.
+ *
+ * `pnl` (optional, realized on this leg) is now authoritative: a take-worded exit that lost money is a
+ * `capitulation`. Callers without a P&L keep the old word-only behaviour (nothing silently reclassifies).
+ */
+export function classifyExitTrigger(text: string, settledBy: string | null | undefined, pnl?: number | null): ExitTrigger {
   const t = text.toLowerCase();
   if (/time_stop|тайм-стоп/.test(t)) return "time_stop";
   if (/time_decay|тайм-флор/.test(t)) return "time_decay_floor";
   if (/counter_scenario|контр-ветк|контр-сценар/.test(t)) return "counter_scenario";
   if (/thesis_stop|тезис|слома/.test(t)) return "thesis_stop";
-  if (/take_price|тейк|на пике|цена (дош|дости|пришла)|фикс/.test(t)) return "take_price";
-  if (/edge (исчерп|закры|gone|closed)|эдж/.test(t)) return "edge_closed";
+  // Direction wins over wording: a take-worded exit that realized a LOSS is a capitulation, not a take.
+  if (/take_price|тейк|на пике|цена (дош|дости|пришла)|фикс/.test(t)) return pnl != null && pnl < 0 ? "capitulation" : "take_price";
+  if (/edge (исчерп|закры|gone|closed)|эдж/.test(t)) return pnl != null && pnl < 0 ? "capitulation" : "edge_closed";
   if (/хард-стоп|hard[_-]?stop|\bстоп\b|\bstop\b/.test(t)) return "hard_stop";
   if (isResolutionSettle(settledBy)) return "settle";
   return "discretionary";
@@ -124,7 +141,8 @@ export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
         const pc = Number((e.text.match(/@ (\d+(?:\.\d+)?)¢/) ?? [])[1]);
         const pnlM = e.text.match(/P&L ([+-]?)\$?(-?\d+(?:\.\d+)?)/);
         const pnlV = pnlM ? (pnlM[1] === "-" ? -1 : 1) * Number(pnlM[2]) : 0;
-        return { trigger: classifyExitTrigger(e.text, b.settled_by), minute: minuteFrom(e.minute), priceCents: Number.isFinite(pc) ? pc : null, pnl: pnlV, partial: /частичн/.test(e.text), modelFill: /\[model_fill\]/.test(e.text), text: e.text };
+        // [P1] the leg's own realized P&L decides take vs capitulation (the word is the strategist's ACTION code).
+        return { trigger: classifyExitTrigger(e.text, b.settled_by, pnlV), minute: minuteFrom(e.minute), priceCents: Number.isFinite(pc) ? pc : null, pnl: pnlV, partial: /частичн/.test(e.text), modelFill: /\[model_fill\]/.test(e.text), text: e.text };
       });
     // [H2] book P&L = the realized pnl UNLESS the exit rode a stale/modelled price (no live bid). Such a leg's
     // money is barred from the win-rate already (staleExit→void); this bars it from the P&L verdict too.

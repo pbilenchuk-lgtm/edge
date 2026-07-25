@@ -1381,7 +1381,7 @@ function liveCalibration(db: Database, matchId: string, confidence: string): num
  * trade log) so it shows up in the match log and is countable by the P2 unfillable_edge report. Non-football
  * or non-live → empty map (tennis has its own placeholder handling; §9.6 — a deterministic quote check).
  */
-function footballZombieMap(
+export function footballZombieMap(
   db: Database, m: Match, sport: string, markets: Market[], minute: number | null,
   env: Record<string, string | undefined>, now: string, log = true,
 ): Map<string, ZombieReason> {
@@ -1408,14 +1408,24 @@ function footballZombieMap(
     out.set(mk.label, z);
     if (logSid) throttleZombieLog(db, m, mk.label, z.code, `zombie_quarantine:${z.code} «${mk.label}»: ${z.detail} — рынок на карантине для всех потребителей (вход/контекст)`, logSid, now);
   }
-  // Z1: close episodes for markets no longer quarantined this tick — log the LIFT once, then drop the marker
-  // (so a re-quarantine later starts a fresh episode). Bounded scan: only THIS match's episode markers.
+  // [P2 / batch-9] POSITIVE lift only. The old sweep lifted a market merely because it was absent from THIS
+  // evaluation's map — which is not evidence of health, and produced 273 «рынок снова торгуем» lines in batch
+  // 9, 15 of them on books whose very next quarantine line reported a LARGER staleness age (217м → 220м): the
+  // book never revived, the map just didn't classify it that tick. A lift must be EARNED: re-measure the book
+  // and require it to be demonstrably fresh (age < the stale threshold, or no age reading at all → nothing to
+  // hold against it). The observed age is printed so a premature lift can never again hide.
   if (logSid) {
+    const priceOf = new Map(markets.map((mk) => [mk.label, mk.price] as const));
     for (const rec of R.metaByPrefix(db, `${ZOMBIE_EP}${m.id} `)) {
       const label = rec.key.slice(`${ZOMBIE_EP}${m.id} `.length);
       if (out.has(label)) continue; // still quarantined → its marker was already refreshed above
-      let ticks = 0; try { ticks = Number(JSON.parse(rec.value).ticks ?? 0); } catch { /* ignore */ }
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: logSid, minute: minuteLabel(m), type: "skip", text: `zombie_lifted «${label}»: карантин снят (эпизод ${ticks} тик.) — рынок снова торгуем`, created_at: now });
+      const px = priceOf.get(label);
+      const age = px == null ? null : R.bookStaleMinutes(db, m.id, label, px, now);
+      // Still provably stale → NOT healthy: keep the episode open, stay silent (no flap, no marker churn).
+      if (age != null && age >= cfg.staleBookMin) continue;
+      let ticks = 0, code = "?"; try { const p = JSON.parse(rec.value); ticks = Number(p.ticks ?? 0); code = String(p.code ?? "?"); } catch { /* ignore */ }
+      const ageTxt = age == null ? "возраст книги не читается" : `книга свежая (${Math.round(age)}м < ${cfg.staleBookMin}м)`;
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: logSid, minute: minuteLabel(m), type: "skip", text: `zombie_lifted «${label}»: карантин снят по позитивному признаку — ${ageTxt}; эпизод ${ticks} тик. (последний код ${code}) — рынок снова торгуем`, created_at: now });
       try { R.metaDelete(db, rec.key); } catch { /* best-effort */ }
     }
   }
@@ -1429,12 +1439,39 @@ function footballZombieMap(
 // re-logging every tick — the ~90k skip-line storm (staleSweep-frozen matches ran this for hours) becomes a
 // handful of transition lines. Replaces the old slice(-14) tail dedup, which failed once #markets×#consumers>14.
 const ZOMBIE_EP = "zombie_ep:";
+/**
+ * [P2 / batch-9] The episode is keyed on the MARKET, not on (market, code).
+ *
+ * A market routinely satisfies more than one zombie rule at once — a Draw parked at ~50¢ with desynced
+ * notations is BOTH notation_desync and placeholder_mid — and classifyZombie returns whichever comes first in
+ * its ordered rule list. As the group spread oscillates around its threshold the winning code flips, the old
+ * key changed, and the throttle logged a brand-new «episode» every flip: batch 9 shows 407 lines for 181
+ * (market, code) pairs — 41% re-logged, `Draw — Yes` alone carrying THREE codes. The market never became
+ * tradeable in between; only the label of its illness changed.
+ *
+ * So: one episode per continuous quarantine of a market. A code change inside the episode is recorded as a
+ * FIELD (the code list travels with the marker and is appended to the tick counter), not as a new episode —
+ * except for a change INTO resolved_price, which is a genuinely different class (the book contradicts a
+ * settled outcome — money-relevant) and still deserves its own loud line.
+ */
+const LOUD_CODE = "resolved_price"; // the one class change worth re-logging (book contradicts a decided outcome)
 export function throttleZombieLog(db: Database, m: Match, label: string, code: string, text: string, sid: string, now: string): void {
   const key = `${ZOMBIE_EP}${m.id} ${label}`;
-  let ep: { code: string; ticks: number } | null = null;
+  let ep: { code: string; ticks: number; codes?: string[] } | null = null;
   try { const s = R.metaGet(db, key); if (s) ep = JSON.parse(s); } catch { /* treat as new */ }
-  if (ep && ep.code === code) { try { R.metaSet(db, key, JSON.stringify({ code, ticks: ep.ticks + 1 }), now); } catch { /* ignore */ } return; } // same episode → silent tick++
-  try { R.metaSet(db, key, JSON.stringify({ code, ticks: 1 }), now); } catch { /* ignore */ }
+  if (ep) {
+    const codes = Array.from(new Set([...(ep.codes ?? [ep.code]), code]));
+    // Same continuous quarantine → silent tick++, remembering every code the episode has worn.
+    if (code !== LOUD_CODE || ep.code === LOUD_CODE) {
+      try { R.metaSet(db, key, JSON.stringify({ code, ticks: ep.ticks + 1, codes }), now); } catch { /* ignore */ }
+      return;
+    }
+    // Escalation into resolved_price — re-log once, keep the episode's tick history.
+    try { R.metaSet(db, key, JSON.stringify({ code, ticks: ep.ticks + 1, codes }), now); } catch { /* ignore */ }
+    R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "skip", text: `${text} [эскалация класса внутри эпизода: ${codes.join("→")}]`, created_at: now });
+    return;
+  }
+  try { R.metaSet(db, key, JSON.stringify({ code, ticks: 1, codes: [code] }), now); } catch { /* ignore */ }
   R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "skip", text, created_at: now });
 }
 
@@ -1609,7 +1646,29 @@ export async function strategistReassess(
         } else if (sid === "overreaction") {
           // Вход overreaction возможен ТОЛЬКО через заряженный buyback-триггер; нет ни одного живого
           // (событие/глубина + окно) → пропуск с конкретной причиной разоружения.
-          const g = overreactionGate(battleSheet ?? null, { totalGoals: (m.score_home ?? 0) + (m.score_away ?? 0), minute: m.minute ?? minuteApprox });
+          // [P5 / batch-9] + пре-фильтр стоимости: измеряем РЕАЛЬНУЮ магнитуду паники (максимальная просадка
+          // любого рынка матча от его максимума за историю снапшотов) и глубину лучшей книги. Заряженный
+          // триггер без настоящей паники или на неисполнимой книге больше не будит LLM. Обе метрики
+          // необязательны — не прочитались, гейт открывается как раньше (fail-open).
+          const panicBook = (() => {
+            try {
+              const mkts = R.latestMarkets(db, m.id);
+              if (!mkts.length) return { panicDropCents: null, bookUsd: null };
+              let drop: number | null = null;
+              for (const mk of mkts) {
+                // A market with a SINGLE snapshot yields peak==current → a 0¢ "drop" that is absence of
+                // evidence, not evidence of absence. Only a market with real price history can testify to
+                // whether a panic happened, so unhistoried markets contribute nothing (→ fail open).
+                const hist = db.prepare(`SELECT MAX(price) px, COUNT(*) n FROM markets WHERE match_id=? AND label=?`).get(m.id, mk.label) as { px: number | null; n: number } | undefined;
+                if (!hist || hist.n < 2 || hist.px == null || mk.price == null) continue;
+                const d = hist.px - mk.price;
+                if (drop == null || d > drop) drop = d;
+              }
+              const book = mkts.reduce((mx, mk) => Math.max(mx, Number(mk.liquidity ?? 0) || 0), 0);
+              return { panicDropCents: drop, bookUsd: book > 0 ? book : null };
+            } catch { return { panicDropCents: null, bookUsd: null }; }
+          })();
+          const g = overreactionGate(battleSheet ?? null, { totalGoals: (m.score_home ?? 0) + (m.score_away ?? 0), minute: m.minute ?? minuteApprox, ...panicBook });
           if (!g.call) { skipReason = `Overreaction: ${g.reason} — детерминированный пропуск, без LLM`; skipTag = "det_gate_skip:ovr_dormant"; }
         }
         if (skipReason) {
