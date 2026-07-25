@@ -43,7 +43,8 @@ export interface BetRec {
   winsOnEvent: boolean; codeVersion: string | null;
   status: string; settledBy: string | null; outcome: "won" | "lost" | "void" | "open";
   stake: number; payout: number | null; pnl: number | null; clvCents: number | null; finalScore: string | null;
-  decisionId: string | null; // S4: the strategist decision this bet belongs to — its profiles+partials are ONE signal
+  decisionId: string | null; // S4: strategist decision id (per-bet-unique in this schema — NOT a signal group)
+  createdAt: string | null;   // S4-fix: the signal grouping key uses match×market×strategy×episode(day of this)
   exits: ExitRec[];
 }
 
@@ -132,7 +133,7 @@ export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
       winsOnEvent: em?.winsOnEvent ?? winsOnEventOccurrence(b.market_label), codeVersion: b.code_version ?? null,
       status: b.status, settledBy: b.settled_by ?? null, outcome,
       stake, payout: num(b.payout), pnl, clvCents, finalScore: m.final_score ?? null,
-      decisionId: b.decision_id ?? null, exits,
+      decisionId: b.decision_id ?? null, createdAt: b.created_at ?? null, exits,
     });
   }
   return out;

@@ -201,21 +201,39 @@ export async function GET(req: Request) {
       const { buildReassessEfficiency } = await import("@/lib/reassessEfficiency");
       return NextResponse.json({ ok: true, report: buildReassessEfficiency(db) });
     }
+    // ?report=thesis_exposure → S5 (R0.5): live per-match thesis exposure across the whole open book. A
+    // correlated stack (dom:/total: cluster — Over 0.5+Over 1.5 of one team, ML+handicap same side) is ONE
+    // thesis; overCap flags any exceeding THESIS_MATCH_CAP_USD. The real=on blocker + the entry-time clamp.
+    if (new URL(req.url).searchParams.get("report") === "thesis_exposure") {
+      const { buildThesisExposure } = await import("@/lib/thesisExposure");
+      return NextResponse.json({ ok: true, ...buildThesisExposure(db) });
+    }
     // ?report=signal_stats → S4: signal-level verdict for a cell (the units-fix, R0.1). Same filters as
     // profiles (&strategyId=&phase=&competitionId=&codeVersion=&fromMs=&toMs=) plus &family=totals|btts|…
     // Collapses the 4-profile fan-out to SIGNALS and runs binomial win-vs-implied, CLV t-stat, bootstrap
     // P&L, and top-3 concentration; verdict at n≥25 (prelim) / n≥40 (stable). Headers carry both counts.
     if (new URL(req.url).searchParams.get("report") === "signal_stats") {
-      const { betRecords } = await import("@/lib/profileAnalytics");
+      const { betRecords, betRecordsExcluded } = await import("@/lib/profileAnalytics");
       const { signalCohort, marketFamily } = await import("@/lib/signals");
       const q = new URL(req.url).searchParams;
       const num = (v: string | null) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
       const ph = q.get("phase");
       const filter = { fromMs: num(q.get("fromMs")), toMs: num(q.get("toMs")), competitionId: q.get("competitionId") || undefined, strategyId: q.get("strategyId") || undefined, phase: ph === "prematch" || ph === "live" ? (ph as "prematch" | "live") : undefined, codeVersion: q.get("codeVersion") || undefined };
+      // phase read is on the stored bets.origin column (betRecords resolves phase = b.origin), NOT a
+      // recomputed created-phase (fix #2). When a slice is empty, show WHY: the exclusion breakdown + the
+      // phase split of the strategy/family scope, so «0» never reads as a broken filter.
+      const recsAll = betRecords(db, { ...filter, phase: undefined }); // same scope, ignoring phase — to show the phase split
       let recs = betRecords(db, filter);
       const fam = q.get("family");
-      if (fam) recs = recs.filter((r) => marketFamily(r.market) === fam);
-      return NextResponse.json({ ok: true, cohort: signalCohort(recs, { strategyId: filter.strategyId, phase: filter.phase, family: fam || undefined }) });
+      const famFilter = (rs: typeof recs) => (fam ? rs.filter((r) => marketFamily(r.market) === fam) : rs);
+      recs = famFilter(recs);
+      const cohort = signalCohort(recs, { strategyId: filter.strategyId, phase: filter.phase, family: fam || undefined });
+      const diagnostic = cohort.nSignals === 0 ? {
+        excluded: betRecordsExcluded(db, { ...filter, phase: undefined }),
+        phaseSplitInScope: { prematch: famFilter(recsAll).filter((r) => r.phase === "prematch").length, live: famFilter(recsAll).filter((r) => r.phase === "live").length },
+        note: "пусто в этом срезе. phaseSplitInScope — как та же стратегия/семья делится по origin (prematch/live); excluded — сколько ставок отброшено гейтами (epoch_unknown и т.п.).",
+      } : undefined;
+      return NextResponse.json({ ok: true, cohort, ...(diagnostic ? { diagnostic } : {}) });
     }
     // ?report=profiles → the risk-profile analytics (same as POST /api/profiles) but reachable by a plain
     // LINK, so a non-programmer can open it in the browser. Filters come from the query string:

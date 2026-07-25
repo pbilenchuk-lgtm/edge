@@ -186,8 +186,12 @@ test("correlationKey: same-team 'more goals' markets share a cluster", () => {
   assert.notEqual(correlationKey("Over 3.5", home, away), a);
   // Underdog positive handicap / opponent-side markets don't join France's cluster.
   assert.equal(correlationKey("Morocco +1.5", home, away), null);
-  // A plain moneyline isn't clustered (resolves on the result, not a goal count).
-  assert.equal(correlationKey("France to win", home, away), null);
+  // S5 (R0.5): a team's MONEYLINE is the SAME dominance thesis as its Over/−handicap — all resolve on
+  // France outperforming — so it now JOINS France's cluster (previously null → stacked uncapped).
+  assert.equal(correlationKey("France to win", home, away), "dom:home");
+  assert.equal(correlationKey("France", home, away), a); // bare team-name to-win market
+  // The opponent's moneyline is the OTHER side — a different thesis, not France's.
+  assert.equal(correlationKey("Morocco to win", home, away), "dom:away");
 });
 
 test("correlationKey: LOW-total bets share one cluster (Under-symmetry — Örgryte–Häcken pseudo-diversification)", () => {
