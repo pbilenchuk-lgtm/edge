@@ -2027,10 +2027,21 @@ const FILE_GROUPS: { title: string; items: { label: string; url: string; file: s
     { label: "Overreaction — гейт выборки", url: "/api/real?report=overreaction_gate", file: "overreaction-gate.json" },
     { label: "Только overreaction (по профилям)", url: "/api/profiles?report=profiles&strategyId=overreaction", file: "profiles-overreaction.json" },
   ] },
+  // [Phase 5.1 / M18] Реал-контур в один клик — всё, что владельцу нужно, чтобы дотянуться до реальных денег.
+  { title: "Реал-контур (в один клик)", items: [
+    { label: "Портфель: стратегия × семья (+ CLV↔P&L, WoW, FDR)", url: "/api/profiles?report=portfolio", file: "portfolio.json", hint: "Phase 5.2/5.3: весь банк одним JSON — n сигналов, fee-adj EV, P&L, ROI, CLV-t, maturity, вердикт по каждой ячейке; недельная дельта P&L/CLV/вердиктов; корреляция CLV↔реализованный P&L (самая решающая валидация); BH-коррекция (survivesFdr) по сетке." },
+    { label: "Готовность к реалу (phase_f_readiness)", url: "/api/real?report=phase_f_readiness", file: "phase-f-readiness.json", hint: "Механический go/hold гейт по накопленному dry-контуру. real=on отказывает, пока не go." },
+    { label: "Реал-контур: банк/ордера/позиции + real_vs_paper", url: "/api/real", file: "real-view.json", hint: "Полный read-only реал-вью: режим, банк, ордера, позиции, whitelist и блок real_vs_paper (слиппедж/филл-рейт зеркала против бумажного близнеца)." },
+    { label: "Честность выходов (exit_honesty)", url: "/api/real?report=exit_honesty", file: "exit-honesty.json", hint: "Разложение dry realized-vs-hold: доброкачественные ранние продажи vs model-fill." },
+    { label: "Dry-fill воронка (dry_fill_watch)", url: "/api/real?report=dry_fill_watch", file: "dry-fill-watch.json", hint: "Где застревает первый сквозной paper→dry филл." },
+    { label: "Тезис-экспозиция (thesis_exposure)", url: "/api/profiles?report=thesis_exposure", file: "thesis-exposure.json", hint: "S5: живая экспозиция на матч по всей открытой книге; overCap флаги. Реал-блокер + клэмп на входе." },
+    { label: "Сигнальный вердикт ячейки (signal_stats)", url: "/api/profiles?report=signal_stats", file: "signal-stats.json", hint: "S4/R0.1: сигнальный вердикт (не запись). Чистая эпоха (e5+) по умолчанию; &includeAllEpochs=1 включить всё. Фильтры &strategyId=&family=&phase=." },
+    { label: "Теннис-PMV: лестница промоушена (maturity)", url: "/api/profiles?report=pmv_promotion", file: "tennis-pmv-promotion.json", hint: "Phase 4.4: стадия shadow→paper→real, тройное согласие + порог n≥25. Реал только football до ратификации." },
+  ] },
   { title: "Теннис", items: [
-    { label: "Теннис PMV — калибровка (Brier, win%, OVER-крен)", url: "/api/profiles?report=pmv_shadow_calibration", file: "tennis-pmv-calibration.json", hint: "Включает новый sideBias/biasFlags — измеренный over-крен тоталов." },
-    { label: "Set-value — когорта камбэков", url: "/api/profiles?report=sv_cohort", file: "sv-cohort.json" },
-    { label: "Set-value — калибровка shadow", url: "/api/profiles?report=sv_shadow_calibration", file: "sv-shadow-calibration.json" },
+    { label: "Теннис PMV — калибровка (Brier, win%, OVER-крен)", url: "/api/profiles?report=pmv_shadow_calibration", file: "tennis-pmv-calibration.json", hint: "Включает sideBias/biasFlags — измеренный over-крен. MATURITY: вердикт (go/no_go) читается c n≥40 разрешённых; до этого insufficient — это НЕ провал, а накопление." },
+    { label: "Set-value — когорта камбэков", url: "/api/profiles?report=sv_cohort", file: "sv-cohort.json", hint: "MATURITY: бины созревают отдельно; смотри n на бин и accrual/ETA." },
+    { label: "Set-value — калибровка shadow", url: "/api/profiles?report=sv_shadow_calibration", file: "sv-shadow-calibration.json", hint: "MATURITY: net-EV вердикт бина требует n≥порога (см. reenable/hold в шапке)." },
     { label: "Теннис — link-rate скаута", url: "/api/tennis-scout?report=link_rate", file: "tennis-link-rate.json" },
   ] },
   { title: "Покрытие · здоровье · экономия", items: [

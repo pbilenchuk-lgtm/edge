@@ -72,6 +72,14 @@ export async function GET(req: Request) {
       const { buildPmvShadowCalibration } = await import("@/lib/tennisPmvShadow");
       return NextResponse.json({ ok: true, calibration: buildPmvShadowCalibration(db) });
     }
+    // ?report=pmv_promotion → [Phase 4.4/5.1] the tennis-PMV maturity/promotion ladder: which stage
+    // (shadow→paper→real) it stands at, the triple-agreement gate (Brier-GO + side-bias-clear + positive
+    // paper P&L) + the n≥25 signal floor, and the hard fact that real stays football-only until an owner
+    // ratification. The owner's "is tennis ready for real money yet?" answer in one file.
+    if (new URL(req.url).searchParams.get("report") === "pmv_promotion") {
+      const { buildPmvPromotion } = await import("@/lib/tennisPmvShadow");
+      return NextResponse.json({ ok: true, promotion: buildPmvPromotion(db) });
+    }
     // ?report=sv_shadow_calibration → set_value flag-only cohort: measured P(comeback) vs the 0.5 constant,
     // binned by frozen favourite strength × ATP/WTA, price-path drawdown/take. Read-only (§P1.1).
     if (new URL(req.url).searchParams.get("report") === "sv_shadow_calibration") {
@@ -223,25 +231,46 @@ export async function GET(req: Request) {
     if (new URL(req.url).searchParams.get("report") === "signal_stats") {
       const { betRecords, betRecordsExcluded } = await import("@/lib/profileAnalytics");
       const { signalCohort, marketFamily } = await import("@/lib/signals");
+      const { cleanEpochRecords, CLEAN_EPOCH_FLOOR } = await import("@/lib/profileEpochCut");
       const q = new URL(req.url).searchParams;
       const num = (v: string | null) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
       const ph = q.get("phase");
-      const filter = { fromMs: num(q.get("fromMs")), toMs: num(q.get("toMs")), competitionId: q.get("competitionId") || undefined, strategyId: q.get("strategyId") || undefined, phase: ph === "prematch" || ph === "live" ? (ph as "prematch" | "live") : undefined, codeVersion: q.get("codeVersion") || undefined };
+      // [Phase 5.5 / M10] The clean-epoch floor (entry ≥ e5, no cross-epoch settle) is the DEFAULT verdict
+      // scope for EVERY sport — a verdict must not silently include pre-clean / two-rule-set money. An
+      // explicit &includeAllEpochs=1 override keeps the dirty rows (e.g. to inspect legacy sim history).
+      const includeAllEpochs = /^(1|true|yes|on)$/i.test(q.get("includeAllEpochs") ?? "");
+      const filter = { fromMs: num(q.get("fromMs")), toMs: num(q.get("toMs")), competitionId: q.get("competitionId") || undefined, strategyId: q.get("strategyId") || undefined, phase: ph === "prematch" || ph === "live" ? (ph as "prematch" | "live") : undefined, codeVersion: q.get("codeVersion") || undefined, includeAllEpochs };
+      const clean = (rs: ReturnType<typeof betRecords>) => (includeAllEpochs ? rs : cleanEpochRecords(rs, CLEAN_EPOCH_FLOOR));
       // phase read is on the stored bets.origin column (betRecords resolves phase = b.origin), NOT a
       // recomputed created-phase (fix #2). When a slice is empty, show WHY: the exclusion breakdown + the
       // phase split of the strategy/family scope, so «0» never reads as a broken filter.
-      const recsAll = betRecords(db, { ...filter, phase: undefined }); // same scope, ignoring phase — to show the phase split
-      let recs = betRecords(db, filter);
+      const recsAll = clean(betRecords(db, { ...filter, phase: undefined })); // same scope, ignoring phase — to show the phase split
+      let recs = clean(betRecords(db, filter));
       const fam = q.get("family");
       const famFilter = (rs: typeof recs) => (fam ? rs.filter((r) => marketFamily(r.market) === fam) : rs);
       recs = famFilter(recs);
       const cohort = signalCohort(recs, { strategyId: filter.strategyId, phase: filter.phase, family: fam || undefined });
       const diagnostic = cohort.nSignals === 0 ? {
-        excluded: betRecordsExcluded(db, { ...filter, phase: undefined }),
+        // [M19] honest scope: when the clean floor is in force, the exclusion breakdown names the pre-clean /
+        // cross-epoch drops too, so an empty clean slice reads as "all N rows pre-clean", not a broken filter.
+        excluded: betRecordsExcluded(db, { ...filter, phase: undefined }, includeAllEpochs ? undefined : CLEAN_EPOCH_FLOOR),
         phaseSplitInScope: { prematch: famFilter(recsAll).filter((r) => r.phase === "prematch").length, live: famFilter(recsAll).filter((r) => r.phase === "live").length },
-        note: "пусто в этом срезе. phaseSplitInScope — как та же стратегия/семья делится по origin (prematch/live); excluded — сколько ставок отброшено гейтами (epoch_unknown и т.п.).",
+        note: `пусто в этом срезе. phaseSplitInScope — как та же стратегия/семья делится по origin (prematch/live); excluded — сколько ставок отброшено гейтами (epoch_unknown, pre_clean_epoch, cross_epoch и т.п.).${includeAllEpochs ? " includeAllEpochs=1 — грязные эпохи включены." : " Чистая эпоха (e5+) по умолчанию; &includeAllEpochs=1 чтобы включить всё."}`,
       } : undefined;
-      return NextResponse.json({ ok: true, cohort, ...(diagnostic ? { diagnostic } : {}) });
+      return NextResponse.json({ ok: true, cleanEpochFloor: includeAllEpochs ? null : CLEAN_EPOCH_FLOOR, cohort, ...(diagnostic ? { diagnostic } : {}) });
+    }
+    // ?report=portfolio → [Phase 5.2/5.3/5.4] the whole book in one JSON: every (strategy × market-family)
+    // cell on the clean epoch as SIGNALS — verdict, money, CLV-t, maturity + a Week-over-Week P&L/CLV/verdict
+    // delta; the CLV→realized correlation (per cell AND overall — the decisive validation); and a Benjamini-
+    // Hochberg FDR pass across the grid's win-vs-implied p-values (survivesFdr / binomQ). &includeAllEpochs=1
+    // keeps dirty epochs; &strategyId=/&competitionId=/&fromMs=/&toMs= narrow the base.
+    if (new URL(req.url).searchParams.get("report") === "portfolio") {
+      const { buildPortfolio } = await import("@/lib/portfolio");
+      const q = new URL(req.url).searchParams;
+      const num = (v: string | null) => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
+      const includeAllEpochs = /^(1|true|yes|on)$/i.test(q.get("includeAllEpochs") ?? "");
+      const filter = { fromMs: num(q.get("fromMs")), toMs: num(q.get("toMs")), competitionId: q.get("competitionId") || undefined, strategyId: q.get("strategyId") || undefined, includeAllEpochs };
+      return NextResponse.json({ ok: true, portfolio: buildPortfolio(db, { filter }) });
     }
     // ?report=family_shadow → Phase 1.1/1.2: prematch_value stakes real money only in totals; BTTS/1X2/
     // handicap/draw are demoted to a would-be SHADOW cohort (zero money) that matures to a signal verdict.
