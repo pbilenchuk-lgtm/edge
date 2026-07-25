@@ -40,7 +40,7 @@ import { strategistDecide, effectiveEnv } from "./llm.js";
 import { hoursUntil, finishStamp } from "./time.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit, type ShadowEntryRequest } from "./shadow.js";
 import { collectSnapshots } from "./snapshots.js";
-import { collectTennisSnapshots, recordTennisBreakMarks, tennisScoutSilence } from "./tennisScout.js";
+import { collectTennisSnapshots, collectTennisPrematchSnapshots, recordTennisBreakMarks, tennisScoutSilence } from "./tennisScout.js";
 import { tennisTradingTick, tennisSetValueTick, tennisExitTick, settleTennisBets, finishTennisMatches, tennisScoutInPlay, tennisFinalResult, pollTennisFinals } from "./tennisTrading.js";
 import { sweepAbandonedMatches } from "./staleSweep.js";
 import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
@@ -2121,6 +2121,9 @@ export async function runAutoCycle(
   // Tennis provider scouting (Stage 0) — parallel, observe-only, gated on API_TENNIS_KEY.
   // Never touches football/money-path; isolated so a provider blip can't abort the tick.
   await step("tennisScout", () => collectTennisSnapshots(db, deps), 0);
+  // S10: prematch moneyline anchors for upcoming ATP/WTA singles (self-throttled to ~4h) — a true sets-0-0
+  // frozen price so set_value's cohort stops living in the first_snapshot quarantine. Slow cycle only.
+  await step("tennisPrematchScout", () => collectTennisPrematchSnapshots(db, deps), 0);
   // Scout watchdog (the signal it never had): alert ONCE when the scout is silent while the schedule
   // says a match should be live — self-concealing death otherwise (a dead scout drops the match out of
   // "live", which then blinds the heartbeat's own recovery). Throttled: one alert per silence episode,
