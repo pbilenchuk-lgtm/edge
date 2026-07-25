@@ -72,6 +72,13 @@ const PMV_COMPLETE_PROB = Math.min(1, Math.max(0.5, num(process.env.TENNIS_PMV_C
 // WAS the bug: TENNIS_PAPER_BUDGET_USD=$1M for the PMV sim also sized Set-Value bets at $7k+ on a $1k
 // account, showing $29k «в игре» on a $4.7k balance. PMV no longer reads the shared paper budget.
 const PMV_BUDGET = (() => { const n = Number(process.env.TENNIS_PMV_SIM_BUDGET_USD); return Number.isFinite(n) && n > 0 ? n : 1000; })();
+// S9 (R0.3): tennis-PMV goes from flag-only to PAPER — a fresh, self-describing epoch so its bets segment
+// cleanly away from the legacy sim-v1 money that polluted signal_stats. Micro-caps for the first-20 review.
+export const PMV_PAPER_EPOCH = process.env.TENNIS_PMV_PAPER_EPOCH || "tpmv-paper-m1";
+const PMV_PAPER_MAX_STAKE = (() => { const n = Number(process.env.TENNIS_PMV_PAPER_MAX_STAKE); return Number.isFinite(n) && n > 0 ? n : 15; })(); // micro-cap $/prop
+// total_games·under is quarantined from PAPER (model +15.6пп optimism, n=21) until theo of that side is
+// recalibrated — shadow still records it, but no money rides it. Env-liftable once recalibrated.
+const PMV_UNDER_QUARANTINE = (process.env.TENNIS_PMV_UNDER_QUARANTINE ?? "true").toLowerCase() !== "false";
 // FLAG-ONLY until the core is re-calibrated (momentum + base_hold from our own frequencies). The
 // scanner still logs every would-be entry so data accumulates, but places NO bets — the first-day
 // systematic one-sided edge was phantom value from the model's own math. Set env "false" to re-enable.
@@ -643,9 +650,23 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
         R.metaSet(db, PMV_ACTED + m.id, `flag_only:${enters.length}`, now);
         continue;
       }
+      // S9: shadow keeps writing in PARALLEL when paper-trading — free control (paid fill vs the frozen theo).
+      for (const cand of enters) recordPmvShadowSignal(db, {
+        matchId: m.id, label: cand.label, family: cand.family, side: cand.side, firstIsP1: cand.firstIsP1,
+        theoCents: cand.theoCents, midCents: cand.midCents, deviation: cand.deviation, delta: scan.delta ?? 0,
+        bookUsd: cand.bookUsd, tour, surface: surfaceOf(tournament), epoch: `${codeVer}·${PMV_SHADOW_EPOCH}`, at: now,
+      });
+      // S9: total_games·under quarantined from PAPER (shadow above still records it, but no money).
+      const tradeableEnters = enters.filter((cand) => {
+        if (PMV_UNDER_QUARANTINE && cand.family === "total_games" && cand.side === "under") {
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `under_quarantine «${cand.label}»: total_games·under на карантине (модель +15.6пп оптимизма, n=21) — записано в shadow, деньги не ставим`, created_at: now });
+          return false;
+        }
+        return true;
+      });
       // Correlation cap: ≤ MAX_PROPS of different CLUSTERS (games+sets = one length cluster).
       const chosen: PmvCandidate[] = []; const clusters = new Set<string>();
-      for (const cand of enters) { if (chosen.length >= PMV_MAX_PROPS) break; if (clusters.has(cand.cluster)) continue; clusters.add(cand.cluster); chosen.push(cand); }
+      for (const cand of tradeableEnters) { if (chosen.length >= PMV_MAX_PROPS) break; if (clusters.has(cand.cluster)) continue; clusters.add(cand.cluster); chosen.push(cand); }
       R.metaSet(db, PMV_ACTED + m.id, `entered:${chosen.length}`, now); // one shot per match
       const heldByProfile = (profile: string) => R.betsForMatch(db, m.id, PMV_STRATEGY).filter((b) => b.status === "open" && b.risk_profile_id === profile);
       for (const cand of chosen) {
@@ -655,8 +676,9 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
           const held = heldByProfile(profile).reduce((s, b) => s + (b.stake ?? 0), 0);
           const r = sizePrematch({ ourProb, priceCents: cand.midCents, implied, calibration: 0.6, liquidity: cand.bookUsd, budget: PMV_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: false, bankCeiling: PMV_BUDGET });
           if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `[${profile}] «${cand.label}» dev +${cand.deviation}¢, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
-          // Thin-book cap: never stake more than 25% of the prop's book depth.
-          const stake = Math.min(r.stake, 0.25 * cand.bookUsd);
+          // Thin-book cap: never stake more than 25% of the prop's book depth. S9: + a micro-cap ($/prop)
+          // for the first-20-signal paper review — deliberately tiny while the paid contour is validated.
+          const stake = Math.min(r.stake, 0.25 * cand.bookUsd, PMV_PAPER_MAX_STAKE);
           if (stake < 1) continue;
           const meta = pmvEntryMeta({ theoCents: cand.theoCents, midCents: cand.midCents, deviation: cand.deviation, delta: scan.delta ?? 0, edge: r.edge, kelly: r.kellyFraction, stake, bookUsd: cand.bookUsd, family: cand.family, firstIsP1: cand.firstIsP1 });
           const betId = R.uid();
@@ -665,7 +687,9 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
             status: "open", proposed_price: cand.midCents, entry_price: cand.midCents, current_price: cand.midCents, closing_price: null,
             ai_prob: ourProb, stake, rationale: `PMV: манилайн δ=${scan.delta} → theo ${cand.theoCents}¢ vs mid ${cand.midCents}¢ (dev +${cand.deviation}¢), семья ${cand.family}, книга $${cand.bookUsd}`,
             entered_minute: "предматч", result: null, payout: null, settled_by: null, settled_at: null,
-            entry_meta: serializeEntryMeta(meta), code_version: codeVer, created_at: now,
+            // S9: stamp the fresh paper epoch so these bets segment away from legacy sim-v1 money (the
+            // signal_stats legacy_diagnostic mark points at shadow; paper bets are isolable by this tag).
+            entry_meta: serializeEntryMeta(meta), code_version: `${codeVer}·${PMV_PAPER_EPOCH}`, created_at: now,
           });
           try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: c.id, strategyId: PMV_STRATEGY, profileId: profile, size: stake, edge: r.edge, isLive: false }], shadowCfg, now); } catch { /* observe-only */ }
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "enter", text: `[${profile}] PMV «${cand.label}» @ ${cand.midCents}¢ · $${Math.round(stake)} (theo ${cand.theoCents}¢, dev +${cand.deviation}¢, δ=${scan.delta}, пороги:${PMV_EPOCH})`, created_at: now });
