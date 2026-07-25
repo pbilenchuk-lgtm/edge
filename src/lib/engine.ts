@@ -687,7 +687,10 @@ const LEAGUE_NAME_ESPN: [RegExp, string][] = [
   [/(liga 1.*per[uú]|per[uú].*liga 1|\bperu\b)/i, "per.1"],
   // Romania SuperLiga (ESPN rou.1). Category arrives as bare "Romania 1".
   [/\bromania\b|superliga.*romania|liga 1.*romania/i, "rou.1"],
-  [/(efl championship|\bchampionship\b)/i, "eng.2"],
+  // [H4] anchor to the ENGLISH second tier only. The bare /\bchampionship\b/ over-matched "European/World/
+  // Scottish/African … Championship" → bound English-2nd-tier live data onto foreign fixtures (wrong-feed on
+  // real money). Scottish Championship is sco.2, not eng.2; add it explicitly if traded.
+  [/(efl championship|english championship)/i, "eng.2"],
   [/saudi pro league/i, "ksa.1"],
   [/j1 league/i, "jpn.1"],
   // Chinese Super League — ESPN's chn.1 feed DOES carry it (probed: Beijing Guoan, Henan,
@@ -979,8 +982,9 @@ const TEAM_STOPWORDS = new Set(["fc", "afc", "sc", "cf", "ac", "as", "cd", "sv",
 // foldLetters now lives in the leaf module nameFold.ts (shared with the persisted alias store so the two
 // canonicalize identically). Imported above.
 // S11: the persisted alias overlay (getTeamAliases) is merged OVER TEAM_EXONYMS in teamTokens. It's read from
-// a module-level cache that enrichFromEspn/reconcile refresh once per pass (refreshTeamAliasOverlay), so the
-// hot name-match path stays a pure map lookup. Empty overlay (default) ⇒ byte-for-byte the old behavior.
+// a module-level cache refreshed once at the TOP of runAutoCycle (refreshTeamAliasOverlay) — before
+// discover/dedupe/enrich, so EVERY name-match path in a cycle uses one fresh overlay (M13). enrichFromEspn
+// also refreshes defensively for standalone calls. Empty overlay (default) ⇒ byte-for-byte the old behavior.
 let TEAM_ALIAS_OVERLAY: Record<string, string> = {};
 /** Reload the DB-backed alias overlay into the module cache. Called at the top of each enrich/reconcile pass. */
 export function refreshTeamAliasOverlay(db: Database): void { TEAM_ALIAS_OVERLAY = getTeamAliases(db); }
@@ -1014,9 +1018,13 @@ function teamTokens(name: string): Set<string> {
   // routinely 2-char names ("T1", "G2", "C9"). Dropping those left such a match
   // with an EMPTY token set, so nameMatch always failed and the fixture could
   // never reconcile with the provider (it hung "live" forever on the timer).
-  const toks = foldLetters(name.toLowerCase()).normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter((w) => w.length >= 3 || /\d/.test(w));
-  // F1 static city exonyms, then the S11 persisted overlay (last wins). Overlay empty by default ⇒ unchanged.
-  return new Set(toks.map((w) => TEAM_ALIAS_OVERLAY[w] ?? TEAM_EXONYMS[w] ?? w));
+  const toks = foldLetters(name.toLowerCase()).normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter(Boolean);
+  // [H3] MAP the aliases (F1 static city exonyms, then the S11 persisted overlay — last wins) BEFORE the
+  // length filter. A 2-char club token ("KÍ"→ki, "HB"→hb) was dropped by the ≥3 filter BEFORE any alias could
+  // rescue it, so a 2-char name yielded an EMPTY token set and could never bind — and an added alias was
+  // silently dead. Mapping first lets `ki→klaksvik` (8 chars) survive; un-aliased short noise ("fc","sc",
+  // "ki") still drops. The ≥3 floor is UNCHANGED (lowering it would let FC/AC/SC false-match).
+  return new Set(toks.map((w) => TEAM_ALIAS_OVERLAY[w] ?? TEAM_EXONYMS[w] ?? w).filter((w) => w.length >= 3 || /\d/.test(w)));
 }
 /** Do two team names refer to the same club/nation? Requires every token of the
  *  shorter name to appear in the longer (so "West Ham" ⊂ "West Ham United" ok,

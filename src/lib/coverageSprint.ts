@@ -44,6 +44,9 @@ export interface CoverageSprint {
   worstLeagues: LeagueGap[];              // link-rate ascending, gap-to-target + binds-needed per league
   unbound: UnboundItem[];                  // the NAMED worklist — funded-blind + near-kickoff-blind, deduped
   unboundByClass: { no_league: number; name_or_dark: number };
+  // [M17] the DOLLAR-weighted blind view: a count-based 85% can pass while the biggest BUDGETS sit blind. This
+  // reconciles the target against the budget of funded comps that currently have ≥1 blind funded match.
+  moneyBlind: { fundedComps: number; fundedBudgetUsd: number; blindComps: { league: string; budgetUsd: number; blindMatches: number }[]; blindBudgetUsd: number; blindBudgetPct: number | null };
   aliasOverlay: { count: number; recent: { from: string; to: string }[] }; // what's already been aliased
   note: string;
 }
@@ -107,6 +110,19 @@ export function buildCoverageSprint(db: Database, opts: { nowMs?: number; window
   const aliases = listTeamAliases(db);
   const unboundByClass = { no_league: unbound.filter((u) => u.cls === "no_league").length, name_or_dark: unbound.filter((u) => u.cls === "name_or_dark").length };
 
+  // [M17] dollar-weighted blind view: which funded-comp BUDGETS have blind matches, vs total funded budget.
+  const fundedComps = R.listCompetitions(db).filter((c) => c.sport_id === "football" && (c.budget ?? 0) > 0);
+  const fundedBudgetUsd = Math.round(fundedComps.reduce((s, c) => s + (c.budget ?? 0), 0) * 100) / 100;
+  const blindByComp = new Map<string, number>();
+  for (const b of R.listBlindFundedFootball(db, { nowMs })) blindByComp.set(String(b.league || b.comp), (blindByComp.get(String(b.league || b.comp)) ?? 0) + 1);
+  const compByLeague = new Map(fundedComps.map((c) => [String(c.external_league || c.name), c]));
+  const blindComps = [...blindByComp.entries()]
+    .map(([league, blindMatches]) => ({ league, budgetUsd: Math.round((compByLeague.get(league)?.budget ?? 0) * 100) / 100, blindMatches }))
+    .filter((x) => x.budgetUsd > 0)
+    .sort((a, b) => b.budgetUsd - a.budgetUsd);
+  const blindBudgetUsd = Math.round(blindComps.reduce((s, c) => s + c.budgetUsd, 0) * 100) / 100;
+  const moneyBlind = { fundedComps: fundedComps.length, fundedBudgetUsd, blindComps, blindBudgetUsd, blindBudgetPct: fundedBudgetUsd > 0 ? r1((blindBudgetUsd / fundedBudgetUsd) * 100) : null };
+
   const note = euroNK.total === 0
     ? `нет еврокубковых пар у kickoff в окне ${nearHours}ч — цель не считается сейчас; следи по window-срезу`
     : euroNK.meetsTarget
@@ -124,6 +140,7 @@ export function buildCoverageSprint(db: Database, opts: { nowMs?: number; window
     worstLeagues,
     unbound: unbound.slice(0, 60),
     unboundByClass,
+    moneyBlind,
     aliasOverlay: { count: aliases.length, recent: aliases.slice(-10).reverse().map((a) => ({ from: a.from, to: a.to })) },
     note,
   };

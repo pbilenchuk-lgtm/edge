@@ -17,7 +17,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
-import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, reSettleSuspectBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries, repairCategoryLeagues } from "./engine.js";
+import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, reSettleSuspectBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries, repairCategoryLeagues, refreshTeamAliasOverlay } from "./engine.js";
 import { settlePmResolutionBets } from "./pmResolution.js";
 import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
@@ -2075,6 +2075,11 @@ export async function runAutoCycle(
     try { return fn(); } catch (e) { console.error(`[autoCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
   };
 
+  // [M13] Refresh the persisted team-alias overlay ONCE at the top of the cycle — BEFORE discover/import
+  // (findTwinMatch) and dedupe (sameTeams), which name-match earlier than enrich. Doing it only inside
+  // enrichFromEspn left those earlier paths on a stale/empty overlay (a freshly-added alias lagged two cycles
+  // for dedupe/import, and on boot they ran with no aliases at all).
+  stepSync("aliasOverlay", () => { refreshTeamAliasOverlay(db); return 0; }, 0);
   const synced = provider ? await step("sync", () => syncCompetitions(db, provider!, deps, opts), []) : [];
   // Discover the many matches Polymarket lists directly (into catch-all comps).
   // Gated by opts.discover so the frequent tick can skip the daily-ish parse.

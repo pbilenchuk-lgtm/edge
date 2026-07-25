@@ -178,6 +178,28 @@ test("noFeedProbe: euro fixtures rank ahead of domestic before the max cut (not 
   assert.equal(r.rows[0].match, "EuroHome—EuroAway", "euro sorts first despite 25 domestic candidates ahead in scan order");
 });
 
+test("noFeedProbe: M14 schwa/ð fold now scores the hard cases; M16 flags a STALE board (rou.1-class)", async () => {
+  const db = seed();
+  comp(db, "uecl", "uefa.europa.conf");
+  match(db, "z1", "uecl", "Zirə FK", "Paide Linnameeskond", "2026-07-24T18:00:00Z"); // Azerbaijani schwa
+  const provider: SportsProvider = {
+    name: "mock",
+    async scoreboard(_sport: string, league: string) {
+      if (!/uefa\.europa\.conf/.test(league)) return [];
+      // ESPN spelling "Zira" (no schwa) — the old private fold kept ə and scored this 0; foldLetters folds it.
+      // The event is dated 2025 → the board is STALE (a linked-but-dark league).
+      return [{ externalRef: "E1", home: "Zira", away: "Paide", state: "post", minute: null, scoreHome: null, scoreAway: null, final: true, date: "2025-07-24T18:00:00Z" }] as any;
+    },
+    async matchDetail() { return null; },
+  };
+  const r = await buildNoFeedProbe(db, provider, { nowMs: NOW_MS });
+  const z = r.rows.find((x) => /Zirə/.test(x.match))!;
+  assert.equal(z.verdict, "name_mismatch_fixable", "schwa folded → Zira overlaps → surfaced (was scored 0)");
+  const board = r.boards.find((b) => /uefa\.europa\.conf/.test(b.league));
+  assert.ok(board, "board freshness reported");
+  assert.equal(board!.stale, true, "freshest event is 2025 → board is stale (linked-but-dark)");
+});
+
 test("persistNoFeedCoverage: writes the blind_pairs_daily digest", () => {
   const db = seed();
   comp(db, "ucl", "uefa.champions");

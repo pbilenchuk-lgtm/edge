@@ -1152,6 +1152,11 @@ test("espnLeagueForSeries: covered leagues resolve, uncovered (tennis/minor) ret
   assert.equal(espnLeagueForSeries("Morocco Botola", "soccer-botola"), null);      // ESPN doesn't cover → skip
   assert.equal(espnLeagueForSeries(null, "atp-alcaraz-sinner"), null);             // tennis → no mapping → skip
   assert.equal(espnLeagueForSeries(null, null), null);
+  // [H4 / Phase 3.2] the championship rule is anchored to the ENGLISH second tier only.
+  assert.equal(espnLeagueForSeries("EFL Championship", null), "eng.2");
+  assert.equal(espnLeagueForSeries("English Championship", null), "eng.2");
+  assert.notEqual(espnLeagueForSeries("European Championship", null), "eng.2", "the bare word no longer binds English 2nd-tier data");
+  assert.notEqual(espnLeagueForSeries("Scottish Championship", null), "eng.2");
 });
 
 test("espnLeagueForSeries: UEFA cups resolve by NAME (fixes null/aus.1 mis-map) and don't collide", async () => {
