@@ -131,7 +131,17 @@ export function entryBlockerDiag(db: Database, matchId: string, env: Record<stri
         // The pre-kickoff window is where ft_blind is SUPPOSED to fill (the zombie map is empty until the match
         // goes live), so this chain — not the live quarantine — is what decides a blind funded fixture.
         if (!ftEnabled) why.push(`ft_blind ВЫКЛЮЧЕН: FT_BLIND_ENABLED=${ftRaw === undefined ? "не задан" : `«${ftRaw}»`} ≠ "true"`);
-        else if (b.origin !== "prematch") why.push(`origin=${b.origin ?? "?"} — ft_blind берёт только prematch`);
+        else if (b.origin !== "prematch" && b.origin !== "live") why.push(`origin=${b.origin ?? "?"} — ft_blind берёт prematch (или live внутри grace-окна после кикоффа)`);
+        else if (b.origin === "live") {
+          // The Samegrelo class: the analysis ran AFTER kickoff, so a pre-match thesis got stamped live. Name
+          // the measured gap — it is the difference between a fixable scheduling slip and a genuine mid-match
+          // blind entry, and without the number the two look identical in the log.
+          const grace = (() => { const n = Number(env.FT_BLIND_LIVE_GRACE_MIN); return Number.isFinite(n) && n >= 0 ? n : 5; })();
+          const gap = m.kickoff_at && b.created_at ? Math.round(((Date.parse(b.created_at) || 0) - (Date.parse(m.kickoff_at) || 0)) / 60_000) : null;
+          if (gap == null) why.push("origin=live, но зазор от кикоффа не измерить (нет kickoff_at/created_at) — fail-closed, вход отклонён");
+          else if (gap < 0 || gap > grace) why.push(`origin=live, решение через ${gap}м после кикоффа > grace ${grace}м — вслепую счёт неизвестен, вход отклонён (АНАЛИЗ ОПОЗДАЛ: чинить расписание предматчевого прохода, а не гейт)`);
+          else why.push(`origin=live, но всего ${gap}м после кикоффа ≤ grace ${grace}м — допущено как предматчевый тезис`);
+        }
         else if (!FT_SETTLED_RE.test(b.market_label)) why.push("рынок не FT-сеттлится — ft_blind держит только финальные тоталы/исходы");
         else if (hasMatchLive) why.push("есть match_live-строка → фикстура покрыта, ft_blind неприменим");
         else why.push("ft_blind ПРИМЕНИМ (предматч) — если входа нет, блокер ниже по цепочке (дубль-позиция / нулевая котировка / тезис-кэп / сайзинг)");

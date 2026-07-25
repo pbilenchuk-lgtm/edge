@@ -193,3 +193,27 @@ test("Z2(а): two HELD legs of one contract disagreeing is a real defect (double
   assert.equal(rep.groups[0].classification, "suspect");
   assert.match(rep.groups[0].note, /ПОДОЗРИТЕЛЬНО/);
 });
+
+// ── V0.1 ROOT CAUSE: ft_blind refused a blind fixture's thesis because the analysis ran late ─────
+// Samegrelo (the whole ft_blind=0 mystery): funded, blind, mode ON, FT-settled market, no match_live — and
+// zero entries. The DB answered it: origin='live'. It was stamped live because the analysis ran at 09:01:33
+// for a 09:00:00 kickoff. Refusing a live thesis on a blind fixture is CORRECT in general (we cannot see the
+// score, so a totals thesis at minute 60 bets into goals that may already have happened) — but right after
+// kickoff, «blind» and «pre-match» are the same information state.
+import { ftBlindOriginOk } from "../src/lib/lifecycle.js";
+
+test("V0.1 (Samegrelo): a thesis formed 2m after kickoff on a blind fixture is admissible; 60m later is not", () => {
+  const m = { kickoff_at: "2026-07-25T09:00:00Z" };
+  const bet = (createdAt: string, origin = "live") => ({ origin, created_at: createdAt });
+  // The real case: analysis at 09:01:33, i.e. ~1.5 minutes late — the fixture must not be lost to that slip.
+  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T09:01:33Z"), {}), true, "≈1.5m after kickoff → still a pre-match state");
+  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T09:05:00Z"), {}), true, "exactly at the 5m grace edge → admitted");
+  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T10:00:00Z"), {}), false, "60m in, blind to the score → refused");
+  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T08:50:00Z"), {}), false, "a 'live' stamp BEFORE kickoff is incoherent → fail closed");
+  // A genuine pre-match thesis is unconditionally fine; anything unmeasurable or unknown fails closed.
+  assert.equal(ftBlindOriginOk(m, { origin: "prematch", created_at: null }, {}), true);
+  assert.equal(ftBlindOriginOk({ kickoff_at: null }, bet("2026-07-25T09:01:00Z"), {}), false, "no kickoff → gap unmeasurable → refused");
+  assert.equal(ftBlindOriginOk(m, { origin: null, created_at: "2026-07-25T09:01:00Z" }, {}), false, "unknown origin → refused");
+  // The window is env-tunable, and 0 collapses it back to prematch-only.
+  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T09:01:33Z"), { FT_BLIND_LIVE_GRACE_MIN: "0" }), false, "grace 0 → strictly prematch-only, the old behaviour");
+});

@@ -736,9 +736,36 @@ export function isFtSettledMarket(label: string): boolean {
 // settle, never a live-entry strategy like overreaction), an FT-settled market, and a genuinely
 // Polymarket-ONLY fixture (no provider match_live row — a transient live-data gap on a COVERED fixture keeps
 // its row, so it is NOT blind). Gated behind the env switch.
-function ftBlindEligible(db: Database, m: Match, b: { origin?: string | null; market_label: string }, env: Record<string, string | undefined>): boolean {
+// [V0.1 root cause / batch-9] KICKOFF-GRACE for a blind fixture's late-formed thesis.
+//
+// Samegrelo was the whole ft_blind=0 mystery: a funded blind fixture, mode ON, an FT-settled market, no
+// match_live — and zero entries. The DB answered it: the bet carried `origin='live'`, so the very first line
+// of this gate refused it. It was stamped live because the ANALYSIS ran at 09:01:33 for a 09:00:00 kickoff —
+// ~90 seconds LATE — and the clock had already flipped the match to live.
+//
+// Refusing a live-origin thesis is right in general: on a blind fixture we cannot see the score, so entering
+// a totals thesis at minute 60 would be betting into goals that may already have happened — the exact class
+// of blind-capital error this mode exists to bound. But immediately after kickoff «blind» and «pre-match» are
+// informationally the SAME state: nothing has happened yet. So a live-origin thesis is admissible only inside
+// a small grace window measured from kickoff, and refused after it. Unknown kickoff → refuse (fail closed).
+//
+// This does NOT replace the upstream fix (blind funded fixtures should be analysed BEFORE kickoff so the pick
+// is stamped prematch in the first place); it stops a ~90-second scheduling slip from silently costing the
+// whole fixture, while keeping mid-match blind entries impossible.
+const FT_BLIND_GRACE_MIN = (env: Record<string, string | undefined>) => {
+  const n = Number(env.FT_BLIND_LIVE_GRACE_MIN);
+  return Number.isFinite(n) && n >= 0 ? n : 5;
+};
+export function ftBlindOriginOk(m: { kickoff_at?: string | null }, b: { origin?: string | null; created_at?: string | null }, env: Record<string, string | undefined>): boolean {
+  if (b.origin === "prematch") return true;
+  if (b.origin !== "live") return false;                       // unknown/absent origin → fail closed
+  if (!isIsoTs(m.kickoff_at) || !b.created_at) return false;   // can't measure the gap → fail closed
+  const gapMin = ((Date.parse(b.created_at) || 0) - Date.parse(String(m.kickoff_at))) / 60_000;
+  return gapMin >= 0 && gapMin <= FT_BLIND_GRACE_MIN(env);
+}
+function ftBlindEligible(db: Database, m: Match, b: { origin?: string | null; market_label: string; created_at?: string | null }, env: Record<string, string | undefined>): boolean {
   if (!ftBlindConfig(env).enabled) return false;
-  if (b.origin !== "prematch") return false;      // pre-match thesis only (live-entry strategies excluded)
+  if (!ftBlindOriginOk(m, b, env)) return false;  // pre-match thesis, or a live one inside the kickoff grace
   if (!isFtSettledMarket(b.market_label)) return false;
   if (R.getMatchLive(db, m.id)) return false;     // has a provider row → covered, not blind
   return true;
