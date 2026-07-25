@@ -2018,6 +2018,7 @@ function LogsScreen({ events, onDownloaded, onGoMatches }: any) {
 const FILE_GROUPS: { title: string; items: { label: string; url: string; file: string; hint?: string }[] }[] = [
   { title: "Стратегии × профили риска", items: [
     { label: "Все стратегии и профили (общий)", url: "/api/profiles?report=profiles", file: "profiles-all.json", hint: "P&L, ROI, CLV по каждому риск-профилю + калибровка + хвосты. Внизу vocab — точные названия стратегий/категорий." },
+    { label: "Профиль × чистая эпоха × стратегия (на сигналах)", url: "/api/profiles?report=profile_epoch_cut", file: "profile-epoch-cut.json", hint: "S6: сигнальный разрез по риск-профилям на чистой эпохе (e5+). Внизу conservativeAnomalies — почему у conservative худший CLV: какие сигналы его порог входа пропустил." },
     { label: "Футбол Pre-match Value — LIVE входы", url: "/api/profiles?report=profiles&strategyId=prematch_value&phase=live", file: "pmv-football-live.json", hint: "Разрез той же стратегии по фазе входа." },
     { label: "Футбол Pre-match Value — PREMATCH входы", url: "/api/profiles?report=profiles&strategyId=prematch_value&phase=prematch", file: "pmv-football-prematch.json", hint: "Сравни с live-файлом — есть ли смысл разделять." },
     { label: "Футбол PMV — разрез origin × рынок", url: "/api/profiles?report=pmv_origin_cut", file: "pmv-origin-cut.json" },
