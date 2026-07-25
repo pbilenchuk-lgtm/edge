@@ -259,6 +259,28 @@ export async function GET(req: Request) {
       } : undefined;
       return NextResponse.json({ ok: true, cleanEpochFloor: includeAllEpochs ? null : CLEAN_EPOCH_FLOOR, cohort, ...(diagnostic ? { diagnostic } : {}) });
     }
+    // ?report=provider_scope → [batch-9] what each (provider × league) pair is ACTUALLY delivering, with a
+    // verdict instead of a raw counter. Prod evidence that motivated it: Sportmonks on a World-Cup plan
+    // resolved `fifa.world` cleanly while every club league accumulated 16-235 consecutive not-resolved —
+    // structurally out of plan, re-probed every 20 minutes forever, and invisible for five days. out_of_plan
+    // is an ECONOMIC verdict (widen the plan or drop the provider for that league), not an engineering bug.
+    if (new URL(req.url).searchParams.get("report") === "provider_scope") {
+      const R2 = await import("@/lib/repo");
+      const { coverageScope, coverageRetryMin, coverageVerdictNote, COVERAGE_OUT_OF_PLAN_AT } = await import("@/lib/providerCoverage");
+      const rows = R2.listProviderCoverage(db).map((r) => ({
+        provider: r.provider, league: r.league, consecFail: r.consec_fail,
+        scope: coverageScope(r), retryMin: coverageRetryMin(r.consec_fail),
+        mutedUntil: r.muted_until, lastProbeAt: r.last_probe_at, note: coverageVerdictNote(r.provider, r.league, r),
+      }));
+      const outOfPlan = rows.filter((r) => r.scope === "out_of_plan");
+      return NextResponse.json({ ok: true, report: {
+        outOfPlanAt: COVERAGE_OUT_OF_PLAN_AT, rows,
+        summary: { total: rows.length, healthy: rows.filter((r) => r.scope === "healthy").length, degraded: rows.filter((r) => r.scope === "degraded").length, outOfPlan: outOfPlan.length },
+        note: outOfPlan.length
+          ? `${outOfPlan.length} (провайдер×лига) вне плана: ${outOfPlan.map((r) => `${r.provider}·${r.league}`).join(", ")}. Эти лиги не зарезолвятся никогда — подписка их не покрывает; перепрос снижен до суточного. Решение экономическое (расширить план / отключить провайдера для лиги), инженерно чинить нечего. Здоровые лиги того же провайдера показывают, что ключ рабочий.`
+          : "все пары в норме или в деградации — структурно выпавших из плана нет.",
+      } });
+    }
     // ?report=leg_consistency → [Z2(а) / batch-9] one market = one contract, so its settled legs must not
     // carry BOTH directions. Groups settled bets by (match × canonical market × strategy) and separates the
     // legitimate shape (a partial cut + the held remainder → labelled, and the signal collapses to void [M6])

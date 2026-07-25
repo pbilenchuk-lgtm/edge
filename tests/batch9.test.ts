@@ -217,3 +217,38 @@ test("V0.1 (Samegrelo): a thesis formed 2m after kickoff on a blind fixture is a
   // The window is env-tunable, and 0 collapses it back to prematch-only.
   assert.equal(ftBlindOriginOk(m, bet("2026-07-25T09:01:33Z"), { FT_BLIND_LIVE_GRACE_MIN: "0" }), false, "grace 0 → strictly prematch-only, the old behaviour");
 });
+
+// ── Provider plan-scope: escalating backoff + a verdict instead of a raw counter ──────────────────
+// Prod evidence: Sportmonks on a World-Cup plan resolved `fifa.world` cleanly (consec_fail 0) while every club
+// league sat at 16-235 consecutive not-resolved. Those never resolve — the subscription doesn't cover them —
+// yet the flat 20-minute retry treated a 5-failure league and a 235-failure league identically, re-probed both
+// forever, and the system had no way to SAY «plan scope, not an outage». Five days went unnoticed.
+import { coverageRetryMin, coverageScope, coverageVerdictNote, nextCoverage, COVERAGE_OUT_OF_PLAN_AT } from "../src/lib/providerCoverage.js";
+
+test("provider scope: the re-probe interval escalates with the failure history and is capped at a daily probe", () => {
+  assert.equal(coverageRetryMin(0), 20, "a healthy league keeps the base interval");
+  assert.equal(coverageRetryMin(5), 20, "at the mute threshold → the plain slow retry");
+  assert.equal(coverageRetryMin(15), 80, "three thresholds of failures → 4× the interval");
+  assert.equal(coverageRetryMin(235), 1440, "the Sportmonks club-league case → a DAILY probe, not every 20m");
+  assert.ok(coverageRetryMin(100000) <= 1440, "capped — muting stays soft, a plan upgrade is still picked up");
+});
+
+test("provider scope: a verdict, not a counter — healthy / degraded / out_of_plan", () => {
+  const row = (consec: number) => ({ provider: "sportmonks", league: "bra.1", consec_fail: consec, muted_until: null, last_probe_at: null, updated_at: "t" } as any);
+  assert.equal(coverageScope(row(0)), "healthy", "fifa.world on the WC plan");
+  assert.equal(coverageScope(row(7)), "degraded");
+  assert.equal(coverageScope(row(235)), "out_of_plan", "the club leagues");
+  assert.ok(COVERAGE_OUT_OF_PLAN_AT > 5, "out-of-plan is a much higher bar than the mute threshold");
+  const note = coverageVerdictNote("sportmonks", "bra.1", row(235));
+  assert.match(note, /ВНЕ ПЛАНА/);
+  assert.match(note, /экономическое/, "…and says plainly that there is nothing to fix in code");
+});
+
+test("provider scope: a resolved probe clears the history instantly (a late mapping is never punished)", () => {
+  const muted = nextCoverage("sportmonks", "bra.1", { provider: "sportmonks", league: "bra.1", consec_fail: 234, muted_until: "2026-07-25T00:00:00Z", last_probe_at: null, updated_at: "t" } as any, "not_resolved", "2026-07-25T12:00:00Z");
+  assert.equal(muted.consec_fail, 235);
+  assert.equal(muted.muted_until, "2026-07-26T12:00:00.000Z", "escalated to a daily probe");
+  const healed = nextCoverage("sportmonks", "bra.1", muted, "resolved", "2026-07-26T12:00:00Z");
+  assert.equal(healed.consec_fail, 0, "one success wipes the whole history");
+  assert.equal(healed.muted_until, null, "…and unmutes immediately");
+});
