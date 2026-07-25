@@ -12,6 +12,7 @@ import { parseEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { winsOnEventOccurrence } from "./thresholds.js";
 import { canonicalProfileId } from "./riskProfiles.js";
 import { isResolutionSettle } from "./settlement.js";
+import { epochNum, crossEpoch } from "./codeEpoch.js";
 
 export interface ProfileFilter {
   fromMs?: number; toMs?: number;      // created_at window
@@ -19,6 +20,7 @@ export interface ProfileFilter {
   strategyId?: string;
   phase?: "prematch" | "live";
   codeVersion?: string;                // segregate pre/post-fix eras
+  includeAllEpochs?: boolean;          // [Phase 5.5 / M10] explicit override to keep pre-clean-epoch rows
 }
 
 export type ExitTrigger =
@@ -309,8 +311,12 @@ export interface ProfileAnalytics {
  * broken filter. This counts the drops for the SAME strategy/comp scope so the report can say "0 в срезе —
  * но N ставок исключено: все epoch_unknown" instead of a bare empty.
  */
-export function betRecordsExcluded(db: Database, filter: ProfileFilter = {}): { matchedScope: number; kept: number; excluded: Record<string, number> } {
+export function betRecordsExcluded(db: Database, filter: ProfileFilter = {}, cleanFloor?: number): { matchedScope: number; kept: number; excluded: Record<string, number> } {
   const ex: Record<string, number> = { proposed_or_not_filled: 0, settle_suspect: 0, epoch_unknown: 0, token_flip_poisoned: 0 };
+  // [Phase 5.5 / M19] When a clean-epoch floor is in force, the excluded breakdown must ALSO account for the
+  // rows the floor removes (pre-e5 entry, cross-epoch settle) — otherwise an empty clean slice reads as a
+  // broken filter when it is really "all N rows are pre-clean-epoch". Honest scope = every drop is named.
+  if (cleanFloor != null) { ex.pre_clean_epoch = 0; ex.cross_epoch = 0; }
   let matched = 0, kept = 0;
   for (const b of R.allBets(db)) {
     if (filter.strategyId && b.strategy_id !== filter.strategyId) continue;
@@ -321,6 +327,10 @@ export function betRecordsExcluded(db: Database, filter: ProfileFilter = {}): { 
     if (b.settle_suspect) { ex.settle_suspect++; continue; }
     if (b.football_epoch === "epoch_unknown") { ex.epoch_unknown++; continue; }
     try { if (parseEntryMeta(b.entry_meta)?.tokenFlipPoisoned === true) { ex.token_flip_poisoned++; continue; } } catch { /* keep */ }
+    if (cleanFloor != null) {
+      if (epochNum(b.code_version) < cleanFloor) { ex.pre_clean_epoch++; continue; }
+      if (crossEpoch({ code_version: b.code_version, exit_code_version: b.exit_code_version })) { ex.cross_epoch++; continue; }
+    }
     kept++;
   }
   return { matchedScope: matched, kept, excluded: ex };

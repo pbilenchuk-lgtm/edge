@@ -15,7 +15,8 @@
 //   • win-vs-implied — POISSON-binomial upper tail over each decided signal's OWN implied prob [M2], not a
 //     pooled mean-p exact binomial.
 //   • CLV — one-sample t vs 0 over DECIDED signals [M4], a real Student-t two-sided p, gated at n≥8 [M3].
-//   • P&L — seeded bootstrap P(book total ≤ 0).
+//   • P&L — seeded RECENTERED bootstrap [Phase 5.4]: center the sample to the null (mean 0), resample, count
+//     how often a null resample mean reaches the observed mean in its direction (a p-value, not a percentile-CI).
 //   • concentration — top-3 book share; robust needs ≥4 contributors AND top-3 ≤50% (or ≤70% once ≥40
 //     decided) [M1] — the old unconditional n≥40 escape is gone.
 // ============================================================
@@ -173,7 +174,7 @@ export interface SignalTests {
   nSignals: number; nRecords: number; recordsPerSignal: number | null; nDecided: number;
   winVsImplied: { wins: number; nDecided: number; winPct: number | null; meanImpliedPct: number | null; binomP: number | null; beatsMarket: boolean };
   clv: { meanCents: number | null; t: number | null; p: number | null; n: number; significant: boolean };
-  pnl: { totalUsd: number; grossUsd: number; bootP_le0: number | null; positiveSignificant: boolean };
+  pnl: { totalUsd: number; grossUsd: number; bootP: number | null; positiveSignificant: boolean };
   concentration: { top3ShareOfGrossPct: number | null; contributors: number; robust: boolean };
 }
 
@@ -199,12 +200,23 @@ export function signalTests(signals: Signal[]): SignalTests {
   const pnls = signals.filter((s) => s.settled).map((s) => s.pnl);       // book P&L
   const total = Math.round(pnls.reduce((a, b) => a + b, 0) * 100) / 100;
   const gross = Math.round(signals.filter((s) => s.settled).reduce((a, s) => a + s.grossPnl, 0) * 100) / 100;
+  // [Phase 5.4] RECENTERED bootstrap p — a proper null test, NOT a percentile-CI. The old form counted
+  // P(resample sum ≤ 0), which is a confidence-interval read masquerading as a p-value (it conflates the
+  // sampling spread with the null). Instead: center the sample to mean 0 (H0: true mean = 0), resample the
+  // CENTERED population, and count how often a null resample mean reaches the observed mean in the observed
+  // DIRECTION. That is P(as-extreme | H0) — the one-sided bootstrap p-value. Same seed → same p (determinism).
   let bootP: number | null = null;
   if (pnls.length >= 5) {
+    const xbar = total / pnls.length;
+    const centered = pnls.map((x) => x - xbar);   // null population: mean exactly 0
     const seed = Math.round(Math.abs(total) * 100) + pnls.length * 7919; const rnd = mulberry32(seed || 1);
-    const ITERS = 2000; let le0 = 0;
-    for (let it = 0; it < ITERS; it++) { let s = 0; for (let i = 0; i < pnls.length; i++) s += pnls[Math.floor(rnd() * pnls.length)]; if (s <= 0) le0++; }
-    bootP = Math.round((1000 * le0) / ITERS) / 1000;
+    const ITERS = 2000; let asExtreme = 0;
+    for (let it = 0; it < ITERS; it++) {
+      let s = 0; for (let i = 0; i < centered.length; i++) s += centered[Math.floor(rnd() * centered.length)];
+      const mStar = s / centered.length;
+      if (xbar >= 0 ? mStar >= xbar : mStar <= xbar) asExtreme++; // one-sided, in the observed direction
+    }
+    bootP = Math.round((1000 * asExtreme) / ITERS) / 1000;
   }
   const contributors = pnls.filter((x) => x !== 0).length;
   const grossAbs = pnls.reduce((a, b) => a + Math.abs(b), 0);
@@ -221,7 +233,7 @@ export function signalTests(signals: Signal[]): SignalTests {
     nDecided,
     winVsImplied: { wins, nDecided: decidedWithImp.length, winPct, meanImpliedPct: meanImp != null ? Math.round(meanImp * 1000) / 10 : null, binomP: binomP != null ? Math.round(binomP * 10000) / 10000 : null, beatsMarket: binomP != null && binomP < 0.05 },
     clv: { meanCents: clvMean != null ? Math.round(clvMean * 10) / 10 : null, t: clvT != null ? Math.round(clvT * 100) / 100 : null, p: clvP != null ? Math.round(clvP * 10000) / 10000 : null, n: clvs.length, significant: clvSignificant },
-    pnl: { totalUsd: total, grossUsd: gross, bootP_le0: bootP, positiveSignificant: total > 0 && bootP != null && bootP < 0.05 },
+    pnl: { totalUsd: total, grossUsd: gross, bootP, positiveSignificant: total > 0 && bootP != null && bootP < 0.05 },
     concentration: { top3ShareOfGrossPct: top3Share, contributors, robust },
   };
 }
@@ -261,6 +273,34 @@ export function signalCohort(recs: BetRec[], meta: { strategyId?: string; phase?
     ? `LEGACY-ДИАГНОСТИКА: signal_stats читает legacy sim-деньги этой flag-only стратегии (решено всего ${nDec}), НЕ её настоящий сигнал. Смотри ${flagOnly}. Вердикт не выносится.`
     : matured === "none"
       ? `копим: ${nDec}/${SIGNAL_N_PRELIM} РЕШЁННЫХ сигналов (${head}) — до предварительного вердикта. Единица — СИГНАЛ, не запись (R0.1).`
-      : `${matured === "stable" ? "УСТОЙЧИВО" : "предварительно"} (${head}): CLV t=${t.clv.t} p=${t.clv.p} ${t.clv.significant ? "✓" : "✗"}, win ${t.winVsImplied.winPct}% vs рынок ${t.winVsImplied.meanImpliedPct}% (Poisson-бином p=${t.winVsImplied.binomP} ${t.winVsImplied.beatsMarket ? "✓" : "✗"}), book-P&L $${t.pnl.totalUsd} (boot P≤0=${t.pnl.bootP_le0} ${t.pnl.positiveSignificant ? "✓" : "✗"}), топ-3 ${t.concentration.top3ShareOfGrossPct}% (${t.concentration.contributors} доноров) ${t.concentration.robust ? "✓" : "✗"} → ${verdict === "positive" ? "ПОЛОЖИТЕЛЬНЫЙ (тройное согласие)" : verdict === "negative" ? "ОТРИЦАТЕЛЬНЫЙ" : "СМЕШАННЫЙ (нет согласия)"}`;
+      : `${matured === "stable" ? "УСТОЙЧИВО" : "предварительно"} (${head}): CLV t=${t.clv.t} p=${t.clv.p} ${t.clv.significant ? "✓" : "✗"}, win ${t.winVsImplied.winPct}% vs рынок ${t.winVsImplied.meanImpliedPct}% (Poisson-бином p=${t.winVsImplied.binomP} ${t.winVsImplied.beatsMarket ? "✓" : "✗"}), book-P&L $${t.pnl.totalUsd} (recentered boot p=${t.pnl.bootP} ${t.pnl.positiveSignificant ? "✓" : "✗"}), топ-3 ${t.concentration.top3ShareOfGrossPct}% (${t.concentration.contributors} доноров) ${t.concentration.robust ? "✓" : "✗"} → ${verdict === "positive" ? "ПОЛОЖИТЕЛЬНЫЙ (тройное согласие)" : verdict === "negative" ? "ОТРИЦАТЕЛЬНЫЙ" : "СМЕШАННЫЙ (нет согласия)"}`;
   return { ...t, ...meta, matured, tripleAgreement: triple, verdict, note };
+}
+
+// [Phase 5.4] Benjamini-Hochberg FDR control. A portfolio grid runs one significance test PER cell, so at
+// α=0.05 a 20-cell grid expects ~1 false "winner" by chance. BH orders the p-values, finds the largest k with
+// p(k) ≤ (k/m)·q, and rejects all p ≤ that threshold — controlling the false-discovery RATE at q. Returns, per
+// input p (original order): its BH q-value (adjusted p) and whether it survives. A null p drops out of the m
+// count and never rejects. Pure + deterministic.
+export interface BhResult { qValues: (number | null)[]; rejected: boolean[]; m: number; threshold: number | null; q: number }
+export function benjaminiHochberg(pValues: (number | null)[], q = 0.05): BhResult {
+  const idx = pValues.map((p, i) => ({ p, i })).filter((x): x is { p: number; i: number } => x.p != null && Number.isFinite(x.p));
+  const m = idx.length;
+  const qValues: (number | null)[] = pValues.map(() => null);
+  const rejected: boolean[] = pValues.map(() => false);
+  if (m === 0) return { qValues, rejected, m, threshold: null, q };
+  const sorted = [...idx].sort((a, b) => a.p - b.p);
+  // BH-adjusted q-values via the standard step-up, monotone from the largest rank down.
+  let prev = 1;
+  for (let k = m - 1; k >= 0; k--) {
+    const raw = Math.min(1, (sorted[k].p * m) / (k + 1));
+    prev = Math.min(prev, raw);
+    qValues[sorted[k].i] = Math.round(prev * 10000) / 10000;
+  }
+  // Largest k with p(k) ≤ (k/m)·q → reject every p at or below that rank.
+  let maxK = -1;
+  for (let k = 0; k < m; k++) if (sorted[k].p <= ((k + 1) / m) * q) maxK = k;
+  const threshold = maxK >= 0 ? sorted[maxK].p : null;
+  if (maxK >= 0) for (let k = 0; k <= maxK; k++) rejected[sorted[k].i] = true;
+  return { qValues, rejected, m, threshold, q };
 }
