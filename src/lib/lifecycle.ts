@@ -1072,7 +1072,12 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
   // legs whose remainders were smaller than the commission needed to close them, each still carrying a row, a
   // mark to refresh and a settle to account. A remainder that cannot pay for its own exit is not a position,
   // it is bookkeeping noise: when the leftover would fall below the floor, close the whole thing instead.
-  if (round2(stake - closed) < PARTIAL_DUST_FLOOR_USD()) {
+  const remainder = round2(stake - closed);
+  if (remainder < PARTIAL_DUST_FLOOR_USD()) {
+    // MARK it. A rule that silently turns a partial into a full close is invisible to every report — and an
+    // unmeasurable fix is exactly what this batch exists to stop. The mark rides on the row, so the floor can
+    // be counted (and its threshold argued with data) instead of taken on faith.
+    R.updateBet(db, bet.id, { rationale: appendReason(bet.rationale ?? "", `dust_floor: остаток $${remainder} < $${PARTIAL_DUST_FLOOR_USD()} — закрыто целиком вместо среза ${Math.round(fraction * 100)}%`) });
     return { pnl: closeBetEarly(db, bet, currentPriceCents, "", minute, now), partial: false };
   }
   const payout = round2(closed * (currentPriceCents / entry));

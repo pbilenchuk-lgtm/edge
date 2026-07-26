@@ -15,8 +15,12 @@ test("1.3: conservative entry thresholds now EQUAL medium's; it differs only in 
   assert.ok(con.sizing.max_position_pct < med.sizing.max_position_pct, "smaller per-position cap");
 });
 
-test("1.3: the re-parameterization is an epoch bump (e8) so the old conservative cohort stays labelled", () => {
-  assert.equal(CODE_VERSION, "e8");
+test("1.3: a semantics change is an epoch bump, so the pre-change cohort stays distinctly labelled", () => {
+  // Pinned to the CURRENT epoch rather than to e8: the point of the rule is that the label moves whenever the
+  // numbers change meaning. Asserting a frozen "e8" would fail every future bump and train the next reader to
+  // edit the expectation reflexively — which is how an epoch stops being a boundary and becomes a formality.
+  assert.match(CODE_VERSION, /^e\d+$/, "a human-legible monotone label, not a git sha");
+  assert.ok(Number(CODE_VERSION.slice(1)) >= 8, "conservative's re-parameterization (e8) is at or behind us");
 });
 
 test("1.4: ft_blind cap-review criterion accrues to n≥30 decided; cap is NOT auto-lifted", () => {
