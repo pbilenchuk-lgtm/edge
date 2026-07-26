@@ -34,6 +34,8 @@ import { underThesisMarginGoals, resolveFootballMarket } from "./settlement.js";
 import { serializeEntryMeta, parseEntryMeta, isFtBlindBet, type BetEntryMeta } from "./betMeta.js";
 import { canonicalizeDrawForMatch, drawCanonEnabled, DRAW_YES_KEYS } from "./drawCanon.js";
 import { inAnchorWindow, ANCHOR_MAX_PER_TICK } from "./prematchAnchor.js";
+import { scoreConsistency, scoreTrustedForDisarm } from "./scoreRace.js";
+import { probeDrawCanon } from "./drawCanonProbe.js";
 import { resolveRefusalShadowSignals } from "./refusalShadow.js";
 import { holdTailToSettle } from "./quasiLocked.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
@@ -1326,7 +1328,20 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // even through a strategist blackout. Only the STOP is gated (winsOnEventOccurrence already
       // handled Over, so this reaches Under/No totals). Take-profit unaffected.
       if (d.kind === "stop") {
-        const uMargin = underThesisMarginGoals(b.market_label, m.score_home ?? 0, m.score_away ?? 0, { home: m.home, away: m.away });
+        // [G2 / batch-11] The suppression is RE-COMPUTED from the live score every cycle — a goal narrowing the
+        // margin restores the stop by itself, exactly as the note above says. Brann did not fail because the
+        // suppression was open-ended; it failed because the score it re-read was STALE (the same G1 race: the
+        // feed knew about the 41' goal, the scoreboard did not). So the fix is not a re-arm timer, it is a
+        // refusal to DISARM a guard on a reading that cannot be verified.
+        //
+        // No deadline escape here, unlike the strategist path. Keeping a stop armed one cycle too long costs an
+        // exit the thesis may not have needed; disarming on a phantom margin costs Brann. The asymmetry is the
+        // reason the two consumers of the same fact fail in opposite directions.
+        const scoreOk = scoreTrustedForDisarm(scoreConsistency(db, m, Date.parse(now) || Date.now(), deps.env ?? process.env));
+        const uMargin = scoreOk ? underThesisMarginGoals(b.market_label, m.score_home ?? 0, m.score_away ?? 0, { home: m.home, away: m.away }) : null;
+        if (!scoreOk) {
+          holdOnce(`подавление стопа НЕ применено по ${holdKey}: счёт отстаёт от собственного фида голов — запас Under недоказуем, стоп остаётся боевым (score_race_no_disarm)`);
+        }
         if (uMargin != null && uMargin >= UNDER_STOP_SUPPRESS_MARGIN) {
           holdOnce(`ценовой стоп подавлен по ${holdKey}: Under-тезис в запасе — до линии ещё ${uMargin} гол(ов) при счёте ${m.score_home ?? 0}:${m.score_away ?? 0}; цена оторвана книгой, тезис не под ударом (under_thesis_safe); держим до стратег-выхода / сеттла`);
           continue;
@@ -1704,6 +1719,27 @@ export async function strategistReassess(
     if (!markets.length) continue;
     const opens = R.openOddsFor(db, m.id); // kickoff price per label → price_move direction/size
     const nowMs = Date.parse(now) || Date.now();
+    // [G1 / batch-11] ATOMICITY: never reason on a snapshot that lags its own event feed. enrichFromEspn
+    // commits the scoreboard score BEFORE fetching matchDetail, so the events that TRIGGER this call can be
+    // newer than the score it would be answered with — Brann's reassessment fired on the 41' goal and was
+    // handed 0:1. The strategist then held with a premise the goal had already destroyed, and that cost $263.
+    // A reasoned wrong decision is worse than a late one, so this waits (bounded — see scoreRace).
+    const consistency = scoreConsistency(db, m, nowMs, env);
+    if (!consistency.ok) {
+      R.insertTradeLog(db, {
+        id: R.uid(), match_id: m.id, strategy_id: "system", minute: minuteLabel(m), type: "skip",
+        text: `переоценка отложена: ${consistency.reason}`,
+        dedup_key: `score_race:${m.id}:${consistency.goalEvents}`, created_at: now,
+      });
+      continue;
+    }
+    if (consistency.forced) {
+      R.insertTradeLog(db, {
+        id: R.uid(), match_id: m.id, strategy_id: "system", minute: minuteLabel(m), type: "skip",
+        text: `переоценка ПРОДОЛЖЕНА на рассогласованном снимке: ${consistency.reason}`,
+        dedup_key: `score_race_forced:${m.id}:${consistency.goalEvents}`, created_at: now,
+      });
+    }
     // A live minute for the strategist even when no provider drives one: the timer
     // estimate from kickoff (capped at the sport ceiling so it never reads absurd).
     const minuteApprox = m.minute == null && isIsoTs(m.kickoff_at)
@@ -1741,6 +1777,11 @@ export async function strategistReassess(
     // dropped from what the strategist SEES (context + entry candidates) so it never reasons on or opens into a
     // phantom price. Exits still use the full `markets` (an open position must always be manageable).
     const zombie = footballZombieMap(db, m, sport, markets, liveMinute, env, now);
+    // [G5 / batch-11] Observe what the Draw canon WOULD pick, from this same snapshot, and whether that book is
+    // simultaneously quarantined. Pure observation: gates nothing, moves nothing. It exists because the canon
+    // only ever runs at the fill choke, so a batch in which no Draw was proposed produces zero canon evidence —
+    // indistinguishable in the logs from a canon that is broken.
+    if (sport === "football") { try { probeDrawCanon(db, m.id, markets, zombie, now, env); } catch { /* never break a tick for a counter */ } }
     const liveMarkets = zombie.size ? markets.filter((mk) => !zombie.has(mk.label)) : markets;
 
     // PAIRS to run (LIVE branch of the unified engine — same (strategy, profile)
