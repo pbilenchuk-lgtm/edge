@@ -125,6 +125,10 @@ export function entryBlockerDiag(db: Database, matchId: string, env: Record<stri
     const hasLive = liveDataStatus(db, m.id).ok;
     const hasMatchLive = !!R.getMatchLive(db, m.id);
     if (!hasLive) out.push(`ft_blind режим: ${ftEnabled ? "ВКЛЮЧЁН" : "ВЫКЛЮЧЕН"} (FT_BLIND_ENABLED=${ftRaw === undefined ? "не задан" : `«${ftRaw}»`}; включается ровно значением "true")`);
+    // [R6 / batch-10] One line per (market × reason), not per profile: the 4-profile fan-out of ONE decision
+    // printed the identical blocker four times, burying the distinct causes under repetition. Profiles that
+    // share a verdict are collapsed and listed together — the units-fix (R0.1) applied to the diagnostic.
+    const lines: string[] = [];
     for (const b of proposed) {
       const why: string[] = [];
       if (!hasLive) {
@@ -150,7 +154,19 @@ export function entryBlockerDiag(db: Database, matchId: string, env: Record<stri
       if (!mk) why.push("рынка нет в последнем снапшоте — котировка не найдена");
       else if ((mk.price ?? 0) <= 0) why.push("котировка ≤0 — вход пропущен");
       else if (Math.abs(mk.price - 50) <= 0.6) why.push("котировка ~50¢ — плейсхолдер, zombie-карантин режет филл");
-      out.push(`«${b.market_label}» [${b.strategy_id}/${b.risk_profile_id ?? "medium"}]: ${why.length ? why.join(" · ") : "гейты пройдены — вход ожидался"}`);
+      lines.push(`«${b.market_label}» [${b.strategy_id}/${b.risk_profile_id ?? "medium"}]: ${why.length ? why.join(" · ") : "гейты пройдены — вход ожидался"}`);
+    }
+    // Collapse: identical «market: reason» text across profiles → one line naming the profiles.
+    const byText = new Map<string, string[]>();
+    for (const l of lines) {
+      const m2 = /^«([^»]*)» \[([^\]]*)\]: (.*)$/.exec(l);
+      if (!m2) { out.push(l); continue; }
+      const key = `«${m2[1]}»: ${m2[3]}`;
+      (byText.get(key) ?? byText.set(key, []).get(key)!).push(m2[2]);
+    }
+    for (const [text, profs] of byText) {
+      const uniq = [...new Set(profs)];
+      out.push(`${text}${uniq.length > 1 ? ` [профили: ${uniq.join(", ")}]` : ` [${uniq[0]}]`}`);
     }
   } catch (e) {
     out.push(`диагностика не собралась: ${e instanceof Error ? e.message : String(e)}`);

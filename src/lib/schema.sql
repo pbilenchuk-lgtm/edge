@@ -696,6 +696,30 @@ CREATE TABLE IF NOT EXISTS family_shadow_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_family_shadow_status ON family_shadow_signals(status);
 
+-- [R5 / batch-10] REFUSAL SHADOW: markets the strategist DELIBERATELY walked away from while our own
+-- committed probability implied an edge. Frozen at refusal time and resolved by the same settlement code as
+-- money, so the «79% refusals — discipline or over-tightened screw?» question is answered by a cohort rather
+-- than by argument. Dedup by (match, market, strategy): one decision, not one row per profile or tick.
+CREATE TABLE IF NOT EXISTS refusal_shadow_signals (
+  id            TEXT PRIMARY KEY,
+  match_id      TEXT NOT NULL,
+  strategy_id   TEXT NOT NULL,
+  market_label  TEXT NOT NULL,
+  family        TEXT NOT NULL,
+  our_prob      REAL, implied REAL, edge REAL,
+  entry_cents   REAL,
+  kickoff_at    TEXT,
+  code_version  TEXT,
+  refusal_note  TEXT,
+  hits          INTEGER NOT NULL DEFAULT 1,
+  status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','won','lost','void','unresolved')),
+  resolve_note  TEXT,
+  created_at    TEXT NOT NULL,
+  resolved_at   TEXT,
+  UNIQUE(match_id, market_label, strategy_id)
+);
+CREATE INDEX IF NOT EXISTS idx_refusal_shadow_status ON refusal_shadow_signals(status);
+
 -- Order-book DEPTH snapshots for MEASURED liquidity-capacity (vs the parametric model). Periodic (every
 -- N min on live in-scope matches) + on-fill, storing the top-N bid/ask levels so a future capacity curve
 -- can re-VWAP any scaled size against the REAL book — including skip moments («сколько мы НЕ смогли бы

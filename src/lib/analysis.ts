@@ -10,6 +10,7 @@
 // Graceful: a failed model call marks the assessment failed (§6), no crash.
 // ============================================================
 
+import { recordRefusalForMatch } from "./refusalShadow.js";
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { assessMatchLLM, assessFootballStructured, assessCategoryModifier, effectiveEnv, strategistDecide, resolveModel, type MatchAssessment, type FootballAnalysis, type CategoryDelta } from "./llm.js";
@@ -456,6 +457,13 @@ export async function runStrategists(
         // решением. Движок затем авто-скипает КАЖДЫЙ рынок (нет pick → skip), так что
         // `skipped` == число рынков, и старое «N рынков ниже порога edge» — ложь движка.
         R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — стратег вернул 0 picks (полный пропуск)`, created_at: now() });
+        // [R5 / batch-10] Freeze the walked-away totals with a committed edge as would-be signals. Only a
+        // DELIBERATE refusal (ok=true, zero picks) qualifies — a failed or gated call is not a judgement and
+        // must never enter this cohort. Never blocks the flow.
+        try {
+          const nRef = recordRefusalForMatch(db, matchId, strat.id, (dec as { note?: string }).note ?? null, now());
+          if (nRef > 0) R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `refusal_shadow: ${nRef} тотал(ов) с заявленным краем записаны would-be — отказ будет оценён когортой, а не спором`, created_at: now() });
+        } catch { /* measurement must never break the decision path */ }
       } else if (dec.ok && (skipped + flagged) > 0) {
         // TRUTHFUL audit (правдивый лог): `skipped` = markets the STRATEGIST chose not to pick (his
         // judgement: no edge there), NOT markets a code threshold rejected — so "N рынков ниже порога"

@@ -48,6 +48,16 @@ export interface ZombieConfig {
    *  (a book that "doesn't move" because it's ~0/~100¢ resolved is not a dead placeholder; quarantining it
    *  only hides an efficient quote from the strategist and flaps quarantine↔lift every tick). */
   staleExtremeCents: number;
+  /** [R4 / batch-10] HYSTERESIS margin (cents) and dwell (ticks). Batch 10 measured 260 lift→re-quarantine
+   *  cycles across 28 matches — and only 15 of 417 markets ever wore a second code, so the earlier
+   *  "code-flip" theory was wrong: the driver is markets sitting ON a threshold and crossing it back and
+   *  forth (Draw Yes/No, Over/Under 5.5, Over 4.5 — thin and extreme lines). A boundary that is identical
+   *  in both directions guarantees chatter. So LEAVING quarantine requires clearing the threshold by this
+   *  margin (entering still uses the plain threshold — protection must never be slow to engage), and the
+   *  clean reading must hold for `hysteresisTicks` consecutive evaluations before the market is declared
+   *  healthy again. */
+  hysteresisCents: number;
+  hysteresisTicks: number;
 }
 
 export function loadZombieConfig(env: Record<string, string | undefined> = process.env): ZombieConfig {
@@ -58,6 +68,8 @@ export function loadZombieConfig(env: Record<string, string | undefined> = proce
     resolvedMarginCents: num("FOOTBALL_ZOMBIE_RESOLVED_MARGIN", 12),
     resolvedScoreCertainFloorCents: num("FOOTBALL_ZOMBIE_RESOLVED_SCORE_CERTAIN_FLOOR", 5),
     placeholderBandCents: num("FOOTBALL_ZOMBIE_PLACEHOLDER_BAND", 0.5),
+    hysteresisCents: num("FOOTBALL_ZOMBIE_HYSTERESIS_CENTS", 3),
+    hysteresisTicks: num("FOOTBALL_ZOMBIE_HYSTERESIS_TICKS", 2),
     placeholderStaleMin: num("FOOTBALL_ZOMBIE_PLACEHOLDER_STALE_MIN", 10),
     staleExtremeCents: num("FOOTBALL_ZOMBIE_STALE_EXTREME", 2),
   };
@@ -120,6 +132,35 @@ export function classifyZombie(inp: ZombieInput, cfg: ZombieConfig): ZombieReaso
     return { code: "stale_book", detail: `книга не менялась ${Math.round(inp.bookAgeMin)} мин при живом матче (≥ ${cfg.staleBookMin}) — стухшая/плейсхолдер` };
   }
   return null;
+}
+
+/**
+ * [R4 / batch-10] Is this market clean with a MARGIN — i.e. clear enough of every threshold that calling it
+ * healthy will not be reversed by the next tick's noise?
+ *
+ * classifyZombie uses plain thresholds, which is right for ENTERING quarantine: protection must engage the
+ * instant a book looks wrong. It is wrong for LEAVING: a market sitting exactly on a boundary crosses it back
+ * and forth, and each crossing writes a log line and re-opens the entry gate. Batch 10 measured 260 such
+ * lift→re-quarantine cycles in 28 matches, concentrated in thin/extreme lines (Draw Yes/No, Over/Under 5.5).
+ *
+ * So leaving requires clearing each threshold by `hysteresisCents` (time-based staleness just needs a fresh
+ * book — a price change resets the age to zero by construction, so no extra margin applies there).
+ */
+export function zombieClearWithMargin(inp: ZombieInput, cfg: ZombieConfig): boolean {
+  if (classifyZombie(inp, cfg)) return false;               // still a zombie by the plain rules
+  const h = Math.max(0, cfg.hysteresisCents);
+  // notation spread must sit clearly BELOW the desync threshold, not just under it.
+  if (inp.groupSpreadCents != null && inp.groupSpreadCents > cfg.notationSpreadCents - h) return false;
+  // the price must be clearly OFF the mid-placeholder band (the band itself is tiny, so the margin does the work).
+  if (Math.abs(inp.priceCents - 50) <= cfg.placeholderBandCents + h) return false;
+  // a game-state-resolved leg must be clearly above the resolved-price cap it was quarantined under.
+  if (inp.gsProb != null && inp.gsProb >= 0.995) {
+    const px = inp.askCents ?? inp.priceCents;
+    const scoreCertain = inp.gsProb >= 1 && /\bover\b/i.test(inp.label);
+    const threshold = scoreCertain ? cfg.resolvedScoreCertainFloorCents : 100 - cfg.resolvedMarginCents;
+    if (px <= threshold + h) return false;
+  }
+  return true;
 }
 
 /** Collapse a market label to a canonical OUTCOME key so distinct notations of the same outcome group together

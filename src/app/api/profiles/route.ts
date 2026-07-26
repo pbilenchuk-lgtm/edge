@@ -281,6 +281,22 @@ export async function GET(req: Request) {
           : "все пары в норме или в деградации — структурно выпавших из плана нет.",
       } });
     }
+    // ?report=refusal_shadow → [R5 / batch-10] the strategist refused 22 of 28 football matches. Discipline
+    // or an over-tightened screw? Not an argument — a cohort: every totals market walked away from with a
+    // committed edge >= the floor is frozen and resolved by the SAME settlement code as money. Below n>=25
+    // nothing is concluded and the threshold is not touched.
+    if (new URL(req.url).searchParams.get("report") === "refusal_shadow") {
+      const { buildRefusalShadow } = await import("@/lib/refusalShadow");
+      return NextResponse.json({ ok: true, report: buildRefusalShadow(db) });
+    }
+    // ?report=prematch_timeliness -> [R3] are proposals landing BEFORE kickoff? A late decision is stamped
+    // origin='live' and ft_blind refuses it on a blind fixture — the golden-cell tap, not cosmetics. Includes
+    // the honest ft_blind TAM (blind funded fixtures with genuinely traded FT books, placeholders excluded).
+    if (new URL(req.url).searchParams.get("report") === "prematch_timeliness") {
+      const { buildPrematchTimeliness } = await import("@/lib/prematchAnchor");
+      const d = Number(new URL(req.url).searchParams.get("days"));
+      return NextResponse.json({ ok: true, report: buildPrematchTimeliness(db, Number.isFinite(d) && d > 0 ? d : 7) });
+    }
     // ?report=leg_consistency → [Z2(а) / batch-9] one market = one contract, so its settled legs must not
     // carry BOTH directions. Groups settled bets by (match × canonical market × strategy) and separates the
     // legitimate shape (a partial cut + the held remainder → labelled, and the signal collapses to void [M6])
