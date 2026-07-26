@@ -27,12 +27,14 @@ import { readTradingMode } from "./executor/safety.js";
 import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
 import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
-import { classifyZombie, notationSpreads, loadZombieConfig, outcomeKey, type ZombieReason } from "./zombieMarket.js";
+import { classifyZombie, zombieClearWithMargin, notationSpreads, loadZombieConfig, outcomeKey, type ZombieReason } from "./zombieMarket.js";
 import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
 import { exitDecision, winsOnEventOccurrence, isStaleProposal, proposalDrift } from "./thresholds.js";
 import { underThesisMarginGoals, resolveFootballMarket } from "./settlement.js";
 import { serializeEntryMeta, parseEntryMeta, isFtBlindBet, type BetEntryMeta } from "./betMeta.js";
 import { canonicalizeDrawForMatch, drawCanonEnabled, DRAW_YES_KEYS } from "./drawCanon.js";
+import { inAnchorWindow, ANCHOR_MAX_PER_TICK } from "./prematchAnchor.js";
+import { resolveRefusalShadowSignals } from "./refusalShadow.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
 import { matchThesisRoom, thesisCapUsd, dailyClusterRoom, dailyClusterCapUsd } from "./thesisExposure.js";
@@ -519,8 +521,30 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
   const queue = activeMatches(db)
     .map((x) => ({ ...x, kickMs: x.match.kickoff_at ? (Date.parse(x.match.kickoff_at) || Number.POSITIVE_INFINITY) : Number.POSITIVE_INFINITY }))
     .sort((a, b) => a.kickMs - b.kickMs);
-  for (const { comp, match: m } of queue) {
-    if (out.length >= max) break;
+  // [R3 / batch-10] T-MINUS ANCHOR LANE. Sorting by kickoff was never enough: the pass takes only `max`
+  // matches per tick, so on a busy slate a fixture kicking off in 20 minutes sits behind five others every
+  // tick until its whistle passes — which is exactly how batch 10's proposals ended up 3, 7 and 9 minutes
+  // LATE, stamped origin='live', and refused by ft_blind on blind fixtures. A funded match inside the
+  // T-minus window therefore gets its OWN budget, spent before the general queue. This is a priority lane,
+  // not a bigger cap: with no imminent kickoffs the pass behaves exactly as before.
+  // The queue is already sorted by kickoff — but LIVE matches carry the smallest kickMs, so on a busy slate
+  // they occupy every slot each tick and an upcoming fixture 20 minutes from its whistle waits behind them.
+  // That is the actual starvation mechanism, so anchors are served BEFORE live matches, from a RESERVED share
+  // of the same per-tick budget. The reserve never raises the total (`max` bounds the LLM burst and memory on
+  // the small instance) — it only decides who gets the slots first.
+  const anchorEnv = deps.env ?? process.env;
+  const anchorBudget = Math.min(ANCHOR_MAX_PER_TICK(anchorEnv), max);
+  const isAnchor = (x: typeof queue[number]) =>
+    (budgetByComp.get(x.comp) ?? 0) > 0 && inAnchorWindow(x.match, nowMs, anchorEnv);
+  const anchors = queue.filter(isAnchor);
+  const ordered = [...anchors, ...queue.filter((x) => !anchors.includes(x))];
+  let anchorSpent = 0;
+  for (const entry of ordered) {
+    const { comp, match: m } = entry;
+    const viaAnchor = anchors.includes(entry);
+    // The anchor lane spends its own budget; everything else honours the general cap.
+    if (out.length >= max) break;                       // the per-tick total is unchanged
+    if (viaAnchor && anchorSpent >= anchorBudget) continue; // …the reserve only caps how much of it anchors take
     if (opts.liveOnly && m.state !== "live") continue;             // live-cycle back-fill: only rescue live-but-unanalysed matches
     if ((budgetByComp.get(comp) ?? 0) <= 0) continue;              // unfunded → skip (economical)
     if (!R.latestMarkets(db, m.id).length) continue;               // needs tradeable odds
@@ -551,6 +575,7 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
     const skipStrat = m.state === "live" && !justKickedOff(m, nowMs);
     const r = await analyzeMatch(db, m.id, deps, { skipStrategists: skipStrat });
     out.push({ matchId: m.id, match: `${m.home}–${m.away}`, stage, ok: r.ok, bets: r.betsCreated ?? 0 });
+    if (viaAnchor) anchorSpent++; // the priority lane draws from its own budget, never from the general cap
   }
   return out;
 }
@@ -1025,6 +1050,12 @@ function closeBetEarly(db: Database, bet: { id: string; stake: number | null; en
  * a full close; otherwise the closed slice is booked as a settled child bet and
  * the original open bet's stake shrinks by that slice, leaving the rest running.
  */
+/** [R6] Minimum remainder (USD) worth keeping open after a partial cut; below it the position is closed
+ *  whole. Env-tunable; the default is deliberately small — this removes dust, not real positions. */
+const PARTIAL_DUST_FLOOR_USD = (env: Record<string, string | undefined> = process.env) => {
+  const n = Number(env.PARTIAL_DUST_FLOOR_USD);
+  return Number.isFinite(n) && n >= 0 ? n : 5;
+};
 function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceCents: number, minute: string, now: string, tag?: string): { pnl: number; partial: boolean } {
   if (fraction >= 1) return { pnl: closeBetEarly(db, bet, currentPriceCents, "", minute, now), partial: false };
   // Re-read: another flow may have already (partially) closed this position
@@ -1036,6 +1067,13 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
   const stake = bet.stake ?? 0, entry = bet.entry_price ?? 0;
   const closed = round2(stake * fraction);
   if (closed <= 0 || entry <= 0) return { pnl: closeBetEarly(db, bet, currentPriceCents, "", minute, now), partial: false };
+  // [R6 / batch-10] DUST FLOOR. A cascade of partial cuts on one position left $0.25 tails behind — seven exit
+  // legs whose remainders were smaller than the commission needed to close them, each still carrying a row, a
+  // mark to refresh and a settle to account. A remainder that cannot pay for its own exit is not a position,
+  // it is bookkeeping noise: when the leftover would fall below the floor, close the whole thing instead.
+  if (round2(stake - closed) < PARTIAL_DUST_FLOOR_USD()) {
+    return { pnl: closeBetEarly(db, bet, currentPriceCents, "", minute, now), partial: false };
+  }
   const payout = round2(closed * (currentPriceCents / entry));
   const pnl = round2(payout - closed);
   R.insertBet(db, {
@@ -1454,15 +1492,42 @@ export function footballZombieMap(
   // trade_log.strategy_id is FK-bound; the quarantine is match-level, so we attach the informational line to a
   // real football strategy id (dedup keeps it to one line per label+code). No football strategy → don't log.
   const logSid = log ? (R.listStrategies(db).find((s) => s.sport_id === "football")?.id ?? null) : null;
+  // Consecutive clean-with-margin readings per label, persisted across ticks in the episode marker so the
+  // dwell survives process restarts (an in-memory counter would reset every deploy and defeat the point).
+  const clearTicks = new Map<string, number>();
+  for (const rec of R.metaByPrefix(db, `${ZOMBIE_EP}${m.id} `)) {
+    const label = rec.key.slice(`${ZOMBIE_EP}${m.id} `.length);
+    try { const p = JSON.parse(rec.value); if (Number(p.clear ?? 0) > 0) clearTicks.set(label, Number(p.clear)); } catch { /* ignore */ }
+  }
   for (const mk of markets) {
     const gs = minute != null
       ? liveAdjustedProb(mk.label, { home: m.home, away: m.away, scoreHome: m.score_home, scoreAway: m.score_away, minute, core }, lpCfg)
       : null;
     const bookAge = R.bookStaleMinutes(db, m.id, mk.label, mk.price, now);
-    const z = classifyZombie({ label: mk.label, priceCents: mk.price, askCents: mk.ask_cents ?? null, gsProb: gs?.prob ?? null, groupSpreadCents: spreads.get(mk.label) ?? null, bookAgeMin: bookAge, live: true }, cfg);
-    if (!z) continue;
-    out.set(mk.label, z);
-    if (logSid) throttleZombieLog(db, m, mk.label, z.code, `zombie_quarantine:${z.code} «${mk.label}»: ${z.detail} — рынок на карантине для всех потребителей (вход/контекст)`, logSid, now);
+    const zi = { label: mk.label, priceCents: mk.price, askCents: mk.ask_cents ?? null, gsProb: gs?.prob ?? null, groupSpreadCents: spreads.get(mk.label) ?? null, bookAgeMin: bookAge, live: true };
+    const z = classifyZombie(zi, cfg);
+    if (z) {
+      out.set(mk.label, z);
+      clearTicks.delete(mk.label); // any fresh breach restarts the dwell — protection engages instantly
+      if (logSid) throttleZombieLog(db, m, mk.label, z.code, `zombie_quarantine:${z.code} «${mk.label}»: ${z.detail} — рынок на карантине для всех потребителей (вход/контекст)`, logSid, now);
+      continue;
+    }
+    // [R4 / batch-10] HYSTERESIS on the way OUT. Clean by the plain rules is not enough to be declared
+    // healthy: a market sitting ON a threshold flips across it tick after tick (260 lift→re-quarantine
+    // cycles in batch 10). It must be clean WITH MARGIN, and stay so for `hysteresisTicks` consecutive
+    // evaluations. While it serves that dwell the market REMAINS quarantined for every consumer — the
+    // conservative direction: we keep protection on until health is proven, never the reverse.
+    const openEp = R.metaGet(db, `${ZOMBIE_EP}${m.id} ${mk.label}`);
+    if (!openEp) continue;                       // never quarantined → nothing to hold or lift
+    if (!zombieClearWithMargin(zi, cfg)) {
+      clearTicks.delete(mk.label);
+      out.set(mk.label, lastEpisodeReason(openEp, mk.label));  // still inside the boundary → stay blocked
+      continue;
+    }
+    const n = (clearTicks.get(mk.label) ?? 0) + 1;
+    clearTicks.set(mk.label, n);
+    try { const p = JSON.parse(openEp); R.metaSet(db, `${ZOMBIE_EP}${m.id} ${mk.label}`, JSON.stringify({ ...p, clear: n }), now); } catch { /* best-effort */ }
+    if (n < cfg.hysteresisTicks) { out.set(mk.label, lastEpisodeReason(openEp, mk.label)); } // dwell not served yet
   }
   // [P2 / batch-9] POSITIVE lift only. The old sweep lifted a market merely because it was absent from THIS
   // evaluation's map — which is not evidence of health, and produced 273 «рынок снова торгуем» lines in batch
@@ -1494,6 +1559,13 @@ export function footballZombieMap(
 // + autoEnter fill choke) that call footballZombieMap each tick collapse to a single episode line instead of
 // re-logging every tick — the ~90k skip-line storm (staleSweep-frozen matches ran this for hours) becomes a
 // handful of transition lines. Replaces the old slice(-14) tail dedup, which failed once #markets×#consumers>14.
+/** [R4] The reason a market is STILL held while it serves its hysteresis dwell — the episode's last code,
+ *  so consumers see a coherent reason rather than a blank block. */
+function lastEpisodeReason(epJson: string, label: string): ZombieReason {
+  let code = "stale_book";
+  try { const p = JSON.parse(epJson); if (typeof p.code === "string") code = p.code; } catch { /* keep default */ }
+  return { code: code as ZombieReason["code"], detail: `«${label}» вышел из-под порога, но ещё не подтвердил здоровье с запасом (гистерезис) — карантин держится` };
+}
 const ZOMBIE_EP = "zombie_ep:";
 /**
  * [P2 / batch-9] The episode is keyed on the MARKET, not on (market, code).
@@ -2304,6 +2376,7 @@ export async function runAutoCycle(
   stepSync("tennisPmvSettle", () => settleTennisPmvBets(db, deps), 0);     // safety-net settle for PMV props (Gate-0.2 void clauses)
   stepSync("pmvShadowResolve", () => { const r = resolvePmvShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // score flag-only would-be entries post-match (no money)
   stepSync("familyShadowResolve", () => { const r = resolveFamilyShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // [Phase 1.1] score demoted-family would-be entries post-match (no money)
+  stepSync("refusalShadowResolve", () => { const r = resolveRefusalShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // [R5] score the markets the strategist walked away from
   stepSync("svShadowResolve", () => { const r = resolveSvShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // score set_value flag-only would-be entries post-match (no money)
   const reassess = await step("reassess", () => strategistReassess(db, deps, { newEventMatchIds: triggers, labelFor }), { exits: [], entries: [], llmCalls: 0, llmFail: 0 } as ReassessResult);
   const exited = [...await step("exits", () => evaluateExits(db, deps), [] as ExitItem[]), ...reassess.exits];

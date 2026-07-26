@@ -2225,8 +2225,12 @@ test("P2: a still-stale book (220m) is NOT lifted; a genuinely fresh one is, and
   // Now the book genuinely refreshes (a new, different price stamped now) → it no longer classifies as a
   // zombie, the re-measured age is ~0, and the lift is EARNED. The market stays in the list so the age is read.
   R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 5.5", price: 61, ai_prob: null, liquidity: "1000", external_ref: "T1", snapshot_at: now, is_closing: false });
+  // [R4 / batch-10] HYSTERESIS: one clean reading is no longer enough — a market sitting on a threshold
+  // flips across it tick after tick (260 lift→re-quarantine cycles in batch 10). The dwell is 2 ticks.
+  footballZombieMap(db, m, "football", R.latestMarkets(db, mid), 30, {}, now);
+  assert.ok(!R.tradeLogForMatch(db, mid).some((l) => /zombie_lifted «Over 5.5»/.test(l.text)), "ONE clean tick does not lift — the dwell must be served");
   footballZombieMap(db, m, "football", R.latestMarkets(db, mid), 30, {}, now);
   const lift = R.tradeLogForMatch(db, mid).find((l) => /zombie_lifted «Over 5.5»/.test(l.text));
-  assert.ok(lift, "a demonstrably fresh book IS lifted");
+  assert.ok(lift, "after the second consecutive clean-with-margin reading the lift is earned");
   assert.match(lift!.text, /книга свежая \(0м/, "the observed age is printed, so a premature lift can never hide again");
 });
