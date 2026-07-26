@@ -20,6 +20,7 @@
 import { openDb, dbPath } from "../src/lib/db.js";
 import { CODE_VERSION } from "../src/lib/betMeta.js";
 import { pmvNetEvCents } from "../src/lib/tennisPmv.js";
+import { isFtBlindBet } from "../src/lib/betMeta.js";
 
 const argSince = process.argv.find((a) => a.startsWith("--since="))?.slice(8);
 const since = argSince ?? new Date(Date.now() - 24 * 3600_000).toISOString();
@@ -156,9 +157,39 @@ const rateLine = (name: string, count: number, baseCount: number, note: string) 
   P(`    ${note} · база: ${BASE.at}`);
 };
 
-line("ft_blind входы", n1(
-  `SELECT COUNT(*) n FROM bets WHERE created_at >= ? AND (rationale LIKE '%ft_blind%' OR strategy_id = 'ft_blind')`, fireSince),
+// TWO INDEPENDENT READINGS, on purpose. The first version of this counter looked for the string "ft_blind"
+// in bets.rationale — a field the entry path never writes it to (the mark goes to entry_meta.ftBlind and to
+// a trade_log line). It would have reported 0 forever while the mode worked perfectly, which is exactly the
+// mistake already made once in PR #49: a diagnostic that guesses the wrong field is worse than none, because
+// it manufactures a false negative and sends the next investigation down a dead end.
+//
+// So the authoritative read now uses the SAME helper the money path and the cohort reports use, and the
+// trade_log line is kept alongside as an independent witness. If the two ever disagree, that disagreement is
+// itself the finding — one of the two writes is missing.
+const ftBlindBets = q<any>(`SELECT entry_meta FROM bets WHERE created_at >= ?`, fireSince).filter(isFtBlindBet).length;
+const ftBlindLogs = n1(`SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE '%ft_blind%'`, fireSince);
+line("ft_blind входы (entry_meta.ftBlind — источник истины)", ftBlindBets,
   `V0.1: до деплоя было ровно 0 из-за origin='live' на опоздавшем анализе`);
+P(`    свидетель из trade_log: ${ftBlindLogs} строк${ftBlindBets !== ftBlindLogs ? ` — ⚠ РАСХОЖДЕНИЕ с ${ftBlindBets}: одна из двух записей не делается, это отдельный баг` : ""}`);
+// A zero here is only informative once it can be ATTRIBUTED. "No blind fixture existed" and "blind fixtures
+// existed, were analysed in time, and still produced nothing" are opposite conclusions with the same count,
+// and treating them alike is how V0.1 stayed unexplained for a whole batch. So the funnel is printed.
+const blindFunnel = q<any>(
+  `SELECT m.id, m.home, m.away, m.kickoff_at,
+          (SELECT COUNT(*) FROM match_live ml WHERE ml.match_id = m.id)  AS live_rows,
+          (SELECT COUNT(*) FROM markets mk WHERE mk.match_id = m.id)      AS mkts,
+          (SELECT MIN(a.created_at) FROM assessments a WHERE a.match_id = m.id AND a.status='ok') AS first_ok
+     FROM matches m JOIN competitions c ON c.id = m.competition_id
+    WHERE c.budget > 0 AND m.kickoff_at >= ? AND c.sport_id = 'football'`, fireSince);
+const blind = blindFunnel.filter((r) => r.live_rows === 0 && r.mkts > 0);
+const blindAnalysed = blind.filter((r) => r.first_ok);
+const blindInTime = blindAnalysed.filter((r) => r.first_ok < r.kickoff_at);
+P(`    воронка слепых фикстур в окне: ${blind.length} слепых с котировками → ${blindAnalysed.length} проанализировано → **${blindInTime.length} успело ДО свистка**`);
+P(blind.length === 0
+  ? `    → слепых фикстур в окне просто НЕ БЫЛО: ноль выше ничего не говорит про режим, нужен слейт с ними`
+  : blindInTime.length === 0
+    ? `    → анализ по-прежнему не успевает к слепым: чинить дальше вход, а не режим`
+    : `    → анализ успевает, но входов нет: узкое место ПОСЛЕ анализа (стратег не предлагает, сайзинг режет, нет FT-рынка или упирается в кэп) — вот где копать`);
 line("net_ev_cut (теннис)", n1(
   `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'net_ev_cut%'`, fireSince),
   `гейт PR #46 режет кандидатов до денег`);
