@@ -85,9 +85,25 @@ export interface LiveState {
   // a panic actually deep enough to buy back, and a book deep enough to fill. Both undefined → fail OPEN.
   panicDropCents?: number | null;   // biggest adverse move (¢) on a tracked market since its pre-panic anchor
   bookUsd?: number | null;          // depth of the deepest tracked market ($)
+  // [G3 / batch-11] Minutes since the most recent event that could have TRIGGERED a buyback (goal / red card).
+  // Distinct from the window check below: that one asks whether the LLM's own declared window has passed, this
+  // one asks how STALE the panic is. St Louis had a red card on 12' and an entry on 45'+5 — the declared window
+  // was still open, but the market had had 33 minutes to re-price, so what was bought was not a panic but a
+  // half-match melting option. −$251. Undefined → fail OPEN, as with every other pre-filter here.
+  triggerAgeMin?: number | null;
 }
 // Env-tunable floors; defaults are deliberately permissive so the filter cuts cost, never a real setup.
 const ovrNum = (v: string | undefined, d: number) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+/** [G3] How fresh a triggering event must be for MONEY. Ratified at 3 minutes against a measured distribution:
+ *  across batch 11, the median event→reassessment latency was 1 minute, p75 2, p90 4. A 10-minute rule was
+ *  proposed first and rejected on that evidence — it would have covered 98% of reactions, i.e. cut almost
+ *  nothing, and been a threshold in name only (the same way the $250 thesis cap was decoration while its env
+ *  vars were unset). Seconds are not reachable: the floor is our own tick cadence. */
+export const OVR_TRIGGER_FRESH_MIN = (env: Record<string, string | undefined> = process.env) => ovrNum(env.OVR_TRIGGER_FRESH_MIN, 3);
+/** [G3] The sensitivity band above the money threshold. A trigger in 3..6 minutes does NOT get money, but is
+ *  recorded so the question «was 3 too tight?» can later be answered from data rather than re-argued. Beyond
+ *  the band the trigger is DETRIGGERED: no LLM call at all, because a stale panic is not a setup. */
+export const OVR_TRIGGER_FLAG_MIN = (env: Record<string, string | undefined> = process.env) => ovrNum(env.OVR_TRIGGER_FLAG_MIN, 6);
 export const OVR_MIN_PANIC_CENTS = () => ovrNum(process.env.OVR_MIN_PANIC_CENTS, 6);
 export const OVR_MIN_BOOK_USD = () => ovrNum(process.env.OVR_MIN_BOOK_USD, 500);
 
@@ -117,6 +133,17 @@ export function overreactionGate(battleSheet: string | null | undefined, live: L
   const a = armedTriggers(battleSheet);
   if (a.kind === "unparsed") return { call: true }; // can't verify → don't risk skipping a real setup
   if (a.kind === "none") return { call: false, reason: "нет заряженных buyback-триггеров — вход невозможен" };
+  // [G3 / batch-11] TRIGGER FRESHNESS, checked before anything else: an overreaction buyback is a bet that the
+  // market has MIS-priced a shock it has just absorbed. Minutes later there is no mispricing left to buy — the
+  // book has re-priced, and what is on offer is a melting option. This is a different question from the window
+  // check further down (which only asks whether the LLM's own stated deadline has passed), and St Louis passed
+  // that one while being 33 minutes stale.
+  const age = live.triggerAgeMin;
+  if (age != null && Number.isFinite(age)) {
+    const fresh = OVR_TRIGGER_FRESH_MIN(), band = OVR_TRIGGER_FLAG_MIN();
+    if (age > band) return { call: false, reason: `триггер-событие произошло ${Math.round(age)}′ назад > ${band}′ — паника давно отыграна, выкупать нечего: детриггер, стратега не будим (ovr_stale_detrigger)` };
+    if (age > fresh) return { call: false, reason: `триггер-событие ${Math.round(age)}′ назад — в полосе чувствительности ${fresh}–${band}′: деньги НЕ идут, случай записан, чтобы позже проверить по данным, не слишком ли туг порог ${fresh}′ (ovr_stale_flag)` };
+  }
   let expired = 0, dormant = 0;
   for (const t of a.list) {
     const blob = triggerBlob(t);

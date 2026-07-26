@@ -110,3 +110,48 @@ test("G5: a match with no draw book produces no observation at all", () => {
   probeDrawCanon(db, "m1", [{ label: "Over 2.5" }, { label: "Under 2.5" }], new Map(), "2026-07-27T16:40:00Z", {});
   assert.equal(buildDrawCanonProbe(db).observations, 0, "nothing to say about a match that has no draw market");
 });
+
+// ── G3: trigger freshness — the St Louis case ────────────────────────────────────────────────────
+// Red card on 12', entry on 45'+5: the LLM's own declared window was still open, so the existing window check
+// passed it. What was bought was not a mispriced shock but a half-match melting option — the book had had 33
+// minutes to re-price. −$251. Ratified at 3 minutes against a MEASURED distribution: median event→reassess
+// latency 1', p75 2', p90 4'. The first proposal of 10 minutes was rejected on that evidence — it would have
+// covered 98% of reactions and cut essentially nothing.
+import { overreactionGate, OVR_TRIGGER_FRESH_MIN, OVR_TRIGGER_FLAG_MIN } from "../src/lib/reassessGate.js";
+
+const SHEET = JSON.stringify({
+  live_triggers_armed: [{ name: "buyback", condition: "ранний гол андердога", window: "до ~70'" }],
+});
+
+test("G3: a stale trigger is DETRIGGERED — no money and no LLM call", () => {
+  // St Louis: red card 12', now 50' → 38 minutes stale, far past the 6' band.
+  const g = overreactionGate(SHEET, { totalGoals: 0, minute: 50, triggerAgeMin: 38 });
+  assert.equal(g.call, false, "a panic 38 minutes old is not a setup");
+  assert.match((g as any).reason, /ovr_stale_detrigger/);
+  assert.match((g as any).reason, /паника давно отыграна/);
+});
+
+test("G3: the 3–6′ band spends no money but is recorded, so the threshold can be re-argued from data", () => {
+  const g = overreactionGate(SHEET, { totalGoals: 1, minute: 30, triggerAgeMin: 5 });
+  assert.equal(g.call, false, "money does not go in the sensitivity band");
+  assert.match((g as any).reason, /ovr_stale_flag/);
+  assert.match((g as any).reason, /не слишком ли туг порог/, "the note says what the record is FOR");
+  assert.equal(OVR_TRIGGER_FRESH_MIN({}), 3);
+  assert.equal(OVR_TRIGGER_FLAG_MIN({}), 6);
+});
+
+test("G3: a FRESH trigger still passes, and an unknown age fails OPEN", () => {
+  assert.equal(overreactionGate(SHEET, { totalGoals: 1, minute: 26, triggerAgeMin: 2 }).call, true,
+    "2' after the goal is exactly the setup this strategy exists for");
+  assert.equal(overreactionGate(SHEET, { totalGoals: 1, minute: 26, triggerAgeMin: null }).call, true,
+    "no measurable age → fail OPEN, never cut a real setup blind");
+  assert.equal(overreactionGate(SHEET, { totalGoals: 1, minute: 26 }).call, true,
+    "field absent entirely → also open (same rule as the other pre-filters)");
+});
+
+test("G3: freshness is checked BEFORE the declared-window rule — that rule is what St Louis passed", () => {
+  // Window says «до ~70'» and we are on 50', so the old check is satisfied; only freshness rejects it.
+  const g = overreactionGate(SHEET, { totalGoals: 1, minute: 50, triggerAgeMin: 38 });
+  assert.equal(g.call, false);
+  assert.match((g as any).reason, /триггер-событие/, "rejected on staleness, not on the window");
+});
