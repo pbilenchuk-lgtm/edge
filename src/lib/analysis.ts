@@ -75,7 +75,7 @@ function renderFootballBody(as: AssembledAnalysis): string {
 }
 
 export async function analyzeMatch(
-  db: Database, matchId: string, deps: AnalyzeDeps = {}, opts: { skipStrategists?: boolean } = {},
+  db: Database, matchId: string, deps: AnalyzeDeps = {}, opts: { skipStrategists?: boolean; allowNoLineup?: boolean } = {},
 ): Promise<AnalyzeResult> {
   const now = deps.now ?? (() => new Date().toISOString());
   const match = R.getMatch(db, matchId);
@@ -92,7 +92,13 @@ export async function analyzeMatch(
   // lineup data (без составов анализ не делаем). A live match's lineup is out by
   // definition, so it's never held here. Returned before any assessment is
   // recorded, so a match still waiting on lineups is «ждём состав», not a failure.
-  if (R.awaitingLineup(db, match, sport)) {
+  // …unless the CALLER has established that no teamsheet is coming. The gate assumes lineups are merely
+  // late; for a fixture with no provider binding at all there is nothing to wait for, and waiting means the
+  // analysis only ever runs after kickoff (state='live' is what clears this gate), which stamps the decision
+  // origin='live' and makes ft_blind refuse it. The blind-fixture judgement lives in ONE place — autoAnalyze,
+  // which knows the anchor window and the feed state — and is passed down explicitly rather than re-derived
+  // here, so the two call sites cannot drift into disagreeing about what "blind" means.
+  if (!opts.allowNoLineup && R.awaitingLineup(db, match, sport)) {
     return { ok: false, error: "ждём состав — без стартового состава анализ не делаем", stage: "pre_lineup" };
   }
   const prompt = R.analyticsPromptFor(db, sport, match.competition_id);

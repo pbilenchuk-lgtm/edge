@@ -553,12 +553,27 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
     // и без лайва не торгуем, поэтому и анализировать нечего (autoEnter всё равно держит вход
     // до составов). Silently skip; it becomes eligible the tick after the provider publishes
     // lineups. A live match is never held (awaitingLineup is false once state=live).
-    if (R.awaitingLineup(db, m, sportByComp.get(comp) ?? "football")) continue;
+    // …EXCEPT when the teamsheet can never arrive. The gate's premise is «составы выйдут, просто позже» —
+    // true for a fixture bound to a feed, false for a BLIND one, which has no provider to publish them. For
+    // those the gate is not a delay but a permanent block: they stay unanalysable until kickoff flips
+    // state='live' (which is what clears awaitingLineup), the pass finally runs late, and the decision is
+    // stamped origin='live' — the very stamp that made ft_blind refuse and read as 0.
+    //
+    // Measured, not assumed: of 79 late analyses in a week, 61 (77%) had no lineups against 31% of the
+    // on-time ones, and 55 had no feed binding at all. The ft_blind carve-out below was written for exactly
+    // these fixtures and sat one line too low to ever run for them.
+    //
+    // Capital is NOT loosened by this: autoEnter holds pre-lineup fills on its own (`preLineupHold`), so a
+    // fixture that later binds still cannot deploy money before its XI is out. This buys the ANALYSIS a
+    // pre-kickoff timestamp, nothing more.
+    const analyzeSport = sportByComp.get(comp) ?? "football";
+    const blindAnchor = viaAnchor && !hasLiveData(db, m) && ftBlindEnterable(db, m, deps.env ?? process.env);
+    if (!blindAnchor && R.awaitingLineup(db, m, analyzeSport)) continue;
     // R3 (e7) deep-tree economy: a BLIND football match (no provider bind — un-manageable in
     // play) that no mode can enter — ft_blind off, or on but no FT-settled market to hold — gets
     // NO pre-match analysis. Nothing is recorded, so it analyses fresh the tick it binds; a
     // covered fixture normally binds before kickoff, so only genuinely-dark matches stay skipped.
-    if ((sportByComp.get(comp) ?? "football") === "football" && !hasLiveData(db, m) && !ftBlindEnterable(db, m, deps.env ?? process.env)) continue;
+    if (analyzeSport === "football" && !hasLiveData(db, m) && !ftBlindEnterable(db, m, deps.env ?? process.env)) continue;
     const stage = m.lineup_out ? "post_lineup" : "pre_lineup";
     // Time gate: pre-match assessment only within ~12h of kickoff. Matches with no known
     // kickoff (e.g. an ESPN live match) aren't gated.
@@ -574,7 +589,7 @@ export async function autoAnalyze(db: Database, deps: EngineDeps = {}, opts: { m
     // grace of the whistle, prices still pre-match), give the pre-match strategist
     // its one shot; forfeiting it would leave the match wholly un-traded.
     const skipStrat = m.state === "live" && !justKickedOff(m, nowMs);
-    const r = await analyzeMatch(db, m.id, deps, { skipStrategists: skipStrat });
+    const r = await analyzeMatch(db, m.id, deps, { skipStrategists: skipStrat, allowNoLineup: blindAnchor });
     out.push({ matchId: m.id, match: `${m.home}–${m.away}`, stage, ok: r.ok, bets: r.betsCreated ?? 0 });
     if (viaAnchor) anchorSpent++; // the priority lane draws from its own budget, never from the general cap
   }

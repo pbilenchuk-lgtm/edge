@@ -150,3 +150,67 @@ test("R1: a market locked AGAINST us is reported honestly but never read as «ho
   assert.equal(v.locked, true, "the state IS locked — reported truthfully");
   assert.equal(holdTailToSettle(against, null, {}).locked, false, "…but holding a worthless tail is not a strategy");
 });
+
+// ── R3 follow-up: the lineup gate blocked the very fixtures ft_blind was written for ─────────────
+// Measured, not assumed: of 79 late analyses in a week, 77% had no lineups (vs 31% of the on-time ones) and
+// 55 had no feed binding at all. The ft_blind carve-out in autoAnalyze sat BELOW awaitingLineup, so a blind
+// fixture was skipped before the carve-out could admit it — and became analysable only once kickoff flipped
+// state to 'live', which is precisely the origin='live' stamp that made ft_blind refuse.
+import { autoAnalyze } from "../src/lib/lifecycle.js";
+import { seedDatabase } from "../src/lib/seed.js";
+const mockLLM = (a: unknown) => (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify(a) }] }) })) as any;
+
+const LLM_CORE = {
+  match_type: "group", match_type_reason: "x",
+  core: { xg_home: 1.4, xg_away: 1.1, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 },
+  overrides: [], drivers: [], scenarios: [],
+  calibration: { xg_confidence: 0.6, scenario_confidence: 0.5, sample_size: 8, notes: "" }, unknowns: [],
+};
+
+/** A funded football fixture with an FT-settled book, NO lineups and NO feed binding — the blind class. */
+function blindFixture(db: any, id: string, kickoff: string, now: string) {
+  const comp = R.listCompetitions(db, "football").find((c: any) => c.budget > 0)!;
+  R.insertMatch(db, { id, competition_id: comp.id, home: "Blind", away: "Dark", state: "upcoming", lineup_out: false, kickoff_at: kickoff, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id });
+  R.insertMarket(db, { id: R.uid(), match_id: id, label: "Blind vs Dark: Over 2.5", price: 52, ai_prob: 0.6, liquidity: null, external_ref: "t", snapshot_at: now, is_closing: false });
+  return id;
+}
+
+test("R3: a BLIND fixture inside the T-minus window is analysed pre-kickoff — the lineup gate cannot wait for a teamsheet no provider will publish", async () => {
+  const db = openDb(":memory:"); seedDatabase(db);
+  db.exec("PRAGMA foreign_keys=OFF; DELETE FROM matches; PRAGMA foreign_keys=ON;");
+  const now = "2026-07-11T12:00:00.000Z";
+  const deps = { now: () => now, fetchImpl: mockLLM(LLM_CORE), env: { ANTHROPIC_API_KEY: "k", FT_BLIND_ENABLED: "true" } };
+  blindFixture(db, "m-blind", "2026-07-11T12:30:00.000Z", now);   // T−30′: inside the anchor window
+  const ran = await autoAnalyze(db, deps as any, { max: 4 });
+  assert.ok(ran.some((a) => a.matchId === "m-blind" && a.ok), "analysed BEFORE the whistle — this is the whole point of the repair");
+});
+
+test("R3: the bypass is narrow — a COVERED fixture without lineups still waits, and a blind one outside the window still waits", async () => {
+  const now = "2026-07-11T12:00:00.000Z";
+  const deps = { now: () => now, fetchImpl: mockLLM(LLM_CORE), env: { ANTHROPIC_API_KEY: "k", FT_BLIND_ENABLED: "true" } };
+
+  // (a) COVERED (a feed row exists) but the teamsheet has not landed: the gate's premise holds — lineups are
+  //     coming — so waiting is correct and nothing is loosened for it.
+  const db1 = openDb(":memory:"); seedDatabase(db1);
+  db1.exec("PRAGMA foreign_keys=OFF; DELETE FROM matches; PRAGMA foreign_keys=ON;");
+  blindFixture(db1, "m-covered", "2026-07-11T12:30:00.000Z", now);
+  R.upsertMatchLive(db1, { match_id: "m-covered", espn_event_id: "e1", league: "l", home_lineup: null, away_lineup: null, stats: null, updated_at: now });
+  assert.ok(!(await autoAnalyze(db1, deps as any, { max: 4 })).some((a) => a.matchId === "m-covered"),
+    "bound to a feed → the teamsheet is merely late, not absent; the gate still holds");
+
+  // (b) Blind, but 6 hours out: outside the T-minus window there is no urgency to trade against, and the
+  //     fixture may still bind before kickoff.
+  const db2 = openDb(":memory:"); seedDatabase(db2);
+  db2.exec("PRAGMA foreign_keys=OFF; DELETE FROM matches; PRAGMA foreign_keys=ON;");
+  blindFixture(db2, "m-far", "2026-07-11T18:00:00.000Z", now);
+  assert.ok(!(await autoAnalyze(db2, deps as any, { max: 4 })).some((a) => a.matchId === "m-far"),
+    "outside the anchor window the bypass does not apply");
+
+  // (c) Blind and inside the window, but ft_blind is OFF: nothing could enter it, so analysing is pure waste.
+  const db3 = openDb(":memory:"); seedDatabase(db3);
+  db3.exec("PRAGMA foreign_keys=OFF; DELETE FROM matches; PRAGMA foreign_keys=ON;");
+  blindFixture(db3, "m-off", "2026-07-11T12:30:00.000Z", now);
+  const depsOff = { now: () => now, fetchImpl: mockLLM(LLM_CORE), env: { ANTHROPIC_API_KEY: "k", FT_BLIND_ENABLED: "false" } };
+  assert.ok(!(await autoAnalyze(db3, depsOff as any, { max: 4 })).some((a) => a.matchId === "m-off"),
+    "ft_blind off → no mode can enter it → no analysis");
+});

@@ -80,6 +80,39 @@ else if (lateNoLu <= onTimeNoLu + 0.1)
     `Причину искать в другом месте (бюджет тика, фандинг лиги, окно ANALYZE_PRE_HOURS, задержка провайдера).`);
 else console.log(`СМЕШАННО: lineup-гейт объясняет часть опозданий (${pct(late.filter((d) => !d.lineups).length, late.length)} против ${pct(ontime.filter((d) => !d.lineups).length, ontime.length)} у успевших), но не всё. Чинить обе стороны нельзя вслепую — нужен ещё один срез.`);
 
+// ── The population the verdict above HIDES ───────────────────────────────────────────────────────
+// A binary "confirmed/acquitted" answers about the majority and quietly buries the rest. Late analyses that
+// DID have lineups cannot be the lineup gate by construction — awaitingLineup was already false for them —
+// so they are a second, distinct failure, and they are the WORST ones by lateness. Splitting them out is the
+// difference between a diagnosis and a slogan.
+const lateWithLu = late.filter((d) => d.lineups).sort((a, b) => a.gap - b.gap);
+console.log(`\n## Второй механизм: опоздали, ХОТЯ состав был (${lateWithLu.length})`);
+if (!lateWithLu.length) console.log(`  таких нет — lineup-гейт объясняет всё опоздание.`);
+else {
+  console.log(`  Для них \`awaitingLineup\` был ложным, значит гейт их не держал. Это другая причина, и по`);
+  console.log(`  величине опоздания они ХУДШИЕ — вердикт выше их не покрывает.`);
+  // Slate congestion: how many OTHER analysed fixtures shared this one's anchor window. If a late-with-lineups
+  // match sat in a crowded window, the per-tick reserve is the suspect; if it sat alone, it is not.
+  for (const d of lateWithLu.slice(0, 12)) {
+    const k = Date.parse(d.r.kickoff_at);
+    const crowd = data.filter((o) => o !== d && Math.abs(Date.parse(o.r.kickoff_at) - k) <= 30 * 60_000).length;
+    console.log(`  ${String(Math.round(-d.gap)).padStart(3)}′  ${d.r.home}–${d.r.away}  [${d.r.comp ?? "?"}; в ±30′ от этого свистка ещё ${crowd} матч(ей)]`);
+  }
+  const crowds = lateWithLu.map((d) => {
+    const k = Date.parse(d.r.kickoff_at);
+    return data.filter((o) => o !== d && Math.abs(Date.parse(o.r.kickoff_at) - k) <= 30 * 60_000).length;
+  });
+  const okCrowds = ontime.map((d) => {
+    const k = Date.parse(d.r.kickoff_at);
+    return data.filter((o) => o !== d && Math.abs(Date.parse(o.r.kickoff_at) - k) <= 30 * 60_000).length;
+  });
+  const avg = (xs: number[]) => (xs.length ? Math.round((10 * xs.reduce((a, b) => a + b, 0)) / xs.length) / 10 : 0);
+  console.log(`\n  теснота слейта (матчей в ±30′ от свистка): у опоздавших-с-составом ${avg(crowds)}, у успевших ${avg(okCrowds)}`);
+  console.log(avg(crowds) > avg(okCrowds) * 1.5
+    ? `  → похоже на ПРОБКУ: якорный резерв (${process.env.PREMATCH_ANCHOR_MAX_PER_TICK ?? 4}/тик) не разгребает одновременные стартовые окна.`
+    : `  → на пробку НЕ похоже: слейт у опоздавших не теснее. Причину искать в фандинге лиги, окне ANALYZE_PRE_HOURS или задержке провайдера.`);
+}
+
 // ── Where the late ones live: a league concentration is a different fix from a global one ────────
 const byComp = new Map<string, { late: number; total: number }>();
 for (const d of data) {
