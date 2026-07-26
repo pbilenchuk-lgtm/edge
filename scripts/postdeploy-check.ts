@@ -134,6 +134,28 @@ if (fireHours < 2) P(`⚠ Сборка живёт всего ${fireHours} ч. Н
 const line = (name: string, count: number, note: string) =>
   P(`- **${name}**: ${count === 0 ? `0 — ⚠ путь НЕ прошёл, починка НЕ подтверждена` : `${count}`} — ${note}`);
 
+// Counts are NOT comparable across windows of different length, and the zombie baseline was taken over ~8
+// hours while this window is whatever the deploy marker makes it. Comparing 953 to a 20-hour number would
+// «prove» the hysteresis made things worse — the same units error this project keeps having to fix. So the
+// baseline is stored as a RATE, measured once and named here, and the report does the division itself
+// instead of trusting whoever reads it to remember.
+const BASE = { hours: 7.96, quarantine: 953, lifted: 745, at: "2026-07-25T18:00Z…2026-07-26T01:57Z (до гистерезиса)" };
+const rateLine = (name: string, count: number, baseCount: number, note: string) => {
+  const rate = fireHours > 0 ? Math.round((count / fireHours) * 10) / 10 : null;
+  const baseRate = Math.round((baseCount / BASE.hours) * 10) / 10;
+  // A LITERAL zero is not a win. Dropping from ~120/hour to exactly none is not what a hysteresis margin
+  // does — it is what an empty table, a stopped tick loop or a wrong DB path does. Read as «improvement» it
+  // would certify a dead system as a fixed one, which is the same fail-open the P5 panic gate had. So zero
+  // gets the suspicion, and a real improvement has to show a real, non-zero, smaller rate.
+  const verdict = rate == null ? ""
+    : count === 0 ? " → ⚠ РОВНО НОЛЬ — это не победа: так же выглядит остановленный тик или пустая база. Проверить, что цикл вообще работал"
+    : rate <= baseRate * 0.7 ? " → **ЗАМЕТНО МЕНЬШЕ**"
+    : rate >= baseRate * 1.3 ? " → **БОЛЬШЕ базы** (гистерезис не помог — разбираться)"
+    : " → в пределах базы (изменения не видно)";
+  P(`- **${name}**: ${count} за ${fireHours} ч = **${rate}/час** против базы **${baseRate}/час**${verdict}`);
+  P(`    ${note} · база: ${BASE.at}`);
+};
+
 line("ft_blind входы", n1(
   `SELECT COUNT(*) n FROM bets WHERE created_at >= ? AND (rationale LIKE '%ft_blind%' OR strategy_id = 'ft_blind')`, fireSince),
   `V0.1: до деплоя было ровно 0 из-за origin='live' на опоздавшем анализе`);
@@ -143,12 +165,12 @@ line("net_ev_cut (теннис)", n1(
 line("flag_only (теннис)", n1(
   `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'flag_only%'`, fireSince),
   `R2: безопасная ветка — сигналы пишутся в калибровку, деньги не идут`);
-line("zombie_quarantine эпизоды", n1(
+rateLine("zombie_quarantine эпизоды", n1(
   `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'zombie_quarantine%'`, fireSince),
-  `R4: с гистерезисом их должно стать МЕНЬШЕ, а не больше — сравнивать с прошлой пачкой логов`);
-line("zombie_lifted", n1(
+  BASE.quarantine, `R4: с гистерезисом частота должна УПАСТЬ — рынок на пороге больше не мигает`);
+rateLine("zombie_lifted", n1(
   `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'zombie_lifted%'`, fireSince),
-  `снятие карантина требует 2 подряд чистых тика (dwell), а не одного`);
+  BASE.lifted, `снятие карантина требует 2 подряд чистых тика (dwell), а не одного`);
 line("quasi_locked_tail (хвост досижен)", n1(
   `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE '%quasi_locked_tail%'`, fireSince),
   `R1: тейк подавлен, потому что счёт запер рынок`);
