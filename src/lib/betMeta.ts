@@ -22,7 +22,12 @@
 //   e8  audit Phase 1: prematch_value money → totals-only (BTTS/1X2/handicap demoted to shadow) +
 //       conservative re-parameterized to a same-signal size-dial (entry thresholds = medium). Both change
 //       what a bet's SELECTION means, so the epoch bumps — pre-change cohorts stay distinctly labelled.
-export const CODE_VERSION = "e8";
+//   e9  batches 9–10: the composition of a cohort changed, not just its plumbing. Blind FT fixtures start
+//       producing entries at all (T-minus anchor + ft_blind grace closed the origin='live' refusal that made
+//       the class empty), score-locked tails now ride to resolution instead of cashing out, and sub-floor
+//       remainders close whole. Entry REACH, exit SEMANTICS and partial-exit accounting all moved, so an e8
+//       number and an e9 number are not the same measurement — hence a label, not a promise to remember.
+export const CODE_VERSION = "e9";
 
 /** Decision-time snapshot stored as JSON on the bet. Every field is what was TRUE at
  *  the instant the bet was proposed/filled — never re-read later. All optional so a
