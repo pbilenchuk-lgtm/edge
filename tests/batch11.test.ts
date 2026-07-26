@@ -155,3 +155,116 @@ test("G3: freshness is checked BEFORE the declared-window rule — that rule is 
   assert.equal(g.call, false);
   assert.match((g as any).reason, /триггер-событие/, "rejected on staleness, not on the window");
 });
+
+// ── Complement lookup: the condition-1 danger is settling one line against another ───────────────
+import { complementKey, findComplementMarket, resolveComplement } from "../src/lib/complementMarket.js";
+import { backfillComplementTokens, auditComplementVoids } from "../src/lib/complementBackfill.js";
+
+test("complement: the pair is keyed on subject × EXACT line × inverted side — never a neighbouring total", () => {
+  // The Falkenbergs catalogue is exactly the trap: both 1.5 and 3.5 lines are quoted.
+  const cat = [
+    { label: "Falkenbergs FF Under 1.5", external_ref: "t-u15" },
+    { label: "Falkenbergs FF Over 1.5", external_ref: "t-o15" },
+    { label: "Under 3.5", external_ref: "t-u35" },
+    { label: "Over 3.5", external_ref: "t-o35" },
+    { label: "Over 1.5", external_ref: "t-o15m" },
+  ];
+  assert.equal(findComplementMarket("Under 3.5", cat)?.token, "t-o35");
+  assert.equal(findComplementMarket("Falkenbergs FF Under 1.5", cat)?.token, "t-o15",
+    "the TEAM total pairs with the same team's own opposite side, not the match total");
+  // The failure this test exists to prevent: Under 3.5 must never bind to Over 1.5.
+  assert.notEqual(findComplementMarket("Under 3.5", cat)?.token, "t-o15m");
+});
+
+test("complement: no invertible side, or an ambiguous catalogue, yields NOTHING — fail-closed", () => {
+  assert.equal(complementKey("SK Brann (-1.5)"), null, "a handicap has no side token to invert → no guess");
+  assert.equal(complementKey("Under 3.5"), "over35");
+  assert.equal(complementKey("Draw — Yes"), "drawno");
+  // Duplicate notations of the same outcome: picking one arbitrarily is how a settle binds to the wrong book.
+  const dupes = [
+    { label: "Draw — Yes", external_ref: "a" },
+    { label: "Draw — No", external_ref: "b" },
+    { label: "Draw (A vs. B) — No", external_ref: "c" },
+  ];
+  assert.equal(findComplementMarket("Draw — Yes", dupes), null, "two candidates carry the complement key → refuse");
+});
+
+test("complement: a club whose NAME contains a side word is not corrupted mid-string", () => {
+  const cat = [{ label: "Yesilyurt Under 1.5", external_ref: "u" }, { label: "Yesilyurt Over 1.5", external_ref: "o" }];
+  assert.equal(findComplementMarket("Yesilyurt Under 1.5", cat)?.token, "o",
+    "the swap is anchored at the END of the key, so 'Yes'ilyurt is never treated as a side token");
+});
+
+test("complement: a stored pointer always wins, and its provenance is reported", () => {
+  const cat = [{ label: "Under 3.5", external_ref: "u" }, { label: "Over 3.5", external_ref: "o" }];
+  assert.equal(resolveComplement("Under 3.5", "stored-tok", cat)?.via, "stored");
+  assert.equal(resolveComplement("Under 3.5", "stored-tok", cat)?.token, "stored-tok");
+  assert.equal(resolveComplement("Under 3.5", null, cat)?.via, "match");
+});
+
+test("condition 4: the backfill touches ONLY markets carrying open money, and never overwrites a pointer", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "football", "Football");
+  R.upsertCompetition(db, { id: "c1", sport_id: "football", name: "F", budget: 8000, external_league: "nor.1", created_at: "t" } as any);
+  R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: null, color: null, version: 1, prompt: "", prompt_live: null, params: null, model: null, model_live: null, created_at: "t" } as any);
+  for (const id of ["m-open", "m-quiet"]) {
+    R.insertMatch(db, { id, competition_id: "c1", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t",
+      minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id } as any);
+    R.insertMarket(db, { id: R.uid(), match_id: id, label: "Under 3.5", price: 55, ai_prob: 0.6, liquidity: "900", external_ref: `u-${id}`, snapshot_at: "t", is_closing: false } as any);
+    R.insertMarket(db, { id: R.uid(), match_id: id, label: "Over 3.5", price: 45, ai_prob: 0.4, liquidity: "900", external_ref: `o-${id}`, snapshot_at: "t", is_closing: false } as any);
+  }
+  db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,created_at) VALUES ('b1','m-open','prematch_value','max','Under 3.5','open',55,50,'t')`).run();
+  const r = backfillComplementTokens(db, "2026-07-28T00:00:00Z");
+  assert.equal(r.matches, 1, "only the match with an open position is visited");
+  assert.equal(r.tokensWritten, 1);
+  const got = db.prepare(`SELECT token_second FROM markets WHERE match_id='m-open' AND label='Under 3.5'`).get() as any;
+  assert.equal(got.token_second, "o-m-open");
+  const quiet = db.prepare(`SELECT token_second FROM markets WHERE match_id='m-quiet' AND label='Under 3.5'`).get() as any;
+  assert.equal(quiet.token_second, null, "a match with no live money is left alone — the import path covers it");
+});
+
+test("condition 5: the retro-audit sweeps BOTH refund tags and reports before it rewrites anything", async () => {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "football", "Football");
+  R.upsertCompetition(db, { id: "c1", sport_id: "football", name: "F", budget: 8000, external_league: "nor.1", created_at: "t" } as any);
+  R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: null, color: null, version: 1, prompt: "", prompt_live: null, params: null, model: null, model_live: null, created_at: "t" } as any);
+  R.insertMatch(db, { id: "m1", competition_id: "c1", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t",
+    minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "m1" } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: "m1", label: "Under 3.5", price: 99, ai_prob: 0.6, liquidity: "900", external_ref: "u", snapshot_at: "t", is_closing: false } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: "m1", label: "Over 3.5", price: 1, ai_prob: 0.4, liquidity: "900", external_ref: "o", snapshot_at: "t", is_closing: false } as any);
+  // The exact shape the ratification pointed at — refunded with tag 'void' (NOT 'void_timeout'), because the
+  // single-token path uses that tag. Auditing only void_timeout would have missed this entire population.
+  db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,payout,settled_by,created_at)
+              VALUES ('b1','m1','prematch_value','max','Under 3.5','settled_void',50,100,100,'void','t')`).run();
+  const resolveTokens = async () => ({ u: { priceCents: 99, closed: true }, o: { priceCents: 1, closed: true } });
+
+  const dry = await auditComplementVoids(db, { resolveTokens } as any, { apply: false });
+  assert.equal(dry.reSettled, 1, "the refund was actually a WIN — the complement just was not stored");
+  assert.equal(dry.won, 1);
+  assert.match(dry.note, /сухой прогон/, "a dry run says so plainly");
+  assert.equal((db.prepare(`SELECT status FROM bets WHERE id='b1'`).get() as any).status, "settled_void",
+    "…and changes nothing until asked");
+
+  const applied = await auditComplementVoids(db, { resolveTokens, now: () => "2026-07-28T00:00:00Z" } as any, { apply: true });
+  assert.equal(applied.reSettled, 1);
+  const after = db.prepare(`SELECT status, settled_via FROM bets WHERE id='b1'`).get() as any;
+  assert.equal(after.status, "settled_won");
+  assert.equal(after.settled_via, "match_complement_retro", "provenance says the row was rewritten by the audit");
+});
+
+test("condition 5: an unresolved or half-resolved pair leaves the refund alone", async () => {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "football", "Football");
+  R.upsertCompetition(db, { id: "c1", sport_id: "football", name: "F", budget: 8000, external_league: "nor.1", created_at: "t" } as any);
+  R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: null, color: null, version: 1, prompt: "", prompt_live: null, params: null, model: null, model_live: null, created_at: "t" } as any);
+  R.insertMatch(db, { id: "m1", competition_id: "c1", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t",
+    minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "m1" } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: "m1", label: "Under 3.5", price: 60, ai_prob: 0.6, liquidity: "900", external_ref: "u", snapshot_at: "t", is_closing: false } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: "m1", label: "Over 3.5", price: 40, ai_prob: 0.4, liquidity: "900", external_ref: "o", snapshot_at: "t", is_closing: false } as any);
+  db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,payout,settled_by,created_at)
+              VALUES ('b1','m1','prematch_value','max','Under 3.5','settled_void',50,100,100,'void_timeout','t')`).run();
+  const r = await auditComplementVoids(db, { resolveTokens: async () => ({ u: { priceCents: 60, closed: false }, o: { priceCents: 40, closed: false } }) } as any, { apply: true });
+  assert.equal(r.complementFound, 1, "the complement is findable…");
+  assert.equal(r.reSettled, 0, "…but 60/40 is not a resolving pair, so booked history is not rewritten on a guess");
+  assert.equal((db.prepare(`SELECT status FROM bets WHERE id='b1'`).get() as any).status, "settled_void");
+});

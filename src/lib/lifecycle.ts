@@ -19,6 +19,7 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, reSettleSuspectBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries, repairCategoryLeagues, refreshTeamAliasOverlay } from "./engine.js";
 import { settlePmResolutionBets } from "./pmResolution.js";
+import { backfillComplementTokens } from "./complementBackfill.js";
 import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
 import { classifyOrderBook, paperBuyFill, paperSellFill, scaleCost, ENTRY_PHANTOM_DIVERGENCE, type FillCost, type EntryFillResult, type SellFillResult } from "./executor/paperFill.js";
@@ -1725,20 +1726,25 @@ export async function strategistReassess(
     // handed 0:1. The strategist then held with a premise the goal had already destroyed, and that cost $263.
     // A reasoned wrong decision is worse than a late one, so this waits (bounded — see scoreRace).
     const consistency = scoreConsistency(db, m, nowMs, env);
+    // trade_log.strategy_id carries a FOREIGN KEY to strategies(id) — a synthetic "system" id throws, and this
+    // block sits in the reassessment loop, so the throw would take the whole live pass down with it. Use a real
+    // strategy of this sport (the same pattern the zombie log uses), and treat logging as best-effort: a
+    // diagnostic line must never be able to stop position management.
+    const sysSid = R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? null;
     if (!consistency.ok) {
-      R.insertTradeLog(db, {
-        id: R.uid(), match_id: m.id, strategy_id: "system", minute: minuteLabel(m), type: "skip",
+      if (sysSid) try { R.insertTradeLog(db, {
+        id: R.uid(), match_id: m.id, strategy_id: sysSid, minute: minuteLabel(m), type: "skip",
         text: `переоценка отложена: ${consistency.reason}`,
         dedup_key: `score_race:${m.id}:${consistency.goalEvents}`, created_at: now,
-      });
+      }); } catch { /* observability only */ }
       continue;
     }
-    if (consistency.forced) {
-      R.insertTradeLog(db, {
-        id: R.uid(), match_id: m.id, strategy_id: "system", minute: minuteLabel(m), type: "skip",
+    if (consistency.forced && sysSid) {
+      try { R.insertTradeLog(db, {
+        id: R.uid(), match_id: m.id, strategy_id: sysSid, minute: minuteLabel(m), type: "skip",
         text: `переоценка ПРОДОЛЖЕНА на рассогласованном снимке: ${consistency.reason}`,
         dedup_key: `score_race_forced:${m.id}:${consistency.goalEvents}`, created_at: now,
-      });
+      }); } catch { /* observability only */ }
     }
     // A live minute for the strategist even when no provider drives one: the timer
     // estimate from kickoff (capped at the sport ceiling so it never reads absurd).
@@ -2411,6 +2417,10 @@ export async function runAutoCycle(
   await step("pmResolution", async () => {
     const at = deps.now?.() ?? new Date().toISOString();
     try {
+      // [batch-11, условие 4] TARGETED backfill runs FIRST: positions already hanging toward a void timeout
+      // will not survive until the import path fills token_second on its own schedule. Only markets carrying
+      // open money are touched, and a stored pointer is never overwritten.
+      try { backfillComplementTokens(db, nowFn(deps)()); } catch { /* a backfill must never block settlement */ }
       const r = await settlePmResolutionBets(db, deps);
       try { R.metaSet(db, "pm_resolution_last", JSON.stringify({ ...r, at }), at); } catch { /* best-effort */ }
       return r;

@@ -243,6 +243,10 @@ export function initSchema(db: Database): void {
     "ALTER TABLE markets ADD COLUMN token_second TEXT",
     // origin phase as a FIELD with provenance (was read-time inferred in profileAnalytics). Backfilled
     // once by migrateBetOrigin below; new bets stamp it in insertBet.
+    // [batch-11] WHERE the PM-resolution cross-check token came from: 'stored_complement' (markets.token_second)
+    // or 'match_complement' (found among the match's own markets when the pointer was never stored). A settle
+    // dispute has to be answerable from the row itself.
+    "ALTER TABLE bets ADD COLUMN settled_via TEXT",
     "ALTER TABLE bets ADD COLUMN origin TEXT",
     "ALTER TABLE bets ADD COLUMN origin_source TEXT",
     // P0.1: the bound ESPN event's ISO date, frozen at bind time — the two-leg fixture-identity key.
