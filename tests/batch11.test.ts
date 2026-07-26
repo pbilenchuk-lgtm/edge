@@ -268,3 +268,31 @@ test("condition 5: an unresolved or half-resolved pair leaves the refund alone",
   assert.equal(r.reSettled, 0, "…but 60/40 is not a resolving pair, so booked history is not rewritten on a guess");
   assert.equal((db.prepare(`SELECT status FROM bets WHERE id='b1'`).get() as any).status, "settled_void");
 });
+
+test("retro-audit: a locked row is DEFERRED, not counted and not fatal — the pass stays idempotent", async () => {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "football", "Football");
+  R.upsertCompetition(db, { id: "c1", sport_id: "football", name: "F", budget: 8000, external_league: "nor.1", created_at: "t" } as any);
+  R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: null, color: null, version: 1, prompt: "", prompt_live: null, params: null, model: null, model_live: null, created_at: "t" } as any);
+  R.insertMatch(db, { id: "m1", competition_id: "c1", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t",
+    minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "m1" } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: "m1", label: "Under 3.5", price: 99, ai_prob: 0.6, liquidity: "900", external_ref: "u", snapshot_at: "t", is_closing: false } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: "m1", label: "Over 3.5", price: 1, ai_prob: 0.4, liquidity: "900", external_ref: "o", snapshot_at: "t", is_closing: false } as any);
+  db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,payout,settled_by,created_at)
+              VALUES ('b1','m1','prematch_value','max','Under 3.5','settled_void',50,100,100,'void','t')`).run();
+  // Simulate the production failure: the write throws exactly as "database is locked" did.
+  const realPrepare = db.prepare.bind(db);
+  (db as any).prepare = (sql: string) => {
+    if (/^UPDATE bets SET/.test(sql)) return { run: () => { throw new Error("database is locked"); } };
+    return realPrepare(sql);
+  };
+  const r = await auditComplementVoids(db, { resolveTokens: async () => ({ u: { priceCents: 99, closed: true }, o: { priceCents: 1, closed: true } }) } as any, { apply: true });
+  (db as any).prepare = realPrepare;
+  assert.equal(r.deferred, 1, "the contended row is deferred");
+  assert.equal(r.reSettled, 0, "…and NOT counted as re-settled — the first prod run would have over-reported");
+  assert.equal(r.bankDeltaUsd, 0, "…nor added to the bank delta");
+  assert.match(r.note, /НИЧЕГО НЕ ЗАПИСАНО/, "a fully-deferred run must not read as «the pairs were unclean» — opposite meanings");
+  assert.match(r.note, /запустите ту же команду ещё раз/, "…and it tells the operator the pass is safe to repeat");
+  assert.equal((db.prepare(`SELECT status FROM bets WHERE id='b1'`).get() as any).status, "settled_void",
+    "the row is untouched, so a re-run picks it up again — that is what makes deferral safe");
+});

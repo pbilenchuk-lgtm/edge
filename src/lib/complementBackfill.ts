@@ -67,6 +67,8 @@ export function backfillComplementTokens(db: Database, now: string): BackfillRes
 export interface RetroAuditRow { betId: string; matchId: string; label: string; outcome: "won" | "lost"; priceCents: number; stake: number; deltaUsd: number }
 export interface RetroAuditResult {
   examined: number; complementFound: number; reSettled: number;
+  /** Rows the DB refused to write right now (lock contention with the running app). Idempotent: re-run. */
+  deferred: number;
   won: number; lost: number; bankDeltaUsd: number; rows: RetroAuditRow[]; note: string;
 }
 
@@ -80,7 +82,7 @@ export async function auditComplementVoids(
   db: Database, deps: EngineDeps & { resolveTokens?: ResolveTokensFn } = {}, opts: { apply?: boolean } = {},
 ): Promise<RetroAuditResult> {
   const now = deps.now?.() ?? new Date().toISOString();
-  const res: RetroAuditResult = { examined: 0, complementFound: 0, reSettled: 0, won: 0, lost: 0, bankDeltaUsd: 0, rows: [], note: "" };
+  const res: RetroAuditResult = { examined: 0, complementFound: 0, reSettled: 0, deferred: 0, won: 0, lost: 0, bankDeltaUsd: 0, rows: [], note: "" };
 
   // Sweep BOTH refund tags, and select on the reason — the single-token path tags 'void', not 'void_timeout'.
   const voided = db.prepare(
@@ -119,13 +121,21 @@ export async function auditComplementVoids(
     if (!won && !lost) continue;                         // not a clean resolving pair → leave the refund alone
     const patch = settleBet({ entry_price: p.bet.entry_price, stake: p.bet.stake }, won, t.priceCents);
     const delta = (patch.payout ?? 0) - (p.bet.stake ?? 0);   // vs the refund, which returned the stake
+    if (opts.apply) {
+      // COUNT ONLY WHAT ACTUALLY LANDED. The first production run died mid-way on «database is locked», and
+      // with the counter incremented before the write the report would have claimed rows it never changed.
+      // A lock is also not a reason to abandon the remaining 100 rows: the pass is idempotent (a re-settled
+      // bet is no longer settled_void, so a re-run skips it), so a contended row is DEFERRED, not lost.
+      try {
+        R.updateBet(db, p.bet.id, {
+          status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price,
+          settled_at: now, settled_by: "pm_resolution", settled_via: "match_complement_retro",
+        });
+      } catch (e) { res.deferred++; continue; }
+    }
     res.rows.push({ betId: p.bet.id, matchId: p.bet.match_id, label: p.bet.market_label, outcome: won ? "won" : "lost", priceCents: t.priceCents, stake: p.bet.stake ?? 0, deltaUsd: Math.round(delta * 100) / 100 });
     res.reSettled++; won ? res.won++ : res.lost++; res.bankDeltaUsd += delta;
     if (opts.apply) {
-      R.updateBet(db, p.bet.id, {
-        status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price,
-        settled_at: now, settled_by: "pm_resolution", settled_via: "match_complement_retro",
-      });
       // Same FK rule as everywhere else: strategy_id references strategies(id), so the bet's OWN strategy is
       // the honest attribution — this row is that strategy's money being re-settled.
       try { R.insertTradeLog(db, {
@@ -137,9 +147,17 @@ export async function auditComplementVoids(
     }
   }
   res.bankDeltaUsd = Math.round(res.bankDeltaUsd * 100) / 100;
-  res.note = res.reSettled === 0
-    ? `проверено ${res.examined}, комплемент нашёлся у ${res.complementFound}, но ни один не дал чистой разрешающей пары — история не переписана. Это хороший исход: дыра не съела прошлых денег.`
-    : `${opts.apply ? "ПЕРЕ-СЕТТЛЕНО" : "БУДЕТ пере-сеттлено (сухой прогон)"}: ${res.reSettled} возвратов оказались реальными исходами ` +
-      `(${res.won} выигрышей / ${res.lost} проигрышей), Δ банка $${res.bankDeltaUsd.toFixed(2)}. Это деньги, снятые со стола таймаутом из-за несохранённого указателя.`;
+  const deferNote = res.deferred ? ` ОТЛОЖЕНО ${res.deferred} строк(и) — БД была занята приложением; проход идемпотентен, просто запустите ещё раз.` : "";
+  // Three distinct outcomes, and they must NOT share a sentence. "Nothing re-settled because the pairs were
+  // not clean" and "nothing re-settled because the DB was busy" look identical in a count and mean opposite
+  // things: the first says the data is fine, the second says the job is unfinished. Reporting the second as
+  // the first would send the operator away satisfied with the work half done.
+  res.note = res.reSettled === 0 && res.deferred > 0
+    ? `НИЧЕГО НЕ ЗАПИСАНО: все ${res.deferred} подходящих строк отклонены блокировкой БД (приложение держало запись). ` +
+      `Данные в порядке — не записан ни один ряд. Проход идемпотентен: запустите ту же команду ещё раз.`
+    : res.reSettled === 0
+      ? `проверено ${res.examined}, комплемент нашёлся у ${res.complementFound}, но ни один не дал чистой разрешающей пары — история не переписана. Это хороший исход: дыра не съела прошлых денег.${deferNote}`
+      : `${opts.apply ? "ПЕРЕ-СЕТТЛЕНО" : "БУДЕТ пере-сеттлено (сухой прогон)"}: ${res.reSettled} возвратов оказались реальными исходами ` +
+        `(${res.won} выигрышей / ${res.lost} проигрышей), Δ банка $${res.bankDeltaUsd.toFixed(2)}. Это деньги, снятые со стола таймаутом из-за несохранённого указателя.${deferNote}`;
   return res;
 }

@@ -184,7 +184,11 @@ export function transact<T>(db: Database, fn: () => T): T {
 export function openDb(path: string): Database {
   const { DatabaseSync } = require("node:sqlite") as SqliteModule;
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA foreign_keys = ON;");
+  // busy_timeout, or a CLI that writes while the app is running dies on the first contended statement with
+  // "database is locked" — SQLite's default is to fail INSTANTLY rather than wait. The main connection has
+  // always had WAL (a database-level property, so this handle inherits it), but readers and writers still
+  // contend for the write lock, and a maintenance script is by definition the one that should yield.
+  db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 10000;");
   initSchema(db);
   return db;
 }
