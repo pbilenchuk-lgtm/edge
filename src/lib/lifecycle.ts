@@ -1872,7 +1872,22 @@ export async function strategistReassess(
               return { panicDropCents: drop, bookUsd: book > 0 ? book : null };
             } catch { return { panicDropCents: null, bookUsd: null }; }
           })();
-          const g = overreactionGate(battleSheet ?? null, { totalGoals: (m.score_home ?? 0) + (m.score_away ?? 0), minute: m.minute ?? minuteApprox, ...panicBook });
+          // [G3 / batch-11] Age of the most recent BUYBACK-CAPABLE event (goal / red card), in match minutes.
+          // Read from match_events, whose minutes are the provider's own — the same clock the live minute uses,
+          // so the subtraction is apples to apples. No such event, or no live minute → null → the gate fails
+          // OPEN exactly as it does for the other pre-filters.
+          const triggerAgeMin = (() => {
+            const lm = m.minute ?? minuteApprox;
+            if (lm == null) return null;
+            let latest: number | null = null;
+            for (const e of R.eventsForMatch(db, m.id)) {
+              if (e.type !== "goal" && e.type !== "red_card") continue;
+              if (e.minute == null || e.minute > lm) continue;   // future/unknown minute tells us nothing
+              if (latest == null || e.minute > latest) latest = e.minute;
+            }
+            return latest == null ? null : lm - latest;
+          })();
+          const g = overreactionGate(battleSheet ?? null, { totalGoals: (m.score_home ?? 0) + (m.score_away ?? 0), minute: m.minute ?? minuteApprox, triggerAgeMin, ...panicBook });
           if (!g.call) { skipReason = `Overreaction: ${g.reason} — детерминированный пропуск, без LLM`; skipTag = "det_gate_skip:ovr_dormant"; }
         }
         if (skipReason) {
