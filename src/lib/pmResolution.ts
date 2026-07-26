@@ -26,6 +26,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
+import { resolveComplement } from "./complementMarket.js";
 import { isStateSuspect } from "./engine.js";
 import { settleBet } from "./settlement.js";
 import { isFtBlindBet } from "./betMeta.js";
@@ -57,6 +58,10 @@ export interface TokenResolution { priceCents: number | null; closed: boolean }
 export type ResolveTokensFn = (tokenIds: string[]) => Promise<Record<string, TokenResolution>>;
 
 export interface PmResolutionResult {
+  /** [batch-11] Which source supplied the cross-check complement. A rising match_complement share is the
+   *  fallback working; it is reported rather than silent so nobody has to trust that it stayed conservative. */
+  viaStoredComplement: number;
+  viaMatchComplement: number;
   candidates: number;        // open bets on PM-only (score-less) finished football fixtures examined
   settled: number; won: number; lost: number;
   marketVoid: number;        // closed=true + non-resolving price → PM refunded
@@ -87,7 +92,7 @@ export async function settlePmResolutionBets(
   const nowMs = Date.parse(now) || Date.now();
   const cfg = loadPmResolutionConfig(deps.env);
   const shadowCfg = loadShadowConfig(db, deps.env);
-  const res: PmResolutionResult = { candidates: 0, settled: 0, won: 0, lost: 0, marketVoid: 0, voidTimeout: 0, suspect: 0, frozenSuspect: 0, pendingStable: 0, pendingUnresolved: 0, zombieBackfill: 0, bankDeltaUsd: 0, reservesFreedUsd: 0 };
+  const res: PmResolutionResult = { candidates: 0, settled: 0, won: 0, lost: 0, marketVoid: 0, voidTimeout: 0, suspect: 0, frozenSuspect: 0, viaStoredComplement: 0, viaMatchComplement: 0, pendingStable: 0, pendingUnresolved: 0, zombieBackfill: 0, bankDeltaUsd: 0, reservesFreedUsd: 0 };
   const suspectAgeMs = cfg.suspectAgeH * 3_600_000;
 
   // 1) Gather candidates. Two signatures of the SAME class — "no trustworthy score of ours, defer to PM":
@@ -96,7 +101,7 @@ export async function settlePmResolutionBets(
   //        any, is not to be trusted. Once the freeze has hung past a grace window (suspectAgeH beyond expected
   //        finish), route its open bets to PM resolution too. Athletic–São Bernardo (score ?:? forever, Draw-No
   //        $120 hanging) is exactly this. The six e7 resolution rules below apply to both, unchanged.
-  const cands: { betId: string; matchId: string; kickoffAt: string | null; createdAt: string; token: string | null; token2: string | null; frozen: boolean }[] = [];
+  const cands: { betId: string; matchId: string; kickoffAt: string | null; createdAt: string; token: string | null; token2: string | null; frozen: boolean; via: string | null }[] = [];
   const tokenSet = new Set<string>();
   for (const comp of R.listCompetitions(db).filter((c) => c.sport_id === "football")) {
     for (const m of R.listMatches(db, comp.id)) {
@@ -114,12 +119,20 @@ export async function settlePmResolutionBets(
       const frozen = frozenAged; // pulled via the state_suspect extension (its score, if present, is untrusted)
       for (const b of R.betsForMatch(db, m.id)) {
         if (b.status !== "open") continue;
-        const mk = R.latestMarkets(db, m.id).find((x) => x.label === b.market_label);
+        const mkts = R.latestMarkets(db, m.id);
+        const mk = mkts.find((x) => x.label === b.market_label);
         const token = mk?.external_ref ?? null;
-        const token2 = mk?.token_second ?? null;
+        // [batch-11] The cross-check token, preferring the stored pointer. 37% of market rows never got one,
+        // so without the fallback those positions can only ever void — see complementMarket.ts. The fallback
+        // supplies the SAME kind of token from the match's own catalogue; every downstream check is unchanged.
+        // NB: named compTok, not comp — `comp` is the competition loop variable above, and shadowing it
+        // here would read as the competition three lines later.
+        const compTok = resolveComplement(b.market_label, mk?.token_second ?? null, mkts);
+        const token2 = compTok?.token ?? null;
+        const via = compTok ? (compTok.via === "stored" ? "stored_complement" : "match_complement") : null;
         if (token) tokenSet.add(token);
         if (token2) tokenSet.add(token2);
-        cands.push({ betId: b.id, matchId: m.id, kickoffAt: m.kickoff_at, createdAt: b.created_at, token, token2, frozen });
+        cands.push({ betId: b.id, matchId: m.id, kickoffAt: m.kickoff_at, createdAt: b.created_at, token, token2, frozen, via });
         if (frozen) res.frozenSuspect++;
       }
     }
@@ -136,15 +149,16 @@ export async function settlePmResolutionBets(
   const isLostSide = (p: number | null) => p != null && p <= cfg.loCents;
   const isResolving = (p: number | null) => isWonSide(p) || isLostSide(p);
 
-  const settle = (betId: string, won: boolean, priceCents: number | null) => {
+  const settle = (betId: string, won: boolean, priceCents: number | null, via: string | null = null) => {
     const b = R.getBet(db, betId); if (!b) return;
     // Rule 4: redemption is not a trade — settleBet books payout from entry/stake with NO exit fee.
     const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, priceCents);
-    R.updateBet(db, betId, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price, settled_at: now, settled_by: "pm_resolution" });
+    R.updateBet(db, betId, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price, settled_at: now, settled_by: "pm_resolution", settled_via: via });
     try { shadowOnExit(db, betId, 1, shadowCfg, now); } catch { /* observe-only */ }
     try { R.metaDelete(db, `${PMRES_OBS}${betId}`); } catch { /* best-effort */ }
     R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: "финал", type: "settle", text: `${b.market_label}: PM-резолюция → ${won ? "выигрыш" : "проигрыш"} (цена ${priceCents ?? "?"}¢) · выплата $${(patch.payout ?? 0).toFixed(2)} (P&L ${(patch.pnl).toFixed(2)}) [pm_resolution]`, created_at: now });
     res.settled++; won ? res.won++ : res.lost++;
+    if (via === "match_complement") res.viaMatchComplement++; else if (via === "stored_complement") res.viaStoredComplement++;
     res.bankDeltaUsd += patch.pnl; res.reservesFreedUsd += b.stake ?? 0;
   };
   const voidBet = (betId: string, tag: "void" | "void_timeout", detail: string) => {
@@ -189,7 +203,7 @@ export async function settlePmResolutionBets(
           else { res.pendingUnresolved++; suspectLog(db, c, t, comp, now); }
           continue;
         }
-        settle(c.betId, isWonSide(t.priceCents), t.priceCents);
+        settle(c.betId, isWonSide(t.priceCents), t.priceCents, c.via);
       } else {
         // Rule 3: closed with a non-resolving price = a real market void/refund.
         voidBet(c.betId, "void", `рынок закрыт с неразрешающей ценой ${t.priceCents ?? "?"}¢ — рыночный void/refund`);
@@ -209,7 +223,7 @@ export async function settlePmResolutionBets(
           else { res.pendingUnresolved++; }
           continue;
         }
-        settle(c.betId, side === "won", t.priceCents);
+        settle(c.betId, side === "won", t.priceCents, c.via);
       } else {
         if (!prev || prev.side !== side) writeObs(db, c.betId, side, now); // (re)start the stability clock
         res.pendingStable++;
@@ -242,7 +256,7 @@ function suspectLog(db: Database, c: { betId: string; matchId: string }, t: Toke
 /** Default resolver: Gamma market state per token (closed flag + resolved outcomePrices) — the source that
  *  survives archival, so a historical backfill resolves correctly. Bounded + hard-timeout inside
  *  fetchTokenResolution; an unknown token is absent from the map → the caller reads it as unresolved. */
-function defaultResolveTokens(deps: EngineDeps): ResolveTokensFn {
+export function defaultResolveTokens(deps: EngineDeps): ResolveTokensFn {
   return async (tokenIds: string[]) => {
     const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
     return fetchTokenResolution(poly, tokenIds, { fetchImpl: deps.fetchImpl });

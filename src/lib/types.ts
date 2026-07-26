@@ -192,6 +192,8 @@ export interface Bet {
    *  "early" = cashed out at market; "partial" = a partial-fixation child slice.
    *  Only resolution-settled bets feed the predictive metrics (Brier/CLV). */
   settled_by?: string | null;
+  /** [batch-11] Provenance of the PM-resolution cross-check token: which source supplied the complement. */
+  settled_via?: string | null;
   /** When the bet was closed/settled (ISO) — for the closures-log timestamp. */
   settled_at?: string | null;
   /** JSON snapshot of the decision-time context (edge/kelly/probs/calibration/phase/
