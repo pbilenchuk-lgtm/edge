@@ -106,3 +106,47 @@ test("R5: refusals resolve by the SAME settlement code as money, and the verdict
   assert.equal(rep.verdict, "insufficient", `one anecdote proves nothing — the verdict needs ${REFUSAL_NEED_N}`);
   assert.match(rep.note, /жёсткость НЕ трогаем/, "…and the note says the screw stays untouched meanwhile");
 });
+
+// ── R1: repaired gate + quasi-locked tail ────────────────────────────────────────────────────────
+// The old gate counted only RESOLUTION settles — unmeasurable by construction for a strategy that cashes out
+// ~100% of its positions by design (the same blindness the PMV Brier gate had before shadow scoring).
+import { quasiLocked, holdTailToSettle } from "../src/lib/quasiLocked.js";
+import { buildOverreactionGate } from "../src/lib/overreactionGate.js";
+
+test("R1: the gate reports the SIGNAL cycle count and keeps the old resolution-only numerator visible", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  const g = buildOverreactionGate(db);
+  assert.equal(typeof g.signalGate.nSignals, "number");
+  assert.equal(g.signalGate.legacyResolutionOnly, g.cleanCycles, "the old numerator travels alongside, so the change of ruler is auditable");
+  assert.match(g.signalGate.note, /ЕДИНИЦА ИЗМЕРЕНИЯ ИСПРАВЛЕНА/);
+  assert.match(g.signalGate.note, /кэш-ауты входят/, "cash-outs are counted — that is the whole repair");
+  assert.match(g.signalGate.note, /ремонт ЛИНЕЙКИ/, "…and the caveat is stated in the report, not just the commit");
+});
+
+test("R1: a tail is held to settle only when the SCORE locks it — never merely because it is winning", () => {
+  const late = { label: "Draw — No", home: "Boston", away: "KC", scoreHome: 3, scoreAway: 0, minute: 88 };
+  const lock = quasiLocked(late, null, {});
+  assert.equal(lock.locked, true, "3:0 at 88' clears the ratified Draw-No threshold");
+  // NOT «arithmetically impossible» — three goals in stoppage time is possible, merely absurd. The reason text
+  // has to say so, or the next reader will treat a ratified threshold as a proof and widen it on a hunch.
+  assert.match(lock.reason, /ратифицированный порог — не арифметика/);
+  assert.equal(lock.against ?? false, false, "the lock runs FOR the position");
+  assert.equal(holdTailToSettle(late, null, {}).locked, true, "so the tail rides to resolution instead of paying the spread");
+  // Winning but NOT locked: the same market earlier in the match, where a comeback is still possible.
+  const early = { ...late, minute: 55 };
+  assert.equal(quasiLocked(early, null, {}).locked, false, "55' is before the clock floor — too much match left to call it decided");
+  assert.match(quasiLocked(early, null, {}).reason, /слишком много матча/);
+  // A one-goal lead late is NOT locked — this is exactly the 94th-minute-goal case the cash-out policy exists for.
+  assert.equal(quasiLocked({ ...late, scoreHome: 1, scoreAway: 0 }, null, {}).locked, false, "1:0 at 88' is not decided");
+  // Missing inputs never lock.
+  assert.equal(quasiLocked({ ...late, scoreHome: null }, null, {}).locked, false, "no score → not provable");
+  assert.equal(quasiLocked({ ...late, minute: null }, null, {}).locked, false, "no minute → not provable");
+});
+
+test("R1: a market locked AGAINST us is reported honestly but never read as «hold»", () => {
+  // Draw — Yes at 3:0 on 88': the score locks the market against the position; there is nothing to ride.
+  const against = { label: "Draw — Yes", home: "Boston", away: "KC", scoreHome: 3, scoreAway: 0, minute: 88 };
+  const v = quasiLocked(against, null, {});
+  assert.equal(v.locked, true, "the state IS locked — reported truthfully");
+  assert.equal(holdTailToSettle(against, null, {}).locked, false, "…but holding a worthless tail is not a strategy");
+});

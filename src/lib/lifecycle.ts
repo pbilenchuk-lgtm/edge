@@ -35,6 +35,7 @@ import { serializeEntryMeta, parseEntryMeta, isFtBlindBet, type BetEntryMeta } f
 import { canonicalizeDrawForMatch, drawCanonEnabled, DRAW_YES_KEYS } from "./drawCanon.js";
 import { inAnchorWindow, ANCHOR_MAX_PER_TICK } from "./prematchAnchor.js";
 import { resolveRefusalShadowSignals } from "./refusalShadow.js";
+import { holdTailToSettle } from "./quasiLocked.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
 import { matchThesisRoom, thesisCapUsd, dailyClusterRoom, dailyClusterCapUsd } from "./thesisExposure.js";
@@ -1261,6 +1262,20 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text, created_at: now });
         }
       };
+      // [R1 / batch-10] QUASI-LOCKED TAIL. Boston rode 95.8¢, was cashed out there, and the market resolved at
+      // 100¢ — those 4.2¢ bought nothing but the exit commission, because the SCORE had already decided the
+      // outcome. Hold the tail to resolution ONLY when the game state has mathematically locked the market (a
+      // deterministic predicate over score+clock, same vocabulary as the resolved_price caps). Anything not
+      // locked cashes out exactly as before — holding an UNLOCKED 95¢ mark to settlement is how it becomes 0¢
+      // on a 94th-minute goal, which is why this policy exists at all.
+      if (d.reason === "take_profit") {
+        const lock = holdTailToSettle(
+          { label: b.market_label, home: m.home, away: m.away, scoreHome: m.score_home, scoreAway: m.score_away, minute: m.minute },
+          footballCore(db, m.id), deps.env ?? process.env,
+        );
+        if (lock.locked) { holdOnce(`тейк подавлен по ${holdKey}: ${lock.reason} (quasi_locked_tail)`); continue; }
+      }
+
       // OPTIONALITY GATE (audit: Argentina–Switzerland). For a market that WINS on a future
       // event (Over / BTTS Yes / team-to-score), the price is a MELTING OPTION — a price STOP
       // liquidates it at its cheapest right before it can pay (stop −44% @ 30.8¢ on 62',

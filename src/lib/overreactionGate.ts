@@ -1,24 +1,29 @@
 // ============================================================
-// EDGE LAB — OVERREACTION EDGE-GATE COUNTER  [SERVER-ONLY, read-only]
+// EDGE LAB — OVERREACTION EDGE-GATE  [R1, batch-10 ТЗ — UNIT-OF-MEASURE REPAIR]
 //
-// The football Overreaction verdict (CLV + win% + P&L agreement) is only readable once the strategy has
-// accumulated ENOUGH clean cycles — the pre-set sample gate is n≥30. Until then the edge is a rumour, not a
-// result. That progress ("6/30") lived only in my head across chats; a mute counter that no report exposes is
-// exactly the «немой ноль» this codebase keeps fixing. This makes it DATA.
+// The old gate counted only RESOLUTION-settled cycles. For a strategy that cashes out ~100% of its positions
+// by design, that gate is unmeasurable by construction: it waits for an event its own exit policy prevents.
+// It is the same class of blindness as the PMV Brier gate that measured nothing until shadow scoring fixed the
+// unit — and the precedent is why this repair is ratified rather than argued.
 //
-// A cycle COUNTS toward the gate iff it is:
-//   • football strategy_id='overreaction' (the live-buyback cohort, not PMV / tennis)
-//   • terminally settled by RESOLUTION — settled_won / settled_lost (a real grade on the final score),
-//     NOT void and NOT an early/partial cash-out (settled_by 'early'/'partial' are discretionary, not a
-//     verdict-bearing outcome)
-//   • on the CLEAN epoch — code-epoch ≥ e5 (pre-e5 numbers mean something different)
-//   • SAME-epoch — entry and exit under one rule-set (crossEpoch cycles are governed by two, quarantined)
-// verdict = "gate_open" once cleanCycles ≥ 30, else "accruing". Read-only; never writes.
-// Exposed at GET /api/real?report=overreaction_gate.
+// The gate is now: CLOSED SIGNAL CYCLES WITH REALIZED P&L. A cash-out is a real, graded outcome — money came
+// back, more or less than went out — so it counts. The unit is the SIGNAL (R0.1), not the bet row, so a
+// 4-profile fan-out of one decision is one observation. Clean epoch and same-epoch filters stay; the verdict
+// is triple agreement on signals (CLV t / win-vs-implied / bootstrap P&L) at n≥25 preliminary, n≥40 stable.
+//
+// STATED OPENLY, in code and in the report: this repairs the RULER, not the result. The cash-out cohort
+// currently reads NEGATIVE (win ≈36%, CLV ≈ −5.2¢). We are adopting a measure that, as of today, argues
+// against the strategy — which is exactly why it can be trusted. A gate that only ever opened on favourable
+// arithmetic would be a marketing device, not a criterion.
+//
+// Read-only; never writes. Exposed at GET /api/real?report=overreaction_gate.
 // ============================================================
 
 import type { Database } from "./db.js";
 import { codeEpochOf, crossEpoch, epochNum } from "./codeEpoch.js";
+import { betRecords } from "./profileAnalytics.js";
+import { cleanEpochRecords } from "./profileEpochCut.js";
+import { signalCohort } from "./signals.js";
 
 
 /** win% / P&L / CLV over a cohort — the SAME three verdict metrics, for the gate cohort and (diagnostically)
@@ -40,6 +45,16 @@ export interface OverreactionGate {
   // the ratified resolution-only n≥30 regardless — we do not refit the criterion to the larger cash-out set.
   cashOutCohort: CohortMetrics;
   verdict: "gate_open" | "accruing";
+  // [R1 / batch-10] THE REPAIRED GATE — closed signal cycles with realized P&L (cash-outs included), scored
+  // on SIGNALS with the same statistical machinery every other cohort uses. `legacyResolutionOnly` keeps the
+  // old numerator visible so the change of ruler is auditable rather than silent.
+  signalGate: {
+    nSignals: number; nDecided: number; matured: "none" | "preliminary" | "stable";
+    winPct: number | null; meanImpliedPct: number | null; binomP: number | null; beatsMarket: boolean;
+    clvMeanCents: number | null; clvT: number | null; clvSignificant: boolean;
+    pnlUsd: number; bootP: number | null; pnlPositiveSignificant: boolean;
+    tripleAgreement: boolean; verdict: string; legacyResolutionOnly: number; note: string;
+  };
   note: string;
 }
 
@@ -102,8 +117,26 @@ export function buildOverreactionGate(db: Database, target = 30, cleanEpochMin =
   const diag = cashOutCohort.n > 0
     ? ` · ДИАГНОСТИКА кэш-аут-когорты (НЕ гейт, n=${cashOutCohort.n}): win ${cashOutCohort.winPct}%, P&L $${cashOutCohort.pnlUsd}, CLV ${cashOutCohort.clvCents ?? "n/a"}¢ vs сеттл win ${settleCohort.winPct ?? "n/a"}%, P&L $${settleCohort.pnlUsd}, CLV ${settleCohort.clvCents ?? "n/a"}¢ — ${agree ? "согласуется (усиливающее свидетельство к вердикту)" : "расходится (осторожно)"}; гейт остаётся ратифицированным resolution-only n≥30`
     : "";
+  // ── [R1] THE REPAIRED GATE: closed signal cycles with realized P&L ──────────────────────────────
+  // Every clean-epoch, same-epoch Overreaction position that CLOSED with money back — cash-out or resolution
+  // alike — collapsed to signals and scored by the standard tests. betRecords already drops settle_suspect,
+  // epoch_unknown and token-poisoned rows; cleanEpochRecords adds the e5 floor and the cross-epoch quarantine,
+  // so the two filters agree with the legacy numerator by construction.
+  const recs = cleanEpochRecords(betRecords(db, { strategyId: "overreaction" }), cleanEpochMin);
+  const cohort = signalCohort(recs, { strategyId: "overreaction" });
+  const sg = {
+    nSignals: cohort.nSignals, nDecided: cohort.nDecided, matured: cohort.matured,
+    winPct: cohort.winVsImplied.winPct, meanImpliedPct: cohort.winVsImplied.meanImpliedPct,
+    binomP: cohort.winVsImplied.binomP, beatsMarket: cohort.winVsImplied.beatsMarket,
+    clvMeanCents: cohort.clv.meanCents, clvT: cohort.clv.t, clvSignificant: cohort.clv.significant,
+    pnlUsd: cohort.pnl.totalUsd, bootP: cohort.pnl.bootP, pnlPositiveSignificant: cohort.pnl.positiveSignificant,
+    tripleAgreement: cohort.tripleAgreement, verdict: cohort.verdict, legacyResolutionOnly: cleanCycles,
+    note: `[R1] ЕДИНИЦА ИЗМЕРЕНИЯ ИСПРАВЛЕНА: гейт считает ЗАКРЫТЫЕ СИГНАЛЬНЫЕ ЦИКЛЫ с реализованным P&L (кэш-ауты входят) — resolution-only ворота для стратегии, кэш-аутящей ~100% позиций, неизмеримы по построению (тот же класс слепоты, что Brier у PMV). n=${cohort.nSignals} сигналов, решённых ${cohort.nDecided} (${cohort.matured}); старый resolution-only числитель был ${cleanCycles}. ` +
+      `ОГОВОРКА ОТКРЫТО: это ремонт ЛИНЕЙКИ, а не результата — текущее чтение против нас (кэш-аут-когорта win ${cashOutCohort.winPct ?? "n/a"}%, CLV ${cashOutCohort.clvCents ?? "n/a"}¢). Принимаем меру, которая сегодня спорит со стратегией: гейт, открывающийся только на удобной арифметике, был бы не критерием, а рекламой. ` + cohort.note,
+  };
+
   const note = (verdict === "gate_open"
     ? `✅ ГЕЙТ ОТКРЫТ: ${cleanCycles}/${target} чистых Overreaction-циклов — выборки достаточно, вердикт (CLV+win%+P&L) можно читать`
     : `⏳ КОПИМ: ${cleanCycles}/${target} чистых циклов (won ${won} / lost ${lost}) — до n≥30 вердикт по Overreaction ещё преждевременный; исключено ${excluded.void} void, ${excluded.cashOut} кэш-аут, ${excluded.preEpoch} до-e5, ${excluded.crossEpoch} cross-epoch, ${excluded.settleSuspect} settle_suspect (two-leg мислейбл)`) + diag;
-  return { target, cleanEpochMin, cleanCycles, progress: `${cleanCycles}/${target}`, won, lost, excluded, byEpoch, settleCohort, cashOutCohort, verdict, note };
+  return { target, cleanEpochMin, cleanCycles, progress: `${cleanCycles}/${target}`, won, lost, excluded, byEpoch, settleCohort, cashOutCohort, verdict, signalGate: sg, note };
 }
