@@ -21,6 +21,7 @@ import { openDb, dbPath } from "../src/lib/db.js";
 import { CODE_VERSION } from "../src/lib/betMeta.js";
 import { pmvNetEvCents } from "../src/lib/tennisPmv.js";
 import { isFtBlindBet } from "../src/lib/betMeta.js";
+import { buildDrawCanonProbe } from "../src/lib/drawCanonProbe.js";
 
 const argSince = process.argv.find((a) => a.startsWith("--since="))?.slice(8);
 const since = argSince ?? new Date(Date.now() - 24 * 3600_000).toISOString();
@@ -211,6 +212,16 @@ line("dust_floor", n1(
 line("refusal_shadow сигналы", n1(
   `SELECT COUNT(*) n FROM refusal_shadow_signals WHERE created_at >= ?`, fireSince),
   `R5: отказы стратега заморожены как would-be сигналы (нужно 25 решённых)`);
+
+// [G5 / batch-11] The Draw-canon counter, surfaced where the operator already looks. Reported as accumulation,
+// never as a verdict, until it matures — the whole point of building it was to stop deciding on a story.
+try {
+  const probe = buildDrawCanonProbe(db);
+  P(`- **Draw-канон (счётчик G5)**: ${probe.observations} наблюдений по ${probe.matches} матчам · ` +
+    `канон выбрал книгу ${probe.canonChosen}× · из них в карантине ${probe.canonQuarantined}` +
+    (probe.doubleLockPct == null ? "" : ` (${probe.doubleLockPct}%)`));
+  P(`    ${probe.note}`);
+} catch (e) { P(`- **Draw-канон (счётчик G5)**: недоступен — ${(e as Error).message}`); }
 
 const rs = q<{ status: string; n: number }>(`SELECT status, COUNT(*) n FROM refusal_shadow_signals GROUP BY status`);
 if (rs.length) P(`  refusal_shadow по статусам: ${rs.map((r) => `${r.status}=${r.n}`).join(", ")}`);
