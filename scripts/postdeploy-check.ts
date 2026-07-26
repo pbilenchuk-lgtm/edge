@@ -23,6 +23,13 @@ import { pmvNetEvCents } from "../src/lib/tennisPmv.js";
 
 const argSince = process.argv.find((a) => a.startsWith("--since="))?.slice(8);
 const since = argSince ?? new Date(Date.now() - 24 * 3600_000).toISOString();
+// The moment the CURRENT build started serving. §3 counts footprints of code that only exists after it, so a
+// window that opens earlier mixes old-code behaviour into a "did the repair fire?" answer — and reads as if a
+// repair made things worse when the rows predate it. Separate knob, because --since is also used to size the
+// cohort in §2/§4, where pre-deploy history is exactly what we want.
+const deployedAt = process.argv.find((a) => a.startsWith("--deployed="))?.slice(11);
+const fireSince = deployedAt && deployedAt > since ? deployedAt : since;
+const fireHours = Math.round(((Date.now() - Date.parse(fireSince)) / 3600_000) * 10) / 10;
 const db = openDb(dbPath());
 const out: string[] = [];
 const P = (s = "") => out.push(s);
@@ -74,58 +81,82 @@ const pmv = q<any>(
 );
 if (!pmv.length) P(`нет ставок tennis_pmv в базе — ретро-прогон нечего считать.`);
 else {
-  P(`| время | матч | рынок | theo | mid | gross | комиссия | net | вердикт гейта | факт P&L |`);
-  P(`|---|---|---|---|---|---|---|---|---|---|`);
-  let cutCount = 0, cutPnl = 0, passPnl = 0;
+  // COLLAPSE THE PROFILE FAN-OUT (R0.1 units). One decision placed across four risk profiles is four ROWS
+  // but one SIGNAL, and the gate is a per-decision object: it either cut that candidate or it did not. Listing
+  // the rows makes a handful of decisions look like a sample. Money still sums over rows — that part is real.
+  type Sig = { rows: any[]; theo: number; mid: number };
+  const sig = new Map<string, Sig>();
+  const orphans: any[] = [];
   for (const b of pmv) {
     let meta: any = null; try { meta = b.entry_meta ? JSON.parse(b.entry_meta) : null; } catch { /* legacy row */ }
     const theo = meta?.derivedProb != null ? meta.derivedProb * 100 : (b.ai_prob != null ? b.ai_prob * 100 : null);
     const mid = meta?.marketPrice ?? b.entry_price;
-    if (theo == null || mid == null) { P(`| ${b.created_at} | ${b.home}–${b.away} | ${b.market_label} | — | — | — | — | — | нет meta | — |`); continue; }
-    const ev = pmvNetEvCents(Math.round(theo * 10) / 10, mid);
-    const pnl = b.status.startsWith("settled") ? Math.round(((b.payout ?? 0) - (b.stake ?? 0)) * 100) / 100 : null;
-    const verdict = ev.pass ? "прошёл бы" : `**СРЕЗАН** (< ${ev.marginCents}¢)`;
-    if (ev.pass) passPnl += pnl ?? 0; else { cutCount++; cutPnl += pnl ?? 0; }
-    P(`| ${b.created_at} | ${b.home}–${b.away} | ${b.market_label} | ${(Math.round(theo * 10) / 10)}¢ | ${mid}¢ | ${ev.grossCents}¢ | ${ev.feeCents}¢ | ${ev.netCents}¢ | ${verdict} | ${pnl == null ? "открыта" : `$${pnl}`} |`);
+    if (theo == null || mid == null) { orphans.push(b); continue; }
+    const k = `${b.created_at}|${b.home}|${b.market_label}`;
+    const e: Sig = sig.get(k) ?? { rows: [], theo: Math.round(theo * 10) / 10, mid };
+    e.rows.push(b); sig.set(k, e);
   }
+  P(`| время | матч | рынок | theo | mid | gross | комиссия | net | вердикт гейта | профилей | факт P&L |`);
+  P(`|---|---|---|---|---|---|---|---|---|---|---|`);
+  let cutN = 0, cutPnl = 0, passN = 0, passPnl = 0, openLegs = 0;
+  for (const [, e] of sig) {
+    const ev = pmvNetEvCents(e.theo, e.mid);
+    let pnl = 0, decided = 0;
+    for (const b of e.rows) {
+      if (String(b.status).startsWith("settled")) { pnl += (b.payout ?? 0) - (b.stake ?? 0); decided++; } else openLegs++;
+    }
+    pnl = Math.round(pnl * 100) / 100;
+    if (ev.pass) { passN++; passPnl += pnl; } else { cutN++; cutPnl += pnl; }
+    const b0 = e.rows[0];
+    P(`| ${b0.created_at} | ${b0.home}–${b0.away} | ${b0.market_label} | ${e.theo}¢ | ${e.mid}¢ | ${ev.grossCents}¢ | ${ev.feeCents}¢ | ${ev.netCents}¢ | ${ev.pass ? "прошёл бы" : `**СРЕЗАН** (< ${ev.marginCents}¢)`} | ${e.rows.length} | ${decided ? `$${pnl}` : "открыта"} |`);
+  }
+  for (const b of orphans) P(`| ${b.created_at} | ${b.home}–${b.away} | ${b.market_label} | — | — | — | — | — | нет meta | 1 | — |`);
   P();
-  P(`Гейт срезал бы **${cutCount}** из ${pmv.length}. P&L срезанных: **$${Math.round(cutPnl * 100) / 100}** ` +
-    `(положительное число = гейт стоил бы нам денег на этой выборке, отрицательное = сберёг). ` +
-    `P&L прошедших: $${Math.round(passPnl * 100) / 100}.`);
-  P(`Выборка мала и НЕ является проверкой гипотезы — это строка в отчёт, а не основание двигать маржу.`);
+  P(`**${sig.size} решений** (${pmv.length} строк ставок — фан-аут по профилям схлопнут; ${orphans.length} без meta).`);
+  P(`Гейт срезал бы **${cutN}** из ${sig.size}. P&L срезанных: **$${Math.round(cutPnl * 100) / 100}** ` +
+    `(положительное = гейт стоил бы денег на этой выборке, отрицательное = сберёг). ` +
+    `P&L прошедших: $${Math.round(passPnl * 100) / 100}. Открытых ног: ${openLegs}.`);
+  if (cutN === 0) P(`⚠ Гейт не срезал НИЧЕГО: при марже ${pmvNetEvCents(50, 50).marginCents}¢ он лежит сильно ниже ` +
+    `распределения отклонений и на этой выборке ни разу не связывал. Это не «защита сработала» — это «защита не включалась». ` +
+    `Двигать маржу без данных всё равно нельзя, но и считать её работающей нельзя.`);
+  P(`Выборка мала и НЕ является проверкой гипотезы — это строка в отчёт, а не основание двигать порог.`);
 }
 P();
 
 // ── §3 LIVE-FIRE ──────────────────────────────────────────────────────────────────────────────────
 // Each repair gets: did it fire, and how often. A zero is reported as UNVERIFIED, never as "fine" — an
 // untriggered path is an untested path, and several of these were shipped precisely because a count was 0.
-P(`## §3. Следы починок batch-10 после деплоя (с ${since})`);
+P(`## §3. Следы починок batch-10 после деплоя (с ${fireSince}, это ${fireHours} ч)`);
+if (!deployedAt) P(`⚠ \`--deployed=ISO\` не передан: окно может захватывать время ДО текущей сборки, и тогда цифры ниже\n` +
+  `описывают старый код, а не починку. Передайте момент выкатки, иначе §3 не читается как проверка.`);
+if (fireHours < 2) P(`⚠ Сборка живёт всего ${fireHours} ч. Нули ниже означают «не успело сработать», а НЕ «не работает».\n` +
+  `Осмысленное чтение — не раньше чем через сутки, тем же ключом \`--deployed\`.`);
 const line = (name: string, count: number, note: string) =>
   P(`- **${name}**: ${count === 0 ? `0 — ⚠ путь НЕ прошёл, починка НЕ подтверждена` : `${count}`} — ${note}`);
 
 line("ft_blind входы", n1(
-  `SELECT COUNT(*) n FROM bets WHERE created_at >= ? AND (rationale LIKE '%ft_blind%' OR strategy_id = 'ft_blind')`, since),
+  `SELECT COUNT(*) n FROM bets WHERE created_at >= ? AND (rationale LIKE '%ft_blind%' OR strategy_id = 'ft_blind')`, fireSince),
   `V0.1: до деплоя было ровно 0 из-за origin='live' на опоздавшем анализе`);
 line("net_ev_cut (теннис)", n1(
-  `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'net_ev_cut%'`, since),
+  `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'net_ev_cut%'`, fireSince),
   `гейт PR #46 режет кандидатов до денег`);
 line("flag_only (теннис)", n1(
-  `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'flag_only%'`, since),
+  `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'flag_only%'`, fireSince),
   `R2: безопасная ветка — сигналы пишутся в калибровку, деньги не идут`);
 line("zombie_quarantine эпизоды", n1(
-  `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'zombie_quarantine%'`, since),
+  `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'zombie_quarantine%'`, fireSince),
   `R4: с гистерезисом их должно стать МЕНЬШЕ, а не больше — сравнивать с прошлой пачкой логов`);
 line("zombie_lifted", n1(
-  `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'zombie_lifted%'`, since),
+  `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'zombie_lifted%'`, fireSince),
   `снятие карантина требует 2 подряд чистых тика (dwell), а не одного`);
 line("quasi_locked_tail (хвост досижен)", n1(
-  `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE '%quasi_locked_tail%'`, since),
+  `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE '%quasi_locked_tail%'`, fireSince),
   `R1: тейк подавлен, потому что счёт запер рынок`);
 line("dust_floor", n1(
-  `SELECT COUNT(*) n FROM bets WHERE settled_at >= ? AND rationale LIKE '%dust_floor%'`, since),
+  `SELECT COUNT(*) n FROM bets WHERE settled_at >= ? AND rationale LIKE '%dust_floor%'`, fireSince),
   `R6: остаток дешевле собственного выхода закрыт целиком`);
 line("refusal_shadow сигналы", n1(
-  `SELECT COUNT(*) n FROM refusal_shadow_signals WHERE created_at >= ?`, since),
+  `SELECT COUNT(*) n FROM refusal_shadow_signals WHERE created_at >= ?`, fireSince),
   `R5: отказы стратега заморожены как would-be сигналы (нужно 25 решённых)`);
 
 const rs = q<{ status: string; n: number }>(`SELECT status, COUNT(*) n FROM refusal_shadow_signals GROUP BY status`);
@@ -138,7 +169,7 @@ P(`### R3 (T-минус якорь): доля анализов, успевших
 const anch = q<any>(
   `SELECT a.created_at, m.kickoff_at, m.home, m.away
      FROM assessments a JOIN matches m ON m.id = a.match_id
-    WHERE a.status = 'ok' AND a.created_at >= ? AND m.kickoff_at IS NOT NULL`, since);
+    WHERE a.status = 'ok' AND a.created_at >= ? AND m.kickoff_at IS NOT NULL`, fireSince);
 if (!anch.length) P(`нет успешных анализов в окне — мерить нечего (⚠ путь не подтверждён).`);
 else {
   const gaps = anch.map((r) => (new Date(r.kickoff_at).getTime() - new Date(r.created_at).getTime()) / 60000);
