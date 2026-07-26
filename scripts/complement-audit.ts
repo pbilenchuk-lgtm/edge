@@ -19,7 +19,7 @@ const r = await auditComplementVoids(db, { resolveTokens: defaultResolveTokens({
 
 console.log(`# РЕТРО-АУДИТ ВОЗВРАТОВ · ${apply ? "ПРИМЕНЕНИЕ" : "сухой прогон"} · ${new Date().toISOString()}`);
 console.log(`БД: ${dbPath()}`);
-console.log(`возвратов проверено: ${r.examined} · комплемент найден: ${r.complementFound} · пере-сеттлено: ${r.reSettled}`);
+console.log(`возвратов проверено: ${r.examined} · комплемент найден: ${r.complementFound} · пере-сеттлено: ${r.reSettled}${r.deferred ? ` · ОТЛОЖЕНО (БД занята): ${r.deferred}` : ""}`);
 console.log(`  выигрышей ${r.won} / проигрышей ${r.lost} · Δ банка $${r.bankDeltaUsd.toFixed(2)}`);
 console.log(r.note);
 if (r.rows.length) {
@@ -28,3 +28,4 @@ if (r.rows.length) {
   for (const x of r.rows) console.log(`| ${x.matchId.slice(0, 8)} | ${x.label} | ${x.outcome} | ${x.priceCents}¢ | $${x.stake} | $${x.deltaUsd.toFixed(2)} |`);
 }
 if (!apply && r.reSettled) console.log(`\nНичего не изменено. Применить: npm run complement:audit -- --apply`);
+if (apply && r.deferred) console.log(`\n⚠ ${r.deferred} строк(и) не записались из-за блокировки БД. Проход идемпотентен — запустите ту же команду ещё раз.`);
