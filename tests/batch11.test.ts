@@ -362,8 +362,9 @@ test("#1: bets settled OUTSIDE the window do not count — the rate is about now
 // A review round was spent unable to answer «did the cap ever act?»: the trade log recorded only outright
 // blocks, so a silent clamp was indistinguishable from a disabled cap. The Brann stack ($80+$30+$166+$50 =
 // $326 against a $250 cap) could not be diagnosed from the record — only guessed at.
-import { matchThesisRoom, thesisCapUsd } from "../src/lib/thesisExposure.js";
-import { correlationKey } from "../src/lib/strategist.js";
+import { matchThesisRoom, thesisCapUsd, bankUsd } from "../src/lib/thesisExposure.js";
+import { correlationKey, sizePrematch } from "../src/lib/strategist.js";
+import { DEFAULT_RISK_CONFIG } from "../src/lib/riskConfig.js";
 
 test("cap: a 4-profile stack on ONE thesis is clamped at the cap, counting across profiles", () => {
   const db = openDb(":memory:"); initSchema(db);
@@ -406,4 +407,45 @@ test("cap: with the env unset the cap is OFF and the same stack passes unclamped
   assert.equal(thesisCapUsd({}), 0, "no env → no cap");
   assert.equal(matchThesisRoom(db, "m1", "total:under", "A", "B", {}, ["open"]), Infinity,
     "…and infinite room, which is exactly why an empty cap log proves nothing on its own");
+});
+
+// ── sizing_insanity on the football path ─────────────────────────────────────────────────────────
+// The $28,291 set_value bets of 17 July — IDENTICAL across all four profiles, on a $1,000 bank — were the
+// signature of a corrupted budget input: profiles are supposed to size differently, so equal stakes mean the
+// number did not come from per-profile sizing at all. The backstop built in response (sizing_insanity, 23 Jul)
+// was wired into tennis only. Football kept sizing off `competitions.budget` — a DB row, i.e. exactly the
+// corruptible input the guard exists for — with no absolute floor under it.
+test("sizing_insanity: a corrupted competition budget cannot size a football stake past half the declared bank", () => {
+  const cfg = DEFAULT_RISK_CONFIG;
+  const inp = { ourProb: 0.62, priceCents: 45, implied: 0.45, calibration: 0.6, liquidity: 500_000,
+    matchExposure: 0, compExposure: 0, cfg };
+
+  // A competition budget of $1M (the poisoned-epoch shape) passes every budget-RELATIVE cap, because they are
+  // all fractions OF the corrupted number.
+  const unguarded = sizePrematch({ ...inp, budget: 1_000_000 });
+  assert.equal(unguarded.status, "enter");
+  assert.ok(unguarded.stake > 500, `without a bank ceiling the caps scale with the corruption: $${unguarded.stake}`);
+
+  // With the declared bank passed, the same call is REJECTED — loudly, never silently trimmed to something
+  // plausible-looking. A trim would have booked a wrong-but-sane stake and left no trace of the corruption.
+  const guarded = sizePrematch({ ...inp, budget: 1_000_000, bankCeiling: 1000 });
+  assert.equal(guarded.status, "flag");
+  assert.equal(guarded.stake, 0);
+  assert.match(guarded.reason, /sizing_insanity/);
+
+  // And a HEALTHY budget is untouched by the ceiling — the guard must not cost a single legitimate entry.
+  const healthy = sizePrematch({ ...inp, budget: 2000, bankCeiling: 1000 });
+  assert.equal(healthy.status, "enter");
+  assert.ok(healthy.stake > 0 && healthy.stake <= 500);
+});
+
+test("sizing_insanity: an undeclared bank leaves the guard inert — bankUsd(0) must not become a $0 ceiling", () => {
+  // bankUsd returns 0 when THESIS_BANK_USD is unset, and the call sites pass `|| undefined`. If 0 leaked
+  // through as a ceiling, `stake > 0 × 0.5` would be true for every bet and the guard would block the entire
+  // book. Fail-closed is right for a settle; here it would be a silent trading halt.
+  assert.equal(bankUsd({}), 0);
+  assert.equal(bankUsd({ THESIS_BANK_USD: "1000" }), 1000);
+  const r = sizePrematch({ ourProb: 0.62, priceCents: 45, implied: 0.45, calibration: 0.6, liquidity: 500_000,
+    matchExposure: 0, compExposure: 0, cfg: DEFAULT_RISK_CONFIG, budget: 1000, bankCeiling: bankUsd({}) || undefined });
+  assert.equal(r.status, "enter", "no declared bank → no ceiling → the book keeps trading as before");
 });
