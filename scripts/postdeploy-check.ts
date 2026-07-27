@@ -182,10 +182,19 @@ const blindFunnel = q<any>(
           (SELECT MIN(a.created_at) FROM assessments a WHERE a.match_id = m.id AND a.status='ok') AS first_ok
      FROM matches m JOIN competitions c ON c.id = m.competition_id
     WHERE c.budget > 0 AND m.kickoff_at >= ? AND c.sport_id = 'football'`, fireSince);
-const blind = blindFunnel.filter((r) => r.live_rows === 0 && r.mkts > 0);
+// KICKOFF MUST HAVE HAPPENED. The query bounds kickoff_at from BELOW only, so it also collects every fixture
+// imported for next week. Those are unanalysed because their turn has not come — counting them as misses
+// turned a healthy funnel into «166 слепых → 10 проанализировано», i.e. a 94% loss that does not exist. The
+// number was about to send the next investigation into the scheduler. A fixture can only be judged on whether
+// it was analysed once its kickoff is in the past.
+const nowIso = new Date().toISOString();
+const blindAll = blindFunnel.filter((r) => r.live_rows === 0 && r.mkts > 0);
+const blind = blindAll.filter((r) => r.kickoff_at < nowIso);
+const upcoming = blindAll.length - blind.length;
 const blindAnalysed = blind.filter((r) => r.first_ok);
 const blindInTime = blindAnalysed.filter((r) => r.first_ok < r.kickoff_at);
-P(`    воронка слепых фикстур в окне: ${blind.length} слепых с котировками → ${blindAnalysed.length} проанализировано → **${blindInTime.length} успело ДО свистка**`);
+P(`    воронка слепых фикстур в окне: ${blind.length} слепых с котировками (кикофф уже был) → ${blindAnalysed.length} проанализировано → **${blindInTime.length} успело ДО свистка**`);
+if (upcoming) P(`    (+${upcoming} слепых с кикоффом ВПЕРЕДИ — их черёд ещё не настал, в воронку не идут)`);
 P(blind.length === 0
   ? `    → слепых фикстур в окне просто НЕ БЫЛО: ноль выше ничего не говорит про режим, нужен слейт с ними`
   : blindInTime.length === 0
