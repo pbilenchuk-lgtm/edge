@@ -17,7 +17,7 @@ import { assessMatchLLM, assessFootballStructured, assessCategoryModifier, effec
 import { assembleFootball, type AssembledAnalysis } from "./assembler.js";
 import { footballLabelProb } from "./footballMarkets.js";
 import { impliedProbs, probSumFlags, sizePrematch, correlationKey } from "./strategist.js";
-import { matchThesisRoom } from "./thesisExposure.js";
+import { matchThesisRoom, bankUsd } from "./thesisExposure.js";
 import { marketFamily } from "./signals.js";
 import { recordFamilyShadowSignal, killedFamilies, isDemotedFamily } from "./familyShadow.js";
 import { getProfileConfig } from "./riskConfig.js";
@@ -366,7 +366,12 @@ export async function runStrategists(
       const execCents = askUsable ? (m.ask_cents as number) : m.price;
       const edgeSource: "executable" | "mid_fallback" = askUsable ? "executable" : "mid_fallback";
       const effImplied = askUsable ? execCents / 100 : implied;
-      const r = sizePrematch({ ourProb, priceCents: execCents, implied: effImplied, calibration, liquidity: parseLiq(m.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg });
+      // bankCeiling: the sizing_insanity backstop, built after a corrupted budget sized a $28k tennis stake on a
+      // $1k bank, was wired into tennis ONLY — football sized off `competitions.budget` (a DB row, i.e. the exact
+      // corruptible input) with no absolute floor under it. Undeclared bank → 0 → undefined → guard stays inert,
+      // so nothing changes for a deployment that never stated its bank.
+      const bank = bankUsd(env) || undefined;
+      const r = sizePrematch({ ourProb, priceCents: execCents, implied: effImplied, calibration, liquidity: parseLiq(m.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg, bankCeiling: bank });
       // S5 (R0.5): MATCH-WIDE thesis cap — a correlated stack (dom:/total: cluster) is one thesis across ALL
       // strategies/profiles, so clamp the entry to the thesis' remaining room on the match (not just this
       // pair's). Off by default (THESIS_MATCH_CAP_USD unset → room=Infinity → no-op); the real=on blocker.

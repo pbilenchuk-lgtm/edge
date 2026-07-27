@@ -41,7 +41,7 @@ import { resolveRefusalShadowSignals } from "./refusalShadow.js";
 import { holdTailToSettle } from "./quasiLocked.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
-import { matchThesisRoom, thesisCapUsd, dailyClusterRoom, dailyClusterCapUsd } from "./thesisExposure.js";
+import { matchThesisRoom, thesisCapUsd, dailyClusterRoom, dailyClusterCapUsd, bankUsd } from "./thesisExposure.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -2265,7 +2265,9 @@ export async function strategistReassess(
             if (lostThisMarket) { unfilled.push(`«${mk.label}» — уже был убыточный выход в этом матче, доливка запрещена (martingale_block)`); continue; }
             const implied = impliedMap.get(mk.label)?.implied ?? mk.price / 100;
             const cKey = correlationKey(mk.label, m.home, m.away);
-            const r = sizePrematch({ ourProb, priceCents: mk.price, implied, calibration, liquidity: liqNum(mk.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg, allowLargeEdge: true });
+            // Same bankCeiling backstop as the prematch path: the LIVE entry sizes off the same competition
+            // budget row, so it needs the same absolute floor under it. 0 → undefined → inert.
+            const r = sizePrematch({ ourProb, priceCents: mk.price, implied, calibration, liquidity: liqNum(mk.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg, allowLargeEdge: true, bankCeiling: bankUsd(env) || undefined });
             if (r.status !== "enter") { unfilled.push(`«${mk.label}» — ${r.reason}`); continue; }
             exposure += r.stake; matchExposure += r.stake;
             if (cKey) clusterExp.set(cKey, (clusterExp.get(cKey) ?? 0) + r.stake);
