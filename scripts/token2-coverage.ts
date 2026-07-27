@@ -98,7 +98,18 @@ const missMatches = [...new Set(rows.filter((r) => !r.has2).map((r) => r.match_i
 const sample = missMatches.slice(0, 200);
 let covered = 0, real = 0, scanned = 0;
 for (const mid of sample) {
-  const mkts = db.prepare(`SELECT label, external_ref, token_second FROM markets WHERE match_id=?`).all(mid) as any[];
+  // LATEST SNAPSHOT PER LABEL — the same view the settle path uses (R.latestMarkets). The first version of
+  // this script read raw `markets` rows, i.e. every historical snapshot, so one match yielded ~183 "markets"
+  // and every label appeared dozens of times. findComplementMarket demands exactly ONE candidate (ambiguity
+  // must not settle money), so the duplicates made it return null almost always and the script reported
+  // «99.6% have no complement» — a fact about my query, not about the data. A measurement that reads
+  // differently from the code it is measuring is worse than no measurement: it looks like evidence.
+  const mkts = db.prepare(
+    `SELECT label, external_ref, token_second FROM markets m
+      WHERE match_id = ?
+        AND snapshot_at = (SELECT MAX(snapshot_at) FROM markets x WHERE x.match_id = m.match_id AND x.label = m.label)
+      GROUP BY label`,
+  ).all(mid) as any[];
   for (const mk of mkts.filter((x) => !x.token_second)) {
     scanned++;
     if (findComplementMarket(mk.label, mkts)) covered++; else real++;
