@@ -27,6 +27,7 @@
     "postdeploy:check": "node --experimental-sqlite --import tsx scripts/postdeploy-check.ts",
     "anchor:diagnose": "node --experimental-sqlite --import tsx scripts/anchor-diagnose.ts",
     "complement:audit": "node --experimental-sqlite --import tsx scripts/complement-audit.ts",
+    "token2:coverage": "node --experimental-sqlite --import tsx scripts/token2-coverage.ts",
     "melt:report": "node --experimental-sqlite --import tsx scripts/melt-report.ts",
     "matchday": "node --experimental-sqlite --import tsx scripts/matchday.ts",
     "scout:gap": "node --experimental-sqlite --import tsx scripts/scout-gap.ts",
