@@ -927,6 +927,15 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
             R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `thesis_cap «${b.market_label}»: тезис «${thesisKey}» у кэпа $${thesisCapUsd(deps.env ?? process.env)} — вход отклонён на филле`, created_at: now });
             continue;
           }
+          // LOG THE CLAMP TOO. Until now the cap only spoke when it blocked outright (room < 1) and stayed
+          // silent when it merely trimmed — so «did the cap ever act?» was unanswerable from the record, and a
+          // whole review round was spent unable to tell a working cap from a disabled one. Same lesson as the
+          // void counter: a guard that works silently cannot be distinguished from a guard that is off.
+          R.insertTradeLog(db, {
+            id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip",
+            text: `thesis_cap_clamp «${b.market_label}»: тезис «${thesisKey}» — запрос $${Math.round(proposed)} подрезан до $${Math.round(room)} (кэп $${thesisCapUsd(deps.env ?? process.env)}, уже открыто $${Math.round(thesisCapUsd(deps.env ?? process.env) - room)})`,
+            dedup_key: `thesis_clamp:${b.id}`, created_at: now,
+          });
           proposed = Math.round(room * 100) / 100; // clamp the fill request to the thesis' remaining room
         }
         // [M11] DAILY cross-match cluster cap: the same directional thesis stacked across the competition's
