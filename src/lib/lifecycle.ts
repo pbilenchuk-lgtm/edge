@@ -19,7 +19,7 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, reSettleSuspectBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries, repairCategoryLeagues, refreshTeamAliasOverlay } from "./engine.js";
 import { settlePmResolutionBets } from "./pmResolution.js";
-import { backfillComplementTokens } from "./complementBackfill.js";
+import { backfillComplementTokens, auditComplementVoids } from "./complementBackfill.js";
 import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
 import { classifyOrderBook, paperBuyFill, paperSellFill, scaleCost, ENTRY_PHANTOM_DIVERGENCE, type FillCost, type EntryFillResult, type SellFillResult } from "./executor/paperFill.js";
@@ -2493,6 +2493,25 @@ export async function runAutoCycle(
   // P3/B2: persist the "blind pairs × league × day" coverage digest for the weekly report (the biggest
   // underearning lump is blind euro pairs — make it DATA, tracked against the ≥85% link-rate target).
   stepSync("noFeedCoverage", () => { persistNoFeedCoverage(db, nowFn(deps)(), { env: deps.env }); return 0; }, 0);
+  // [ratified #3] DAILY complement re-audit. The live settler only ever looks at OPEN bets, so a position that
+  // was already refunded is terminal to it — the backlog drains through this pass and nothing else. Leaving it
+  // as a command someone has to remember makes «is it burning?» a property of memory, and the last time that
+  // was true it cost 225 mis-booked rows. Rate-limited to once per day: the trickle is ~2 rows per 6 hours,
+  // so anything more frequent is spend without signal. Its result is persisted for the weekly report.
+  await step("complementAudit", async () => {
+    const nowIso = nowFn(deps)();
+    const day = nowIso.slice(0, 10);
+    if (R.metaGet(db, "complement_audit_day") === day) return 0;      // already run today
+    const r = await auditComplementVoids(db, deps, { apply: true });
+    try {
+      R.metaSet(db, "complement_audit_day", day, nowIso);
+      R.metaSet(db, "complement_audit_last", JSON.stringify({
+        at: nowIso, examined: r.examined, reSettled: r.reSettled, won: r.won, lost: r.lost,
+        deferred: r.deferred, bankDeltaUsd: r.bankDeltaUsd, note: r.note,
+      }), nowIso);
+    } catch { /* markers are best-effort */ }
+    return r.reSettled;
+  }, 0);
   // A match that passed kickoff but never went live (scout never saw the court / ESPN never delivered)
   // is stuck in upcoming/lineup — give it a terminal state so it leaves «Актуальные» within a tick
   // (voids its open bets, flags it «поломан» for the «Поломанные» bucket) instead of lingering 3 days.

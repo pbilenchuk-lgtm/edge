@@ -296,3 +296,64 @@ test("retro-audit: a locked row is DEFERRED, not counted and not fatal — the p
   assert.equal((db.prepare(`SELECT status FROM bets WHERE id='b1'`).get() as any).status, "settled_void",
     "the row is untouched, so a re-run picks it up again — that is what makes deferral safe");
 });
+
+// ── Ratified #1: the void rate is the sensor whose ABSENCE cost a month ──────────────────────────
+import { buildVoidWatch, VOID_ALARM_PCT, VOID_WATCH_MIN_N } from "../src/lib/voidWatch.js";
+
+function voidBed(db: any) {
+  R.upsertSport(db, "football", "Football");
+  R.upsertCompetition(db, { id: "c1", sport_id: "football", name: "F", budget: 8000, external_league: "nor.1", created_at: "t" } as any);
+  R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: null, color: null, version: 1, prompt: "", prompt_live: null, params: null, model: null, model_live: null, created_at: "t" } as any);
+  R.insertMatch(db, { id: "m1", competition_id: "c1", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t",
+    minute: null, score_home: 1, score_away: 1, final_score: "1-1", kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: "m1" } as any);
+}
+const addBet = (db: any, id: string, status: string, settledAt: string, settledBy: string | null, rationale = "") =>
+  db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,payout,settled_by,settled_at,rationale,created_at)
+              VALUES (?,'m1','prematch_value','max','Under 2.5',?,50,100,100,?,?,?,'t')`).run(id, status, settledBy, settledAt, rationale);
+
+test("#1: a spike of refunds raises an ALARM, and names OUR failure separately from the exchange's", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  voidBed(db);
+  const now = Date.parse("2026-07-28T00:00:00Z");
+  const at = "2026-07-27T20:00:00Z";
+  for (let i = 0; i < 20; i++) addBet(db, `w${i}`, "settled_won", at, null);
+  // Five refunds, of which four are the complement failure — the exact signature that hid 225 rows.
+  for (let i = 0; i < 4; i++) addBet(db, `v${i}`, "settled_void", at, "void", "одиночный токен без комплемента, просрочено");
+  addBet(db, "vm", "settled_void", at, "void", "рынок закрыт с неразрешающей ценой");
+  const r = buildVoidWatch(db, 24, now, {});
+  assert.equal(r.decided, 25);
+  assert.equal(r.voids, 5);
+  assert.equal(r.voidPct, 20);
+  assert.equal(r.verdict, "ALARM", `20% is far past the ${VOID_ALARM_PCT({})}% threshold`);
+  assert.equal(r.byReason["нет_комплемента"], 4, "OUR inability to verify is counted apart…");
+  assert.equal(r.byReason["market_void"], 1, "…from the exchange's own void — same status, opposite meaning");
+  assert.match(r.note, /НАША неспособность сверить/, "and the note points at the reason to start from");
+});
+
+test("#1: a normal day is quiet, and a tiny sample refuses to have an opinion", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  voidBed(db);
+  const now = Date.parse("2026-07-28T00:00:00Z");
+  const at = "2026-07-27T20:00:00Z";
+  for (let i = 0; i < 39; i++) addBet(db, `w${i}`, "settled_won", at, null);
+  addBet(db, "v0", "settled_void", at, "void", "рынок закрыт с неразрешающей ценой");
+  const ok = buildVoidWatch(db, 24, now, {});
+  assert.equal(ok.verdict, "ok", "2.5% of refunds is ordinary — a sensor that cries every day is ignored by week two");
+
+  const db2 = openDb(":memory:"); initSchema(db2);
+  voidBed(db2);
+  addBet(db2, "v0", "settled_void", at, "void", "нет комплемента");
+  const thin = buildVoidWatch(db2, 24, now, {});
+  assert.equal(thin.verdict, "insufficient", `1 decided bet is not ${VOID_WATCH_MIN_N}`);
+  assert.match(thin.note, /ничего не значит/, "100% of one bet is theatre, and the note says so");
+});
+
+test("#1: bets settled OUTSIDE the window do not count — the rate is about now, not about history", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  voidBed(db);
+  const now = Date.parse("2026-07-28T00:00:00Z");
+  for (let i = 0; i < 25; i++) addBet(db, `old${i}`, "settled_void", "2026-07-01T00:00:00Z", "void", "нет комплемента");
+  const r = buildVoidWatch(db, 24, now, {});
+  assert.equal(r.decided, 0);
+  assert.equal(r.verdict, "insufficient", "a month-old pile of refunds must not keep the alarm ringing forever");
+});
