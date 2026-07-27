@@ -97,6 +97,11 @@ console.log(`\n## Сколько из пропусков закрывает фо
 const missMatches = [...new Set(rows.filter((r) => !r.has2).map((r) => r.match_id))];
 const sample = missMatches.slice(0, 200);
 let covered = 0, real = 0, scanned = 0;
+// The 25.6% that no fallback can reach is only alarming if it lands on markets we actually TRADE. A handicap
+// «Team (-1.5)» has no invertible side by construction — complementKey returns null on purpose — so it can
+// never be cross-checked, but prematch_value trades totals only and never proposes one. Splitting the hole by
+// family is what separates "money can still be mis-booked" from "a market type we do not touch".
+const realByFam = new Map<string, number>();
 for (const mid of sample) {
   // LATEST SNAPSHOT PER LABEL — the same view the settle path uses (R.latestMarkets). The first version of
   // this script read raw `markets` rows, i.e. every historical snapshot, so one match yielded ~183 "markets"
@@ -112,12 +117,23 @@ for (const mid of sample) {
   ).all(mid) as any[];
   for (const mk of mkts.filter((x) => !x.token_second)) {
     scanned++;
-    if (findComplementMarket(mk.label, mkts)) covered++; else real++;
+    if (findComplementMarket(mk.label, mkts)) covered++;
+    else { real++; realByFam.set(family(mk.label), (realByFam.get(family(mk.label)) ?? 0) + 1); }
   }
 }
 console.log(`  матчей в выборке: ${sample.length} из ${missMatches.length} затронутых`);
 console.log(`  рынков без указателя просмотрено: ${scanned}`);
 console.log(`  из них фолбэк находит комплемент: **${covered}** (${scanned ? Math.round((1000 * covered) / scanned) / 10 : 0}%) — это вопрос опрятности, деньги уже защищены`);
 console.log(`  комплемента нет нигде: **${real}** (${scanned ? Math.round((1000 * real) / scanned) / 10 : 0}%) — вот это настоящая дыра: такие ставки по-прежнему могут только войти в возврат`);
-console.log(`\nЧитать так: если «нет нигде» близко к нулю — чинить поставщика можно спокойно, в свою очередь.`);
-console.log(`Если заметная доля — это приоритет выше, потому что фолбэк её не закрывает.`);
+console.log(`\n  ДЫРА ПО СЕМЬЯМ (кого именно фолбэк не спасает):`);
+const TRADED = new Set(["total", "team_total"]);   // what money actually goes into today (family gate: totals only)
+let tradedHole = 0;
+for (const [f, n] of [...realByFam.entries()].sort((a, b) => b[1] - a[1])) {
+  if (TRADED.has(f)) tradedHole += n;
+  console.log(`    ${f}: ${n}${TRADED.has(f) ? "  ← ТОРГУЕМ, это живые деньги" : "  (не торгуем сегодня)"}`);
+}
+console.log(`\nЧитать так: значение имеет только «торгуем». Гандикап без инвертируемой стороны не сверяем`);
+console.log(`намеренно — complementKey возвращает null, чтобы не сеттлить по догадке, и денег там нет.`);
+console.log(tradedHole === 0
+  ? `  → в торгуемых семьях дыры НЕТ: чинить поставщика можно спокойно, в свою очередь.`
+  : `  → в торгуемых семьях ${tradedHole} рынков без всякой сверки — эти ставки по-прежнему могут только войти в возврат.`);
