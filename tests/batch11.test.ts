@@ -357,3 +357,53 @@ test("#1: bets settled OUTSIDE the window do not count — the rate is about now
   assert.equal(r.decided, 0);
   assert.equal(r.verdict, "insufficient", "a month-old pile of refunds must not keep the alarm ringing forever");
 });
+
+// ── The thesis cap must be AUDITABLE, not just correct ───────────────────────────────────────────
+// A review round was spent unable to answer «did the cap ever act?»: the trade log recorded only outright
+// blocks, so a silent clamp was indistinguishable from a disabled cap. The Brann stack ($80+$30+$166+$50 =
+// $326 against a $250 cap) could not be diagnosed from the record — only guessed at.
+import { matchThesisRoom, thesisCapUsd } from "../src/lib/thesisExposure.js";
+import { correlationKey } from "../src/lib/strategist.js";
+
+test("cap: a 4-profile stack on ONE thesis is clamped at the cap, counting across profiles", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "football", "Football");
+  R.upsertCompetition(db, { id: "c1", sport_id: "football", name: "F", budget: 8000, external_league: "nor.1", created_at: "t" } as any);
+  R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: null, color: null, version: 1, prompt: "", prompt_live: null, params: null, model: null, model_live: null, created_at: "t" } as any);
+  R.insertMatch(db, { id: "m1", competition_id: "c1", home: "SK Brann", away: "Vålerenga", state: "lineup", lineup_out: true,
+    kickoff_at: "t", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null,
+    end_time: null, duration: null, end_note: null, external_ref: "m1" } as any);
+  const env = { THESIS_BANK_USD: "1000", THESIS_MATCH_CAP_FRAC: "0.25", THESIS_DAILY_CLUSTER_MULT: "2" };
+  assert.equal(thesisCapUsd(env), 250, "1000 × 0.25 — the ratified cap");
+
+  const key = correlationKey("Under 3.5", "SK Brann", "Vålerenga");
+  assert.equal(key, "total:under", "a match Under keys into the low-total cluster — the cap is not skipped");
+
+  // Fill the Brann stack profile by profile, exactly as autoEnter does: each fill commits `open` before the
+  // next re-check, so the room shrinks as the stack grows.
+  const fill = (id: string, prof: string, want: number) => {
+    const room = matchThesisRoom(db, "m1", key!, "SK Brann", "Vålerenga", env, ["open"]);
+    const got = Math.min(want, Math.max(0, room));
+    if (got >= 1) db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,created_at)
+                              VALUES (?,'m1','prematch_value',?,'Under 3.5','open',51,?,'t')`).run(id, prof, got);
+    return got;
+  };
+  assert.equal(fill("b1", "aggressive", 80), 80);
+  assert.equal(fill("b2", "conservative", 30), 30);
+  assert.equal(fill("b3", "max", 166), 140, "the third leg is TRIMMED to the remaining room, not granted in full");
+  assert.equal(fill("b4", "medium", 50), 0, "and the fourth gets nothing — the thesis is at its cap");
+
+  const total = (db.prepare(`SELECT ROUND(SUM(stake),2) s FROM bets WHERE match_id='m1' AND status='open'`).get() as any).s;
+  assert.equal(total, 250, "the whole stack lands exactly on the cap — never the $326 that was actually booked");
+});
+
+test("cap: with the env unset the cap is OFF and the same stack passes unclamped — the two states must be distinguishable", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "football", "Football");
+  R.upsertCompetition(db, { id: "c1", sport_id: "football", name: "F", budget: 8000, external_league: "nor.1", created_at: "t" } as any);
+  R.insertMatch(db, { id: "m1", competition_id: "c1", home: "A", away: "B", state: "lineup", lineup_out: true, kickoff_at: "t",
+    minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "m1" } as any);
+  assert.equal(thesisCapUsd({}), 0, "no env → no cap");
+  assert.equal(matchThesisRoom(db, "m1", "total:under", "A", "B", {}, ["open"]), Infinity,
+    "…and infinite room, which is exactly why an empty cap log proves nothing on its own");
+});
