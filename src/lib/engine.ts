@@ -1157,6 +1157,22 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       // in settleMatch (called by syncMatchStatus, guarded on from!=="finished"),
       // so if enrich flips a match to finished first, syncMatchStatus would skip
       // it forever and its open bets would never resolve. Settle here instead.
+      // A MATCH CANNOT BE OVER BEFORE IT STARTS. The two-leg date gate above stops a foreign leg from BINDING,
+      // but rows bound before that gate existed keep their poisoned binding, and every later poll happily
+      // re-applies the foreign event's «finished / 90' / 2:3» onto a fixture that has not kicked off. That is
+      // how 28.07 went silent: five qualification second legs sat `finished` with first-leg scores from 22.07,
+      // and a match the system believes is played never enters the live phase, never reaches the strategist
+      // and never trades. Not a threshold — a logical impossibility, so it is refused outright.
+      // The window is one match-length: a kickoff time that is merely slightly off must not be fought over,
+      // but an event finishing hours before its fixture begins is somebody else's match.
+      const koMsNow = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
+      const claimsOver = s.final || s.state === "finished" || s.state === "live";
+      if (claimsOver && Number.isFinite(koMsNow) && koMsNow - Date.parse(now) > 2 * 3_600_000) {
+        legTally.dateGap++;
+        recordReject(m.home, m.away, m.kickoff_at, s.date ?? null, league, "finished_before_kickoff");
+        console.warn(`[enrich] finished_before_kickoff: «${m.home}–${m.away}» кикофф ${m.kickoff_at}, а событие ESPN уже «${s.state}${s.final ? "/final" : ""}» (${s.date ?? "—"}) — состояние НЕ применено (чужой круг на нашей записи)`);
+        continue;
+      }
       const becameFinished = (s.final || s.state === "finished") && m.state !== "finished";
       // Never regress state or wipe a known score on a stale/glitchy poll.
       const nextState = STATE_RANK[s.state] >= STATE_RANK[m.state] ? s.state : m.state;
