@@ -281,6 +281,13 @@ export function initSchema(db: Database): void {
     // settle_suspect=0 тем, что означает «проверено», а не «ещё не смотрели» — иначе грубая пометка по
     // перечню турниров возвращала бы метку при каждом открытии базы.
     "ALTER TABLE bets ADD COLUMN settle_verified INTEGER NOT NULL DEFAULT 0",
+    // W1/Z2: судьба куска (payout−stake на закрытии) — ОТДЕЛЬНОЕ поле от исхода рынка, чтобы торговый
+    // P&L куска больше никогда не маскировался под предсказание (Over 1.5: lost@11.7 + won@54.8 на одном
+    // рынке — рынок «разрешился в обе стороны», потому что метка шла от знака P&L).
+    "ALTER TABLE bets ADD COLUMN piece_pnl REAL",
+    // 0 = метка куска ещё не сверена с рынком · 1 = выставлена по исходу рынка · 2 = accounting_unverifiable
+    // (проверить нечем — потребители калибровки обязаны отбрасывать, как settle_suspect).
+    "ALTER TABLE bets ADD COLUMN market_labeled INTEGER NOT NULL DEFAULT 0",
     // P0.5: football epoch tag on the bet (parallels tennis «пороги:…»); backfilled or epoch_unknown.
     "ALTER TABLE bets ADD COLUMN football_epoch TEXT",
     // Z3 (batch-5): idempotency key for trade-log lines — a re-render / double-write of the SAME event

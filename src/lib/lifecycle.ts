@@ -56,6 +56,7 @@ import { resolvePmvShadowSignals } from "./tennisPmvShadow.js";
 import { resolveFamilyShadowSignals } from "./familyShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
+import { relabelPiecesByMarket } from "./pieceRelabel.js";
 import { persistNoFeedCoverage } from "./noFeedCoverage.js";
 import { captureBookDepth } from "./bookDepthCapture.js";
 import { overreactionGate } from "./reassessGate.js";
@@ -2410,6 +2411,14 @@ export async function runAutoCycle(
   // а это MLS; вторая живёт в сеттл-пути, куда досрочно закрытая позиция не приходит вовсе. Этот проход метит
   // по свойству САМОЙ строки — привязка дальше допуска от кикоффа — для любого турнира и любого способа
   // закрытия. Ставится ПОСЛЕ backfill/re-settle, чтобы доказанно чистые успели сняться и не помечались зря.
+  // W1/Z2 (третья ратификация, блокирующая): метка досрочно закрытого куска = исход РЫНКА, судьба куска —
+  // piece_pnl. Идемпотентный проход = и живой конвейер, и ретро-миграция всей истории при первом запуске.
+  // Деньги (payout) не трогаются; win-rate/Brier/калибровка после этого читают предсказание, а не знак P&L.
+  stepSync("pieceRelabel", () => {
+    const r = relabelPiecesByMarket(db, deps);
+    if (r.flipped || r.unverifiable) console.warn(`[pieceRelabel] меток по рынку: ${r.relabeled} (перевёрнуто ${r.flipped}) · piece_pnl backfill: ${r.pnlBackfilled} · непроверяемых: ${r.unverifiable}`);
+    return r.relabeled;
+  }, 0);
   stepSync("legGapSuspect", () => {
     const r = markLegGapSuspect(db, deps.env ?? process.env);
     if (r.betsTagged) console.warn(`[legGapSuspect] ${r.betsTagged} ставок на ${r.mismatched} матчах помечены settle_suspect — привязка к чужому кругу (макс. разрыв ${r.rows[0]?.gapDays ?? "?"}д)`);
