@@ -165,3 +165,44 @@ test("W4: настоящая пустота стратега называетс�
   const d = entryBlockerDiag(db, "em1", {}).join("\n");
   assert.match(d, /strategist_empty/);
 });
+
+// ── W5: shadow отклонённых по дрейфу + W3: приостановка лесенки за флагом ────────────────────────
+import { recordStaleProposalShadow, resolveStaleProposalShadow, buildStaleShadowReport, STALE_SHADOW_NEED_N } from "../src/lib/staleProposalShadow.js";
+
+test("W5: отказ по дрейфу замораживается would-be записью, резолвится по рынку, дубль не раздувает выборку", () => {
+  const db = openDb(":memory:"); initSchema(db); seedFb(db); fbMatch(db, "sp1", 2, 1);   // Over 1.5 → won
+  const s = { matchId: "sp1", strategyId: "overreaction", label: "Over 1.5", proposedCents: 25.5, fillCents: 34.2, at: "t" };
+  recordStaleProposalShadow(db, s); recordStaleProposalShadow(db, s);                     // ре-цикл повторил отказ
+  assert.equal((db.prepare(`SELECT COUNT(*) n FROM stale_proposal_shadow`).get() as any).n, 1, "дедуп: одна запись");
+  const r = resolveStaleProposalShadow(db, {});
+  assert.equal(r.resolved, 1);
+  const row = db.prepare(`SELECT status, drift_cents FROM stale_proposal_shadow`).get() as any;
+  assert.equal(row.status, "won"); assert.equal(row.drift_cents, 8.7);
+});
+
+test("W5: критерий зрелости сильнее результата — до n=20 вердикт insufficient, дальше решает EV по цене филла", () => {
+  const db = openDb(":memory:"); initSchema(db); seedFb(db);
+  // 19 выигрышных отказов — роскошный EV, но вердикт обязан быть «копим».
+  for (let i = 0; i < 19; i++) {
+    fbMatch(db, `w${i}`, 2, 1);
+    recordStaleProposalShadow(db, { matchId: `w${i}`, strategyId: "overreaction", label: "Over 1.5", proposedCents: 30, fillCents: 40, at: "t" });
+  }
+  resolveStaleProposalShadow(db, {});
+  assert.equal(buildStaleShadowReport(db, {}).verdict, "insufficient");
+  // Двадцатый — и критерий читается механически.
+  fbMatch(db, "w19", 2, 1);
+  recordStaleProposalShadow(db, { matchId: "w19", strategyId: "overreaction", label: "Over 1.5", proposedCents: 30, fillCents: 40, at: "t" });
+  resolveStaleProposalShadow(db, {});
+  const rep = buildStaleShadowReport(db, {});
+  assert.equal(rep.resolvedN, STALE_SHADOW_NEED_N);
+  assert.equal(rep.verdict, "порог_режет_деньги", "все 20 выиграли бы по цене филла → порог режет деньги");
+  assert.equal(rep.winnersDriftQuantileC, 10, "кандидат в порог — p75 дрейфа выигрышных");
+});
+
+test("W5: непроверяемый ярлык уходит в unverifiable, а не в знаменатель", () => {
+  const db = openDb(":memory:"); initSchema(db); seedFb(db); fbMatch(db, "sp2", 1, 0);
+  recordStaleProposalShadow(db, { matchId: "sp2", strategyId: "overreaction", label: "Экзотика", proposedCents: 30, fillCents: 40, at: "t" });
+  const r = resolveStaleProposalShadow(db, {});
+  assert.equal(r.unverifiable, 1);
+  assert.equal(buildStaleShadowReport(db, {}).resolvedN, 0);
+});
