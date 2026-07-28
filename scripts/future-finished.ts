@@ -12,11 +12,14 @@ import { openDb, dbPath } from "../src/lib/db.js";
 import { repairFutureFinished } from "../src/lib/futureFinished.js";
 
 const apply = process.argv.includes("--apply");
+// --with-settled: чинить и матчи со СТАРЫМИ решёнными ставками. Книга при этом не меняется — правится только
+// состояние матча. Отдельный флаг, потому что решение «книгу не трогаем» принимает владелец, а не скрипт.
+const withSettled = process.argv.includes("--with-settled");
 const db = openDb(dbPath());
-const r = repairFutureFinished(db, { apply });
+const r = repairFutureFinished(db, { apply, withSettled });
 
 console.log(`# МАТЧИ, «СЫГРАННЫЕ» ДО КИКОФФА · ${new Date().toISOString()}`);
-console.log(`БД: ${dbPath()} · режим: ${apply ? "**ПРИМЕНЕНИЕ**" : "сухой прогон"}\n`);
+console.log(`БД: ${dbPath()} · режим: ${apply ? "**ПРИМЕНЕНИЕ**" : "сухой прогон"}${withSettled ? " · со старыми решёнными ставками (книга НЕ меняется)" : ""}\n`);
 console.log(`просмотрено матчей: ${r.scanned} · испорчено: **${r.broken}** · сброшено: ${r.reset} · пропущено с деньгами: ${r.skippedWithMoney}\n`);
 
 if (r.rows.length) {
@@ -27,3 +30,4 @@ if (r.rows.length) {
 }
 console.log(`\n${r.note}`);
 if (!apply && r.broken > r.skippedWithMoney) console.log(`\nПрименить: npm run future:finished -- --apply`);
+if (r.skippedWithMoney) console.log(`Починить и матчи с решёнными ставками (правится ТОЛЬКО состояние, книга не трогается):\n  npm run future:finished -- --apply --with-settled`);

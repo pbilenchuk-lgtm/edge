@@ -28,6 +28,7 @@
     "guard:check": "node --experimental-sqlite --import tsx scripts/guard-check.ts",
     "pmv:edge": "node --experimental-sqlite --import tsx scripts/pmv-edge.ts",
     "future:finished": "node --experimental-sqlite --import tsx scripts/future-finished.ts",
+    "leg:gap": "node --experimental-sqlite --import tsx scripts/leg-gap-suspect.ts",
     "anchor:diagnose": "node --experimental-sqlite --import tsx scripts/anchor-diagnose.ts",
     "complement:audit": "node --experimental-sqlite --import tsx scripts/complement-audit.ts",
     "token2:coverage": "node --experimental-sqlite --import tsx scripts/token2-coverage.ts",
