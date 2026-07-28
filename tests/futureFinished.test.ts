@@ -83,7 +83,7 @@ test("наведённые события матча стираются вмес
 });
 
 // ── Дыра пометки: подозрение по ФАКТУ разрыва, а не по списку турниров и не в момент расчёта ──────
-import { markLegGapSuspect } from "../src/lib/footballIntegrity.js";
+import { markLegGapSuspect, markUefaSettleSuspect } from "../src/lib/footballIntegrity.js";
 
 function bet(db: any, id: string, mid: string, status: string, settledBy: string | null) {
   db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,settled_by,created_at)
@@ -143,4 +143,31 @@ test("--with-settled чинит состояние и НЕ трогает кни
   const after = db.prepare(`SELECT status,payout,stake,settled_by FROM bets WHERE id='b9'`).get() as any;
   assert.deepEqual(after, before, "книга не изменена НИ В ОДНОМ поле: P&L той позиции взят с рынка, а не со счёта");
   assert.match(r.note, /книга не изменена/);
+});
+
+test("маятник метки: осознанно снятую метку boot-миграция НЕ возвращает", () => {
+  // `guard:check` одним запуском вернул 135 меток — initSchema зовёт markUefaSettleSuspect при КАЖДОМ
+  // открытии базы, а тик до этого снял их по доказанной привязке. Флаг, которым вердиктные срезы
+  // выбрасывают строки, начинал зависеть от истории запусков, а не от данных.
+  //
+  // Различать надо не «привязка чистая» (тест Raków показал, почему: там она чистая СЕЙЧАС, а считали по
+  // грязной РАНЬШЕ), а «строку уже осмотрели и осознанно освободили».
+  const db = openDb(":memory:"); initSchema(db); seed(db);
+  R.upsertCompetition(db, { id: "ucl", sport_id: "football", name: "UCL", budget: 8000, external_league: "uefa.champions", created_at: "t" } as any);
+  R.insertMatch(db, { id: "m", competition_id: "ucl", home: "A", away: "B", state: "finished", lineup_out: true,
+    kickoff_at: "2026-07-28T18:00:00Z", minute: 90, score_home: 1, score_away: 0, final_score: "1:0",
+    kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "m" } as any);
+  bet(db, "b1", "m", "settled_won", "match_score");
+
+  assert.equal(markUefaSettleSuspect(db, {}), 1, "непроверенная строка метится — грубый карантин на месте");
+
+  // Проверка прошла и метку сняли осознанно (так делают backfill и re-settle).
+  db.prepare(`UPDATE bets SET settle_suspect=0, settle_verified=1 WHERE id='b1'`).run();
+
+  assert.equal(markUefaSettleSuspect(db, {}), 0, "повторное открытие базы метку НЕ возвращает");
+  assert.equal(markUefaSettleSuspect(db, {}), 0, "и на третьем тоже — маятник остановлен");
+
+  // А снятие БЕЗ проверки (settle_verified=0) — это «ещё не смотрели», карантин обязан вернуться.
+  db.prepare(`UPDATE bets SET settle_suspect=0, settle_verified=0 WHERE id='b1'`).run();
+  assert.equal(markUefaSettleSuspect(db, {}), 1, "неподтверждённое снятие карантин не отменяет");
 });

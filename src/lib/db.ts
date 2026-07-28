@@ -35,7 +35,7 @@ export interface Database {
 }
 
 interface SqliteModule {
-  DatabaseSync: new (path: string) => Database;
+  DatabaseSync: new (path: string, opts?: { readOnly?: boolean }) => Database;
 }
 
 let _db: Database | null = null;
@@ -193,6 +193,26 @@ export function openDb(path: string): Database {
   return db;
 }
 
+/**
+ * Открыть базу ТОЛЬКО НА ЧТЕНИЕ — для отчётов и диагностики.
+ *
+ * `openDb` вызывает `initSchema`, а тот прогоняет всю schema.sql, список ALTER-миграций И маркировку
+ * settle_suspect. То есть каждый «read-only отчёт», открытый через openDb, на самом деле писал в прод-базу:
+ * `npm run guard:check` одним запуском пометил 135 ставок. Измерение, меняющее измеряемое, хуже отсутствия
+ * измерения — оно выглядит как наблюдение.
+ *
+ * Здесь соединение открывается флагом SQLite: любая попытка записи не «пропускается тихо», а падает с
+ * ошибкой. Это и есть смысл — скрипт, который случайно попробует что-то изменить, обязан сломаться громко,
+ * а не молча испортить данные. Схема не создаётся: базы нет — отчёту нечего показывать, и притворяться
+ * незачем.
+ */
+export function openDbReadOnly(path: string): Database {
+  const { DatabaseSync } = require("node:sqlite") as SqliteModule;
+  const db = new DatabaseSync(path, { readOnly: true });
+  db.exec("PRAGMA busy_timeout = 10000;");   // приложение пишет параллельно — читателю положено ждать, а не падать
+  return db;
+}
+
 export function initSchema(db: Database): void {
   const here = dirname(fileURLToPath(import.meta.url));
   // NOTE: snapshot RETENTION is handled entirely by the background tick (lifecycle.ts →
@@ -257,6 +277,10 @@ export function initSchema(db: Database): void {
     "ALTER TABLE match_live ADD COLUMN espn_event_date TEXT",
     // P0.1: settle-contamination quarantine — a bet whose match may have settled on ANOTHER leg's result.
     "ALTER TABLE bets ADD COLUMN settle_suspect INTEGER NOT NULL DEFAULT 0",
+    // Снятие карантина ОСОЗНАННЫМ решением (доказанная привязка / честный пере-сеттл). Отличается от
+    // settle_suspect=0 тем, что означает «проверено», а не «ещё не смотрели» — иначе грубая пометка по
+    // перечню турниров возвращала бы метку при каждом открытии базы.
+    "ALTER TABLE bets ADD COLUMN settle_verified INTEGER NOT NULL DEFAULT 0",
     // P0.5: football epoch tag on the bet (parallels tennis «пороги:…»); backfilled or epoch_unknown.
     "ALTER TABLE bets ADD COLUMN football_epoch TEXT",
     // Z3 (batch-5): idempotency key for trade-log lines — a re-render / double-write of the SAME event
@@ -275,7 +299,7 @@ export function initSchema(db: Database): void {
   // P0.1: conservative settle-contamination quarantine — tag settled bets on UEFA two-leg comps
   // `settle_suspect` so verdict cuts drop them NOW (no network); the ESPN date backfill clears the clean
   // ones later. Idempotent (only settle_suspect=0 rows). Cheap boot query is safe here (not a full scan).
-  try { const n = markUefaSettleSuspect(db); if (n > 0) console.log(`[migrate] settle_suspect quarantine (UEFA two-leg): ${n} settled bets tagged — excluded from verdict cuts until the ESPN date backfill proves them clean`); } catch { /* best-effort */ }
+  try { const n = markUefaSettleSuspect(db, process.env); if (n > 0) console.log(`[migrate] settle_suspect quarantine (UEFA two-leg): ${n} settled bets tagged — excluded from verdict cuts until the ESPN date backfill proves them clean`); } catch { /* best-effort */ }
   // P0.5: tag pre-fix football bets epoch_unknown (clean era starts after P0.1-P0.3) — dropped from cuts.
   try { const n = migrateFootballEpochUnknown(db); if (n > 0) console.log(`[migrate] football_epoch: ${n} pre-fix football bets tagged epoch_unknown (excluded from verdict cuts)`); } catch { /* best-effort */ }
   // Deterministic epoch backfill: recover rows that were tagged epoch_unknown ONLY because football_epoch

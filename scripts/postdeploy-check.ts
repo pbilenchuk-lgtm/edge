@@ -17,7 +17,7 @@
 //
 //   node --experimental-sqlite --import tsx scripts/postdeploy-check.ts [--since=ISO]
 // ============================================================
-import { openDb, dbPath } from "../src/lib/db.js";
+import { openDbReadOnly, dbPath } from "../src/lib/db.js";
 import { CODE_VERSION } from "../src/lib/betMeta.js";
 import { pmvNetEvCents } from "../src/lib/tennisPmv.js";
 import { isFtBlindBet } from "../src/lib/betMeta.js";
@@ -32,7 +32,7 @@ const since = argSince ?? new Date(Date.now() - 24 * 3600_000).toISOString();
 const deployedAt = process.argv.find((a) => a.startsWith("--deployed="))?.slice(11);
 const fireSince = deployedAt && deployedAt > since ? deployedAt : since;
 const fireHours = Math.round(((Date.now() - Date.parse(fireSince)) / 3600_000) * 10) / 10;
-const db = openDb(dbPath());
+const db = openDbReadOnly(dbPath());
 const out: string[] = [];
 const P = (s = "") => out.push(s);
 

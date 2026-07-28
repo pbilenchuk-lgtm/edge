@@ -377,9 +377,11 @@ export function reSettleSuspectBets(db: Database, deps: EngineDeps = {}): { regr
     const won = resolveOutcome(bet, m, {});
     if (won == null) { deferred++; continue; } // unresolvable label with a known score → PM-resolution / void (P2)
     const nextStatus = won ? "settled_won" : "settled_lost";
-    if (bet.status === nextStatus) { db.prepare(`UPDATE bets SET settle_suspect=0 WHERE id=?`).run(id); confirmed++; continue; } // already honest
+    // settle_verified=1 вместе со снятием: решение принято по доказанной привязке, и грубый карантин по
+    // перечню турниров не должен вернуть метку при следующем же открытии базы.
+    if (bet.status === nextStatus) { db.prepare(`UPDATE bets SET settle_suspect=0, settle_verified=1 WHERE id=?`).run(id); confirmed++; continue; } // already honest
     const patch = settleBet({ entry_price: bet.entry_price, stake: bet.stake }, won, bet.closing_price ?? null);
-    db.prepare(`UPDATE bets SET status=?, result=?, payout=?, settled_by='match_score', settled_at=?, settle_suspect=0 WHERE id=?`)
+    db.prepare(`UPDATE bets SET status=?, result=?, payout=?, settled_by='match_score', settled_at=?, settle_suspect=0, settle_verified=1 WHERE id=?`)
       .run(patch.status, patch.result, patch.payout, now, id);
     R.insertTradeLog(db, {
       id: R.uid(), match_id: m.id, strategy_id: bet.strategy_id, minute: "пересчёт", type: "settle",
