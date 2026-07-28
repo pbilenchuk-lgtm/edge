@@ -57,6 +57,7 @@ import { resolveFamilyShadowSignals } from "./familyShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
 import { relabelPiecesByMarket } from "./pieceRelabel.js";
+import { recordStaleProposalShadow, resolveStaleProposalShadow } from "./staleProposalShadow.js";
 import { persistNoFeedCoverage } from "./noFeedCoverage.js";
 import { captureBookDepth } from "./bookDepthCapture.js";
 import { overreactionGate } from "./reassessGate.js";
@@ -1007,6 +1008,9 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       const proposedC = b.proposed_price ?? quote;
       const drift = proposalDrift(proposedC, ex.priceCents);
       if (isStaleProposal(proposedC, ex.priceCents, deps.env ?? process.env)) {
+        // [W5] Каждый отказ по дрейфу замораживается would-be записью: выигрывали ли бы такие входы по цене
+        // ФИЛЛА — вопрос данных, не спора. Критерий и порог решения — в staleProposalShadow.
+        recordStaleProposalShadow(db, { matchId: m.id, strategyId: b.strategy_id, label: b.market_label, proposedCents: proposedC, fillCents: ex.priceCents, at: now });
         R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `stale_proposal: филл ${ex.priceCents}¢ vs предложение ${proposedC}¢ (Δ${drift.toFixed(0)}¢)`) });
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `stale_proposal «${b.market_label}»: филл ${ex.priceCents}¢ vs предложение ${proposedC}¢ (Δ${drift.toFixed(0)}¢) — рынок ушёл, вход отклонён`, created_at: now });
         continue;
@@ -2076,6 +2080,25 @@ export async function strategistReassess(
           const exBlob = `${ex.trigger ?? ""} ${ex.reason ?? ""}`.toLowerCase();
           const defensiveExit = /thesis_stop|counter_scenario|\bstop\b|стоп|слома|сломан|красн|удал|травм/.test(exBlob);
           const takeProfitExit = /take_price|take_profit|тейк|фикс|прибыл|edge (исчерп|закры)|цена (дош|дости)|на пике/.test(exBlob);
+          // [W3 / batch-12] ПРИОСТАНОВКА take_price-лесенки на живом тающем опционе — ЗА ФЛАГОМ, и флаг
+          // включается только по сработавшему F4-вердикту (hold-to-settle превосходит факт на ≥15% оборота
+          // при n≥30 — `npm run f4:report` читает его механически). Randers: система сама писала «не режу
+          // живую по тезису позицию — типовая ошибка среза тающего опциона» на 11' и всё равно срезала
+          // половину на 47'; куски ушли по 69.8/81.9/89.9¢ при финале 99.8¢, −$77 на матче. Правка узкая по
+          // ратификации: приостанавливается ТОЛЬКО частичный тейк, ТОЛЬКО пока вердикт стратега держит
+          // тезис живым (fav_clean / thesis-alive) и позиция в плюсе; защитные выходы и полные закрытия не
+          // трогаются, quasi-locked хвост остаётся своим механизмом. Каждый холд логируется melt_hold с
+          // ценой — из этих строк f4:report считает самоизмерение «взято при холде vs отдано на реверсах»
+          // (ревью 2 недели, откат-порог: отдано > взято → лесенку вернуть, флаг выключить).
+          if (((deps.env ?? process.env).TAKE_LADDER_SUSPEND ?? "").toLowerCase() === "true"
+              && ex.fraction < 1 && takeProfitExit && !defensiveExit
+              && /fav_clean|thesis[-_ ]?alive/i.test(dec.currentBranch ?? "")
+              && (mk.price ?? 0) > (b.entry_price ?? Infinity)) {
+            const holdKey = `«${b.market_label}» melt_hold`;
+            const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
+            if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `${holdKey}: тек ${mk.price}¢ vs вход ${b.entry_price}¢, ветка ${dec.currentBranch} — лесенка тейков приостановлена (TAKE_LADDER_SUSPEND по F4-вердикту), держим до тезис-события/сеттла`, created_at: now });
+            continue;
+          }
           if (PARTIAL_TP_THROTTLE_MIN > 0 && ex.fraction < 1 && takeProfitExit && !defensiveExit) {
             const prof = b.risk_profile_id ?? "medium";
             const lastPartialMs = R.betsForMatch(db, m.id, sid)
@@ -2438,6 +2461,7 @@ export async function runAutoCycle(
   // W1/Z2 (третья ратификация, блокирующая): метка досрочно закрытого куска = исход РЫНКА, судьба куска —
   // piece_pnl. Идемпотентный проход = и живой конвейер, и ретро-миграция всей истории при первом запуске.
   // Деньги (payout) не трогаются; win-rate/Brier/калибровка после этого читают предсказание, а не знак P&L.
+  stepSync("staleShadowResolve", () => resolveStaleProposalShadow(db, deps).resolved, 0);
   stepSync("pieceRelabel", () => {
     const r = relabelPiecesByMarket(db, deps);
     if (r.flipped || r.unverifiable) console.warn(`[pieceRelabel] меток по рынку: ${r.relabeled} (перевёрнуто ${r.flipped}) · piece_pnl backfill: ${r.pnlBackfilled} · непроверяемых: ${r.unverifiable}`);
