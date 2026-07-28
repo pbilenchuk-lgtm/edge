@@ -8,11 +8,11 @@
 //
 //   npm run pmv:edge
 // ============================================================
-import { openDb, dbPath } from "../src/lib/db.js";
+import { openDbReadOnly, dbPath } from "../src/lib/db.js";
 import { buildPmvEdgeReport, PMV_EDGE_NEED_N } from "../src/lib/pmvEdge.js";
 import { buildPmvShadowCalibration } from "../src/lib/tennisPmvShadow.js";
 
-const db = openDb(dbPath());
+const db = openDbReadOnly(dbPath());
 const rep = buildPmvEdgeReport(db);
 
 console.log(`# ЕСТЬ ЛИ У PMV КРАЙ · ${new Date().toISOString()}`);

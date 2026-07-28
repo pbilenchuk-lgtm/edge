@@ -14,9 +14,9 @@
 //
 //   npm run guard:check
 // ============================================================
-import { openDb, dbPath } from "../src/lib/db.js";
+import { openDbReadOnly, dbPath } from "../src/lib/db.js";
 
-const db = openDb(dbPath());
+const db = openDbReadOnly(dbPath());
 const q = (s: string, ...a: any[]) => db.prepare(s).all(...a) as any[];
 const bank = Number(process.env.THESIS_BANK_USD) || 0;
 const SHARE = Number(process.env.SIZING_INSANITY_SHARE) || 0.5;

@@ -21,10 +21,10 @@
 //
 //   npm run token2:coverage
 // ============================================================
-import { openDb, dbPath } from "../src/lib/db.js";
+import { openDbReadOnly, dbPath } from "../src/lib/db.js";
 import { findComplementMarket } from "../src/lib/complementMarket.js";
 
-const db = openDb(dbPath());
+const db = openDbReadOnly(dbPath());
 
 /** Coarse market family from the label — the same vocabulary the rest of the system reasons in. */
 function family(label: string): string {
