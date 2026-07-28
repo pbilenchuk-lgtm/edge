@@ -55,7 +55,7 @@ import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
 import { resolvePmvShadowSignals } from "./tennisPmvShadow.js";
 import { resolveFamilyShadowSignals } from "./familyShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
-import { backfillEspnEventDates } from "./footballIntegrity.js";
+import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
 import { persistNoFeedCoverage } from "./noFeedCoverage.js";
 import { captureBookDepth } from "./bookDepthCapture.js";
 import { overreactionGate } from "./reassessGate.js";
@@ -2405,6 +2405,16 @@ export async function runAutoCycle(
   // now-correct score so a Raków-class win becomes an honest record, not an eternal suspect. Unprovable ones
   // stay flagged for the PM-resolution settler below. Idempotent.
   stepSync("reSettleSuspects", () => reSettleSuspectBets(db, deps).regraded, 0);
+  // ПОДОЗРЕНИЕ ПО ФАКТУ, А НЕ ПО СПИСКУ И НЕ В МОМЕНТ РАСЧЁТА. Обе прежние маркировки пропустили самый грубый
+  // случай (Seattle–Portland, разрыв 16 дней, settle_suspect=0): одна метит по перечню двухматчевых турниров,
+  // а это MLS; вторая живёт в сеттл-пути, куда досрочно закрытая позиция не приходит вовсе. Этот проход метит
+  // по свойству САМОЙ строки — привязка дальше допуска от кикоффа — для любого турнира и любого способа
+  // закрытия. Ставится ПОСЛЕ backfill/re-settle, чтобы доказанно чистые успели сняться и не помечались зря.
+  stepSync("legGapSuspect", () => {
+    const r = markLegGapSuspect(db, deps.env ?? process.env);
+    if (r.betsTagged) console.warn(`[legGapSuspect] ${r.betsTagged} ставок на ${r.mismatched} матчах помечены settle_suspect — привязка к чужому кругу (макс. разрыв ${r.rows[0]?.gapDays ?? "?"}д)`);
+    return r.betsTagged;
+  }, 0);
   // R2(б): AFTER enrich — surface funded football matches that are past kickoff yet still
   // carry no provider bind (category_tier_mismatch / name-fold / dark board). Instead of a
   // silent «?:?», persist the flagged set + emit a loud warn so it can't hide. The R2(в)

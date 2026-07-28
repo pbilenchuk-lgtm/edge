@@ -46,6 +46,62 @@ export function markUefaSettleSuspect(db: Database): number {
   return Number(r.changes ?? 0);
 }
 
+export interface LegGapSuspectRow { matchId: string; match: string; competition: string; kickoffAt: string | null; eventDate: string | null; gapDays: number; betsTagged: number }
+export interface LegGapSuspectResult { scanned: number; mismatched: number; betsTagged: number; rows: LegGapSuspectRow[] }
+
+/**
+ * ПОДОЗРЕНИЕ ПО ФАКТУ РАЗРЫВА, а не по названию турнира и не в момент расчёта.
+ *
+ * Две независимые дыры сошлись на Seattle Sounders–Portland Timbers: разрыв привязки 16 дней — самый грубый
+ * из всех найденных — и `settle_suspect=0`.
+ *
+ *   1. ПО СПИСКУ. `markUefaSettleSuspect` метит матчи из перечня двухматчевых турниров (UEFA + CONMEBOL).
+ *      Seattle–Portland — это MLS, в перечень не входит, значит не метится НИКОГДА, какой бы разрыв ни был.
+ *      Перечень отвечает на вопрос «бывают ли здесь два круга», а метить надо по «эта запись привязана к
+ *      чужому событию» — свойству строки, а не лиги.
+ *   2. В МОМЕНТ РАСЧЁТА. Уточняющая маркировка живёт в сеттл-пути (`backfillEspnEventDates`, пере-сеттл в
+ *      engine). Позиция, закрытая ДОСРОЧНО (early/partial), до расчёта по счёту не доходит вовсе — и метка
+ *      её не догоняет. Все девять сиэтловских ставок закрыты именно так.
+ *
+ * Поэтому здесь: проход по ВСЕМ привязанным матчам любого спорта и турнира, сравнение замороженной даты
+ * события с кикоффом, и пометка ВСЕХ ставок матча — независимо от того, каким путём они закрылись и
+ * закрылись ли вообще. Деньги это не меняет (досрочный выход считает P&L по цене продажи, а не по счёту) —
+ * меняет честность агрегатов: вердиктные срезы выбрасывают suspect-строки, и решение по стратегии не должно
+ * опираться на сделки, принятые по чужому матчу.
+ */
+export function markLegGapSuspect(
+  db: Database, env: Record<string, string | undefined> = process.env, opts: { apply?: boolean } = { apply: true },
+): LegGapSuspectResult {
+  const gap = LEG_GAP_MS(env);
+  const res: LegGapSuspectResult = { scanned: 0, mismatched: 0, betsTagged: 0, rows: [] };
+  const rows = db.prepare(
+    `SELECT ml.match_id mid, ml.espn_event_date ed FROM match_live ml WHERE ml.espn_event_date IS NOT NULL AND ml.espn_event_date <> ''`,
+  ).all() as { mid: string; ed: string }[];
+  const compById = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
+  for (const r of rows) {
+    res.scanned++;
+    const m = R.getMatch(db, r.mid);
+    if (!m?.kickoff_at) continue;
+    const koMs = Date.parse(m.kickoff_at), evMs = Date.parse(r.ed);
+    if (!Number.isFinite(koMs) || !Number.isFinite(evMs)) continue;
+    const diff = Math.abs(evMs - koMs);
+    if (diff <= gap) continue;                       // привязка в пределах допуска — запись честная
+    res.mismatched++;
+    // Все ставки матча, а не только settled: открытая позиция на чужой привязке — та же ложная посылка,
+    // просто ещё не реализованная.
+    const upd = opts.apply
+      ? Number(db.prepare(`UPDATE bets SET settle_suspect=1 WHERE match_id=? AND settle_suspect=0`).run(r.mid).changes ?? 0)
+      : Number((db.prepare(`SELECT COUNT(*) n FROM bets WHERE match_id=? AND settle_suspect=0`).get(r.mid) as { n: number }).n);
+    res.betsTagged += upd;
+    res.rows.push({
+      matchId: r.mid, match: `${m.home} — ${m.away}`, competition: compById.get(m.competition_id)?.name ?? m.competition_id,
+      kickoffAt: m.kickoff_at, eventDate: r.ed, gapDays: Math.round((diff / 86_400_000) * 10) / 10, betsTagged: upd,
+    });
+  }
+  res.rows.sort((a, b) => b.gapDays - a.gapDays);
+  return res;
+}
+
 export interface SvEspnDateProvider { eventDate(sport: string, league: string, eventId: string): Promise<string | null> }
 
 /** Refine backward: for each bound match in a UEFA comp with no frozen date, re-fetch the ESPN event's ISO

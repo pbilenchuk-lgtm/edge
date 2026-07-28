@@ -19,9 +19,11 @@
 // можно подобрать — это логическая невозможность. Поэтому проверка не требует ни калибровки, ни выборки, и
 // её нельзя ошибочно применить к здоровой записи. Всё, что она ловит, испорчено по определению.
 //
-// ЧЕГО ЧИНИЛКА НЕ ДЕЛАЕТ. Она не трогает матч, у которого есть хоть одна РЕШЁННАЯ ставка: расчёт уже
-// состоялся, и откат состояния переписал бы книгу задним числом. Такие случаи только перечисляются — решение
-// по ним за владельцем. Порча состояния и порча денег лечатся разными руками.
+// ЧЕГО ЧИНИЛКА НЕ ДЕЛАЕТ. Она не трогает КНИГУ — никогда, ни в одном режиме. По умолчанию матч с решёнными
+// ставками вообще пропускается и только перечисляется. Владелец может разрешить сброс и таких (`withSettled`)
+// — тогда чинится ИСКЛЮЧИТЕЛЬНО состояние матча, а ставки остаются как есть. Это законно ровно потому, что те
+// позиции закрыты ДОСРОЧНО, по рыночной цене продажи: их P&L не выводился из счёта матча и от состояния не
+// зависит. Порча состояния и порча денег лечатся разными руками, и вторая рука здесь не поднимается.
 // ============================================================
 
 import type { Database } from "./db.js";
@@ -35,11 +37,13 @@ export interface FutureFinishedRow {
   /** Разрыв между привязанным событием ESPN и собственным кикоффом матча, в днях. */
   legGapDays: number | null;
   settledBets: number; openBets: number;
-  action: "сброшен" | "БУДЕТ сброшен" | "пропущен: есть решённые ставки";
+  action: "сброшен" | "БУДЕТ сброшен" | "пропущен: есть решённые ставки" | "сброшен (ставки НЕ тронуты)" | "БУДЕТ сброшен (ставки НЕ тронуты)";
 }
 
 export interface FutureFinishedReport {
   scanned: number; broken: number; reset: number; skippedWithMoney: number;
+  /** Сброшены при том, что на них есть решённые ставки (только при withSettled). Книга не изменена. */
+  resetWithSettled: number;
   rows: FutureFinishedRow[]; note: string;
 }
 
@@ -54,11 +58,11 @@ const DAY = 86_400_000;
  * привязаны к матчу, а не к событию ESPN, и с ними всё в порядке.
  */
 export function repairFutureFinished(
-  db: Database, opts: { apply?: boolean; nowMs?: number } = {},
+  db: Database, opts: { apply?: boolean; nowMs?: number; withSettled?: boolean } = {},
 ): FutureFinishedReport {
   const nowMs = opts.nowMs ?? Date.now();
   const now = new Date(nowMs).toISOString();
-  const res: FutureFinishedReport = { scanned: 0, broken: 0, reset: 0, skippedWithMoney: 0, rows: [], note: "" };
+  const res: FutureFinishedReport = { scanned: 0, broken: 0, reset: 0, skippedWithMoney: 0, resetWithSettled: 0, rows: [], note: "" };
 
   for (const c of R.listCompetitions(db)) {
     for (const m of R.listMatches(db, c.id)) {
@@ -83,11 +87,17 @@ export function repairFutureFinished(
         boundEventDate: live?.espn_event_date ?? null, boundAt: live?.updated_at ?? null,
         legGapDays: Number.isFinite(evMs) ? Math.round(((koMs - evMs) / DAY) * 10) / 10 : null,
         settledBets: settled, openBets: open,
-        action: settled > 0 ? "пропущен: есть решённые ставки" : opts.apply ? "сброшен" : "БУДЕТ сброшен",
+        action: settled > 0 && !opts.withSettled ? "пропущен: есть решённые ставки"
+          : settled > 0 ? (opts.apply ? "сброшен (ставки НЕ тронуты)" : "БУДЕТ сброшен (ставки НЕ тронуты)")
+          : opts.apply ? "сброшен" : "БУДЕТ сброшен",
       };
       res.rows.push(row);
 
-      if (settled > 0) { res.skippedWithMoney++; continue; }
+      // Сброс состояния и пере-сеттл — РАЗНЫЕ операции, и вторая здесь не выполняется никогда. Ставки этих
+      // матчей закрыты досрочно, по рыночной цене продажи: их P&L не выводился из счёта и от состояния матча
+      // не зависит. Поэтому чинить состояние можно, не притрагиваясь к книге, — но только по явному
+      // разрешению владельца (withSettled), потому что решение «книгу не трогаем» принимает он, а не скрипт.
+      if (settled > 0 && !opts.withSettled) { res.skippedWithMoney++; continue; }
       if (!opts.apply) continue;
 
       try {
@@ -102,6 +112,7 @@ export function repairFutureFinished(
         // (scoreRace) увидит голы при пустом счёте и заблокирует переоценку уже по своей причине.
         db.prepare(`DELETE FROM match_events WHERE match_id=?`).run(m.id);
         res.reset++;
+        if (settled > 0) res.resetWithSettled++;
       } catch { /* одна упрямая строка не должна отменять починку остальных */ }
     }
   }
@@ -110,6 +121,7 @@ export function repairFutureFinished(
     ? `чисто: ни одного матча, помеченного сыгранным до своего кикоффа (просмотрено ${res.scanned}).`
     : `${opts.apply ? "СБРОШЕНО" : "БУДЕТ сброшено (сухой прогон)"}: ${opts.apply ? res.reset : res.broken - res.skippedWithMoney} из ${res.broken} испорченных` +
       (res.skippedWithMoney ? `; ${res.skippedWithMoney} пропущено — там уже есть решённые ставки, откат переписал бы книгу задним числом, это решение владельца.` : ".") +
+      (res.resetWithSettled ? ` Из них ${res.resetWithSettled} со СТАРЫМИ решёнными ставками: сброшено только состояние, книга не изменена ни на цент — те позиции закрыты досрочно по рыночной цене и от счёта матча не зависят.` : "") +
       ` Такие матчи не входят в живую фазу и не торгуются вообще, поэтому каждый из них — это пропущенный слейт целиком.`;
   return res;
 }
