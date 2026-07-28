@@ -98,3 +98,70 @@ test("W1 (Juan-Pablo-класс, теннис): манилайн-кусок ме
   assert.equal(p.status, "settled_won", "Ficovich прошёл дальше — манилайн на него ВЫИГРАЛ, что бы ни говорил P&L куска");
   assert.equal((p as any).piece_pnl, -30);
 });
+
+// ── W2: полные гейты в ft_blind (Östers) + W4: диагностика по стадиям (Hacken) ───────────────────
+import { autoEnter } from "../src/lib/lifecycle.js";
+import { entryBlockerDiag } from "../src/lib/matchLog.js";
+
+function blindMatch(db: any, id: string, mkts: { label: string; price: number }[]) {
+  R.insertMatch(db, { id, competition_id: "c1", home: "Osters IF", away: "Varbergs BoIS", state: "upcoming",
+    lineup_out: true, kickoff_at: "2026-07-27T17:05:00Z", minute: null, score_home: null, score_away: null,
+    final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id } as any);
+  for (const mk of mkts)
+    R.insertMarket(db, { id: R.uid(), match_id: id, label: mk.label, price: mk.price, ai_prob: null, liquidity: "800", external_ref: mk.label, snapshot_at: "t", is_closing: false } as any);
+}
+function proposal(db: any, id: string, mid: string, label: string, stake: number) {
+  db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,proposed_price,stake,origin,created_at)
+              VALUES(?,?,'overreaction','medium',?,'proposed',NULL,?,'prematch','t')`).run(id, mid, label, stake);
+}
+const FTB_ENV = { FT_BLIND_ENABLED: "true" };
+
+test("W2 (Östers): вход @50.2¢ в непроторгованный плейсхолдер на слепой фикстуре ЗАПРЕЩЁН", async () => {
+  // Общий placeholder_mid требует, чтобы книга простояла на 50¢ stale-минут — у слепой фикстуры истории нет,
+  // и Östers прошёл: $40+$85 в дефолтную котировку → void. Для режима без руля отказ безусловный.
+  const db = openDb(":memory:"); initSchema(db); seedFb(db);
+  blindMatch(db, "ob1", [{ label: "Varbergs BoIS Under 1.5", price: 50.2 }]);
+  proposal(db, "obb1", "ob1", "Varbergs BoIS Under 1.5", 40);
+  const opened = await autoEnter(db, { env: FTB_ENV, now: () => "2026-07-27T16:50:00Z" });
+  assert.equal(opened.length, 0);
+  const b = R.getBet(db, "obb1")!;
+  assert.equal(b.status, "not_filled");
+  assert.match(b.rationale ?? "", /ft_blind_placeholder/);
+});
+
+test("W2 (Östers, пыль): филл меньше $5 в ft_blind не открывается", async () => {
+  const db = openDb(":memory:"); initSchema(db); seedFb(db);
+  blindMatch(db, "ob2", [{ label: "Under 3.5", price: 62.2 }]);
+  proposal(db, "obb2", "ob2", "Under 3.5", 6);        // halved by capFrac 0.5 → $3 < $5
+  const opened = await autoEnter(db, { env: FTB_ENV, now: () => "2026-07-27T16:50:00Z" });
+  assert.equal(opened.length, 0);
+  assert.match(R.getBet(db, "obb2")!.rationale ?? "", /ft_blind_min_stake/);
+});
+
+test("W2 (контроль): нормальный ft_blind-вход по-прежнему проходит — гейты режут порчу, не режим", async () => {
+  const db = openDb(":memory:"); initSchema(db); seedFb(db);
+  blindMatch(db, "ob3", [{ label: "Under 3.5", price: 62.2 }]);
+  proposal(db, "obb3", "ob3", "Under 3.5", 40);       // → $20 после cap, цена вне mid-полосы
+  const opened = await autoEnter(db, { env: FTB_ENV, now: () => "2026-07-27T16:50:00Z" });
+  assert.equal(opened.length, 1, "вход состоялся");
+  assert.equal(R.getBet(db, "obb3")!.status, "open");
+});
+
+test("W4 (Hacken): отклонённые на филле picks называются fill_rejected:stale_proposal, а не «стратег не выдал»", () => {
+  const db = openDb(":memory:"); initSchema(db); seedFb(db);
+  blindMatch(db, "hk1", [{ label: "Under 2.5", price: 34.2 }]);
+  for (let i = 0; i < 3; i++)
+    db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,stake,rationale,origin,created_at)
+                VALUES(?,'hk1','overreaction','medium','Under 2.5','not_filled',80,'…частичное … stale_proposal: филл 34.2¢ vs предложение 25.5¢ (Δ9¢)','prematch','t')`).run(`hb${i}`);
+  const d = entryBlockerDiag(db, "hk1", {}).join("\n");
+  assert.match(d, /fill_rejected:stale_proposal ×3/);
+  assert.match(d, /чинить надо названную стадию, НЕ стратега/);
+  assert.doesNotMatch(d, /стратег не выдал/);
+});
+
+test("W4: настоящая пустота стратега называется strategist_empty — стадии не смешиваются", () => {
+  const db = openDb(":memory:"); initSchema(db); seedFb(db);
+  blindMatch(db, "em1", [{ label: "Under 2.5", price: 34.2 }]);
+  const d = entryBlockerDiag(db, "em1", {}).join("\n");
+  assert.match(d, /strategist_empty/);
+});

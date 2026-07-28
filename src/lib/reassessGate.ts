@@ -94,16 +94,16 @@ export interface LiveState {
 }
 // Env-tunable floors; defaults are deliberately permissive so the filter cuts cost, never a real setup.
 const ovrNum = (v: string | undefined, d: number) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
-/** [G3] How fresh a triggering event must be for MONEY. Ratified at 3 minutes against a measured distribution:
- *  across batch 11, the median event→reassessment latency was 1 minute, p75 2, p90 4. A 10-minute rule was
- *  proposed first and rejected on that evidence — it would have covered 98% of reactions, i.e. cut almost
- *  nothing, and been a threshold in name only (the same way the $250 thesis cap was decoration while its env
- *  vars were unset). Seconds are not reachable: the floor is our own tick cadence. */
-export const OVR_TRIGGER_FRESH_MIN = (env: Record<string, string | undefined> = process.env) => ovrNum(env.OVR_TRIGGER_FRESH_MIN, 3);
-/** [G3] The sensitivity band above the money threshold. A trigger in 3..6 minutes does NOT get money, but is
- *  recorded so the question «was 3 too tight?» can later be answered from data rather than re-argued. Beyond
- *  the band the trigger is DETRIGGERED: no LLM call at all, because a stale panic is not a setup. */
-export const OVR_TRIGGER_FLAG_MIN = (env: Record<string, string | undefined> = process.env) => ovrNum(env.OVR_TRIGGER_FLAG_MIN, 6);
+/** [G3] How fresh a triggering event must be for MONEY. RE-RATIFIED batch-12 (W6) at 6 minutes: prod was
+ *  observed running 6′ against the ratified ≤10′ and the divergence had no owner behind it — a threshold
+ *  nobody decided is not a threshold. The owner's call: keep 6′ as the money line (the batch-11 latency
+ *  distribution — median 1′, p90 4′ — shows 6′ still cuts only stale panics) and move the flag-only band to
+ *  6..12 so «was 6 too tight?» keeps answering itself from data. Seconds stay unreachable: tick cadence. */
+export const OVR_TRIGGER_FRESH_MIN = (env: Record<string, string | undefined> = process.env) => ovrNum(env.OVR_TRIGGER_FRESH_MIN, 6);
+/** [G3] The sensitivity band above the money threshold (6..12 flag-only, re-ratified batch-12). A trigger in
+ *  the band does NOT get money, but is recorded; beyond it the trigger is DETRIGGERED: no LLM call at all,
+ *  because a stale panic is not a setup. */
+export const OVR_TRIGGER_FLAG_MIN = (env: Record<string, string | undefined> = process.env) => ovrNum(env.OVR_TRIGGER_FLAG_MIN, 12);
 export const OVR_MIN_PANIC_CENTS = () => ovrNum(process.env.OVR_MIN_PANIC_CENTS, 6);
 export const OVR_MIN_BOOK_USD = () => ovrNum(process.env.OVR_MIN_BOOK_USD, 500);
 

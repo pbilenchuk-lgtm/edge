@@ -911,6 +911,20 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
           } catch { /* stamping must never block a fill */ }
         }
       }
+      // [W2 / batch-12] Решение-1, условие №3 — «полные гейты, без скидок» — ДО СИХ ПОР не было подключено к
+      // ft_blind-пути, и Östers показал цену: два входа @50.2¢ в непроторгованный плейсхолдер ($40+$85 → void).
+      // Общий placeholder_mid его не поймал, потому что требует, чтобы книга ПРОСТОЯЛА на 50¢ ≥ stale-минут — а
+      // у слепой фикстуры истории снапшотов ещё нет. Для режима без живого руля это требование избыточно:
+      // цена в mid-полосе на фикстуре без live-данных не бывает настоящей ценой, доказывать её застой нечем и
+      // незачем. Отказ безусловный, полоса — та же ратифицированная, что у зомби-правила (один порог, не два).
+      if (ftBlind) {
+        const phBand = loadZombieConfig(deps.env ?? process.env).placeholderBandCents;
+        if (Math.abs(quote - 50) <= phBand) {
+          R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `ft_blind_placeholder: котировка ${quote}¢ в полосе 50±${phBand}¢ на слепой фикстуре — неторгованный дефолт, вход запрещён (W2)`) });
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `ft_blind_placeholder «${b.market_label}»: ${quote}¢ ~ mid на слепой фикстуре — плейсхолдер, вход отклонён`, dedup_key: `ftb_ph:${b.id}`, created_at: now });
+          continue;
+        }
+      }
       // Condition 5: a rudderless FT-blind position gets HALF the normal size until its cohort matures.
       let proposed = (b.stake ?? 0) * (ftBlind ? ftBlindConfig(deps.env ?? process.env).capFrac : 1);
 
@@ -971,6 +985,16 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       }
       // P0.2 MIN-DEPTH FLOOR: the book absorbed a CLAMPED fill below the floor — the depth to trade
       // meaningfully isn't there. Skip (don't open a dust position, Bohemian $80→$14). Feeds unfillable_edge.
+      // [W2] Пыль в ft_blind: Östers, третий вход $1 после урезаний. Общий depth-floor ниже ловит только
+      // КНИЖНЫЙ клэмп (ex.clamped) — а $1 может прийти и от тезисного/дневного кэпа, задолго до книги. Для
+      // позиции без живого руля минимальный размер — безусловный: доллар, который нельзя вести и невыгодно
+      // закрывать, это не позиция, а строка учёта.
+      const ftbMin = Math.max(0, Number((deps.env ?? process.env).FT_BLIND_MIN_STAKE_USD ?? 5));
+      if (ftBlind && ex.stake < ftbMin) {
+        R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `ft_blind_min_stake: филл $${ex.stake} < floor $${ftbMin} — пыль без руля не открываем (W2)`) });
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `ft_blind_min_stake «${b.market_label}»: $${ex.stake} < $${ftbMin} — вход отклонён`, dedup_key: `ftb_min:${b.id}`, created_at: now });
+        continue;
+      }
       const MIN_DEPTH = Math.max(1, Number((deps.env ?? process.env).FOOTBALL_MIN_DEPTH_USD ?? 50));
       if (ex.clamped && ex.stake < MIN_DEPTH) {
         R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `depth_floor_skip: книга дала лишь $${ex.stake} < floor $${MIN_DEPTH} — глубины нет`) });

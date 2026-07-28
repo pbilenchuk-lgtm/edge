@@ -131,13 +131,13 @@ test("G3: a stale trigger is DETRIGGERED — no money and no LLM call", () => {
   assert.match((g as any).reason, /паника давно отыграна/);
 });
 
-test("G3: the 3–6′ band spends no money but is recorded, so the threshold can be re-argued from data", () => {
-  const g = overreactionGate(SHEET, { totalGoals: 1, minute: 30, triggerAgeMin: 5 });
+test("G3: the 6–12′ band spends no money but is recorded, so the threshold can be re-argued from data", () => {
+  const g = overreactionGate(SHEET, { totalGoals: 1, minute: 30, triggerAgeMin: 9 });
   assert.equal(g.call, false, "money does not go in the sensitivity band");
   assert.match((g as any).reason, /ovr_stale_flag/);
   assert.match((g as any).reason, /не слишком ли туг порог/, "the note says what the record is FOR");
-  assert.equal(OVR_TRIGGER_FRESH_MIN({}), 3);
-  assert.equal(OVR_TRIGGER_FLAG_MIN({}), 6);
+  assert.equal(OVR_TRIGGER_FRESH_MIN({}), 6, "W6: перератифицировано в batch-12 — денежная линия 6′");
+  assert.equal(OVR_TRIGGER_FLAG_MIN({}), 12, "W6: полоса flag-only 6–12′");
 });
 
 test("G3: a FRESH trigger still passes, and an unknown age fails OPEN", () => {

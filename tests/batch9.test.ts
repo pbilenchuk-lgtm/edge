@@ -113,7 +113,7 @@ test("V0.1: the diagnostic names the parked 50¢ book and clears the preview bra
   const d = entryBlockerDiag(db, "m1", {});
   assert.ok(d.some((x) => /КНИГА НЕ РАЗМЕЧЕНА: 3\/3/.test(x)), "the parked book is named as the real blocker");
   assert.ok(d.some((x) => /превью-ветка НЕ активна/.test(x)), "the preview branch is explicitly cleared (lineups are out)");
-  assert.ok(d.some((x) => /НЕТ ПРЕДЛОЖЕНИЙ/.test(x)), "zero proposals is stated outright — the Varnamo case");
+  assert.ok(d.some((x) => /strategist_empty/.test(x)), "zero proposals is stated outright — the Varnamo case (W4: стадия названа явно)");
 });
 
 // ── P4: Draw canon enforced at the fill choke ────────────────────────────────────────────────────
