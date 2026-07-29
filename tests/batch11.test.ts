@@ -307,9 +307,12 @@ function voidBed(db: any) {
   R.insertMatch(db, { id: "m1", competition_id: "c1", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t",
     minute: null, score_home: 1, score_away: 1, final_score: "1-1", kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: "m1" } as any);
 }
-const addBet = (db: any, id: string, status: string, settledAt: string, settledBy: string | null, rationale = "") =>
-  db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,payout,settled_by,settled_at,rationale,created_at)
-              VALUES (?,'m1','prematch_value','max','Under 2.5',?,50,100,100,?,?,?,'t')`).run(id, status, settledBy, settledAt, rationale);
+// [четвёрка, п.1] Причина возврата сидит в settled_via — МАШИННОМ поле, которое пишет сам путь возврата.
+// Раньше этот бед клал её в `rationale`, и тест сходился с кодом лишь потому, что оба делали одно и то же
+// неверное допущение: продакшен в rationale причину возврата не пишет НИКОГДА (там причина входа).
+const addBet = (db: any, id: string, status: string, settledAt: string, settledBy: string | null, settledVia: string | null = null) =>
+  db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,payout,settled_by,settled_via,settled_at,created_at)
+              VALUES (?,'m1','prematch_value','max','Under 2.5',?,50,100,100,?,?,?,'t')`).run(id, status, settledBy, settledVia, settledAt);
 
 test("#1: a spike of refunds raises an ALARM, and names OUR failure separately from the exchange's", () => {
   const db = openDb(":memory:"); initSchema(db);
@@ -318,8 +321,8 @@ test("#1: a spike of refunds raises an ALARM, and names OUR failure separately f
   const at = "2026-07-27T20:00:00Z";
   for (let i = 0; i < 20; i++) addBet(db, `w${i}`, "settled_won", at, null);
   // Five refunds, of which four are the complement failure — the exact signature that hid 225 rows.
-  for (let i = 0; i < 4; i++) addBet(db, `v${i}`, "settled_void", at, "void", "одиночный токен без комплемента, просрочено");
-  addBet(db, "vm", "settled_void", at, "void", "рынок закрыт с неразрешающей ценой");
+  for (let i = 0; i < 4; i++) addBet(db, `v${i}`, "settled_void", at, "void", "no_complement");
+  addBet(db, "vm", "settled_void", at, "void", "market_void");
   const r = buildVoidWatch(db, 24, now, {});
   assert.equal(r.decided, 25);
   assert.equal(r.voids, 5);
@@ -336,7 +339,7 @@ test("#1: a normal day is quiet, and a tiny sample refuses to have an opinion", 
   const now = Date.parse("2026-07-28T00:00:00Z");
   const at = "2026-07-27T20:00:00Z";
   for (let i = 0; i < 39; i++) addBet(db, `w${i}`, "settled_won", at, null);
-  addBet(db, "v0", "settled_void", at, "void", "рынок закрыт с неразрешающей ценой");
+  addBet(db, "v0", "settled_void", at, "void", "market_void");
   const ok = buildVoidWatch(db, 24, now, {});
   assert.equal(ok.verdict, "ok", "2.5% of refunds is ordinary — a sensor that cries every day is ignored by week two");
 
@@ -448,4 +451,23 @@ test("sizing_insanity: an undeclared bank leaves the guard inert — bankUsd(0) 
   const r = sizePrematch({ ourProb: 0.62, priceCents: 45, implied: 0.45, calibration: 0.6, liquidity: 500_000,
     matchExposure: 0, compExposure: 0, cfg: DEFAULT_RISK_CONFIG, budget: 1000, bankCeiling: bankUsd({}) || undefined });
   assert.equal(r.status, "enter", "no declared bank → no ceiling → the book keeps trading as before");
+});
+
+// [четвёрка, п.1] Сторож, который делит возвраты на «наша вина» и «решение биржи», читал ПРОЗУ входа
+// (b.rationale) — поле, куда причина возврата не пишется никогда. Регулярка не совпадала ни разу, и главная
+// причина — «нет комплемента» — печаталась как market_void, то есть как решение биржи. Ровно наоборот.
+test("#1: причина возврата берётся из МАШИННОГО поля, а не из прозы; неразмеченное не выдаётся за void биржи", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  voidBed(db);
+  const now = Date.parse("2026-07-28T00:00:00Z");
+  const at = "2026-07-27T20:00:00Z";
+  for (let i = 0; i < 20; i++) addBet(db, `w${i}`, "settled_won", at, null);
+  addBet(db, "vt", "settled_void", at, "void_timeout", "timeout_not_closed");
+  // Строка ДО фикса: settled_by='void' есть, машинной причины нет. Назвать её решением биржи нельзя —
+  // именно так ошибка и пряталась.
+  addBet(db, "vlegacy", "settled_void", at, "void", null);
+  const r = buildVoidWatch(db, 24, now, {});
+  assert.equal(r.byReason["void_timeout"], 1, "таймаут опознан по settled_via");
+  assert.equal(r.byReason["market_void"], undefined, "неразмеченная строка НЕ засчитана как void биржи");
+  assert.equal(r.byReason["не_размечено:void"], 1, "она честно уходит в отдельную корзину");
 });

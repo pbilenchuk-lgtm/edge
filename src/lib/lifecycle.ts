@@ -35,7 +35,7 @@ import { underThesisMarginGoals, resolveFootballMarket } from "./settlement.js";
 import { serializeEntryMeta, parseEntryMeta, isFtBlindBet, type BetEntryMeta } from "./betMeta.js";
 import { canonicalizeDrawForMatch, drawCanonEnabled, DRAW_YES_KEYS } from "./drawCanon.js";
 import { inAnchorWindow, ANCHOR_MAX_PER_TICK } from "./prematchAnchor.js";
-import { scoreConsistency, scoreTrustedForDisarm } from "./scoreRace.js";
+import { scoreConsistency, pendingGoalSurplus } from "./scoreRace.js";
 import { probeDrawCanon } from "./drawCanonProbe.js";
 import { resolveRefusalShadowSignals } from "./refusalShadow.js";
 import { holdTailToSettle } from "./quasiLocked.js";
@@ -1241,17 +1241,33 @@ async function gapRepriceSweep(db: Database, deps: EngineDeps, poly: PolymarketC
     const minNum = m.minute != null ? m.minute : (isIsoTs(m.kickoff_at) ? Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at as string)) / 60_000)) : 0);
     const strat = R.getStrategy(db, b.strategy_id);
     const prof = b.risk_profile_id ?? "medium";
-    const fill = (reasonTag: string) => {
-      const pnl = closeBetEarly(db, b, sell.cents, reasonTag, minuteLabel(m), now);
-      if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: prof }, sell.cost, now);
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reasonTag}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+    // [четвёрка, п.2] ЧАСТИЧНЫЙ ФИЛЛ УЧИТЫВАЕТСЯ И ЗДЕСЬ. T3.3 ратифицировала правило «стоп, который бид принял
+    // лишь частично, закрывает ТОЛЬКО исполненную долю» — и основной цикл выходов его исполняет (closeBetPortion).
+    // Этот sweep, который идёт РАНЬШЕ основного цикла и владеет ставкой единолично (основной цикл её пропускает
+    // при открытом watch), закрывал closeBetEarly'ем ВЕСЬ стейк по тонкому VWAP — ровно то, что T3.3 чинила
+    // (Cienciano: «исполнено 42%», а $80 списаны целиком). Одно правило, две реализации — расходятся всегда.
+    // Ноль филла — закрывать нечего: не выдумываем исполнение, оставляем watch открытым, sweep повторит.
+    const fillFrac = sell.requestedShares > 0 ? Math.min(1, sell.filledShares / sell.requestedShares) : 1;
+    const fill = (reasonTag: string): boolean => {
+      if (fillFrac <= 1e-6) {
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text: `gap-wake: защитный выход «${b.market_label}» не исполнен — бид не принял размер (0% филл); отложка НЕ снята, повторяем на следующем тике (gap_wake_partial_zero)`, dedup_key: `gwz:${b.id}`, created_at: now });
+        return false;
+      }
+      const { pnl, partial } = closeBetPortion(db, b, fillFrac, sell.cents, minuteLabel(m), now);
+      if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: prof }, fillFrac < 1 ? scaleCost(sell.cost, fillFrac) : sell.cost, now);
+      const fillTag = partial ? ` (частично ${Math.round(fillFrac * 100)}%)` : "";
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}»${fillTag} @ ${sell.cents}¢ · ${reasonTag}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason: reasonTag, pnl });
       touched.add(b.strategy_id);
+      return true;
     };
     // (a) invalidator materialised during the wait → immediate unconditional exit.
     if (strat && gapWakeInvalidatorMet(db, m, strat.name, prof, b.market_label, minNum)) {
-      R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: sell.cents, deltaCents: round1(sell.cents - w.wake_price_cents), at: now });
-      fill(`gap-wake стоп: инвалидатор тезиса сработал за время ожидания — немедленный выход (gap_wake_invalidator)`); continue;
+      // Отложка снимается ТОЛЬКО если выход действительно исполнился: иначе замер записал бы исполнение,
+      // которого не было, а позиция осталась бы без владельца (основной цикл её пропускает по watch).
+      if (fill(`gap-wake стоп: инвалидатор тезиса сработал за время ожидания — немедленный выход (gap_wake_invalidator)`))
+        R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: sell.cents, deltaCents: round1(sell.cents - w.wake_price_cents), at: now });
+      continue;
     }
     // (b) the protective stop no longer fires on the fresh executable price → the dislocation eased; drop the
     //     deferral and keep the position under normal management (recovered).
@@ -1265,8 +1281,8 @@ async function gapRepriceSweep(db: Database, deps: EngineDeps, poly: PolymarketC
     // (c) window: count this tick; execute unconditionally once expired (≤repriceSec OR repriceTicks).
     const ticks = R.bumpGapRepriceTick(db, w.bet_id);
     if (nowMs >= Date.parse(w.deadline_at) || ticks >= repriceTicks) {
-      R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: sell.cents, deltaCents: round1(sell.cents - w.wake_price_cents), at: now });
-      fill(`gap-wake стоп: окно репрайса истекло (${ticks} тик(ов)), цена ${sell.cents}¢ не вернулась выше ${Math.round(w.floor_cents)}¢ — исполняю безусловно (gap_wake_expired)`);
+      if (fill(`gap-wake стоп: окно репрайса истекло (${ticks} тик(ов)), цена ${sell.cents}¢ не вернулась выше ${Math.round(w.floor_cents)}¢ — исполняю безусловно (gap_wake_expired)`))
+        R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: sell.cents, deltaCents: round1(sell.cents - w.wake_price_cents), at: now });
     }
   }
   for (const sid of touched) recomputeMetrics(db, sid, deps);
@@ -1447,10 +1463,24 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
         // No deadline escape here, unlike the strategist path. Keeping a stop armed one cycle too long costs an
         // exit the thesis may not have needed; disarming on a phantom margin costs Brann. The asymmetry is the
         // reason the two consumers of the same fact fail in opposite directions.
-        const scoreOk = scoreTrustedForDisarm(scoreConsistency(db, m, Date.parse(now) || Date.now(), deps.env ?? process.env));
-        const uMargin = scoreOk ? underThesisMarginGoals(b.market_label, m.score_home ?? 0, m.score_away ?? 0, { home: m.home, away: m.away }) : null;
-        if (!scoreOk) {
-          holdOnce(`подавление стопа НЕ применено по ${holdKey}: счёт отстаёт от собственного фида голов — запас Under недоказуем, стоп остаётся боевым (score_race_no_disarm)`);
+        //
+        // [четвёрка, п.4] РАСХОЖДЕНИЕ СЧЁТА С ФИДОМ БОЛЬШЕ НЕ ОТКЛЮЧАЕТ ПОДАВЛЕНИЕ НАВСЕГДА. Отменённый по VAR
+        // гол оставляет своё событие в фиде, а счёт откатывается — расхождение становится ПОСТОЯННЫМ, и отказ
+        // «на непроверяемом счёте не разоружаемся» переставал быть временным: под-тезисная защита выключалась
+        // на этом матче до финального свистка. Одним призраком отменялась ровно та защита, ради которой она и
+        // написана (Sarpsborg дампился на 21–26¢, Inter FK Sarajevo на 7–8¢ и рассчитался в 100¢).
+        // Доверие больше не требуется: голы считаются ПО ХУДШЕМУ ИЗ ДВУХ ИСТОЧНИКОВ — излишек фида прибавляется
+        // к счёту, и приписывается той стороне, о которой тезис (для матчевого тотала сторона не важна, для
+        // командного берём минимум из двух приписок). Призрак стоит нам одного гола запаса; настоящий гол,
+        // о котором табло ещё не знает, посчитан вовремя. Подавление живо, но опирается на защитимый запас.
+        const cons = scoreConsistency(db, m, Date.parse(now) || Date.now(), deps.env ?? process.env);
+        const surplus = pendingGoalSurplus(cons);
+        const sh = m.score_home ?? 0, sa = m.score_away ?? 0;
+        const uHome = underThesisMarginGoals(b.market_label, sh + surplus, sa, { home: m.home, away: m.away });
+        const uAway = underThesisMarginGoals(b.market_label, sh, sa + surplus, { home: m.home, away: m.away });
+        const uMargin = uHome == null || uAway == null ? null : Math.min(uHome, uAway);
+        if (surplus > 0) {
+          holdOnce(`запас Under посчитан ПО ХУДШЕМУ по ${holdKey}: фид знает о ${cons.goalEvents} голах против счёта ${sh}:${sa} — лишние ${surplus} засчитаны как забитые (score_race_worst_case)`);
         }
         if (uMargin != null && uMargin >= UNDER_STOP_SUPPRESS_MARGIN) {
           holdOnce(`ценовой стоп подавлен по ${holdKey}: Under-тезис в запасе — до линии ещё ${uMargin} гол(ов) при счёте ${m.score_home ?? 0}:${m.score_away ?? 0}; цена оторвана книгой, тезис не под ударом (under_thesis_safe); держим до стратег-выхода / сеттла`);

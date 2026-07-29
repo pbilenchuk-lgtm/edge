@@ -62,9 +62,20 @@ export function buildVoidWatch(db: Database, windowHours = 24, nowMs = Date.now(
         voids++;
         // The reason matters more than the count. 'void'/'void_timeout' with the single-token detail is OUR
         // failure to verify; a market void is the exchange's call. Same status, opposite meaning.
+        //
+        // [четвёрка, п.1] ЧИТАЕТСЯ МАШИННОЕ ПОЛЕ, А НЕ ПРОЗА. Раньше «нет комплемента» опознавалось регуляркой
+        // по `b.rationale` — а туда причина возврата не пишется никогда: detail уходит в trade_log, rationale
+        // хранит причину ВХОДА. Значит регулярка не совпадала ни разу, и главная причина — наша собственная
+        // неспособность сверить — печаталась как `market_void`, то есть как решение биржи. Сторож, построенный
+        // ровно ради этого различия, на своей первой причине показывал обратное. Теперь источник — settled_via.
         const by = b.settled_by ?? "—";
-        const noComp = /комплемент/i.test(b.rationale ?? "") || /одиночный токен/i.test(b.rationale ?? "");
-        const key = noComp ? "нет_комплемента" : by === "void_timeout" ? "void_timeout" : by === "void" ? "market_void" : `иное:${by}`;
+        const via = b.settled_via ?? null;
+        const key = via === "no_complement" ? "нет_комплемента"
+          : via === "market_void" ? "market_void"
+          : via === "timeout_not_closed" ? "void_timeout"
+          // Строки ДО этого фикса машинной причины не несут. Называть их «решением биржи» нельзя — именно так
+          // и пряталась ошибка; они честно уходят в отдельную корзину «не размечено».
+          : `не_размечено:${by}`;
         byReason[key] = (byReason[key] ?? 0) + 1;
       }
     }

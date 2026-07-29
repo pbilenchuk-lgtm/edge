@@ -300,6 +300,32 @@ function favSideForLabel(snap: R.TennisSnapshotRow, label: string): "first" | "s
 }
 
 /**
+ * [четвёрка, п.3] ОРИЕНТАЦИЯ ПОЗИЦИИ БЕРЁТСЯ ИЗ ЗАКРЕПЛЁННОЙ В МОМЕНТ ВХОДА, а не выводится заново.
+ *
+ * Вход пишет `entry_meta.favSide` — какую из сторон матча держит ставка. Выходы этим не пользовались: они
+ * КАЖДЫЙ ТИК заново сопоставляли фамилию из ярлыка рынка с `p1`/`p2` ПОСЛЕДНЕГО снапшота. Две поломки из
+ * одной причины:
+ *   • стороны в снапшоте могут поменяться местами между батчами провайдера (или фамилия совпасть не с той
+ *     строкой) — тогда стоп читает цену ОППОНЕНТА и исполняется по чужому токену. Это в точности класс
+ *     token-flip, из-за которого пришлось карантинить целую когорту (Mrva–Roncadelli, «73¢ @ 25¢»);
+ *   • сопоставление не удалось → `null` → `continue`, и позиция МОЛЧА остаётся без ведения вообще.
+ * Закреплённое при входе значение однозначно и не зависит от того, что провайдер прислал минуту назад.
+ * Расхождение с выводом по фамилии — само по себе улика (та самая поломка), поэтому оно ГРОМКОЕ.
+ */
+export function pinnedFavSide(db: Database, b: Bet, snap: R.TennisSnapshotRow | undefined, now: string): "first" | "second" | null {
+  const pinned = parseEntryMeta(b.entry_meta)?.favSide ?? null;
+  const derived = snap ? favSideForLabel(snap, b.market_label) : null;
+  if (pinned && derived && pinned !== derived) {
+    try {
+      R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: null, type: "skip",
+        text: `tennis_fav_side_drift «${b.market_label}»: закреплено при входе ${pinned}, по фамилии из снапшота ${derived} — ведём по ЗАКРЕПЛЁННОМУ (иначе стоп ушёл бы по токену оппонента)`,
+        dedup_key: `favdrift:${b.id}`, created_at: now });
+    } catch { /* улика не имеет права ломать выход */ }
+  }
+  return pinned ?? derived;   // легаси-ставки без метки — по-прежнему по фамилии, иначе они лишатся ведения
+}
+
+/**
  * token-fix-m1 QUARANTINE (one-time, marker-guarded). Flags every PRE-FIX tennis buyback bet
  * (Overreaction + Set-Value) that HELD THE WRONG OUTCOME's token — the favourite was the SECOND
  * moneyline outcome, but the old code always transacted outcomes[0]. Such a bet's take/exit P&L is
@@ -536,7 +562,7 @@ async function tennisGapRepriceSweep(db: Database, sellCtx: TennisSellCtx, deps:
     if (tennisFinalResult(db, b.match_id)?.finished) { R.resolveGapReprice(db, w.bet_id, { outcome: "recovered", execCents: w.wake_price_cents, deltaCents: 0, at: now }); continue; }
     const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(b.match_id) as R.TennisSnapshotRow[];
     if (!snaps.length) { R.bumpGapRepriceTick(db, w.bet_id); continue; }
-    const favSide = favSideForLabel(snaps[snaps.length - 1], b.market_label);
+    const favSide = pinnedFavSide(db, b, snaps[snaps.length - 1], now);
     if (!favSide) { R.bumpGapRepriceTick(db, w.bet_id); continue; }
     const oppSide = favSide === "first" ? "second" : "first";
     const last = snaps[snaps.length - 1];
@@ -606,7 +632,7 @@ export async function tennisExitTick(db: Database, deps: EngineDeps = {}): Promi
     if (R.getOpenGapReprice(db, b.id)) continue; // T2: an active gap-wake deferral — the sweep owns this bet
     const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(b.match_id) as R.TennisSnapshotRow[];
     if (!snaps.length) continue;
-    const favSide = favSideForLabel(snaps[snaps.length - 1], b.market_label);
+    const favSide = pinnedFavSide(db, b, snaps[snaps.length - 1], now);
     if (!favSide) continue;
     const oppSide = favSide === "first" ? "second" : "first";
     const plan = parseEntryMeta(b.entry_meta)?.exitPlan as any;
