@@ -121,7 +121,17 @@ export function tennisFinalResult(db: Database, matchId: string): TennisFinal | 
   // So walkover lives in the void family; retire/default/DQ live in the advancer family.
   const canceled = /cancel|abandon|walkover|w[\/.]o/i.test(status);
   const retired = /retir|\bret\.?\b|default|disqualif|\bdsq\b/i.test(status);
-  const finished = retired || canceled || r.live === 0 || /finish/i.test(status);
+  // «НЕ В ИГРЕ» ≠ «СЫГРАН». `live === 0` истинно и для ЗАВЕРШЁННОГО матча, и для ещё НЕ НАЧАВШЕГОСЯ
+  // («Scheduled», «Not Started»): у обоих нет прямого эфира. Прежняя строка признавала финалом любой такой
+  // снапшот, поэтому прематчевая запись читалась как результат — а дальше advancing=null, manual=true, и
+  // PMV-shadow сигнал уходил в `unresolved` НАВСЕГДА (те самые 45% выборки, на которых стоял вердикт «край
+  // не подтверждён»). Финал теперь требует ДОКАЗАТЕЛЬСТВА: явный статус, ретайр/отмена, либо хотя бы один
+  // сыгранный сет при отсутствии эфира. Матч без признаков игры остаётся неразрешённым — pending дорезолвится
+  // следующим снапшотом, тогда как ложный финал не откатывается ничем.
+  const scheduled = /schedul|not\s*start|upcoming|postpon|delay/i.test(status);
+  const anySetPlayed = (Number(r.sets_p1) || 0) + (Number(r.sets_p2) || 0) > 0;
+  const finished = retired || canceled || /finish|ended|complet/i.test(status)
+    || (r.live === 0 && !scheduled && anySetPlayed);
   if (!finished) return null;
   // event_winner is the PRIMARY (authoritative) source of the advancer.
   let fromWinner: "first" | "second" | null = null;
