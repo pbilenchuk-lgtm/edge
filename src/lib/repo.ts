@@ -1143,8 +1143,8 @@ export function insertTradeLog(db: Database, e: TradeLogEntry): void {
   // a re-render / double-write of the same event is dropped. Rows without a dedup_key never hit the index,
   // so they insert normally (the uid() PK is unique), and behaviour is unchanged for all existing callers.
   db.prepare(
-    `INSERT OR IGNORE INTO trade_log(id,match_id,strategy_id,minute,type,text,dedup_key,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-  ).run(e.id, e.match_id, e.strategy_id, e.minute, e.type, e.text, e.dedup_key ?? null, e.created_at);
+    `INSERT OR IGNORE INTO trade_log(id,match_id,strategy_id,minute,type,text,dedup_key,bet_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+  ).run(e.id, e.match_id, e.strategy_id, e.minute, e.type, e.text, e.dedup_key ?? null, e.bet_id ?? null, e.created_at);
 }
 export function reassessmentsForMatch(db: Database, matchId: string): Reassessment[] {
   return db.prepare(`SELECT * FROM reassessments WHERE match_id=? ORDER BY created_at`).all(matchId) as Reassessment[];

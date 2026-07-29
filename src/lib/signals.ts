@@ -247,6 +247,11 @@ export interface SignalCohort extends SignalTests {
   strategyId?: string; phase?: string; family?: string;
   matured: "none" | "preliminary" | "stable";
   tripleAgreement: boolean;      // CLV t sig AND win beats market (p<0.05) AND P&L bootstrap positive-significant
+  /** [пункт 6] Нога CLV = n/a: линии закрытия НЕТ В ДАННЫХ ни у одной решённой записи когорты. Тогда — и
+   *  только тогда — вердикт временно ДВУНОГИЙ (win-vs-рынок + P&L). Если линия есть хотя бы где-то, нога
+   *  считается по ней и остаётся третьей: тонкая выборка делает её незначимой, а не отсутствующей. */
+  clvLegNa: boolean;
+  clvCoverage: { decidedRecords: number; withLine: number; naNoSnapshot: number; naStale: number; naNoClock: number };
   verdict: "insufficient" | "positive" | "negative" | "mixed" | "legacy_diagnostic";
   note: string;
 }
@@ -260,7 +265,20 @@ export function signalCohort(recs: BetRec[], meta: { strategyId?: string; phase?
   const nDec = t.nDecided;
   const flagOnly = meta.strategyId ? FLAG_ONLY_STRATEGIES[meta.strategyId] : undefined;
   const matured = nDec >= SIGNAL_N_STABLE ? "stable" : nDec >= SIGNAL_N_PRELIM ? "preliminary" : "none";
-  const triple = t.clv.significant && t.winVsImplied.beatsMarket && t.pnl.positiveSignificant;
+  // [пункт 6] ПОКРЫТИЕ НОГИ CLV. `bets.closing_price` линией закрытия не был (см. clv.ts), поэтому нога
+  // считается по снимкам котировок — и там, где снимка физически нет, она честно n/a. Порог при этом НЕ
+  // смягчается: n/a законен только при НУЛЕВОМ покрытии; одна найденная линия — и нога снова третья, просто
+  // на тонкой выборке она незначима. «Двух ног достаточно» не является основанием, а неудобство — тем более.
+  const decidedRecs = recs.filter((r) => r.outcome !== "open");
+  const withLine = decidedRecs.filter((r) => r.clvSource === "closing_line").length;
+  const clvCoverage = {
+    decidedRecords: decidedRecs.length, withLine,
+    naNoSnapshot: decidedRecs.filter((r) => r.clvSource === "no_snapshot").length,
+    naStale: decidedRecs.filter((r) => r.clvSource === "stale_snapshot").length,
+    naNoClock: decidedRecs.filter((r) => r.clvSource === "no_match_clock").length,
+  };
+  const clvLegNa = decidedRecs.length > 0 && withLine === 0 && t.clv.n === 0;
+  const triple = (clvLegNa ? true : t.clv.significant) && t.winVsImplied.beatsMarket && t.pnl.positiveSignificant;
   let verdict: SignalCohort["verdict"] = "insufficient";
   if (flagOnly) verdict = "legacy_diagnostic";
   else if (matured !== "none") {
@@ -274,7 +292,12 @@ export function signalCohort(recs: BetRec[], meta: { strategyId?: string; phase?
     : matured === "none"
       ? `копим: ${nDec}/${SIGNAL_N_PRELIM} РЕШЁННЫХ сигналов (${head}) — до предварительного вердикта. Единица — СИГНАЛ, не запись (R0.1).`
       : `${matured === "stable" ? "УСТОЙЧИВО" : "предварительно"} (${head}): CLV t=${t.clv.t} p=${t.clv.p} ${t.clv.significant ? "✓" : "✗"}, win ${t.winVsImplied.winPct}% vs рынок ${t.winVsImplied.meanImpliedPct}% (Poisson-бином p=${t.winVsImplied.binomP} ${t.winVsImplied.beatsMarket ? "✓" : "✗"}), book-P&L $${t.pnl.totalUsd} (recentered boot p=${t.pnl.bootP} ${t.pnl.positiveSignificant ? "✓" : "✗"}), топ-3 ${t.concentration.top3ShareOfGrossPct}% (${t.concentration.contributors} доноров) ${t.concentration.robust ? "✓" : "✗"} → ${verdict === "positive" ? "ПОЛОЖИТЕЛЬНЫЙ (тройное согласие)" : verdict === "negative" ? "ОТРИЦАТЕЛЬНЫЙ" : "СМЕШАННЫЙ (нет согласия)"}`;
-  return { ...t, ...meta, matured, tripleAgreement: triple, verdict, note };
+  const naNote = clvLegNa
+    ? ` · ⚠ НОГА CLV = n/a: линии закрытия нет в данных ни у одной из ${clvCoverage.decidedRecords} решённых записей (нет снимка ${clvCoverage.naNoSnapshot}, снимок протух ${clvCoverage.naStale}, нет часов матча ${clvCoverage.naNoClock}) — вердикт ВРЕМЕННО ДВУНОГИЙ. Это не смягчение порога: как только линия появится хотя бы где-то, нога вернётся третьей.`
+    : clvCoverage.decidedRecords > 0 && withLine < clvCoverage.decidedRecords
+      ? ` · нога CLV посчитана по ${withLine}/${clvCoverage.decidedRecords} записям (у остальных линии нет в данных) — считается как ЕСТЬ, не как n/a`
+      : "";
+  return { ...t, ...meta, matured, tripleAgreement: triple, clvLegNa, clvCoverage, verdict, note: note + naNote };
 }
 
 // [Phase 5.4] Benjamini-Hochberg FDR control. A portfolio grid runs one significance test PER cell, so at

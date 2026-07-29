@@ -293,6 +293,11 @@ export function initSchema(db: Database): void {
     // Z3 (batch-5): idempotency key for trade-log lines — a re-render / double-write of the SAME event
     // (enter dup: Kansas, Hammarby) collapses to one row. Partial unique index so only keyed rows dedup.
     "ALTER TABLE trade_log ADD COLUMN dedup_key TEXT",
+    // [пункт 6, batch-12] АДРЕС ВЫХОДА. Выходы сопоставлялись со ставкой по (стратегия + подстрока ярлыка) —
+    // а два профиля одной стратегии держат ОДИН И ТОТ ЖЕ рынок и пишут неразличимые строки. Каждая из двух
+    // ставок забирала ОБА выхода: удвоенные счётчики триггеров, чужая метка model_fill, чужие «частично».
+    // Ставка — единственный однозначный адрес, и теперь он стоит на строке.
+    "ALTER TABLE trade_log ADD COLUMN bet_id TEXT",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_tradelog_dedup ON trade_log(match_id, type, dedup_key) WHERE dedup_key IS NOT NULL",
     // Z2(b) (batch-5): payout-consistency flag — set at settle when |payout − expected| exceeds a
     // commission tolerance (a decimal shift like the Kansas «payout ≈ тек/10»). Caught at birth, not a week later.

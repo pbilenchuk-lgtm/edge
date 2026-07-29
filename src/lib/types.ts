@@ -246,6 +246,9 @@ export interface TradeLogEntry {
   text: string;
   created_at: string;
   dedup_key?: string | null; // Z3: when set, a duplicate (match_id, type, dedup_key) insert is ignored
+  /** [пункт 6] Однозначный адрес строки выхода: чья это ставка. Пара (стратегия + ярлык рынка) адресом не
+   *  является — два профиля одной стратегии держат тот же рынок и пишут неразличимые строки. */
+  bet_id?: string | null;
 }
 
 export interface CalibrationBucket {

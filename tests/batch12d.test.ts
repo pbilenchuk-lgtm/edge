@@ -127,3 +127,83 @@ test("четвёрка п.3: сторона позиции — из entry_meta, 
   assert.equal(pinnedFavSide(db, bet("b4", null), snapStraight, "t"), "first");
   assert.equal(pinnedFavSide(db, bet("b5", null), undefined, "t"), null, "ни метки, ни снапшота — стороны нет");
 });
+
+// ── пункт 6: адрес выхода и развилка n/a ────────────────────────────────────────────────────────
+import { betRecords } from "../src/lib/profileAnalytics.js";
+import { signalCohort } from "../src/lib/signals.js";
+
+// Выходы сопоставлялись со ставкой по (стратегия + подстрока ярлыка). Два профиля одной стратегии держат
+// ОДИН И ТОТ ЖЕ рынок и пишут неразличимые строки — каждая из двух ставок забирала ОБА выхода: удвоенный
+// triggerMix, чужая метка model_fill, а через неё обнулённый bookPnl у чистой ставки.
+test("пункт 6: выход адресуется по СТАВКЕ, а не по (стратегия + ярлык)", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.insertMatch(db, { id: "mx", competition_id: comp.id, home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "2026-07-20T18:00:00Z", minute: 90, score_home: 2, score_away: 0, final_score: "2:0", kickoff_time: null, end_time: "2026-07-20T19:50:00Z", duration: null, end_note: null, external_ref: "mx" } as any);
+  const mkBet = (id: string, profile: string) => R.insertBet(db, { id, match_id: "mx", strategy_id: strat.id, risk_profile_id: profile, market_label: "Over 1.5", status: "settled_won", proposed_price: 40, entry_price: 40, current_price: 70, closing_price: 70, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "предматч", result: "won", payout: 175, settled_by: "early", settled_at: "2026-07-20T19:00:00Z", entry_meta: JSON.stringify({ phase: "prematch" }), created_at: "t" } as any);
+  mkBet("bm", "medium"); mkBet("ba", "aggressive");
+  // Два выхода — по одному на ставку. Строки различимы ТОЛЬКО адресом: текст одинаковый.
+  const exit = (id: string, betId: string, tail: string) => R.insertTradeLog(db, { id, match_id: "mx", strategy_id: strat.id, minute: "70'", type: "exit", text: `выход «Over 1.5» @ 70¢ · тейк${tail} · P&L +$75.00`, bet_id: betId, created_at: "2026-07-20T19:00:00Z" } as any);
+  exit("e1", "bm", "");
+  exit("e2", "ba", " [model_fill]");
+  const recs = betRecords(db);
+  const med = recs.find((r) => r.id === "bm")!, agg = recs.find((r) => r.id === "ba")!;
+  assert.equal(med.exits.length, 1, "medium забирает ровно СВОЙ выход");
+  assert.equal(agg.exits.length, 1, "aggressive — свой");
+  assert.equal(med.exits[0].modelFill, false, "чужая метка model_fill не прилипает");
+  assert.equal(agg.exits[0].modelFill, true);
+  assert.equal(med.bookPnl, 75, "чистая ставка сохраняет свой P&L в вердикте");
+  assert.equal(agg.bookPnl, null, "модельный филл по-прежнему выводит СВОЮ ставку из вердикта");
+  assert.equal(med.exitsAmbiguous, false);
+});
+
+// Легаси-строка без адреса при нескольких кандидатах — жребий. Привязываем по-старому, но помечаем, и
+// деньги такой строки из P&L-вердикта выводим: fail-closed, как и при модельном филле.
+test("пункт 6: легаси-выход без bet_id при двух кандидатах помечен неоднозначным", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.insertMatch(db, { id: "my", competition_id: comp.id, home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "2026-07-20T18:00:00Z", minute: 90, score_home: 2, score_away: 0, final_score: "2:0", kickoff_time: null, end_time: "2026-07-20T19:50:00Z", duration: null, end_note: null, external_ref: "my" } as any);
+  const mkBet = (id: string, profile: string) => R.insertBet(db, { id, match_id: "my", strategy_id: strat.id, risk_profile_id: profile, market_label: "Over 1.5", status: "settled_won", proposed_price: 40, entry_price: 40, current_price: 70, closing_price: 70, ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "предматч", result: "won", payout: 175, settled_by: "early", settled_at: "2026-07-20T19:00:00Z", entry_meta: JSON.stringify({ phase: "prematch" }), created_at: "t" } as any);
+  mkBet("cm", "medium"); mkBet("ca", "aggressive");
+  R.insertTradeLog(db, { id: "eo", match_id: "my", strategy_id: strat.id, minute: "70'", type: "exit", text: `выход «Over 1.5» @ 70¢ · тейк · P&L +$75.00`, created_at: "2026-07-20T19:00:00Z" } as any);
+  const recs = betRecords(db);
+  assert.ok(recs.every((r) => r.exitsAmbiguous), "обе ставки честно помечены: чей это выход — неизвестно");
+  assert.ok(recs.every((r) => r.bookPnl === null), "деньги неоднозначной строки не входят в P&L-вердикт");
+});
+
+// Развилка n/a: ДВУНОГИЙ вердикт законен ровно тогда, когда линии закрытия нет в данных НИ У ОДНОЙ записи.
+// Одна найденная линия — и нога снова третья: тонкая выборка делает её незначимой, а не отсутствующей.
+test("пункт 6: нога CLV n/a только при НУЛЕВОМ покрытии; иначе она считается как есть", () => {
+  const base = {
+    matchLabel: "A — B", competitionId: "c", category: "EPL", strategy: "PMV", profileId: "medium",
+    minute: null, scoreHome: null, scoreAway: null, edge: null, aiProb: null, derivedProb: null,
+    marketPrice: null, liveProbAdjusted: null, entryCents: 50, closingCents: null, kelly: null,
+    sizeRequested: null, sizeFilled: null, entrySlipCents: null, calibration: null, branchWeightSum: null,
+    thinnessUsd: null, winsOnEvent: false, codeVersion: "e9", status: "settled_won", settledBy: "settle",
+    payout: null, finalScore: null, decisionId: null, exitCodeVersion: null, exits: [],
+    closingLineCents: null, exitsAmbiguous: false,
+  };
+  const rec = (i: number, clv: number | null) => ({
+    ...base, id: `r${i}`, matchId: `m${i}`, strategyId: "prematch_value", market: "Over 2.5",
+    phase: "prematch" as const, impliedProb: 0.5, outcome: (i % 3 ? "won" : "lost") as "won" | "lost",
+    stake: 100, pnl: i % 3 ? 60 : -100, bookPnl: i % 3 ? 60 : -100,
+    clvCents: clv, clvSource: (clv == null ? "no_snapshot" : "closing_line") as any,
+    createdAt: `2026-07-${String(i % 27 + 1).padStart(2, "0")}T12:00:00Z`, kickoffAt: `2026-07-${String(i % 27 + 1).padStart(2, "0")}T18:00:00Z`,
+  });
+  const na = signalCohort(Array.from({ length: 30 }, (_, i) => rec(i, null)));
+  assert.equal(na.clvLegNa, true, "линии нет ни у одной записи → нога n/a");
+  assert.equal(na.clvCoverage.withLine, 0);
+  assert.match(na.note, /ДВУНОГИЙ/, "и вердикт честно назван двуногим");
+  assert.match(na.note, /не смягчение порога/, "с прямой оговоркой, что порог не смягчается");
+
+  const some = signalCohort(Array.from({ length: 30 }, (_, i) => rec(i, i === 0 ? 4 : null)));
+  assert.equal(some.clvLegNa, false, "одна линия есть → n/a незаконен, нога остаётся третьей");
+  assert.equal(some.clvCoverage.withLine, 1);
+  assert.equal(some.clv.significant, false, "на одной точке нога просто незначима — это НЕ отсутствие ноги");
+  assert.ok(!some.tripleAgreement, "и тройного согласия нет");
+});
