@@ -271,11 +271,12 @@ test("прод-поправка: отказ на филле пишет маши�
   const strat = R.listStrategies(db, "football")[0];
   R.insertMatch(db, { id: "mf", competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: "2026-07-29T15:00:00Z", minute: 40, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "mf" } as any);
   R.upsertMatchLive(db, { match_id: "mf", espn_event_id: "e", league: "l", home_lineup: null, away_lineup: null, stats: null, updated_at: "t" } as any);
-  // Цена у планки: исполнитель откажет (entry_phantom_block) — раньше об этом не узнавал никто.
-  R.insertMarket(db, { id: R.uid(), match_id: "mf", label: "Over 0.5", price: 99, ai_prob: 0.99, liquidity: "900", external_ref: "TOK", token_second: null, snapshot_at: "t", is_closing: false } as any);
-  R.insertBet(db, { id: "bf", match_id: "mf", strategy_id: strat.id, risk_profile_id: "medium", market_label: "Over 0.5", status: "proposed", proposed_price: 99, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.99, stake: 40, rationale: null, entered_minute: null, result: null, payout: null, entry_meta: JSON.stringify({ phase: "live" }), created_at: "t" } as any);
+  // Книга уехала от цены решения дальше допуска (ENTRY_PHANTOM_DIVERGENCE=25¢): исполнитель откажет
+  // терминально — и раньше об этом не узнавал никто. Цена НЕ у планки, иначе сработает карантин выше.
+  R.insertMarket(db, { id: R.uid(), match_id: "mf", label: "Over 0.5", price: 80, ai_prob: 0.9, liquidity: "900", external_ref: "TOK", token_second: null, snapshot_at: "t", is_closing: false } as any);
+  R.insertBet(db, { id: "bf", match_id: "mf", strategy_id: strat.id, risk_profile_id: "medium", market_label: "Over 0.5", status: "proposed", proposed_price: 40, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.9, stake: 40, rationale: null, entered_minute: null, result: null, payout: null, entry_meta: JSON.stringify({ phase: "live" }), created_at: "t" } as any);
   const fetchImpl = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book")
-    ? { bids: [{ price: "0.98", size: "500" }], asks: [{ price: "0.99", size: "500" }] } : {}) })) as unknown as typeof fetch;
+    ? { bids: [{ price: "0.79", size: "500" }], asks: [{ price: "0.80", size: "500" }] } : {}) })) as unknown as typeof fetch;
   await autoEnter(db, { now: () => "2026-07-29T15:40:00Z", env: {}, polymarket: loadPolymarketConfig({ POLYMARKET_ENABLED: "true" }), fetchImpl });
   const b = R.getBet(db, "bf")!;
   assert.equal(b.status, "not_filled");
@@ -283,4 +284,37 @@ test("прод-поправка: отказ на филле пишет маши�
   const line = R.tradeLogForMatch(db, "mf").find((l) => /entry_fill_reject/.test(l.text));
   assert.ok(line, "и она попала в ЖУРНАЛ, где её ищут");
   assert.equal((line as any).bet_id, "bf", "адресована конкретной ставке");
+});
+
+// ── Планочная цена на несыгранном матче — не котировка ───────────────────────────────────────────
+import { classifyZombie, loadZombieConfig, isRailPrice } from "../src/lib/zombieMarket.js";
+import { runStrategists } from "../src/lib/analysis.js";
+
+test("прод-поправка: планка на несыгранном матче — карантин; на завершённом — законная цена", () => {
+  const cfg = loadZombieConfig({});
+  const base = { label: "Over 2.5", gsProb: null, groupSpreadCents: null, bookAgeMin: 1, live: true, askCents: null };
+  assert.equal(classifyZombie({ ...base, priceCents: 100, matchFinished: false }, cfg)?.code, "rail_price");
+  assert.equal(classifyZombie({ ...base, priceCents: 0.1, matchFinished: false }, cfg)?.code, "rail_price");
+  assert.equal(classifyZombie({ ...base, priceCents: 100, matchFinished: true }, cfg), null,
+    "на завершённом матче планка — честная цена разрешения, прятать нечего");
+  assert.equal(classifyZombie({ ...base, priceCents: 55, matchFinished: false }, cfg), null, "живая цена не трогается");
+  // Раньше ИМЕННО эти цены освобождались от единственного правила, которое могло их поймать.
+  assert.equal(isRailPrice(99.5, cfg), true);
+  assert.equal(isRailPrice(97, cfg), false);
+});
+
+// Карантин зомби работает только для live-футбола, поэтому в ПРЕДМАТЧЕ отравленная книга доезжала до
+// стратега целиком — и он отказывался торговать её всю («котировки нерепрезентативны», picks: []).
+test("прод-поправка: планочные рынки не показываются стратегу в предматче, и это ПОСЧИТАНО", async () => {
+  const db = openDb(":memory:"); seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  R.insertMatch(db, { id: "mz", competition_id: comp.id, home: "A", away: "B", state: "upcoming", lineup_out: true, kickoff_at: "2026-07-30T18:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "mz" } as any);
+  const mk = (label: string, price: number) => R.insertMarket(db, { id: R.uid(), match_id: "mz", label, price, ai_prob: 0.5, liquidity: "900", external_ref: label, token_second: null, snapshot_at: "t", is_closing: false } as any);
+  mk("Over 2.5", 100); mk("Under 2.5", 0.1); mk("Draw — Yes", 0.5); mk("Both Teams to Score — Yes", 48);
+  R.upsertAssessment(db, { id: R.uid(), match_id: "mz", stage: "post_lineup", status: "ok", short: "s", verdict: "v", confidence: "средняя", body: "{}", model: "m", created_at: "t" } as any);
+  // Стратег не вызывается: без ИИ-ключа runStrategists выйдет раньше — нам важна САМА фильтрация и её улика.
+  await runStrategists(db, "mz", { now: () => "2026-07-29T12:00:00Z", env: {} });
+  const line = R.tradeLogForMatch(db, "mz").find((l) => /rail_price/.test(l.text));
+  assert.ok(line, "скрытие рынков записано, а не сделано молча");
+  assert.match(String(line!.text), /3 из 4/, "скрыты ровно планочные, живой рынок остался");
 });

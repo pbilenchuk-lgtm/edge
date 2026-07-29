@@ -10,6 +10,7 @@
 // Graceful: a failed model call marks the assessment failed (§6), no crash.
 // ============================================================
 
+import { loadZombieConfig, isRailPrice } from "./zombieMarket.js";
 import { recordRefusalForMatch } from "./refusalShadow.js";
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
@@ -241,7 +242,29 @@ export async function runStrategists(
   const duel = loadAnalysisDuel(env);
   const analysisTag = duel.enabled && assessment.model ? analysisModelTag(assessment.model) : null;
 
-  const freshMarkets = R.latestMarkets(db, matchId);
+  // [прод-разбор 29.07] ПЛАНОЧНЫЕ ЦЕНЫ НЕ ПОКАЗЫВАЕМ СТРАТЕГУ НА НЕСЫГРАННОМ МАТЧЕ.
+  //
+  // Карантин зомби-рынков работает ТОЛЬКО для live-футбола (footballZombieMap гейтится на state==='live'),
+  // поэтому в предматче стратег получал книгу как есть — а она была отравлена: 2030 из 6660 рынков стояли
+  // у планки, 865 из них на матчах, которые ещё не начались. Стратег вёл себя правильно и отказывался
+  // торговать целиком («котировки нерепрезентативны, ждать live-глубины», picks: []) — то есть мусор в
+  // книге останавливал торговлю, а не отдельную ставку. Убираем такие рынки из его поля зрения: у
+  // несыгранного матча планка означает мёртвую/одностороннюю книгу, а не эффективную котировку.
+  //
+  // Завершённый матч не трогаем: там планка — честная цена разрешения, и прятать её незачем.
+  const zCfg = loadZombieConfig(env);
+  const allMarkets = R.latestMarkets(db, matchId);
+  const railed = match.state === "finished" ? [] : allMarkets.filter((m) => m.price != null && isRailPrice(m.price, zCfg));
+  const freshMarkets = railed.length ? allMarkets.filter((m) => !railed.includes(m)) : allMarkets;
+  if (railed.length) {
+    // Цена скрытия обязана быть посчитана: молча сузить стратегу выбор — это тот же класс, что молча
+    // отказать во входе. Одна строка на матч, не на рынок.
+    try {
+      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? "", minute: null, type: "skip",
+        text: `rail_price: ${railed.length} из ${allMarkets.length} рынков у планки на несыгранном матче — скрыты от стратега (мёртвая/односторонняя книга, не котировка)`,
+        dedup_key: `rail:${matchId}:${stage}`, created_at: now() });
+    } catch { /* улика не имеет права ломать анализ */ }
+  }
   // Only replace existing proposals if we actually have usable probabilities — a
   // degenerate state must not wipe the previous good proposals with nothing.
   if (!freshMarkets.some((m) => m.ai_prob != null)) return { betsCreated: 0, decisions: [] };
