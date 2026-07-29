@@ -43,6 +43,8 @@ export const RATIFIED: RatifiedFeature[] = [
     what: "слепой вход отклонён по mid-плейсхолдеру (W2)" },
   { key: "ft_blind_min_stake", marker: "ft_blind_min_stake", ratifiedAt: "2026-07-28",
     what: "слепой вход отклонён как пыль < $5 (W2)" },
+  { key: "ft_blind_late_fill", marker: "ft_blind_late_fill", ratifiedAt: "2026-07-29",
+    what: "слепой вход отклонён, потому что филл пришёлся на идущий матч, а не на грейс от старта (п.5)" },
   { key: "piece_relabel", marker: "piece_relabel", ratifiedAt: "2026-07-28",
     what: "метка куска переставлена по исходу РЫНКА (W1/Z2)" },
   { key: "dust_floor", marker: "dust_floor", ratifiedAt: "2026-07-26",
