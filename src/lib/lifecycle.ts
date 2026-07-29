@@ -1329,7 +1329,12 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // deterministic predicate over score+clock, same vocabulary as the resolved_price caps). Anything not
       // locked cashes out exactly as before — holding an UNLOCKED 95¢ mark to settlement is how it becomes 0¢
       // on a 94th-minute goal, which is why this policy exists at all.
-      if (d.reason === "take_profit") {
+      // ПОЛЕ, А НЕ ПРОЗА. Здесь стояло `d.reason === "take_profit"` — сравнение с ЧЕЛОВЕЧЕСКИМ текстом
+      // («тейк: +52% от позиции…»), которое не совпадало никогда, и весь R1-хвост два батча пролежал мёртвым
+      // при честном нуле в постдеплой-счётчике. Машинный дискриминатор — `kind` (thresholds.ts:261), им и
+      // ветвимся; ровно тот же урок, что в quasiLocked.ts:26-30 («Callers must branch on this, never on
+      // `reason`») — тот комментарий был написан, а эта строка его нарушала.
+      if (d.kind === "take_profit") {
         const lock = holdTailToSettle(
           { label: b.market_label, home: m.home, away: m.away, scoreHome: m.score_home, scoreAway: m.score_away, minute: m.minute },
           footballCore(db, m.id), deps.env ?? process.env,

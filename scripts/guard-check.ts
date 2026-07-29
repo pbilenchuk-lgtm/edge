@@ -15,6 +15,7 @@
 //   npm run guard:check
 // ============================================================
 import { openDbReadOnly, dbPath } from "../src/lib/db.js";
+import { buildRatifiedWatch, RATIFIED_ZERO_DAYS } from "../src/lib/ratifiedWatch.js";
 
 const db = openDbReadOnly(dbPath());
 const q = (s: string, ...a: any[]) => db.prepare(s).all(...a) as any[];
@@ -78,3 +79,21 @@ const big = q(`SELECT b.stake, b.market_label, b.risk_profile_id, b.strategy_id,
                 WHERE b.status='open' AND b.stake > ? ORDER BY b.stake DESC LIMIT 10`, bank ? bank * SHARE : 1e9);
 if (!big.length) console.log(bank ? `  ни одной — открытая книга в пределах банка.` : `  банк не объявлен — сравнивать не с чем.`);
 for (const r of big) console.log(`    $${r.stake}  ${r.market_label}  [${r.risk_profile_id}/${r.strategy_id}]  ${r.home}—${r.away}  ${r.created_at}`);
+
+// ── 6. Ратифицированные фичи: доказали ли ПЕРВОЕ срабатывание ───────────────────────────────────
+// [Поправка 1, batch-12] Второй случай «ратифицировано и не работает»: Z2 не доезжал трижды, R1-хвост
+// доехал мёртвым (сравнение с прозой вместо поля). Оба раза счётчик честно печатал ноль, и оба раза
+// строка в отчёте никого не заставила копнуть — потому что строка не является действием. Теперь ноль
+// дольше срока при ЖИВОЙ торговле — это задача-расследование, а не наблюдение.
+const rw = buildRatifiedWatch(db);
+console.log(`\n## 6. Ратифицированные фичи (срок доказательства ${RATIFIED_ZERO_DAYS()}д)`);
+console.log(`  ставок с самой ранней ратификации: ${rw.tradedInWindow}`);
+for (const r of rw.rows) {
+  const mark = r.verdict === "РАССЛЕДОВАТЬ" ? "⚠ " : r.verdict === "работает" ? "✓ " : "  ";
+  console.log(`  ${mark}${r.key.padEnd(22)} ${r.verdict.padEnd(14)} ${r.note}`);
+}
+console.log(`  ${rw.note}`);
+if (rw.investigate.length) {
+  console.log(`\n  ЗАВЕСТИ РАССЛЕДОВАНИЕ (каждая строка = отдельная задача, не наблюдение):`);
+  for (const r of rw.investigate) console.log(`    - ${r.key}: ${r.what}`);
+}
