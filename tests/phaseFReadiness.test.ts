@@ -21,7 +21,7 @@ function seed() {
 const paperBet = (db: any, decision: string) => R.insertBet(db, { id: R.uid(), match_id: "m1", strategy_id: "prematch_value", risk_profile_id: "medium", market_label: "Over 2.5", status: "settled_won", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: 60, ai_prob: 0.6, stake: 40, rationale: "r", entered_minute: "предматч", result: "won", payout: 80, decision_id: decision, created_at: NOW } as any);
 const realOrder = (db: any, o: { decision: string; status: RR.RealOrderStatus; fillCents?: number; filled?: number; createdAt?: string }) => {
   const id = R.uid();
-  RR.insertRealOrder(db, { id, client_order_id: id, exchange_order_id: null, decision_id: o.decision, strategy_id: "prematch_value", profile_id: "medium", match_id: "m1", token_id: "0xTOK", side: "BUY", leg: "entry", limit_price_cents: 50, size_usd: 20, tif_sec: 30, status: o.status, code_version: null, whitelist_version: 1, note: "n", created_at: o.createdAt ?? NOW } as any);
+  RR.insertRealOrder(db, { id, client_order_id: id, exchange_order_id: null, decision_id: o.decision, strategy_id: "prematch_value", profile_id: "medium", match_id: "m1", token_id: "0xTOK", side: "BUY", leg: "entry", limit_price_cents: 50, size_usd: 20, tif_sec: 30, status: o.status, code_version: null, whitelist_version: 1, note: "n", dry: 1, created_at: o.createdAt ?? NOW } as any);
   db.prepare(`UPDATE real_orders SET filled_size_usd=?, avg_fill_cents=? WHERE id=?`).run(o.filled ?? 0, o.fillCents ?? null, id);
   return id;
 };
@@ -83,4 +83,60 @@ test("phase-F readiness: over-fill (filled > size) is caught as an impossible fi
   db.prepare(`UPDATE real_orders SET filled_size_usd=999 WHERE decision_id='d1'`).run();
   const rep = buildPhaseFReadiness(db, ENV, nowMs);
   assert.equal(rep.checks.find((x) => x.id === "no_overfill")!.status, "fail");
+});
+
+// ── [пункт 7] Пара исполнения в явном списке блокеров ───────────────────────────────────────────
+// Веер по ликвидности: книга кэшируется на цикл, и несколько ставок исполняются об ОДИН стакан, не съедая
+// его — каждая получает полную глубину, как будто пришла первой. На бумаге бесплатно, на реальных деньгах
+// нет. Значит вся статистика исполнения систематически оптимистична, и вывод о ВМЕСТИМОСТИ на ней завышен.
+const fill = (db: any, o: { betId: string; strategyId: string; at: string; usd: number; label?: string }) =>
+  R.insertFillCost(db, { id: R.uid(), bet_id: o.betId, match_id: "m1", competition_id: "epl", strategy_id: o.strategyId, profile_id: "medium", side: "buy", shares: o.usd * 2, notional_usd: o.usd, quote_cents: 50, vwap_cents: 50, fee_cents: 0, fee_usd: 0, slip_cents: 0, slip_usd: 0, from_book: 1, created_at: o.at } as any);
+
+const betOn = (db: any, id: string, profile: string, strategyId = "prematch_value") =>
+  R.insertBet(db, { id, match_id: "m1", strategy_id: strategyId, risk_profile_id: profile, market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: null, ai_prob: 0.6, stake: 40, rationale: "r", entered_minute: "предматч", result: null, payout: null, decision_id: `dx${id}`, created_at: NOW } as any);
+
+test("пункт 7: веер по ликвидности у целевой стратегии — жёсткий блокер Phase F", () => {
+  const db = happy();
+  betOn(db, "p1", "medium"); betOn(db, "p2", "aggressive");
+  // Два профиля одной стратегии исполнились об ОДИН стакан в ОДИН момент — глубина не съедалась.
+  fill(db, { betId: "p1", strategyId: "prematch_value", at: NOW, usd: 40 });
+  fill(db, { betId: "p2", strategyId: "prematch_value", at: NOW, usd: 40 });
+  const rep = buildPhaseFReadiness(db, ENV, nowMs);
+  const c = rep.checks.find((x) => x.id === "liquidity_fanout")!;
+  assert.equal(c.status, "fail", "веер по целевой стратегии — блокер, а не примечание");
+  assert.match(c.detail, /вместимости/, "и он прямо говорит, что вывод о вместимости на этих числах строить нельзя");
+  assert.equal(rep.verdict, "hold");
+});
+
+test("пункт 7: веер по ЧУЖОЙ стратегии — предупреждение, но не блокер целевой", () => {
+  const db = happy();
+  R.insertStrategy(db, { id: "overreaction", sport_id: "football", name: "OVR", tag: "t", color: null, version: 1, prompt: "p", prompt_live: null, params: {}, model: null, model_live: null, created_at: NOW } as any);
+  betOn(db, "q1", "medium", "overreaction"); betOn(db, "q2", "aggressive", "overreaction");
+  fill(db, { betId: "q1", strategyId: "overreaction", at: NOW, usd: 30 });
+  fill(db, { betId: "q2", strategyId: "overreaction", at: NOW, usd: 30 });
+  const c = buildPhaseFReadiness(db, ENV, nowMs).checks.find((x) => x.id === "liquidity_fanout")!;
+  assert.equal(c.status, "warn", "чужой веер не блокирует целевую стратегию, но и не молчит");
+});
+
+test("пункт 7: одиночные книжные филлы — веера нет", () => {
+  const db = happy();
+  betOn(db, "s1", "medium"); betOn(db, "s2", "aggressive");
+  fill(db, { betId: "s1", strategyId: "prematch_value", at: NOW, usd: 40 });
+  fill(db, { betId: "s2", strategyId: "prematch_value", at: "2026-07-17T12:05:00.000Z", usd: 40 }); // другой момент — другой стакан
+  const c = buildPhaseFReadiness(db, ENV, nowMs).checks.find((x) => x.id === "liquidity_fanout")!;
+  assert.equal(c.status, "pass");
+});
+
+test("пункт 7: отсутствие книжных филлов читается как «не измерено», а не как «веера нет»", () => {
+  const c = buildPhaseFReadiness(happy(), ENV, nowMs).checks.find((x) => x.id === "liquidity_fanout")!;
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /«неизвестно», а не «нет»/);
+});
+
+// Предохранитель-берсерк складывал симуляцию и реальные деньги в один счётчик: в dry он молча подрезал
+// сухую воронку, а на переходе к реалу отдал бы первым настоящим ордерам квоту, потраченную симуляцией.
+test("пункт 7: предохранитель ордеров/час считает свой контур раздельно", () => {
+  const db = happy();
+  const c = buildPhaseFReadiness(db, ENV, nowMs).checks.find((x) => x.id === "berserk_scope")!;
+  assert.equal(c.status, "pass", "признак режима на ордере есть — контуры разделены");
 });

@@ -298,6 +298,14 @@ export function initSchema(db: Database): void {
     // ставок забирала ОБА выхода: удвоенные счётчики триггеров, чужая метка model_fill, чужие «частично».
     // Ставка — единственный однозначный адрес, и теперь он стоит на строке.
     "ALTER TABLE trade_log ADD COLUMN bet_id TEXT",
+    // [пункт 7] РЕЖИМ НА ОРДЕРЕ. У real_orders не было признака сухого прогона вообще — «в сухом режиме
+    // все ордера сухие» держалось только на том, что настоящий исполнитель ещё не включён. Из-за этого
+    // предохранитель от цикла-берсерка (N ордеров/час) считал СИМУЛЯЦИЮ наравне с реальными деньгами:
+    // в dry он молча подрезал сухую воронку (а статистика исполнения делалась неполной), а в момент
+    // перехода на реал первые же настоящие ордера могли быть отклонены квотой, уже потраченной на
+    // симуляцию. DEFAULT 1 — это и есть бэкфилл истории: все существующие строки сухие по построению
+    // (единственный, кто их пишет, — DryRunExecutor). Новые вставки обязаны передавать значение явно.
+    "ALTER TABLE real_orders ADD COLUMN dry INTEGER NOT NULL DEFAULT 1",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_tradelog_dedup ON trade_log(match_id, type, dedup_key) WHERE dedup_key IS NOT NULL",
     // Z2(b) (batch-5): payout-consistency flag — set at settle when |payout − expected| exceeds a
     // commission tolerance (a decimal shift like the Kansas «payout ≈ тек/10»). Caught at birth, not a week later.
