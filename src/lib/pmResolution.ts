@@ -57,6 +57,11 @@ export function loadPmResolutionConfig(env: Record<string, string | undefined> =
 export interface TokenResolution { priceCents: number | null; closed: boolean }
 export type ResolveTokensFn = (tokenIds: string[]) => Promise<Record<string, TokenResolution>>;
 
+/** Машинная причина возврата — пишется в `bets.settled_via` и ЕСТЬ то, по чему voidWatch делит возвраты.
+ *  `no_complement` — НАША неспособность сверить (одиночный токен); `market_void` — решение биржи;
+ *  `timeout_not_closed` — рынок так и не закрылся за отведённый срок. Разные факты, не один статус. */
+export type VoidVia = "no_complement" | "market_void" | "timeout_not_closed";
+
 export interface PmResolutionResult {
   /** [batch-11] Which source supplied the cross-check complement. A rising match_complement share is the
    *  fallback working; it is reported rather than silent so nobody has to trust that it stayed conservative. */
@@ -170,10 +175,16 @@ export async function settlePmResolutionBets(
     if (via === "match_complement") res.viaMatchComplement++; else if (via === "stored_complement") res.viaStoredComplement++;
     res.bankDeltaUsd += patch.pnl; res.reservesFreedUsd += b.stake ?? 0;
   };
-  const voidBet = (betId: string, tag: "void" | "void_timeout", detail: string) => {
+  // [четвёрка, п.1] ПРИЧИНА ВОЗВРАТА — МАШИННАЯ, а не проза. voidWatch существует, чтобы отличать «биржа
+  // отменила рынок» от «мы не смогли сверить» — это противоположные факты под одним статусом, и весь смысл
+  // сторожа в их разделении. Но различал он их регуляркой по `b.rationale`, куда причина возврата НИКОГДА не
+  // писалась: detail уходил в trade_log, а rationale хранит причину ВХОДА. Поэтому главная причина —
+  // «нет комплемента», наша собственная неспособность сверить, — печаталась как market_void, решение биржи.
+  // Сторож на своей же первой причине показывал ровно обратное. Тот же класс, что `d.reason` вместо `d.kind`.
+  const voidBet = (betId: string, tag: "void" | "void_timeout", detail: string, via: VoidVia) => {
     const b = R.getBet(db, betId); if (!b) return;
     if (b.status !== "open") { res.alreadySettled++; return; }   // та же защита: возврат не переписывает расчёт
-    R.updateBet(db, betId, { status: "settled_void", result: null, payout: b.stake ?? 0, settled_at: now, closing_price: b.current_price ?? b.entry_price ?? null, settled_by: tag });
+    R.updateBet(db, betId, { status: "settled_void", result: null, payout: b.stake ?? 0, settled_at: now, closing_price: b.current_price ?? b.entry_price ?? null, settled_by: tag, settled_via: via });
     try { shadowOnExit(db, betId, 1, shadowCfg, now); } catch { /* observe-only */ }
     try { R.metaDelete(db, `${PMRES_OBS}${betId}`); } catch { /* best-effort */ }
     R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: "финал", type: "settle", text: `${b.market_label}: ${detail} — возврат ставки $${(b.stake ?? 0).toFixed(2)} (P&L $0) [${tag}]`, created_at: now });
@@ -209,14 +220,14 @@ export async function settlePmResolutionBets(
         if (cs === "mismatch") { res.suspect++; suspectLog(db, c, t, comp, now); continue; }
         if (cs === "missing" && strictComplement) {
           // single-token market: hold (don't settle on an un-cross-checkable token); void only when overdue.
-          if (overdue) { voidBet(c.betId, "void", `одиночный токен без комплемента, просрочено ${cfg.voidTimeoutH}ч — не сеттлю на один токен (C4)`); }
+          if (overdue) { voidBet(c.betId, "void", `одиночный токен без комплемента, просрочено ${cfg.voidTimeoutH}ч — не сеттлю на один токен (C4)`, "no_complement"); }
           else { res.pendingUnresolved++; suspectLog(db, c, t, comp, now); }
           continue;
         }
         settle(c.betId, isWonSide(t.priceCents), t.priceCents, c.via);
       } else {
         // Rule 3: closed with a non-resolving price = a real market void/refund.
-        voidBet(c.betId, "void", `рынок закрыт с неразрешающей ценой ${t.priceCents ?? "?"}¢ — рыночный void/refund`);
+        voidBet(c.betId, "void", `рынок закрыт с неразрешающей ценой ${t.priceCents ?? "?"}¢ — рыночный void/refund`, "market_void");
       }
       continue;
     }
@@ -229,7 +240,7 @@ export async function settlePmResolutionBets(
         const cs = complementStatus();
         if (cs === "mismatch") { res.suspect++; suspectLog(db, c, t, comp, now); continue; }
         if (cs === "missing" && strictComplement) { // single token, no cross-check → hold; void only when overdue
-          if (overdue) { voidBet(c.betId, "void", `одиночный токен без комплемента, просрочено ${cfg.voidTimeoutH}ч — не сеттлю на один токен (C4)`); }
+          if (overdue) { voidBet(c.betId, "void", `одиночный токен без комплемента, просрочено ${cfg.voidTimeoutH}ч — не сеттлю на один токен (C4)`, "no_complement"); }
           else { res.pendingUnresolved++; }
           continue;
         }
@@ -242,7 +253,7 @@ export async function settlePmResolutionBets(
     }
 
     // Not closed, not resolving. Rule 3: only NOW may the timeout void fire.
-    if (overdue) voidBet(c.betId, "void_timeout", `не разрешилось за ${cfg.voidTimeoutH}ч (PM не закрыл рынок)`);
+    if (overdue) voidBet(c.betId, "void_timeout", `не разрешилось за ${cfg.voidTimeoutH}ч (PM не закрыл рынок)`, "timeout_not_closed");
     else res.pendingUnresolved++;
   }
 
