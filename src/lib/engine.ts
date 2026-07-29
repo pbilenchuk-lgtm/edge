@@ -19,7 +19,7 @@ import { reassessNarrative, effectiveEnv } from "./llm.js";
 import { settleBet, resolveFootballMarket, matchPhase, isResolutionSettle } from "./settlement.js";
 import { isFtBlindBet } from "./betMeta.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
-import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig } from "./polymarket.js";
+import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig, RESOLVED_RAIL_CENTS } from "./polymarket.js";
 import { liquidationCents } from "./execution.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { recordComebackLatency } from "./overreactionLatency.js";
@@ -130,9 +130,9 @@ function strategiesWithOpenBets(db: Database, matchId: string): string[] {
 
 export async function refreshMatchOdds(
   db: Database, matchId: string, deps: EngineDeps = {},
-): Promise<{ updated: number; triggers: ReassessResult[] }> {
+): Promise<{ updated: number; triggers: ReassessResult[]; railSkipped: number }> {
   const match = R.getMatch(db, matchId);
-  if (!match) return { updated: 0, triggers: [] };
+  if (!match) return { updated: 0, triggers: [], railSkipped: 0 };
   const cfg = deps.config ?? loadEngineConfig(deps.env);
   const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
   const now = nowFn(deps)();
@@ -142,12 +142,24 @@ export async function refreshMatchOdds(
   const byTok: Record<string, number | null> = {};
   for (const q of quotes) byTok[q.tokenId] = q.priceCents;
 
-  let updated = 0;
+  let updated = 0, railSkipped = 0;
   const triggers: ReassessResult[] = [];
   for (const m of markets) {
     if (!m.external_ref) continue;
     const price = byTok[m.external_ref];
     if (price == null || price === m.price) continue;
+    // [прод-разбор 29.07] ВЕРХНЯЯ/НИЖНЯЯ ОТСЕЧКА, ЗЕРКАЛЬНАЯ ИМПОРТНОЙ. Импорт отказывается заводить
+    // рынок с ценой у планки — `polymarket.ts:707`, «effectively-resolved / dead line». У рефреша такой
+    // проверки не было вовсе: единственный фильтр выше — «цена не null и изменилась». Поэтому книга
+    // РАЗРЕШИВШЕГОСЯ рынка продолжала записываться снапшот за снапшотом (Ypiranga—Barra: весь набор
+    // 99.5–99.6¢ / 0.5¢ на сыгранном матче), светилась в «Котировках» как живая котировка и кормила
+    // расчёт эджа мёртвой ценой. Зомби-карантин это не ловит по построению: ≥98¢ у него в ИСКЛЮЧЕНИИ
+    // правила протухания (`zombieMarket.ts:130`, staleExtremeCents=2) — то есть в белом списке.
+    // Один порог на оба пути, а не два разных: что импорт считает мёртвым, то и рефреш не пишет.
+    if (price <= RESOLVED_RAIL_CENTS || price >= 100 - RESOLVED_RAIL_CENTS) {
+      railSkipped++;
+      continue;
+    }
     updated++;
     // new versioned snapshot (§2.10)
     // Quote-refresh updates the mid from CLOB /midpoint (no fresh book). The book's SPREAD structure
@@ -183,7 +195,7 @@ export async function refreshMatchOdds(
       }
     }
   }
-  return { updated, triggers };
+  return { updated, triggers, railSkipped };
 }
 
 // ------------------------------------------------------------

@@ -235,3 +235,52 @@ test("прод-поправка: улика ищется там, где её п�
   assert.equal(dust.verdict, "работает", "и ложной тревоги больше нет");
   assert.ok(!rw.investigate.some((r) => r.key === "dust_floor"));
 });
+
+// ── Прод-разбор 29.07: мёртвые книги и молчаливый отказ на филле ─────────────────────────────────
+import { refreshMatchOdds } from "../src/lib/engine.js";
+import { autoEnter } from "../src/lib/lifecycle.js";
+
+// Импорт отказывался заводить рынок с ценой у планки («effectively-resolved / dead line»), а рефреш писал
+// такие цены снапшот за снапшотом: разрешившийся матч продолжал светиться «живой» котировкой 99.6¢ и кормил
+// расчёт эджа мёртвой ценой. Зомби-карантин это не ловит: ≥98¢ у него в ИСКЛЮЧЕНИИ правила протухания.
+test("прод-поправка: рефреш не записывает цену у планки — один порог с импортом", async () => {
+  const db = openDb(":memory:"); seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  R.insertMatch(db, { id: "mr", competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: "2026-07-29T15:00:00Z", minute: 80, score_home: 2, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "mr" } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: "mr", label: "Over 0.5", price: 70, ai_prob: 0.8, liquidity: "900", external_ref: "TOKA", token_second: null, snapshot_at: "t0", is_closing: false } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: "mr", label: "Under 0.5", price: 30, ai_prob: 0.2, liquidity: "900", external_ref: "TOKB", token_second: null, snapshot_at: "t0", is_closing: false } as any);
+  // Книга разрешилась: одна сторона 99.6¢, другая 0.4¢; третья двинулась нормально.
+  const fetchImpl = (async (url: any) => {
+    const u = String(url);
+    const px = u.includes("TOKA") ? "0.996" : u.includes("TOKB") ? "0.004" : "0.5";
+    return { ok: true, status: 200, json: async () => ({ mid: px }) };
+  }) as unknown as typeof fetch;
+  const r = await refreshMatchOdds(db, "mr", { fetchImpl, polymarket: loadPolymarketConfig({ POLYMARKET_ENABLED: "true" }), now: () => "2026-07-29T16:00:00Z" });
+  assert.equal(r.updated, 0, "ни одна цена у планки не записана");
+  assert.equal(r.railSkipped, 2, "и обе отклонённые ПОСЧИТАНЫ, а не проглочены");
+  const last = R.latestMarkets(db, "mr");
+  assert.equal(last.find((m) => m.label === "Over 0.5")!.price, 70, "в книге осталась последняя живая цена");
+});
+
+// Единственный гейт входа, не оставлявший следа: причина писалась только в `bets.rationale`, а когда
+// исполнитель не дал текста — и там пусто. На проде это дало 80 ставок «not_filled: без_метки».
+test("прод-поправка: отказ на филле пишет машинную строку, а не пустоту", async () => {
+  const db = openDb(":memory:"); seedDatabase(db);
+  db.exec("DELETE FROM bets");
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football")[0];
+  R.insertMatch(db, { id: "mf", competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: "2026-07-29T15:00:00Z", minute: 40, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "mf" } as any);
+  R.upsertMatchLive(db, { match_id: "mf", espn_event_id: "e", league: "l", home_lineup: null, away_lineup: null, stats: null, updated_at: "t" } as any);
+  // Цена у планки: исполнитель откажет (entry_phantom_block) — раньше об этом не узнавал никто.
+  R.insertMarket(db, { id: R.uid(), match_id: "mf", label: "Over 0.5", price: 99, ai_prob: 0.99, liquidity: "900", external_ref: "TOK", token_second: null, snapshot_at: "t", is_closing: false } as any);
+  R.insertBet(db, { id: "bf", match_id: "mf", strategy_id: strat.id, risk_profile_id: "medium", market_label: "Over 0.5", status: "proposed", proposed_price: 99, entry_price: null, current_price: null, closing_price: null, ai_prob: 0.99, stake: 40, rationale: null, entered_minute: null, result: null, payout: null, entry_meta: JSON.stringify({ phase: "live" }), created_at: "t" } as any);
+  const fetchImpl = (async (url: any) => ({ ok: true, status: 200, json: async () => (String(url).includes("/book")
+    ? { bids: [{ price: "0.98", size: "500" }], asks: [{ price: "0.99", size: "500" }] } : {}) })) as unknown as typeof fetch;
+  await autoEnter(db, { now: () => "2026-07-29T15:40:00Z", env: {}, polymarket: loadPolymarketConfig({ POLYMARKET_ENABLED: "true" }), fetchImpl });
+  const b = R.getBet(db, "bf")!;
+  assert.equal(b.status, "not_filled");
+  assert.match(String(b.rationale), /entry_fill_reject:/, "причина есть и она названа");
+  const line = R.tradeLogForMatch(db, "mf").find((l) => /entry_fill_reject/.test(l.text));
+  assert.ok(line, "и она попала в ЖУРНАЛ, где её ищут");
+  assert.equal((line as any).bet_id, "bf", "адресована конкретной ставке");
+});

@@ -1039,7 +1039,16 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       // offers) — leave the proposal untouched so the next cycle re-attempts it. A plain
       // skip is TERMINAL (phantom fill, edge gone, placeholder market) → mark not_filled.
       if (ex.skip) {
-        if (!ex.retry) R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, ex.note) });
+        if (!ex.retry) {
+          // [прод-разбор 29.07] ЕДИНСТВЕННЫЙ ГЕЙТ ВХОДА БЕЗ СЛЕДА В ЖУРНАЛЕ. Все соседние отказы пишут
+          // строку в trade_log; этот — только в `bets.rationale`, а когда исполнитель не дал текста, и
+          // там пусто. На проде это дало 80 ставок `not_filled: без_метки` — восемьдесят несостоявшихся
+          // входов, у которых НЕТ причины. Диагностика матча честно писала «чинить надо названную стадию»,
+          // но назвать стадию было нечем. Улика обязана быть машинной и обязана попадать туда, где её ищут.
+          const why = (ex.note && ex.note.trim()) || "исполнитель отказал без текста";
+          R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `entry_fill_reject: ${why}`) });
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `entry_fill_reject «${b.market_label}» @ ${quote}¢: ${why}`, dedup_key: `efr:${b.id}`, bet_id: b.id, created_at: now });
+        }
         continue;
       }
       // P0.2 MIN-DEPTH FLOOR: the book absorbed a CLAMPED fill below the floor — the depth to trade
