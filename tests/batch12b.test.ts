@@ -113,3 +113,52 @@ test("PM-резолюция не перезаписывает ставку, ра
   assert.equal(b.settled_by, "match_score", "расчёт первого пути НЕ перезаписан");
   assert.equal(b.payout, 200, "деньги остались как были начислены");
 });
+
+// ── (3) Теннис: «не в игре» ≠ «сыгран»; завершённость сета по правилам ───────────────────────────
+import { tennisFinalResult } from "../src/lib/tennisTrading.js";
+import { resolveTennisProp } from "../src/lib/tennisPmv.js";
+
+function tSeed(db: any) {
+  R.upsertSport(db, "tennis", "Tennis");
+  R.upsertCompetition(db, { id: "tc", sport_id: "tennis", name: "ATP", budget: 0, external_league: null, created_at: "t" } as any);
+  R.insertMatch(db, { id: "tm", competition_id: "tc", home: "A Player", away: "B Player", state: "upcoming",
+    lineup_out: false, kickoff_at: "t", minute: null, score_home: null, score_away: null, final_score: null,
+    kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "tm" } as any);
+}
+function snap(db: any, o: { status: string; live: number; s1?: number | null; s2?: number | null; raw?: string; at?: string }) {
+  db.prepare(`INSERT INTO tennis_snapshots(id,event_key,provider,pm_match_id,batch_at,created_at,p1,p2,sets_p1,sets_p2,live,status,raw)
+              VALUES(?, 'ek','apitennis','tm',?,?,'A Player','B Player',?,?,?,?,?)`)
+    .run(R.uid(), o.at ?? "t1", o.at ?? "t1", o.s1 ?? null, o.s2 ?? null, o.live, o.status, o.raw ?? null);
+}
+
+test("T: прематч-снапшот (live=0, «Scheduled») НЕ читается как финал — иначе shadow-сигнал гибнет навсегда", () => {
+  const db = openDb(":memory:"); initSchema(db); tSeed(db);
+  snap(db, { status: "Scheduled", live: 0, s1: 0, s2: 0 });
+  assert.equal(tennisFinalResult(db, "tm"), null, "матч ещё не начинался — финала нет");
+  // Тот же снапшот, но уже с сыгранным сетом и без эфира — это уже настоящий финал.
+  snap(db, { status: "Finished", live: 0, s1: 2, s2: 1, raw: '{"event_winner":"First Player"}', at: "t2" });
+  const fin = tennisFinalResult(db, "tm")!;
+  assert.equal(fin.finished, true); assert.equal(fin.advancing, "first");
+});
+
+test("T: «не в игре» без единого сыгранного сета и без явного статуса — не финал, а ожидание", () => {
+  const db = openDb(":memory:"); initSchema(db); tSeed(db);
+  snap(db, { status: "", live: 0, s1: 0, s2: 0 });
+  assert.equal(tennisFinalResult(db, "tm"), null, "pending дорезолвится следующим снимком; ложный финал не откатывается ничем");
+});
+
+test("T: ретайр на 6-5 — сет НЕ завершён, set_winner уходит в void, а не в выдуманного победителя", () => {
+  // Прежний предикат (max ≥ 6) считал 6-5 завершённым сетом и книжил победителя, которого не было.
+  const fs = { sets: [{ p1: 6, p2: 5 }], setsWonP1: 1, setsWonP2: 0, matchGames: 11 };
+  assert.equal(resolveTennisProp("A Player Set 1 Winner", fs as any, { retired: true, canceled: false, firstIsP1: true }), null);
+  assert.equal(resolveTennisProp("Set 1 Over 10.5", fs as any, { retired: true, canceled: false, firstIsP1: true }), null);
+});
+
+test("T: 7-6 и 7-5 — законно завершённые сеты; 6-6 (тай-брейк идёт) — нет", () => {
+  const tb = { sets: [{ p1: 7, p2: 6 }], setsWonP1: 1, setsWonP2: 0, matchGames: 13 };
+  assert.equal(resolveTennisProp("A Player Set 1 Winner", tb as any, { retired: true, canceled: false, firstIsP1: true }), true);
+  const seven5 = { sets: [{ p1: 7, p2: 5 }], setsWonP1: 1, setsWonP2: 0, matchGames: 12 };
+  assert.equal(resolveTennisProp("A Player Set 1 Winner", seven5 as any, { retired: true, canceled: false, firstIsP1: true }), true);
+  const six6 = { sets: [{ p1: 6, p2: 6 }], setsWonP1: 0, setsWonP2: 0, matchGames: 12 };
+  assert.equal(resolveTennisProp("A Player Set 1 Winner", six6 as any, { retired: true, canceled: false, firstIsP1: true }), null);
+});
