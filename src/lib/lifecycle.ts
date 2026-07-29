@@ -802,19 +802,68 @@ const FT_BLIND_GRACE_MIN = (env: Record<string, string | undefined>) => {
   const n = Number(env.FT_BLIND_LIVE_GRACE_MIN);
   return Number.isFinite(n) && n >= 0 ? n : 5;
 };
-export function ftBlindOriginOk(m: { kickoff_at?: string | null }, b: { origin?: string | null; created_at?: string | null }, env: Record<string, string | undefined>): boolean {
+//
+// [batch-12, п.5 / аудит] ГРЕЙС ОТСЧИТЫВАЕТСЯ ОТ ФИЛЛА, А НЕ ОТ СОЗДАНИЯ ПРЕДЛОЖЕНИЯ.
+//
+// Весь текст выше объясняет, почему слепой вход допустим только пока «слепо» и «до матча» — одно и то же
+// состояние. Но проверялся `b.created_at` — момент, когда ТЕЗИС РОДИЛСЯ, а не момент, когда УХОДЯТ ДЕНЬГИ.
+// Предложение, созданное за час до старта (origin=prematch, первая строка возвращала true безусловно), могло
+// пролежать «предлагается» и залиться на 40-й минуте: preLineupHold держит слепую фикстуру до перехода в live
+// (лайнапов у неё не будет НИКОГДА), а часы двигает тик. Ничто на пути не спрашивало, сколько матча уже
+// прошло к моменту филла. Это ровно тот запрет, ради которого режим существует: покупать FT-контракт, не видя
+// счёта, в матче, где голы уже могли случиться, — систематическое донорство информированной стороне.
+// Зачистка непокрытых (NO_COVERAGE_GRACE_H=0.5) дыру не закрывала: она снимает ПРЕДЛОЖЕНИЯ после 30 минут и
+// только когда открытых ставок нет.
+//
+// Порог один и тот же: FT_BLIND_LIVE_GRACE_MIN — это свойство МАТЧА («сколько после старта слепая фикстура
+// ещё информационно равна прематчу»), а не свойство предложения. Филл до стартового свистка — лучший случай
+// (слепоты нет вовсе) и разрешён всегда. Следствие для конфига: FT_BLIND_LIVE_GRACE_MIN=0 теперь означает
+// «заливаться только ДО стартового свистка», а не «только прематч-происхождение».
+//
+// ИЗВЕСТНАЯ ЦЕНА, ЗАЯВЛЕННАЯ ЗАРАНЕЕ: живой цикл (20с) крутится только когда есть матч in-play, поэтому в
+// пустое окно часы двигает тяжёлый тик (TICK_INTERVAL_MIN, по умолчанию 30) — и слепая фикстура может
+// перейти в live уже на 25-й минуте. Такие входы теперь будут отклоняться, и это НЕ повод расширять окно
+// слепоты: лечится скоростью часов, а не разрешением ставить вслепую в середину матча. Отказ пишется
+// строкой `ft_blind_late_fill`, чтобы цена была ПОСЧИТАНА, а не невидима.
+export function ftBlindOriginOk(m: { kickoff_at?: string | null }, b: { origin?: string | null; created_at?: string | null }, env: Record<string, string | undefined>, fillAt: string): boolean {
+  if (b.origin !== "prematch" && b.origin !== "live") return false;  // unknown/absent origin → fail closed
+  if (!isIsoTs(m.kickoff_at)) return false;                          // can't measure the gap → fail closed
+  const ko = Date.parse(String(m.kickoff_at));
+  const grace = FT_BLIND_GRACE_MIN(env);
+  const fillMs = Date.parse(fillAt ?? "");
+  if (!Number.isFinite(fillMs)) return false;                        // no fill clock → fail closed
+  if ((fillMs - ko) / 60_000 > grace) return false;                  // деньги уходят слепыми в середину матча
   if (b.origin === "prematch") return true;
-  if (b.origin !== "live") return false;                       // unknown/absent origin → fail closed
-  if (!isIsoTs(m.kickoff_at) || !b.created_at) return false;   // can't measure the gap → fail closed
-  const gapMin = ((Date.parse(b.created_at) || 0) - Date.parse(String(m.kickoff_at))) / 60_000;
-  return gapMin >= 0 && gapMin <= FT_BLIND_GRACE_MIN(env);
+  if (!b.created_at) return false;
+  const gapMin = ((Date.parse(b.created_at) || 0) - ko) / 60_000;
+  return gapMin >= 0 && gapMin <= grace;
 }
-function ftBlindEligible(db: Database, m: Match, b: { origin?: string | null; market_label: string; created_at?: string | null }, env: Record<string, string | undefined>): boolean {
+/** Отказ ТОЛЬКО из-за позднего филла: происхождение допустимо, рынок FT-шный, покрытия нет — деньги не ушли
+ *  единственно потому, что матч уже идёт. Отдельный предикат, чтобы ЦЕНУ нового гейта можно было посчитать,
+ *  а не угадывать: если она окажется большой, лечится скоростью часов, а не расширением окна слепоты. */
+export function ftBlindLateFill(m: { kickoff_at?: string | null }, b: { origin?: string | null; created_at?: string | null }, env: Record<string, string | undefined>, fillAt: string): boolean {
+  if (b.origin !== "prematch" && b.origin !== "live") return false;
+  if (!isIsoTs(m.kickoff_at)) return false;
+  const ko = Date.parse(String(m.kickoff_at));
+  const fillMs = Date.parse(fillAt ?? "");
+  if (!Number.isFinite(fillMs)) return false;
+  const grace = FT_BLIND_GRACE_MIN(env);
+  if ((fillMs - ko) / 60_000 <= grace) return false;      // отказ (если он был) — не из-за филла
+  if (b.origin === "prematch") return true;               // происхождение само по себе прошло бы
+  if (!b.created_at) return false;
+  const gapMin = ((Date.parse(b.created_at) || 0) - ko) / 60_000;
+  return gapMin >= 0 && gapMin <= grace;
+}
+function ftBlindEligible(db: Database, m: Match, b: { origin?: string | null; market_label: string; created_at?: string | null }, env: Record<string, string | undefined>, fillAt: string): boolean {
   if (!ftBlindConfig(env).enabled) return false;
-  if (!ftBlindOriginOk(m, b, env)) return false;  // pre-match thesis, or a live one inside the kickoff grace
+  if (!ftBlindOriginOk(m, b, env, fillAt)) return false;  // pre-match thesis, or a fill inside the kickoff grace
   if (!isFtSettledMarket(b.market_label)) return false;
   if (R.getMatchLive(db, m.id)) return false;     // has a provider row → covered, not blind
   return true;
+}
+/** Была бы ставка слепым входом, если бы не поздний филл? Всё, кроме гейта происхождения/филла. */
+function ftBlindShapeOk(db: Database, m: Match, b: { market_label: string }, env: Record<string, string | undefined>): boolean {
+  return ftBlindConfig(env).enabled && isFtSettledMarket(b.market_label) && !R.getMatchLive(db, m.id);
 }
 // R3 (e7): would ANY entry mode be able to take a position on this blind match? Only ft_blind
 // can — and only when it's enabled AND the match exposes at least one FT-settled (final-score)
@@ -869,8 +918,17 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       if (preLineupHold) continue; // preview only — keep it «предлагается» until lineups are out
       // FT-mode: a prematch_value FT-settled thesis on a Polymarket-only fixture MAY fill blind (hold to
       // settle, half size, no live rudder). Everything else with no live coverage stays a preview.
-      const ftBlind = !liveData && ftBlindEligible(db, m, b, deps.env ?? process.env);
-      if (!liveData && !ftBlind) continue; // no provider live coverage & not FT-blind-eligible → hold «предлагается»
+      const ftBlind = !liveData && ftBlindEligible(db, m, b, deps.env ?? process.env, now);
+      if (!liveData && !ftBlind) {
+        // [batch-12, п.5] Цена гейта «грейс от ФИЛЛА» должна быть посчитана. Ставка остаётся «предлагается»
+        // (как и раньше при любом отказе слепого входа), но отказ ИМЕННО по позднему филлу получает машинную
+        // строку — иначе новый запрет тихо съест слепую когорту, и мы узнаем об этом только по пустому счётчику.
+        if (ftBlindShapeOk(db, m, b, deps.env ?? process.env) && ftBlindLateFill(m, b, deps.env ?? process.env, now)) {
+          const lateMin = Math.round((Date.parse(now) - Date.parse(String(m.kickoff_at))) / 60_000);
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `ft_blind_late_fill «${b.market_label}»: филл на ${lateMin}' > грейса ${FT_BLIND_GRACE_MIN(deps.env ?? process.env)}' — вслепую в идущий матч не входим`, dedup_key: `ftb_late:${b.id}`, created_at: now });
+        }
+        continue; // no provider live coverage & not FT-blind-eligible → hold «предлагается»
+      }
       const key = pairMkt(b);
       if (openKey.has(key)) { R.updateBet(db, b.id, { status: "not_filled" }); continue; } // already in this market — drop the dup
       const mk = markets.find((x) => x.label === b.market_label);

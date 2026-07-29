@@ -323,16 +323,24 @@ export async function runStrategists(
       R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `стратег недоступен (${dec.error || "нет ответа ИИ"}) — входов нет (без базовой подмены)`, created_at: now() });
     }
 
+    // [batch-12 W5-аудит] Экспозиция матча и кластера СЧИТАЕТСЯ ПО open+proposed. Раньше — только по open,
+    // и это асимметрично соседней строке: comp-кэп (strategyCompExposure) proposed уже включал. Стадии
+    // pre_lineup и post_lineup — два независимых прогона, autoAnalyze идёт ДО autoEnter в тике, поэтому
+    // второй прогон не видел предложений первого и мог напредлагать ещё столько же: до 2× кэпа матча и
+    // кластера, оба пакета филлятся (openKey-дедуп ловит лишь идентичный рынок пары, а тезисный кэп по
+    // умолчанию выключен). Футбол в дефолте прикрыт lineup-гейтом, но теннис/киберспорт и краевые случаи
+    // футбола (перенос, откатывающий lineup_out) — нет. Считать надо ОБЯЗАТЕЛЬСТВА, а не только исполненное.
+    const committed = committedBets(R.betsForMatch(db, matchId, strat.id), profile);
     const held = new Set(openPos.map((b) => norm(b.market_label)));
     let exposure = strategyCompExposure(db, match.competition_id, strat.id, profile) - strategyCompRealized(db, match.competition_id, strat.id, profile);
     const cfg = getProfileConfig(db, profile);
     const psFlags = probSumFlags(quotes, cfg);
-    let matchExposure = openPos.reduce((s, b) => s + (b.stake ?? 0), 0);
+    let matchExposure = committed.reduce((s, b) => s + (b.stake ?? 0), 0);
     // Same-event correlation exposure, seeded from positions this pair already
     // holds so a fresh correlated market sizes against the existing stack, not
     // from zero (see correlationKey / the cluster cap in sizePrematch).
     const clusterExp = new Map<string, number>();
-    for (const b of openPos) { const k = correlationKey(b.market_label, match.home, match.away); if (k) clusterExp.set(k, (clusterExp.get(k) ?? 0) + (b.stake ?? 0)); }
+    for (const b of committed) { const k = correlationKey(b.market_label, match.home, match.away); if (k) clusterExp.set(k, (clusterExp.get(k) ?? 0) + (b.stake ?? 0)); }
     // T3.2: a market the strategist listed in rejected[] must never be entered, even if it also appears in
     // picks — rejected is authoritative over picks (Hammarby BTTS-Yes). The execution gate reads it.
     const rejectedSet = new Set((dec.ok && dec.rejected ? dec.rejected : []).map((r) => norm(r.market)));
@@ -743,6 +751,12 @@ export function strategyCompExposure(db: Database, competitionId: string, strate
     for (const b of R.betsForMatch(db, mt.id, strategyId))
       if ((b.status === "open" || b.status === "proposed") && (profileId == null || (b.risk_profile_id ?? "medium") === profileId)) sum += b.stake ?? 0;
   return sum;
+}
+/** [batch-12 W5-аудит] ОБЯЗАТЕЛЬСТВА пары на ОДНОМ матче: open + ещё не отменённые proposed. Тот же счёт,
+ *  что и у comp-кэпа выше — кэп матча и кластера обязан читать его же, иначе два прогона одного тика
+ *  (pre_lineup и post_lineup) видят пустой матч дважды и предлагают до 2× кэпа. */
+export function committedBets<T extends { status: string; risk_profile_id?: string | null }>(bets: T[], profileId: string): T[] {
+  return bets.filter((b) => (b.status === "open" || b.status === "proposed") && (b.risk_profile_id ?? "medium") === profileId);
 }
 /** Realized P&L ($) a (strategy, profile) pair booked across the WHOLE competition
  *  (bankroll = budget + realized, so a loss elsewhere shrinks what's re-stakeable

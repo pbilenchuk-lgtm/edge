@@ -1133,8 +1133,21 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
             console.warn(`[enrich] fixture_leg_mismatch date_gap: «${c0.home}–${c0.away}» запись ${c0.kickoff_at} vs ESPN ${s.date} (${league}) — НЕ привязано (чужой круг/перенос)`);
             continue; // the date says this event is not any of these records — never wire a foreign leg
           }
+        } else if (candidates.length === 1) {
+          m = candidates[0]; // no event date, но кандидат ЕДИНСТВЕННЫЙ — привязывать не из чего выбирать
         } else {
-          m = candidates[0]; // single-leg, no event date → can't gate; legacy team-name binding
+          // [batch-12, п.5 / аудит] БЕЗ ДАТЫ И С НЕСКОЛЬКИМИ КАНДИДАТАМИ ПРИВЯЗКА — ЖРЕБИЙ.
+          // StatPal-фид (parseStatpalSoccer) даты события не отдаёт вовсе: evMs=NaN, и весь дата-гейт выше
+          // проваливался в `candidates[0]` — «первый попавшийся из тех, у кого совпали имена». Для двухматчевых
+          // пар UEFA/CONMEBOL это перехвачено списком, но пара «кубок + лига» одних и тех же команд в списке
+          // не значится: класс Seattle–Portland (одни соперники дважды за неделю в РАЗНЫХ турнирах) бился
+          // ровно сюда. Цена ошибки — не пропущенная привязка, а ЧУЖОЙ СЧЁТ на живом матче и сеттл по нему.
+          // Имена совпали у двоих, различить нечем → не привязываем ни к кому, громко и со счётчиком.
+          legTally.dateGap++;
+          const c0 = candidates[0];
+          recordReject(c0.home, c0.away, c0.kickoff_at, s.date ?? null, league, "no_date_ambiguous");
+          console.warn(`[enrich] fixture_leg_mismatch no_date_ambiguous: «${c0.home}–${c0.away}» — у события нет даты, а кандидатов ${candidates.length} (${candidates.map((c) => c.kickoff_at ?? "—").join(", ")}) [${league}] — НЕ привязано (различить нечем)`);
+          continue;
         }
       }
       // Suffix mismatch (record league vs board league) is LEGAL — PM files quals under the main league and
