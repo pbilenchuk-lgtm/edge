@@ -19,7 +19,11 @@ export interface RealOrderRow {
   side: "BUY" | "SELL"; leg: string; limit_price_cents: number; size_usd: number; tif_sec: number;
   expiry_mode: string | null; client_cancel_deadline: string | null;
   status: RealOrderStatus; filled_size_usd: number; avg_fill_cents: number | null;
-  code_version: string | null; whitelist_version: number | null; note: string | null; created_at: string;
+  code_version: string | null; whitelist_version: number | null; note: string | null;
+  /** [пункт 7] 1 = сухой прогон, 0 = реальные деньги. Обязателен при вставке: предохранители считают
+   *  СВОЙ контур, и молчаливого «по умолчанию» здесь быть не должно. */
+  dry: 0 | 1;
+  created_at: string;
 }
 
 // ── real_orders + transition log ─────────────────────────────────────────────
@@ -33,10 +37,10 @@ export function insertRealOrder(db: Database, o: Omit<RealOrderRow, "status" | "
   const status: RealOrderStatus = o.status ?? "created";
   db.prepare(
     `INSERT INTO real_orders(id,client_order_id,salt,order_hash,exchange_order_id,decision_id,strategy_id,profile_id,match_id,
-       token_id,side,leg,limit_price_cents,size_usd,tif_sec,expiry_mode,client_cancel_deadline,status,filled_size_usd,avg_fill_cents,code_version,whitelist_version,note,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,?,?,?,?)`,
+       token_id,side,leg,limit_price_cents,size_usd,tif_sec,expiry_mode,client_cancel_deadline,status,filled_size_usd,avg_fill_cents,code_version,whitelist_version,note,dry,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,?,?,?,?,?)`,
   ).run(o.id, o.client_order_id, o.salt ?? null, o.order_hash ?? null, o.exchange_order_id, o.decision_id, o.strategy_id, o.profile_id, o.match_id,
-    o.token_id, o.side, o.leg, o.limit_price_cents, o.size_usd, o.tif_sec, o.expiry_mode ?? null, o.client_cancel_deadline ?? null, status, o.code_version, o.whitelist_version, o.note, o.created_at);
+    o.token_id, o.side, o.leg, o.limit_price_cents, o.size_usd, o.tif_sec, o.expiry_mode ?? null, o.client_cancel_deadline ?? null, status, o.code_version, o.whitelist_version, o.note, o.dry, o.created_at);
   appendRealOrderEvent(db, o.id, status, o.created_at, "order created");
   return getRealOrderByClientId(db, o.client_order_id)!;
 }
@@ -88,9 +92,12 @@ export function openDryExposureUsd(db: Database): number {
 
 /** Orders placed in the last hour (the berserk-loop guard reads this). C5 (audit #L3): an indexed SQL
  *  window (created_at is ISO → lexicographic = chronological), not a full-table scan filtered in JS. */
-export function realOrdersLastHour(db: Database, nowMs: number): number {
+/** [пункт 7] Ордера за последний час В СВОЁМ РЕЖИМЕ. `dry` обязателен: считать симуляцию и реальные
+ *  деньги одним счётчиком — значит и подрезать сухую воронку чужой квотой, и отдать реальному контуру
+ *  предохранитель, уже израсходованный симуляцией. Это разные контуры, и лимит у каждого свой. */
+export function realOrdersLastHour(db: Database, nowMs: number, dry: 0 | 1): number {
   const sinceIso = new Date(nowMs - 3_600_000).toISOString();
-  const r = db.prepare(`SELECT COUNT(*) AS n FROM real_orders WHERE created_at >= ?`).get(sinceIso) as { n: number };
+  const r = db.prepare(`SELECT COUNT(*) AS n FROM real_orders WHERE created_at >= ? AND dry = ?`).get(sinceIso, dry) as { n: number };
   return r.n ?? 0;
 }
 

@@ -8,7 +8,7 @@ const baseOrder = (over: Partial<RR.RealOrderRow> = {}) => ({
   id: "o1", client_order_id: "c1", exchange_order_id: null, decision_id: "dec1",
   strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "tok1",
   side: "BUY" as const, leg: "entry", limit_price_cents: 45, size_usd: 50, tif_sec: 45,
-  code_version: "e1", whitelist_version: 1, note: null, created_at: "2026-07-15T10:00:00.000Z", ...over,
+  code_version: "e1", whitelist_version: 1, note: null, dry: 1 as const, created_at: "2026-07-15T10:00:00.000Z", ...over,
 });
 
 test("real_orders: insert stamps a 'created' event; idempotent on client_order_id", () => {

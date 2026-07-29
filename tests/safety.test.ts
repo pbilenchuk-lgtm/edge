@@ -12,9 +12,9 @@ const CAPS = { maxOrderUsd: 50, maxExposureUsd: 200, maxDailyLossUsd: 60, maxOrd
 const NOW = Date.parse("2026-07-15T12:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
 let seq = 0;
-function seedOrder(d: ReturnType<typeof db>, o: { side?: "BUY" | "SELL"; filled?: number; status?: RR.RealOrderStatus; at?: string; expiryMode?: string; deadline?: string }) {
+function seedOrder(d: ReturnType<typeof db>, o: { side?: "BUY" | "SELL"; filled?: number; status?: RR.RealOrderStatus; at?: string; expiryMode?: string; deadline?: string; dry?: 0 | 1 }) {
   const id = `o${seq++}`;
-  RR.insertRealOrder(d, { id, client_order_id: id, exchange_order_id: null, decision_id: id, strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "tok1", side: o.side ?? "BUY", leg: "entry", limit_price_cents: 45, size_usd: 50, tif_sec: 45, code_version: "e1", whitelist_version: 1, note: null, created_at: o.at ?? iso(NOW), expiry_mode: o.expiryMode ?? null, client_cancel_deadline: o.deadline ?? null });
+  RR.insertRealOrder(d, { id, client_order_id: id, exchange_order_id: null, decision_id: id, strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "tok1", side: o.side ?? "BUY", leg: "entry", limit_price_cents: 45, size_usd: 50, tif_sec: 45, code_version: "e1", whitelist_version: 1, note: null, dry: o.dry ?? 0, created_at: o.at ?? iso(NOW), expiry_mode: o.expiryMode ?? null, client_cancel_deadline: o.deadline ?? null });
   if (o.status && o.status !== "created") RR.transitionRealOrder(d, id, o.status, o.at ?? iso(NOW), { filledSizeUsd: o.filled ?? 0 });
   return id;
 }
@@ -33,7 +33,7 @@ test("readTradingMode: fresh read, off by default, four valid states", () => {
 // ── §4.1 hard caps ─────────────────────────────────────────────────────────────
 test("enforceCaps: order-size clamp to the per-order ceiling", () => {
   const d = db();
-  const r = enforceCaps(d, { sizeUsd: 500, isEntry: true }, NOW, CAPS);
+  const r = enforceCaps(d, { sizeUsd: 500, isEntry: true, dry: 0 }, NOW, CAPS);
   assert.equal(r.action, "allow");
   assert.equal(r.sizeUsd, 50, "clamped to maxOrderUsd");
   assert.equal(r.clamped, true);
@@ -42,32 +42,32 @@ test("enforceCaps: exposure ceiling from OPEN REAL positions (A3); dry excluded,
   const d = db();
   RR.upsertRealPosition(d, { token_id: "tok1", decision_id: "d1", profile_id: "medium", match_id: "m1", strategy_id: "overreaction", size_shares: 180, avg_price_cents: 100, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 0, updated_at: iso(NOW) }); // $180 real open
   RR.upsertRealPosition(d, { token_id: "tokDry", decision_id: "d2", profile_id: "medium", match_id: "m1", strategy_id: "overreaction", size_shares: 900, avg_price_cents: 100, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 1, updated_at: iso(NOW) }); // $900 DRY — must NOT count
-  const r = enforceCaps(d, { sizeUsd: 50, isEntry: true }, NOW, CAPS); // 180+50 > 200
+  const r = enforceCaps(d, { sizeUsd: 50, isEntry: true, dry: 0 }, NOW, CAPS); // 180+50 > 200
   assert.equal(r.action, "reject");
   assert.match(r.reason ?? "", /экспозиция/);
   // exit reduces the SAME twin → exposure drops below cap → a new entry passes again.
   RR.upsertRealPosition(d, { token_id: "tok1", decision_id: "d1", profile_id: "medium", match_id: "m1", strategy_id: "overreaction", size_shares: 100, avg_price_cents: 100, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 0, updated_at: iso(NOW) }); // now $100
-  assert.equal(enforceCaps(d, { sizeUsd: 50, isEntry: true }, NOW, CAPS).action, "allow", "exposure released on exit");
+  assert.equal(enforceCaps(d, { sizeUsd: 50, isEntry: true, dry: 0 }, NOW, CAPS).action, "allow", "exposure released on exit");
 });
 test("enforceCaps: exposure RESERVES working real orders (A3 TOCTOU) — unfilled notional counts pre-fill", () => {
   const d = db();
   const id = "ro1"; // a real (exchange_order_id set) placed BUY of $180, 0 filled → reserves $180 pre-fill.
-  RR.insertRealOrder(d, { id, client_order_id: id, exchange_order_id: "ex1", decision_id: id, strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "tok1", side: "BUY", leg: "entry", limit_price_cents: 50, size_usd: 180, tif_sec: 45, code_version: "e1", whitelist_version: 1, note: null, created_at: iso(NOW), expiry_mode: null, client_cancel_deadline: null });
+  RR.insertRealOrder(d, { id, client_order_id: id, exchange_order_id: "ex1", decision_id: id, strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "tok1", side: "BUY", leg: "entry", limit_price_cents: 50, size_usd: 180, tif_sec: 45, code_version: "e1", whitelist_version: 1, note: null, dry: 0, created_at: iso(NOW), expiry_mode: null, client_cancel_deadline: null });
   RR.transitionRealOrder(d, id, "placed", iso(NOW), {});
-  assert.equal(enforceCaps(d, { sizeUsd: 50, isEntry: true }, NOW, CAPS).action, "reject", "reservation of the working order blows 180+50>200 before it fills — closes the TOCTOU");
+  assert.equal(enforceCaps(d, { sizeUsd: 50, isEntry: true, dry: 0 }, NOW, CAPS).action, "reject", "reservation of the working order blows 180+50>200 before it fills — closes the TOCTOU");
 });
 test("enforceCaps: daily-loss auto-pause from REALIZED P&L (A4); opening BUYs and dry losses do NOT trip", () => {
   const d = db();
   for (let i = 0; i < 3; i++) RR.insertRealLedger(d, { kind: "fill", amount_usd: -50, token_id: "t", order_id: `o${i}`, ref: null, at: "2026-07-15T09:00:00Z", created_at: "t" }); // 3 opening BUYs = cash out, NOT loss
   RR.insertRealRealized(d, { decisionId: "d", tokenId: "t", amountUsd: -100, dry: 1, at: "2026-07-15T09:00:00Z" }); // dry realized loss — must NOT count
-  assert.equal(enforceCaps(d, { sizeUsd: 10, isEntry: true }, NOW, CAPS).action, "allow", "buys aren't losses; dry realized doesn't trip the real breaker");
+  assert.equal(enforceCaps(d, { sizeUsd: 10, isEntry: true, dry: 0 }, NOW, CAPS).action, "allow", "buys aren't losses; dry realized doesn't trip the real breaker");
   RR.insertRealRealized(d, { decisionId: "d2", tokenId: "t", amountUsd: -70, dry: 0, at: "2026-07-15T09:00:00Z" }); // real realized −$70 > $60 cap
-  assert.equal(enforceCaps(d, { sizeUsd: 10, isEntry: true }, NOW, CAPS).action, "pause", "≥$60 REAL realized loss today → pause");
+  assert.equal(enforceCaps(d, { sizeUsd: 10, isEntry: true, dry: 0 }, NOW, CAPS).action, "pause", "≥$60 REAL realized loss today → pause");
 });
 test("enforceCaps: orders/hour berserk guard rejects", () => {
   const d = db();
   for (let i = 0; i < 20; i++) seedOrder(d, { at: iso(NOW - 60_000) }); // 20 orders in the last hour
-  const r = enforceCaps(d, { sizeUsd: 10, isEntry: true }, NOW, CAPS);
+  const r = enforceCaps(d, { sizeUsd: 10, isEntry: true, dry: 0 }, NOW, CAPS);
   assert.equal(r.action, "reject");
   assert.match(r.reason ?? "", /берсерка|час/);
 });
@@ -75,7 +75,7 @@ test("enforceCaps: a defensive EXIT is never blocked by the caps", () => {
   const d = db();
   RR.upsertRealPosition(d, { token_id: "tok1", decision_id: "d1", profile_id: "medium", match_id: "m1", strategy_id: "overreaction", size_shares: 199, avg_price_cents: 100, realized_pnl_usd: 0, unrealized_pnl_usd: null, dry: 0, updated_at: iso(NOW) }); // exposure near cap
   RR.insertRealRealized(d, { decisionId: "d", tokenId: "t", amountUsd: -100, dry: 0, at: "2026-07-15T09:00:00Z" }); // loss over cap
-  const r = enforceCaps(d, { sizeUsd: 200, isEntry: false }, NOW, CAPS);
+  const r = enforceCaps(d, { sizeUsd: 200, isEntry: false, dry: 0 }, NOW, CAPS);
   assert.equal(r.action, "allow", "a stop must always be able to leave");
 });
 
@@ -85,7 +85,7 @@ test("auto-pause STICKS: daily loss trips → env=on → next op is STILL exits_
   RR.insertRealRealized(d, { decisionId: "d", tokenId: "t", amountUsd: -70, dry: 0, at: "2026-07-15T09:00:00Z" });
   const onEnv = { REAL_TRADING: "on" };
   assert.equal(effectiveTradingMode(d, onEnv), "on", "before the trip, env governs");
-  const r = enforceCaps(d, { sizeUsd: 10, isEntry: true }, NOW, CAPS);
+  const r = enforceCaps(d, { sizeUsd: 10, isEntry: true, dry: 0 }, NOW, CAPS);
   assert.equal(r.action, "pause");
   // The fresh env still says "on" — but the persisted pause must WIN, else the pause silently evaporates.
   assert.equal(readTradingMode(onEnv), "on", "env read is unchanged (fresh)");
@@ -163,4 +163,17 @@ test("expiredClientCancelOrders: a placed client-cancel order past its deadline 
   seedOrder(d, { status: "placed", expiryMode: "native-GTD", deadline: iso(NOW - 1000) }); // GTD → exchange handles it, not swept
   const due = RR.expiredClientCancelOrders(d, iso(NOW));
   assert.equal(due.length, 1, "only the past-deadline client-cancel order is due for cancel");
+});
+
+// [пункт 7] Предохранитель-берсерк складывал СИМУЛЯЦИЮ и реальные деньги в один счётчик ордеров/час: в
+// сухом режиме он молча подрезал сухую воронку (и причина не называлась), а на переходе к реалу первые же
+// настоящие ордера могли быть отклонены квотой, потраченной симуляцией. Контуры считаются раздельно.
+test("enforceCaps: сухие ордера не расходуют квоту реального контура (и наоборот)", () => {
+  const d = db();
+  for (let i = 0; i < 20; i++) seedOrder(d, { at: iso(NOW - 60_000), dry: 1 }); // 20 СУХИХ за час
+  assert.equal(enforceCaps(d, { sizeUsd: 10, isEntry: true, dry: 0 }, NOW, CAPS).action, "allow",
+    "реальный контур не видит квоту, потраченную симуляцией");
+  const dry = enforceCaps(d, { sizeUsd: 10, isEntry: true, dry: 1 }, NOW, CAPS);
+  assert.equal(dry.action, "reject", "а сухой контур свой лимит видит");
+  assert.match(dry.reason ?? "", /сухой контур/, "и называет, чей именно лимит достигнут");
 });
