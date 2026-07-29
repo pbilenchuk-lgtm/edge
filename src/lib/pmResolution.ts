@@ -71,6 +71,9 @@ export interface PmResolutionResult {
   pendingStable: number;     // resolving price, no closed flag → awaiting the second stable poll
   pendingUnresolved: number; // no resolving price yet, still inside the timeout
   zombieBackfill: number;    // = candidates: the hidden already-eternal-open tail this pass cleared/examined
+  /** Ставки, рассчитанные ДРУГИМ путём, пока шёл сетевой resolver — pm_resolution их не перезаписывает.
+   *  Ненулевое значение = гонка сеттл-путей реально случается; полезно видеть, а не молча пропускать. */
+  alreadySettled: number;
   // Proof #2: the one-time bank impact of this pass (a backfill settles a tail that accrued for weeks — a
   // STEP on the P&L curve, not a trading result). settled_by="pm_resolution"/void tags segment it out of daily cuts.
   bankDeltaUsd: number;      // Σ P&L booked this pass (won/lost payouts − stakes; a void refund is 0)
@@ -92,7 +95,7 @@ export async function settlePmResolutionBets(
   const nowMs = Date.parse(now) || Date.now();
   const cfg = loadPmResolutionConfig(deps.env);
   const shadowCfg = loadShadowConfig(db, deps.env);
-  const res: PmResolutionResult = { candidates: 0, settled: 0, won: 0, lost: 0, marketVoid: 0, voidTimeout: 0, suspect: 0, frozenSuspect: 0, viaStoredComplement: 0, viaMatchComplement: 0, pendingStable: 0, pendingUnresolved: 0, zombieBackfill: 0, bankDeltaUsd: 0, reservesFreedUsd: 0 };
+  const res: PmResolutionResult = { candidates: 0, settled: 0, won: 0, lost: 0, marketVoid: 0, voidTimeout: 0, suspect: 0, frozenSuspect: 0, viaStoredComplement: 0, viaMatchComplement: 0, pendingStable: 0, pendingUnresolved: 0, zombieBackfill: 0, alreadySettled: 0, bankDeltaUsd: 0, reservesFreedUsd: 0 };
   const suspectAgeMs = cfg.suspectAgeH * 3_600_000;
 
   // 1) Gather candidates. Two signatures of the SAME class — "no trustworthy score of ours, defer to PM":
@@ -151,6 +154,12 @@ export async function settlePmResolutionBets(
 
   const settle = (betId: string, won: boolean, priceCents: number | null, via: string | null = null) => {
     const b = R.getBet(db, betId); if (!b) return;
+    // ПЕРЕЧИТАТЬ СТАТУС ПОСЛЕ await. Кандидаты собираются ДО сетевого resolver'а, и за время запроса ставку
+    // мог рассчитать другой путь (settleMatch по счёту, ретро-аудит, ручной разбор). Без этой проверки
+    // pm_resolution перезаписывал бы уже проведённый расчёт: статус, payout и settled_by менялись бы задним
+    // числом на строке, которая деньги уже отдала. Тот же класс, что двойной сеттл в closeBetEarly — там
+    // fresh-read стоит с самого начала, здесь его не было.
+    if (b.status !== "open") { res.alreadySettled++; return; }
     // Rule 4: redemption is not a trade — settleBet books payout from entry/stake with NO exit fee.
     const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, priceCents);
     R.updateBet(db, betId, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price, settled_at: now, settled_by: "pm_resolution", settled_via: via });
@@ -163,6 +172,7 @@ export async function settlePmResolutionBets(
   };
   const voidBet = (betId: string, tag: "void" | "void_timeout", detail: string) => {
     const b = R.getBet(db, betId); if (!b) return;
+    if (b.status !== "open") { res.alreadySettled++; return; }   // та же защита: возврат не переписывает расчёт
     R.updateBet(db, betId, { status: "settled_void", result: null, payout: b.stake ?? 0, settled_at: now, closing_price: b.current_price ?? b.entry_price ?? null, settled_by: tag });
     try { shadowOnExit(db, betId, 1, shadowCfg, now); } catch { /* observe-only */ }
     try { R.metaDelete(db, `${PMRES_OBS}${betId}`); } catch { /* best-effort */ }

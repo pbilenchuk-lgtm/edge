@@ -76,3 +76,40 @@ test("Поправка 1: одно доказанное срабатывание
   const early = buildRatifiedWatch(db, Date.parse("2026-07-29T00:00:00Z"), {});
   assert.ok(early.rows.some((r) => r.verdict === "ждём"));
 });
+
+// ── (2) time_stop: маркер запирает повтор только при ИСПОЛНЕННОМ плане ───────────────────────────
+
+test("time_stop: маркер недоисполнения НЕ гасит следующий цикл, а исполненный — гасит", () => {
+  // Суть бага: `already` искал подстроку `(time_stop·medium)`. Раньше её писали при любом выходе, включая
+  // частичный филл, — и остаток жил до сеттла без стопа. Теперь недобор помечается отдельным суффиксом.
+  const full = "выход «Under 2.5» @ 30¢ · плановый тайм-стоп: 70' ≥ 70', закрываю (time_stop·medium)";
+  const partial = "выход «Under 2.5» @ 30¢ · плановый тайм-стоп: 70' ≥ 70', закрываю · бид принял лишь 30% — остаток дожмём следующим циклом (time_stop·medium·partial)";
+  const marker = "(time_stop·medium)";
+  assert.ok(full.includes(marker), "исполненный план запирает повтор");
+  assert.ok(!partial.includes(marker), "недоисполненный — НЕ запирает: остаток обязан дожаться");
+  // И маркер по-прежнему разделяет профили (урок Fix[2]): чужой профиль не гасит наш.
+  assert.ok(!full.includes("(time_stop·aggressive)"));
+});
+
+// ── (2) двойной сеттл PM: перечитать статус после await ──────────────────────────────────────────
+import { settlePmResolutionBets } from "../src/lib/pmResolution.js";
+
+test("PM-резолюция не перезаписывает ставку, рассчитанную другим путём во время сетевого запроса", async () => {
+  const db = openDb(":memory:"); initSchema(db); seed(db);
+  db.prepare(`UPDATE matches SET score_home=NULL, score_away=NULL WHERE id='m1'`).run();
+  db.prepare(`INSERT INTO markets(id,match_id,label,price,liquidity,external_ref,snapshot_at,is_closing)
+              VALUES('mk1','m1','Under 2.5',50,'1000','tok-A','t',0)`).run();
+  db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,created_at)
+              VALUES('pb1','m1','prematch_value','medium','Under 2.5','open',50,100,'t')`).run();
+
+  // Резолвер имитирует сеть — и ПОКА он «летит», другой путь честно рассчитывает ставку по счёту.
+  const resolveTokens = async () => {
+    db.prepare(`UPDATE bets SET status='settled_won', result='won', payout=200, settled_by='match_score' WHERE id='pb1'`).run();
+    return { "tok-A": { priceCents: 99, closed: true } };
+  };
+  await settlePmResolutionBets(db, { now: () => "t2", resolveTokens } as any);
+
+  const b = R.getBet(db, "pb1")!;
+  assert.equal(b.settled_by, "match_score", "расчёт первого пути НЕ перезаписан");
+  assert.equal(b.payout, 200, "деньги остались как были начислены");
+});
