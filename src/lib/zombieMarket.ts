@@ -21,7 +21,7 @@
 // only on unambiguous contradictions; anything it can't classify is left tradeable (fail-open on ambiguity).
 // ============================================================
 
-export type ZombieCode = "resolved_price" | "notation_desync" | "placeholder_mid" | "stale_book";
+export type ZombieCode = "rail_price" | "resolved_price" | "notation_desync" | "placeholder_mid" | "stale_book";
 export interface ZombieReason { code: ZombieCode; detail: string }
 
 export interface ZombieConfig {
@@ -90,10 +90,37 @@ export interface ZombieInput {
   bookAgeMin: number | null;
   /** is the match live right now (gates the stale-book rule). */
   live: boolean;
+  /** Завершён ли матч. `false` включает правило (a0): планка на несыгранном матче — не цена. `undefined`
+   *  оставляет прежнее поведение для вызовов, которые состояния матча не знают (правило не срабатывает). */
+  matchFinished?: boolean;
+}
+
+/**
+ * [прод-разбор 29.07] ЦЕНА У ПЛАНКИ НА НЕСЫГРАННОМ МАТЧЕ — ЭТО НЕ ЦЕНА.
+ *
+ * `Fenerbahçe — Yes 100¢`, `Górnik — Yes 0.1¢`, `Draw — Yes 0.1¢` на 55-й минуте живого матча; 36 из 40
+ * рынков у планки. По всей базе — 2030 из 6660 (30.5%), из них 865 на матчах, которые ЕЩЁ НЕ НАЧАЛИСЬ.
+ * У неначавшегося матча разрешённой книги быть не может: это записанный мусор, а не эффективная котировка.
+ *
+ * Стратег вёл себя правильно — отказывался торговать («котировки нерепрезентативны, ждать live-глубины») и
+ * не предлагал НИЧЕГО. То есть отравленная книга останавливала торговлю целиком, а карантин её пропускал:
+ * единственное правило, которое могло бы поймать (`stale_book`), ИМЕННО такие цены и освобождало —
+ * `extreme` (≤2¢ или ≥98¢) был задуман как «терминальная эффективная котировка» и стал белым списком.
+ *
+ * Освобождение остаётся законным ровно там, где оно и задумывалось: матч ЗАВЕРШЁН, книга честно стоит у
+ * планки разрешения. Пока матч не сыгран — планка означает мёртвую/односторонюю книгу, и торговать её нельзя.
+ */
+export function isRailPrice(priceCents: number, cfg: ZombieConfig): boolean {
+  return priceCents <= cfg.staleExtremeCents || priceCents >= 100 - cfg.staleExtremeCents;
 }
 
 /** Classify a single market. Returns the FIRST matching zombie reason (a → b → c), or null if tradeable. */
 export function classifyZombie(inp: ZombieInput, cfg: ZombieConfig): ZombieReason | null {
+  // (a0) Планочная цена на НЕЗАВЕРШЁННОМ матче. Проверяется ПЕРВОЙ: пока цена не является ценой, все
+  // остальные суждения о ней (насколько отстала от исхода, разошлись ли нотации) бессмысленны.
+  if (inp.matchFinished === false && isRailPrice(inp.priceCents, cfg)) {
+    return { code: "rail_price", detail: `цена ${Math.round(inp.priceCents * 10) / 10}¢ у планки на несыгранном матче — книга мёртвая/односторонняя, это не котировка` };
+  }
   // (a) price contradicts a completed event: the leg is game-state-resolved yes but priced far below 100¢.
   // F6: compare against the live executable ask when we have one — a resolved leg whose real book already sits
   // at ~100¢ (only the stored mid lagged) is NOT a phantom and must not flap-quarantine; only quarantine when
