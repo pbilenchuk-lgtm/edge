@@ -19,6 +19,7 @@
 // Read-only; never writes. Exposed at GET /api/real?report=overreaction_gate.
 // ============================================================
 
+import { clvLeg } from "./clv.js";
 import type { Database } from "./db.js";
 import { codeEpochOf, crossEpoch, epochNum } from "./codeEpoch.js";
 import { betRecords } from "./profileAnalytics.js";
@@ -62,11 +63,12 @@ export interface OverreactionGate {
 export function buildOverreactionGate(db: Database, target = 30, cleanEpochMin = 5): OverreactionGate {
   const rows = db.prepare(
     `SELECT b.status, b.settled_by, b.code_version, b.exit_code_version, b.settle_suspect,
-            b.payout, b.stake, b.entry_price, b.closing_price
+            b.payout, b.stake, b.entry_price, b.closing_price, b.market_label,
+            m.id AS match_id, m.kickoff_at, m.end_time
        FROM bets b JOIN matches m ON m.id = b.match_id JOIN competitions c ON c.id = m.competition_id
       WHERE c.sport_id = 'football' AND b.strategy_id = 'overreaction'
         AND b.status IN ('settled_won','settled_lost','settled_void')`,
-  ).all() as { status: string; settled_by: string | null; code_version: string | null; exit_code_version: string | null; settle_suspect: number | null; payout: number | null; stake: number | null; entry_price: number | null; closing_price: number | null }[];
+  ).all() as { status: string; settled_by: string | null; code_version: string | null; exit_code_version: string | null; settle_suspect: number | null; payout: number | null; stake: number | null; entry_price: number | null; closing_price: number | null; market_label: string; match_id: string; kickoff_at: string | null; end_time: string | null }[];
 
   // Accumulator for the three verdict metrics over a cohort.
   const acc = () => ({ n: 0, won: 0, lost: 0, pnl: 0, clvSum: 0, clvN: 0 });
@@ -74,7 +76,11 @@ export function buildOverreactionGate(db: Database, target = 30, cleanEpochMin =
   const tally = (a: ReturnType<typeof acc>, r: typeof rows[number], won1: boolean) => {
     a.n++; if (won1) a.won++; else a.lost++;
     a.pnl += (r.payout ?? 0) - (r.stake ?? 0);
-    if (r.closing_price != null && r.entry_price != null) { a.clvSum += r.closing_price - r.entry_price; a.clvN++; }
+    // [пункт 6] CLV — по ЛИНИИ ЗАКРЫТИЯ, а не по `closing_price` (там при досрочном выходе стоит наша
+    // собственная цена выхода, а при расчёте — цена разрешения; см. clv.ts). Где линии нет — нога не
+    // считается, и `clvN` честно показывает, на какой доле когорты вообще есть число.
+    const leg = clvLeg(db, { id: r.match_id, kickoff_at: r.kickoff_at, end_time: r.end_time }, { market_label: r.market_label, entry_price: r.entry_price });
+    if (leg.clvCents != null) { a.clvSum += leg.clvCents; a.clvN++; }
   };
   const finalize = (a: ReturnType<typeof acc>): CohortMetrics => ({
     n: a.n, won: a.won, lost: a.lost, winPct: (a.won + a.lost) ? Math.round((a.won / (a.won + a.lost)) * 1000) / 10 : null,

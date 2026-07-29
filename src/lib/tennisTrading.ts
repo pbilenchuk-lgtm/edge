@@ -380,7 +380,7 @@ function closeTennisBetEarly(db: Database, betId: string, currentCents: number, 
   try { shadowOnExit(db, betId, 1, loadShadowConfig(db, deps.env), now); } catch { /* observe-only */ }
   const epoch = fresh.strategy_id === SET_VALUE_STRATEGY ? SET_VALUE_EPOCH : TENNIS_ARMED_EPOCH;
   const tail = `геймы ${extra.gameScore ?? "?"}, приёмных ${extra.recvGames ?? 0}${opts.stale ? " · ⚠ по несвежей цене (stale)" : ""} · пороги:${epoch}`;
-  R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: fresh.strategy_id, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} · ${tail} (${trigger})`, created_at: now });
+  R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: fresh.strategy_id, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} · ${tail} (${trigger})`, bet_id: fresh.id, created_at: now });
   return pnl;
 }
 
@@ -413,7 +413,7 @@ function closeTennisBetPortion(db: Database, betId: string, fraction: number, cu
   try { shadowOnExit(db, betId, fraction, loadShadowConfig(db, deps.env), now); } catch { /* observe-only */ }
   const epoch = fresh.strategy_id === SET_VALUE_STRATEGY ? SET_VALUE_EPOCH : TENNIS_ARMED_EPOCH;
   const tailNote = opts.attentionRemainder ? `остаток под ⚠attention (retry след. тик)` : `остаток до финала`;
-  R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: fresh.strategy_id, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · фиксация ${Math.round(fraction * 100)}% · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} · ${tailNote} · пороги:${epoch} (${opts.attentionRemainder ? "protective_partial" : "take_partial"})`, created_at: now });
+  R.insertTradeLog(db, { id: R.uid(), match_id: fresh.match_id, strategy_id: fresh.strategy_id, minute: fresh.entered_minute ?? "лайв", type: "exit", text: `${reason} @ ${currentCents}¢ · фиксация ${Math.round(fraction * 100)}% · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)} · ${tailNote} · пороги:${epoch} (${opts.attentionRemainder ? "protective_partial" : "take_partial"})`, bet_id: fresh.id, created_at: now });
   return pnl;
 }
 

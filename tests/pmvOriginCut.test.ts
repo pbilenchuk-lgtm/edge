@@ -11,7 +11,7 @@ function seed() {
   R.upsertCompetition(db, { id: "epl", sport_id: "football", name: "EPL", budget: 1000, external_league: "eng.1", created_at: "t" });
   R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: "t", color: null, version: 1, prompt: "p", prompt_live: null, params: {}, model: null, model_live: null, created_at: "t" } as any);
   R.insertStrategy(db, { id: "overreaction", sport_id: "football", name: "OVR", tag: "t", color: null, version: 1, prompt: "p", prompt_live: null, params: {}, model: null, model_live: null, created_at: "t" } as any);
-  R.insertMatch(db, { id: "m1", competition_id: "epl", home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: "t", minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: null } as any);
+  R.insertMatch(db, { id: "m1", competition_id: "epl", home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: "2026-07-15T18:00:00Z", minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: null } as any);
   return db;
 }
 
@@ -30,6 +30,11 @@ function pmvBet(db: any, o: {
     rationale: "r", entered_minute: o.enteredMinute, result: null, payout: null,
     entry_meta: o.entryMeta ?? null, created_at: "2026-07-01T00:00:00Z",
   } as any);
+  // [пункт 6] «Линия закрытия» — это снимок котировки до конца матча, а не поле ставки. Раньше хелпер сеял
+  // её только в `closing_price`, и тесты сходились с багом: CLV считался по нашей же цене выхода.
+  if (o.close != null) {
+    R.insertMarket(db, { id: R.uid(), match_id: "m1", label: o.label, price: o.close, ai_prob: null, liquidity: null, external_ref: null, token_second: null, snapshot_at: "2026-07-15T19:45:00Z", is_closing: false } as any);
+  }
   if (o.result != null) {
     const status = o.result === "won" ? "settled_won" : "settled_lost";
     db.prepare(`UPDATE bets SET status=?, result=?, payout=?, closing_price=?, settled_at=? WHERE id=?`)
