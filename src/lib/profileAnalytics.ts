@@ -152,7 +152,7 @@ export function betRecords(db: Database, filter: ProfileFilter = {}, env: Record
     // независимыми), а при расчёте по резолюции — цена разрешения (тогда «CLV» = исход). Настоящая линия
     // берётся из снимков котировок до конца матча; где снимка нет — n/a, и это честный ответ, а не повод
     // подставить что-нибудь похожее. Подробности и правило отсечки — в clv.ts.
-    const clv = clvLeg(db, m, { market_label: b.market_label, entry_price: entryCents }, env);
+    const clv = clvLeg(db, m, { market_label: b.market_label, entry_price: entryCents, entry_meta: b.entry_meta ?? null }, env);
     const clvCents = clv.clvCents;
     // [пункт 6] Выходы адресуются ПО СТАВКЕ. Сопоставление «стратегия + подстрока ярлыка» не адрес: два
     // профиля одной стратегии держат тот же рынок и пишут неразличимые строки, поэтому каждая из двух
@@ -174,10 +174,17 @@ export function betRecords(db: Database, filter: ProfileFilter = {}, env: Record
       });
     // [H2] book P&L = the realized pnl UNLESS the exit rode a stale/modelled price (no live bid). Such a leg's
     // money is barred from the win-rate already (staleExit→void); this bars it from the P&L verdict too.
+    // `modelFilled` считается по ВСЕМ кандидатам — это уже консервативно: если хоть одна из строк-кандидатов
+    // модельная, ставка выводится из вердикта независимо от того, чья именно строка была её.
     const modelFilled = exits.some((e) => e.modelFill);
-    // Неоднозначная привязка выходов — та же неопределённость, что и модельный филл: мы не знаем, чей это
-    // был выход. Fail-closed: деньги такой строки не входят в P&L-вердикт, а сама неоднозначность видна полем.
-    const bookPnl = pnl != null && !staleExit && !modelFilled && !exitsAmbiguous ? pnl : null;
+    // [пункт 6, поправка по факту прода] Неоднозначность привязки САМА ПО СЕБЕ денег не портит. P&L ставки
+    // берётся из её собственного payout и от того, какая из строк выхода была её, не зависит; привязка важна
+    // только для решения «был ли выход модельным/по протухшей цене», а оно уже считается по всем кандидатам.
+    // Первая версия обнуляла bookPnl у любой неоднозначной строки — и на проде это выкосило 318 из 337
+    // записей prematch_value/prematch, то есть почти всю ногу P&L по футболу. Это была не осторожность, а
+    // потеря данных: строгость там, где неопределённость на результат не влияет. Флаг остаётся и должен
+    // исключать записи из ВЫХОДНЫХ срезов (triggerMix, тайминг выхода), где привязка действительно решает.
+    const bookPnl = pnl != null && !staleExit && !modelFilled ? pnl : null;
     out.push({
       id: b.id, matchId: b.match_id, matchLabel: `${m.home} — ${m.away}`, competitionId: m.competition_id, category: comp?.name ?? m.competition_id,
       // canonicalProfileId folds legacy `rp-lite*` → `max` so pre-rename history glues to the renamed

@@ -159,8 +159,10 @@ test("пункт 6: выход адресуется по СТАВКЕ, а не �
   assert.equal(med.exitsAmbiguous, false);
 });
 
-// Легаси-строка без адреса при нескольких кандидатах — жребий. Привязываем по-старому, но помечаем, и
-// деньги такой строки из P&L-вердикта выводим: fail-closed, как и при модельном филле.
+// Легаси-строка без адреса при нескольких кандидатах — жребий. Привязываем по-старому и ПОМЕЧАЕМ, но денег
+// это не портит: P&L ставки берётся из её собственного payout и от выбора строки не зависит. Привязка важна
+// только для решения «был ли выход модельным», а оно уже считается консервативно по ВСЕМ кандидатам. Флаг
+// нужен выходным срезам (triggerMix, тайминг), где привязка действительно решает.
 test("пункт 6: легаси-выход без bet_id при двух кандидатах помечен неоднозначным", () => {
   const db = openDb(":memory:");
   seedDatabase(db);
@@ -173,7 +175,11 @@ test("пункт 6: легаси-выход без bet_id при двух кан
   R.insertTradeLog(db, { id: "eo", match_id: "my", strategy_id: strat.id, minute: "70'", type: "exit", text: `выход «Over 1.5» @ 70¢ · тейк · P&L +$75.00`, created_at: "2026-07-20T19:00:00Z" } as any);
   const recs = betRecords(db);
   assert.ok(recs.every((r) => r.exitsAmbiguous), "обе ставки честно помечены: чей это выход — неизвестно");
-  assert.ok(recs.every((r) => r.bookPnl === null), "деньги неоднозначной строки не входят в P&L-вердикт");
+  assert.ok(recs.every((r) => r.bookPnl === 75), "но P&L ставки от выбора строки не зависит — деньги остаются в вердикте");
+  // Стоит среди кандидатов появиться модельному филлу — и обе ставки выходят из вердикта: чья это была
+  // строка, мы не знаем, поэтому консервативно выводим обе.
+  R.insertTradeLog(db, { id: "eo2", match_id: "my", strategy_id: strat.id, minute: "72'", type: "exit", text: `выход «Over 1.5» @ 70¢ · тейк [model_fill] · P&L +$75.00`, created_at: "2026-07-20T19:02:00Z" } as any);
+  assert.ok(betRecords(db).every((r) => r.bookPnl === null), "модельный филл среди кандидатов выводит обе ставки");
 });
 
 // Развилка n/a: ДВУНОГИЙ вердикт законен ровно тогда, когда линии закрытия нет в данных НИ У ОДНОЙ записи.
@@ -206,4 +212,26 @@ test("пункт 6: нога CLV n/a только при НУЛЕВОМ покр
   assert.equal(some.clvCoverage.withLine, 1);
   assert.equal(some.clv.significant, false, "на одной точке нога просто незначима — это НЕ отсутствие ноги");
   assert.ok(!some.tripleAgreement, "и тройного согласия нет");
+});
+
+// ── Поправки по факту первого прода ─────────────────────────────────────────────────────────────
+import { buildRatifiedWatch } from "../src/lib/ratifiedWatch.js";
+import { initSchema } from "../src/lib/db.js";
+
+// Сторож ратифицированных фич искал улику ТОЛЬКО в trade_log — и на первом же проде выдал ложную тревогу
+// «dust_floor мёртв» при двух реальных срабатываниях: dust_floor пишет причину в `bets.rationale`.
+// Сторож, построенный против мёртвой проводки, сам оказался разведён мимо.
+test("прод-поправка: улика ищется там, где её пишут — dust_floor живёт в rationale, а не в trade_log", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "football", "Football");
+  R.upsertCompetition(db, { id: "c1", sport_id: "football", name: "F", budget: 100, external_league: "nor.1", created_at: "t" } as any);
+  R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: null, color: null, version: 1, prompt: "", prompt_live: null, params: null, model: null, model_live: null, created_at: "t" } as any);
+  R.insertMatch(db, { id: "m1", competition_id: "c1", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "2026-07-27T18:00:00Z", minute: 90, score_home: 1, score_away: 0, final_score: "1:0", kickoff_time: null, end_time: "2026-07-27T19:50:00Z", duration: null, end_note: null, external_ref: "m1" } as any);
+  db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,payout,settled_at,rationale,created_at)
+              VALUES ('b1','m1','prematch_value','medium','Over 1.5','settled_won',50,100,180,'2026-07-28T00:00:00Z','вход · dust_floor: остаток $2 < $5 — закрыто целиком','2026-07-27T00:00:00Z')`).run();
+  const rw = buildRatifiedWatch(db, Date.parse("2026-07-30T00:00:00Z"), {});
+  const dust = rw.rows.find((r) => r.key === "dust_floor")!;
+  assert.equal(dust.hits, 1, "срабатывание найдено в rationale");
+  assert.equal(dust.verdict, "работает", "и ложной тревоги больше нет");
+  assert.ok(!rw.investigate.some((r) => r.key === "dust_floor"));
 });
