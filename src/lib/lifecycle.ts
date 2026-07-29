@@ -1288,7 +1288,15 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           // T3.3: book only the fraction the bid actually absorbed (planned × fillFrac), remainder re-offered.
           const tsFillFrac = sell.requestedShares > 0 ? Math.min(1, sell.filledShares / sell.requestedShares) : 1;
           const fraction = planned * tsFillFrac;
-          const reason = `плановый тайм-стоп: ${minNum}' ≥ ${ts.minute}', событие не наступило (рынок ${mk.price}¢) — ${ts.action === "close_half" ? "фиксирую половину" : "закрываю"} ${tsMarker}`;
+          // МАРКЕР ЗАПИРАЕТ ПОВТОР ТОЛЬКО ПРИ ИСПОЛНЕННОМ ПЛАНЕ. Раньше он ставился при ЛЮБОМ выходе, включая
+          // недоисполненный: книга приняла 30% от запрошенного — строка написана, `already` навсегда true, и
+          // остаток позиции доживал до сеттла вообще без тайм-стопа, хотя план требовал закрыть её целиком.
+          // Различать надо ПЛАН и ФИЛЛ: close_half закрывает половину ПО ЗАМЫСЛУ (план исполнен), а частичный
+          // филл — это недобор исполнения (план НЕ исполнен). Недобор помечается отдельным суффиксом, который
+          // не совпадает с `tsMarker` при .includes, поэтому следующий цикл честно дожимает хвост.
+          const planFulfilled = tsFillFrac >= 0.999;
+          const doneMarker = planFulfilled ? tsMarker : `(time_stop·${prof}·partial)`;
+          const reason = `плановый тайм-стоп: ${minNum}' ≥ ${ts.minute}', событие не наступило (рынок ${mk.price}¢) — ${ts.action === "close_half" ? "фиксирую половину" : "закрываю"}${planFulfilled ? "" : ` · бид принял лишь ${Math.round(tsFillFrac * 100)}% — остаток дожмём следующим циклом`} ${doneMarker}`;
           if (fraction <= 1e-6) { // book absorbed nothing — hold the whole leg, time_stop retries next cycle
             const tsKey = `«${b.market_label}»`;
             if (!R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === b.strategy_id).slice(-8).some((e) => e.type === "hold" && e.text.includes(tsKey) && e.text.includes("exit_partial_zero")))
