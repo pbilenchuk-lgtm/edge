@@ -1399,9 +1399,16 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // delimit the label so «Over 1.5» ≠ «Over 1.5 goals»; scan a recent window so two
       // alternating held markets don't each re-log every cycle).
       const holdKey = `«${b.market_label}»`;
-      const holdOnce = (text: string) => {
+      // [поправка по факту прода] ДРОБИЛКА ПОВТОРОВ КЛЮЧУЕТСЯ НА (РЫНОК + ПРИЧИНА), А НЕ НА ОДНОМ РЫНКЕ.
+      // Раньше достаточно было ЛЮБОЙ hold-строки по этому рынку среди последних восьми — и следующая
+      // причина по тому же рынку не писалась вовсе. То есть `score_race_worst_case` или `exit_phantom_block`
+      // молча съедали улику `quasi_locked_tail`, и её счётчик не мог отличить «путь не сработал» от
+      // «сработал, но строку проглотил чужой hold». Сторож ратифицированных фич читает ровно эти строки,
+      // поэтому глушилка по общему ключу превращала его ноль в неинформативный. Анти-шторм сохраняется:
+      // одна строка на причину на рынок, а не одна на рынок.
+      const holdOnce = (text: string, tag: string) => {
         const recent = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === b.strategy_id).slice(-8);
-        if (!recent.some((e) => e.type === "hold" && e.text.includes(holdKey))) {
+        if (!recent.some((e) => e.type === "hold" && e.text.includes(holdKey) && e.text.includes(tag))) {
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text, created_at: now });
         }
       };
@@ -1421,7 +1428,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           { label: b.market_label, home: m.home, away: m.away, scoreHome: m.score_home, scoreAway: m.score_away, minute: m.minute },
           footballCore(db, m.id), deps.env ?? process.env,
         );
-        if (lock.locked) { holdOnce(`тейк подавлен по ${holdKey}: ${lock.reason} (quasi_locked_tail)`); continue; }
+        if (lock.locked) { holdOnce(`тейк подавлен по ${holdKey}: ${lock.reason} (quasi_locked_tail)`, "quasi_locked_tail"); continue; }
       }
 
       // OPTIONALITY GATE (audit: Argentina–Switzerland). For a market that WINS on a future
@@ -1436,7 +1443,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
         if (sell.cents <= EXIT_TIME_FLOOR_CENTS && minNum >= EXIT_TIME_FLOOR_MIN) {
           d = { exit: true, reason: `тайм-флор: ${sell.cents}¢ на ${minNum}' — опцион на событие истёк (time_decay_floor)`, pnlFrac: d.pnlFrac, kind: "stop" };
         } else {
-          holdOnce(`ценовой стоп подавлен по ${holdKey}: рынок выигрывает от наступления события — цена тает по времени, это не слом тезиса (price_stop_exempt); держим до стратег-выхода / тайм-флора / сеттла`);
+          holdOnce(`ценовой стоп подавлен по ${holdKey}: рынок выигрывает от наступления события — цена тает по времени, это не слом тезиса (price_stop_exempt); держим до стратег-выхода / тайм-флора / сеттла`, "price_stop_exempt");
           continue;
         }
       } else if (d.kind === "stop" && winsOnEventOccurrence(b.market_label) && degraded) {
@@ -1480,10 +1487,10 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
         const uAway = underThesisMarginGoals(b.market_label, sh, sa + surplus, { home: m.home, away: m.away });
         const uMargin = uHome == null || uAway == null ? null : Math.min(uHome, uAway);
         if (surplus > 0) {
-          holdOnce(`запас Under посчитан ПО ХУДШЕМУ по ${holdKey}: фид знает о ${cons.goalEvents} голах против счёта ${sh}:${sa} — лишние ${surplus} засчитаны как забитые (score_race_worst_case)`);
+          holdOnce(`запас Under посчитан ПО ХУДШЕМУ по ${holdKey}: фид знает о ${cons.goalEvents} голах против счёта ${sh}:${sa} — лишние ${surplus} засчитаны как забитые (score_race_worst_case)`, "score_race_worst_case");
         }
         if (uMargin != null && uMargin >= UNDER_STOP_SUPPRESS_MARGIN) {
-          holdOnce(`ценовой стоп подавлен по ${holdKey}: Under-тезис в запасе — до линии ещё ${uMargin} гол(ов) при счёте ${m.score_home ?? 0}:${m.score_away ?? 0}; цена оторвана книгой, тезис не под ударом (under_thesis_safe); держим до стратег-выхода / сеттла`);
+          holdOnce(`ценовой стоп подавлен по ${holdKey}: Under-тезис в запасе — до линии ещё ${uMargin} гол(ов) при счёте ${m.score_home ?? 0}:${m.score_away ?? 0}; цена оторвана книгой, тезис не под ударом (under_thesis_safe); держим до стратег-выхода / сеттла`, "under_thesis_safe");
           continue;
         }
       }
@@ -1494,10 +1501,10 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // below, which weaken with it (Cienciano team-Under −$141 on a bet that settled +$212).
       if (d.kind === "stop") {
         const sc = stopContradictsGameState(b.market_label, m.score_home, m.score_away, { home: m.home, away: m.away }, b.entry_price, sell);
-        if (sc) { holdOnce(`выход отклонён по ${holdKey}: ${sc}`); continue; }
+        if (sc) { holdOnce(`выход отклонён по ${holdKey}: ${sc} (stop_contradicts_state)`, "stop_contradicts_state"); continue; }
         // T1.2: a terminal-phase winning position (or a melting model-fill) is held to settle, not stopped.
         const th = terminalProtectiveHold(b.market_label, m.score_home, m.score_away, minNum, { home: m.home, away: m.away }, sell.fromBook, true);
-        if (th) { holdOnce(`выход отклонён по ${holdKey}: ${th}`); continue; }
+        if (th) { holdOnce(`выход отклонён по ${holdKey}: ${th} (terminal_protective_hold)`, "terminal_protective_hold"); continue; }
       }
       // Phantom-bid guard: a stop firing on a degenerate bid (≤FLOOR¢) that sits far
       // below the mid is dumping into a momentarily-broken book, not managing risk —
@@ -1506,7 +1513,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // ONLY on a REAL book (fromBook) — a modelled parametric price this low is a
       // genuine illiquidity haircut, not a phantom, and a real stop must still fire.
       if (sell.fromBook && sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP) {
-        holdOnce(`выход отклонён по ${holdKey}: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${d.reason}); держим до реального рынка/сеттла (exit_phantom_block)`);
+        holdOnce(`выход отклонён по ${holdKey}: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${d.reason}); держим до реального рынка/сеттла (exit_phantom_block)`, "exit_phantom_block");
         continue;
       }
       // Slippage guard: the best bid can pay far MORE than the full-stake dump realizes —
@@ -1515,7 +1522,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // / settlement, rather than book a depth artifact as a −70% loss. Only on a real
       // book; a genuine small-slip stop (0–1¢) still fires.
       if (sell.fromBook && sell.bestBidCents != null && (sell.bestBidCents - sell.cents) >= EXIT_SLIPPAGE_BLOCK) {
-        holdOnce(`выход отклонён по ${holdKey}: фулл-стейк VWAP ${sell.cents}¢ против бида ${sell.bestBidCents}¢ (слип −${Math.round((sell.bestBidCents - sell.cents) * 10) / 10}¢) — книга не держит размер (${d.reason}); держим до реального рынка/сеттла (exit_slippage_block)`);
+        holdOnce(`выход отклонён по ${holdKey}: фулл-стейк VWAP ${sell.cents}¢ против бида ${sell.bestBidCents}¢ (слип −${Math.round((sell.bestBidCents - sell.cents) * 10) / 10}¢) — книга не держит размер (${d.reason}); держим до реального рынка/сеттла (exit_slippage_block)`, "exit_slippage_block");
         continue;
       }
       // Illiquid-mark-gap guard (audit: 20-26¢ bids that slipped between the ≤5¢ phantom floor and
@@ -1524,7 +1531,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // stop would dump at a price the market doesn't bear. HOLD. Only for a STOP (a take-profit
       // needs a HIGH bid, never triggers here); conservative + logged for calibration.
       if (d.kind === "stop" && sell.fromBook && sell.bestBidCents != null && mk.price >= EXIT_ILLIQUID_MARK_MIN && (mk.price - sell.bestBidCents) >= EXIT_ILLIQUID_MARK_GAP) {
-        holdOnce(`выход отклонён по ${holdKey}: марк ${mk.price}¢, но лучший бид ${sell.bestBidCents}¢ (Δ−${Math.round((mk.price - sell.bestBidCents) * 10) / 10}¢) — книга неликвидна, цена оторвана от стоимости, не слом тезиса (${d.reason}); держим до реального рынка/сеттла (exit_illiquid_mark_gap)`);
+        holdOnce(`выход отклонён по ${holdKey}: марк ${mk.price}¢, но лучший бид ${sell.bestBidCents}¢ (Δ−${Math.round((mk.price - sell.bestBidCents) * 10) / 10}¢) — книга неликвидна, цена оторвана от стоимости, не слом тезиса (${d.reason}); держим до реального рынка/сеттла (exit_illiquid_mark_gap)`, "exit_illiquid_mark_gap");
         continue;
       }
       // P0.6 GAP-WAKE protective-exit invariant — ONLY a protective stop, ONLY right after a scheduler sleep
@@ -1541,7 +1548,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           } else {
             const cfg = gapRepriceConfig(deps.env ?? process.env);
             R.openGapReprice(db, { bet_id: b.id, match_id: m.id, strategy_id: b.strategy_id, profile: b.risk_profile_id ?? "medium", gap_sec: gapWakeGapSec(db), wake_price_cents: sell.cents, floor_cents: sell.cents, deadline_at: new Date(nowMs + cfg.repriceSec * 1000).toISOString(), created_at: now });
-            holdOnce(`gap-wake: ценовой стоп по ${holdKey} отложен ≤${cfg.repriceSec}с/${cfg.repriceTicks} тика — даю книге разжаться после сна планировщика (gap_wake_reprice); стоп НЕ отменён`);
+            holdOnce(`gap-wake: ценовой стоп по ${holdKey} отложен ≤${cfg.repriceSec}с/${cfg.repriceTicks} тика — даю книге разжаться после сна планировщика (gap_wake_reprice); стоп НЕ отменён`, "gap_wake_reprice");
             continue;
           }
         }
@@ -1551,7 +1558,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // stop re-fires next cycle. Before this, closeBetEarly booked the WHOLE stake at the thin VWAP even on a
       // 42% fill (Cienciano: «исполнено 42%» yet the full $80 booked settled_lost), overstating the loss.
       const fillFrac = sell.requestedShares > 0 ? Math.min(1, sell.filledShares / sell.requestedShares) : 1;
-      if (fillFrac <= 1e-6) { holdOnce(`выход по ${holdKey} не исполнен: бид не принял размер (0% филл, ${d.reason}); держим до реального рынка/сеттла (exit_partial_zero)`); continue; }
+      if (fillFrac <= 1e-6) { holdOnce(`выход по ${holdKey} не исполнен: бид не принял размер (0% филл, ${d.reason}); держим до реального рынка/сеттла (exit_partial_zero)`, "exit_partial_zero"); continue; }
       const { pnl, partial } = closeBetPortion(db, b, fillFrac, sell.cents, minuteLabel(m), now);
       if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, fillFrac < 1 ? scaleCost(sell.cost, fillFrac) : sell.cost, now);
       const fillTag = partial ? ` (частично ${Math.round(fillFrac * 100)}%)` : "";

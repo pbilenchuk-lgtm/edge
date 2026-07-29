@@ -29,6 +29,8 @@ export const CLV_MAX_LAG_MIN = (env: Record<string, string | undefined> = proces
 };
 /** Окно матча от кикоффа, если время окончания не проставлено (90' + перерыв + компенсированное). */
 const MATCH_WINDOW_MIN = 135;
+/** То же для тенниса: матч из трёх сетов спокойно идёт три часа, футбольное окно обрезало бы линию. */
+const TENNIS_WINDOW_MIN = 300;
 
 export type ClvSource = "closing_line" | "no_snapshot" | "stale_snapshot" | "no_match_clock";
 
@@ -66,6 +68,35 @@ export function closingLine(
   return { cents: row.price, at: row.snapshot_at };
 }
 
+/** Теннисные позиции по стороне матча котируются НЕ в `markets`, а в `tennis_snapshots` (pm_p1_cents /
+ *  pm_p2_cents на скаут-каденции ~20с). Искать их линию только в `markets` — значит объявить n/a там, где
+ *  линия физически ЕСТЬ, просто в другой таблице; такой n/a незаконен по нашему же правилу. Сторона берётся
+ *  из ЗАКРЕПЛЁННОЙ при входе (`entry_meta.favSide`) — выводить её заново мы уже один раз запретили. Окно
+ *  матча шире футбольного: теннисный матч спокойно идёт три часа. */
+function tennisClosingLine(
+  db: Database,
+  m: { id: string; kickoff_at?: string | null; end_time?: string | null },
+  b: { entry_meta?: string | null },
+  env: Record<string, string | undefined> = process.env,
+): { cents: number; at: string } | null {
+  let favSide: string | null = null;
+  try { favSide = b.entry_meta ? (JSON.parse(b.entry_meta)?.favSide ?? null) : null; } catch { favSide = null; }
+  if (favSide !== "first" && favSide !== "second") return null;   // сторона не закреплена → не гадаем
+  const endMs = m.end_time ? Date.parse(m.end_time) : NaN;
+  const koMs = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
+  const cutoffMs = Number.isFinite(endMs) ? endMs : Number.isFinite(koMs) ? koMs + TENNIS_WINDOW_MIN * 60_000 : NaN;
+  if (!Number.isFinite(cutoffMs)) return null;
+  const col = favSide === "first" ? "pm_p1_cents" : "pm_p2_cents";
+  const row = db.prepare(
+    `SELECT ${col} AS c, batch_at FROM tennis_snapshots WHERE pm_match_id=? AND ${col} IS NOT NULL AND batch_at <= ?
+      ORDER BY batch_at DESC LIMIT 1`,
+  ).get(m.id, new Date(cutoffMs).toISOString()) as { c: number; batch_at: string } | undefined;
+  if (!row || row.c == null) return null;
+  const lagMin = (cutoffMs - (Date.parse(row.batch_at) || 0)) / 60_000;
+  if (!Number.isFinite(lagMin) || lagMin > CLV_MAX_LAG_MIN(env)) return null;
+  return { cents: row.c, at: row.batch_at };
+}
+
 /**
  * Нога CLV одной ставки. Мы всегда держим купленный токен, поэтому вход и линия закрытия — одной стороны,
  * и `линия − вход` работает одинаково для Yes- и No-рынков.
@@ -73,7 +104,7 @@ export function closingLine(
 export function clvLeg(
   db: Database,
   m: { id: string; kickoff_at?: string | null; end_time?: string | null },
-  b: { market_label: string; entry_price?: number | null },
+  b: { market_label: string; entry_price?: number | null; entry_meta?: string | null },
   env: Record<string, string | undefined> = process.env,
 ): ClvLeg {
   const entry = b.entry_price;
@@ -81,7 +112,7 @@ export function clvLeg(
   const endMs = m.end_time ? Date.parse(m.end_time) : NaN;
   const koMs = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
   if (!Number.isFinite(endMs) && !Number.isFinite(koMs)) return NA("no_match_clock");
-  const line = closingLine(db, m, b.market_label, env);
+  const line = closingLine(db, m, b.market_label, env) ?? tennisClosingLine(db, m, b, env);
   if (!line) {
     // Отличаем «снимка нет вовсе» от «снимок есть, но протух»: это разные дыры в покрытии и чинятся разным.
     const any = db.prepare(`SELECT 1 FROM markets WHERE match_id=? AND label=? LIMIT 1`).get(m.id, b.market_label);

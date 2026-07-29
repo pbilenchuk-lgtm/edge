@@ -82,3 +82,23 @@ test("P0.6 recovered: price comes back above the stop level within the window �
   assert.equal(m!.outcome, "recovered");
   assert.equal(m!.delta_cents, 45, "saved 65−20 = 45¢ vs dumping at the gap bottom");
 });
+
+// [поправка по факту прода] Дробилка повторов ключевалась на ОДНОМ рынке: любая hold-строка по нему среди
+// последних восьми глушила следующую причину целиком. Так чужой hold молча съедал улику `quasi_locked_tail`,
+// и её счётчик не мог отличить «не сработало» от «сработало, но строку проглотили». Ключ — (рынок + причина).
+test("hold-строки: разные причины по одному рынку пишутся обе, повтор одной — нет", async () => {
+  const { db, mid } = setup(20, [0, 0], 70);
+  const T = Date.parse("2026-07-22T18:00:00Z");
+  const strat = R.listStrategies(db, "football")[0];
+  // Чужая причина уже записана по этому же рынку.
+  R.insertTradeLog(db, { id: "h0", match_id: mid, strategy_id: strat.id, minute: "70'", type: "hold", text: `ценовой стоп подавлен по «Celje»: ... (under_thesis_safe)`, created_at: "2026-07-22T17:59:00Z" } as any);
+  markGapWake(db, T, 3480, {});
+  await evaluateExits(db, { now: () => iso(T), env: {} });
+  const logs = R.tradeLogForMatch(db, mid).filter((l) => l.type === "hold");
+  assert.ok(logs.some((l) => /gap_wake_reprice/.test(l.text)), "своя причина не проглочена чужой");
+  // Повтор той же причины на следующем тике — по-прежнему одна строка (анти-шторм сохранён).
+  const before = logs.filter((l) => /gap_wake_reprice/.test(l.text)).length;
+  await evaluateExits(db, { now: () => iso(T + 30_000), env: {} });
+  const after = R.tradeLogForMatch(db, mid).filter((l) => /gap_wake_reprice/.test(l.text)).length;
+  assert.equal(after, before, "одна строка на причину на рынок — шторма нет");
+});
