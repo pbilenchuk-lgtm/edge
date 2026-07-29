@@ -31,6 +31,12 @@
 import "./http.js"; // configure proxy dispatcher for server-side fetch
 import type { OrderBook } from "./execution.js";
 
+/** Полоса «планки»: цена в ней означает РАЗРЕШЁННЫЙ (мёртвый) рынок, а не котировку. Один порог на оба
+ *  пути — импорт (ниже) и рефреш котировок (`engine.refreshMatchOdds`). Разведёнными эти два числа и
+ *  держали мёртвые книги живыми: импорт такие рынки не заводил, а рефреш продолжал их писать снапшот за
+ *  снапшотом, и разрешившийся матч светился «живыми» котировками у планки. */
+export const RESOLVED_RAIL_CENTS = 1;
+
 export interface PolymarketConfig {
   enabled: boolean;
   gammaBase: string;
@@ -704,7 +710,7 @@ export function matchMarketSnapshots(
       if (dropNoise && isNoiseMarket(m.label)) continue;
       for (const side of marketSides(m)) {
         if (side.price == null) continue;
-        if (dropNoise && (side.price <= 1 || side.price >= 99)) continue; // effectively-resolved / dead line
+        if (dropNoise && (side.price <= RESOLVED_RAIL_CENTS || side.price >= 100 - RESOLVED_RAIL_CENTS)) continue; // effectively-resolved / dead line
         const key = side.label.toLowerCase().trim();
         if (seen.has(key)) continue;
         seen.add(key);
