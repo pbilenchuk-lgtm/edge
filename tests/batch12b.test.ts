@@ -162,3 +162,32 @@ test("T: 7-6 и 7-5 — законно завершённые сеты; 6-6 (т�
   const six6 = { sets: [{ p1: 6, p2: 6 }], setsWonP1: 0, setsWonP2: 0, matchGames: 12 };
   assert.equal(resolveTennisProp("A Player Set 1 Winner", six6 as any, { retired: true, canceled: false, firstIsP1: true }), null);
 });
+
+// ── (4) correlationKey: дефис, отсутствие разделителя и голый «Draw» ─────────────────────────────
+import { correlationKey } from "../src/lib/strategist.js";
+import { resolveFootballMarket } from "../src/lib/settlement.js";
+
+test("cluster: «Draw - No» и «Extra Time - No» попадают в ОДИН кластер — France–Spain больше не покупается дважды", () => {
+  // Прежний узкий регекс `[—:]` не видел обычный дефис → оба ярлыка давали null → clusterExposure=0,
+  // тезисный кэп молчал (он весь под `if (thesisKey)`), и один исход покупался двумя ногами.
+  assert.equal(correlationKey("Draw - No", "France", "Spain"), "ko:decided");
+  assert.equal(correlationKey("Extra Time - No", "France", "Spain"), "ko:decided");
+  assert.equal(correlationKey("Draw — No", "France", "Spain"), "ko:decided", "длинное тире работало и работает");
+  assert.equal(correlationKey("Extra Time No", "France", "Spain"), "ko:decided", "и без разделителя тоже");
+});
+
+test("cluster: голый «Draw» — это implicit-yes сторона (кейс Larne), а «Draw No Bet» кластером не является", () => {
+  assert.equal(correlationKey("Draw", "A", "B"), "ko:level");
+  assert.equal(correlationKey("Draw - Yes", "A", "B"), "ko:level");
+  assert.equal(correlationKey("Draw No Bet", "A", "B"), null, "DNB — другой контракт, не сторона ничьей");
+});
+
+test("settle: «Draw - No» разрешается по счёту — раньше дефис ронял его в непроверяемые", () => {
+  // Один и тот же ярлык обязан и кластеризоваться, и сеттлиться: иначе одна подсистема считает его
+  // тезисом, а другая не может определить исход.
+  assert.equal(resolveFootballMarket("Draw - No", 2, 1, { home: "A", away: "B" }, { wentToExtraTime: null }), true);
+  assert.equal(resolveFootballMarket("Draw - No", 1, 1, { home: "A", away: "B" }, { wentToExtraTime: null }), false);
+  assert.equal(resolveFootballMarket("Draw - Yes", 1, 1, { home: "A", away: "B" }, { wentToExtraTime: null }), true);
+  // Защита от «Draw No Bet» держится не разделителем, а якорем конца строки.
+  assert.notEqual(resolveFootballMarket("Draw No Bet", 1, 1, { home: "A", away: "B" }, { wentToExtraTime: null }), false);
+});
