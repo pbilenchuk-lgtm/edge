@@ -108,23 +108,41 @@ const SHADOW_MAX_TOKENS = (env: Record<string, string | undefined>) => num(env.S
  * сохранённых снимков. Никогда не бросает: измерение не имеет права ломать путь решения — но и
  * молчать о своём отказе не имеет права, поэтому счётчик отдаётся наружу.
  */
+export interface ShadowDepthTally {
+  saved: number; empty: number; unavailable: number; threw: number; skippedOverBudget: number;
+  reason: string | null;   // почему НИ ОДНОГО снимка, если saved === 0
+}
+
 export async function captureShadowDepth(
   db: Database, targets: BookTarget[], source: string, deps: EngineDeps = {}, nowIso?: string,
-): Promise<number> {
+): Promise<ShadowDepthTally> {
+  const t0: ShadowDepthTally = { saved: 0, empty: 0, unavailable: 0, threw: 0, skippedOverBudget: 0, reason: null };
   const env = deps.env ?? process.env;
   const poly = deps.polymarket ?? loadPolymarketConfig(env);
-  if (!poly.enabled || !targets.length) return 0;
+  // НОЛЬ ОБЯЗАН НАЗЫВАТЬ ПРИЧИНУ. Первая версия возвращала голое число, и прод в тот же вечер написал
+  // «глубина снята по 0» — ровно тот немой ноль, против которого написан весь этот файл. Три разные
+  // причины нуля (выключён Polymarket, нет целей, книги недоступны) чинятся по-разному.
+  if (!poly.enabled) { t0.reason = "polymarket выключен"; return t0; }
+  if (!targets.length) { t0.reason = "нет целей с токеном — у рынков нет external_ref"; return t0; }
   const at = nowIso ?? (deps.now?.() ?? new Date().toISOString());
   const cache = new Map<string, OrderBookFetch>();
-  let ok = 0;
-  for (const t of targets.slice(0, SHADOW_MAX_TOKENS(env))) {
+  const budget = SHADOW_MAX_TOKENS(env);
+  t0.skippedOverBudget = Math.max(0, targets.length - budget);
+  for (const t of targets.slice(0, budget)) {
     try {
       const res = await classifyOrderBook(t.token, poly, deps, cache);
       // Пустая книга — ФАКТ ёмкости («налить было нечем»), а не сбой: пишем её нулём.
       // Недоступная — сбой запроса, и притворяться, что там нет ликвидности, нельзя: пропускаем.
-      if (res.status === "ok") { saveBookDepth(db, t, res.book, source, at); ok++; }
-      else if (res.status === "empty") { saveBookDepth(db, t, { bids: [], asks: [] }, `${source}_empty`, at); ok++; }
-    } catch { /* одна книга не имеет права уронить запись когорты */ }
+      if (res.status === "ok") { saveBookDepth(db, t, res.book, source, at); t0.saved++; }
+      else if (res.status === "empty") { saveBookDepth(db, t, { bids: [], asks: [] }, `${source}_empty`, at); t0.saved++; t0.empty++; }
+      else t0.unavailable++;
+    } catch { t0.threw++; } // одна книга не имеет права уронить запись когорты
   }
-  return ok;
+  if (t0.saved === 0) {
+    t0.reason = t0.unavailable || t0.threw
+      ? `книга недоступна: ${t0.unavailable} unavailable, ${t0.threw} исключений из ${Math.min(targets.length, budget)} запросов`
+      : "ни одного запроса не выполнено";
+  }
+  try { R.metaSet(db, `shadow_depth_tally_${source}`, JSON.stringify({ ...t0, targets: targets.length, at }), at); } catch { /* ignore */ }
+  return t0;
 }
