@@ -149,3 +149,29 @@ test("ETA считается по форвард-потоку, а нулевой
   assert.ok(live.etaWeeks && live.etaWeeks > 0, "ETA — число недель, а не настроение");
   assert.match(live.etaNote, /ETA ≈/);
 });
+
+// ── НОЛЬ ОБЯЗАН НАЗЫВАТЬ ПРИЧИНУ ─────────────────────────────────────────────────────────────────
+// Прод в тот же вечер написал «глубина снята по 0» — ровно тот немой ноль, против которого написан
+// весь этот механизм. Три причины нуля чинятся по-разному, значит обязаны различаться в записи.
+import { captureShadowDepth } from "../src/lib/bookDepthCapture.js";
+
+test("captureShadowDepth: КАЖДАЯ причина нуля названа, а не отдана голым числом", async () => {
+  const db = openDb(":memory:");
+  seedMatch(db, "m1");
+  const T = [{ matchId: "m1", token: "tok", label: "Over 2.5" }];
+
+  const off = await captureShadowDepth(db, T, "refusal_shadow", { env: {}, polymarket: { enabled: false } as any });
+  assert.equal(off.saved, 0);
+  assert.match(String(off.reason), /выключен/);
+
+  const noTargets = await captureShadowDepth(db, [], "refusal_shadow", { env: {}, polymarket: { enabled: true } as any });
+  assert.equal(noTargets.saved, 0);
+  assert.match(String(noTargets.reason), /нет целей/, "«нет токена» — отдельная поломка, отдельный текст");
+
+  // Книга недоступна (сбой запроса) — это НЕ факт об отсутствии ликвидности, снимок не пишется,
+  // но причина обязана быть названа, иначе когорта тихо пополняется невердиктными записями.
+  const dead = (async () => { throw new Error("CLOB 502"); }) as unknown as typeof fetch;
+  const bad = await captureShadowDepth(db, T, "refusal_shadow", { env: {}, polymarket: { enabled: true, clobBase: "https://x" } as any, fetchImpl: dead });
+  assert.equal(bad.saved, 0);
+  assert.ok(bad.reason && /недоступна|запроса/.test(bad.reason), `причина названа: ${bad.reason}`);
+});

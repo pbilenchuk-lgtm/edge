@@ -546,8 +546,11 @@ export async function runStrategists(
             // ИНВАРИАНТ: would-be запись обязана нести снимок исполнимости В МОМЕНТ ЗАПИСИ. Без него
             // когорта рождается невердиктной — прод дал 140 из 143 «без снимка», и вердикт с p=0
             // оказался нечитаем. Захват идёт по РОВНО тем рынкам, что заморожены.
-            const snaps = await captureShadowDepth(db, ref.targets, "refusal_shadow", deps, now());
-            R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `refusal_shadow: ${ref.frozen} тотал(ов) с заявленным краем записаны would-be (глубина снята по ${snaps}) — отказ будет оценён когортой, а не спором`, created_at: now() });
+            const t = await captureShadowDepth(db, ref.targets, "refusal_shadow", deps, now());
+            const depthTxt = t.saved > 0
+              ? `глубина снята по ${t.saved} из ${ref.targets.length}`
+              : `ГЛУБИНА НЕ СНЯТА (${t.reason}) — когорта пополняется НЕВЕРДИКТНЫМИ записями`;
+            R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `refusal_shadow: ${ref.frozen} тотал(ов) с заявленным краем записаны would-be · ${depthTxt}`, created_at: now() });
           }
         } catch { /* measurement must never break the decision path */ }
       } else if (dec.ok && (skipped + flagged) > 0) {
