@@ -23,7 +23,7 @@
 
 import { RESOLVED_RAIL_CENTS } from "./polymarket.js";
 
-export type ZombieCode = "rail_price" | "resolved_price" | "notation_desync" | "placeholder_mid" | "stale_book";
+export type ZombieCode = "rail_price" | "rail_unexplained" | "resolved_price" | "notation_desync" | "placeholder_mid" | "stale_book";
 export interface ZombieReason { code: ZombieCode; detail: string }
 
 export interface ZombieConfig {
@@ -60,6 +60,11 @@ export interface ZombieConfig {
    *  healthy again. */
   hysteresisCents: number;
   hysteresisTicks: number;
+  /** (a1) Насколько game-state вероятность обязана подпирать планку, чтобы планка считалась ОБЪЯСНЁННОЙ.
+   *  Цена ≥99¢ законна только при gsProb > этого порога; ниже — книга утверждает определённость, которой
+   *  состояние игры не даёт. Зазор 4пп до планки выбран НАМЕРЕННО: класс ошибки #89 (98¢ на 90'+4' при
+   *  запертом счёте, gsProb ≈ 0.99) обязан проходить с запасом, а не впритык. */
+  railGsProbCeiling: number;
 }
 
 export function loadZombieConfig(env: Record<string, string | undefined> = process.env): ZombieConfig {
@@ -74,6 +79,7 @@ export function loadZombieConfig(env: Record<string, string | undefined> = proce
     hysteresisTicks: num("FOOTBALL_ZOMBIE_HYSTERESIS_TICKS", 2),
     placeholderStaleMin: num("FOOTBALL_ZOMBIE_PLACEHOLDER_STALE_MIN", 10),
     staleExtremeCents: num("FOOTBALL_ZOMBIE_STALE_EXTREME", 2),
+    railGsProbCeiling: num("FOOTBALL_ZOMBIE_RAIL_GSPROB_CEILING", 0.95),
   };
 }
 
@@ -128,6 +134,33 @@ export function classifyZombie(inp: ZombieInput, cfg: ZombieConfig): ZombieReaso
   // остальные суждения о ней (насколько отстала от исхода, разошлись ли нотации) бессмысленны.
   if (inp.matchKickedOff === false && isRailPrice(inp.priceCents)) {
     return { code: "rail_price", detail: `цена ${Math.round(inp.priceCents * 10) / 10}¢ у планки ДО стартового свистка — книга мёртвая/односторонняя, это не котировка` };
+  }
+  // (a1) ПЛАНКА, КОТОРУЮ СОСТОЯНИЕ ИГРЫ НЕ ОБЪЯСНЯЕТ. Между (a0) и resolved_price была незакрытая зона, и
+  // прод 30.07 показал её размер: на шести живых матчах Conference League 36 из 40, 36 из 40, 32 из 36 и
+  // 30 из 34 рынков стояли у планки — при счёте 0:0 на 24-й минуте. (a0) молчит по построению (матч начался),
+  // resolved_price молчит тоже (он требует gsProb ≥ 0.995 — «счёт запер исход», а при 0:0 не заперто ничто).
+  // Стратег видел доску, где 90% котировок утверждают уже известный результат, и отказывался от неё целиком.
+  //
+  // Правильный предикат — не «до/после свистка», а тот же, что в T1.1: ОБЪЯСНЯЕТ ЛИ СОСТОЯНИЕ ИГРЫ ЦЕНУ.
+  // gsProb у нас уже посчитан; планка законна ровно тогда, когда он её подпирает.
+  //
+  // Возражение «модель не согласна с ценой — это же край» снято: У ПЛАНКИ КРАЯ НЕ СУЩЕСТВУЕТ ФИЗИЧЕСКИ.
+  // Купить на 99.5¢ нечего (потолок 100¢ при нулевой глубине), продавать мы не умеем. Значит карантин таких
+  // рынков не отнимает ни одной ТОРГУЕМОЙ возможности, а яд из доски убирает.
+  //
+  // gsProb === null → правило МОЛЧИТ. Не знаем состояния игры — не имеем права утверждать, что планка им не
+  // объясняется; §9.6 fail-open на неоднозначности. Это же и защищает класс ошибки #89 на рынках без
+  // game-state вероятности.
+  if (inp.matchKickedOff !== false && inp.gsProb != null && isRailPrice(inp.priceCents)) {
+    const high = inp.priceCents >= 100 - RESOLVED_RAIL_CENTS;
+    // Симметрия: ≥99¢ требует gsProb > 0.95; ≤1¢ требует gsProb < 0.05 (та же уверенность с другой стороны).
+    const unexplained = high ? inp.gsProb <= cfg.railGsProbCeiling : inp.gsProb >= 1 - cfg.railGsProbCeiling;
+    if (unexplained) {
+      return {
+        code: "rail_unexplained",
+        detail: `цена ${Math.round(inp.priceCents * 10) / 10}¢ у планки, но состояние игры даёт P=${Math.round(inp.gsProb * 1000) / 10}% (нужно ${high ? ">" : "<"} ${Math.round((high ? cfg.railGsProbCeiling : 1 - cfg.railGsProbCeiling) * 100)}%) — книга утверждает определённость, которой на поле нет`,
+      };
+    }
   }
   // (a) price contradicts a completed event: the leg is game-state-resolved yes but priced far below 100¢.
   // F6: compare against the live executable ask when we have one — a resolved leg whose real book already sits
@@ -194,6 +227,15 @@ export function zombieClearWithMargin(inp: ZombieInput, cfg: ZombieConfig): bool
     const scoreCertain = inp.gsProb >= 1 && /\bover\b/i.test(inp.label);
     const threshold = scoreCertain ? cfg.resolvedScoreCertainFloorCents : 100 - cfg.resolvedMarginCents;
     if (px <= threshold + h) return false;
+  }
+  // (a1) Выход из rail_unexplained тоже с зазором — иначе рынок, чья цена дрожит вокруг самой планки,
+  // будет хлопать карантин↔снятие каждый тик. Ровно та беда, ради которой гистерезис и написан (260 циклов
+  // на 28 матчах). Цена обязана отойти от планки на hysteresisCents, а не просто перестать её касаться.
+  if (inp.matchKickedOff !== false && inp.gsProb != null) {
+    const nearHigh = inp.priceCents >= 100 - RESOLVED_RAIL_CENTS - h;
+    const nearLow = inp.priceCents <= RESOLVED_RAIL_CENTS + h;
+    if (nearHigh && inp.gsProb <= cfg.railGsProbCeiling) return false;
+    if (nearLow && inp.gsProb >= 1 - cfg.railGsProbCeiling) return false;
   }
   return true;
 }

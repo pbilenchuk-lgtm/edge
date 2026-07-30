@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classifyZombie, outcomeKey, notationSpreads, loadZombieConfig, type ZombieConfig } from "../src/lib/zombieMarket.js";
 
-const CFG: ZombieConfig = { staleBookMin: 30, notationSpreadCents: 12, resolvedMarginCents: 12, resolvedScoreCertainFloorCents: 5, placeholderBandCents: 0.5, placeholderStaleMin: 10, staleExtremeCents: 2, hysteresisCents: 3, hysteresisTicks: 2 };
+const CFG: ZombieConfig = { staleBookMin: 30, notationSpreadCents: 12, resolvedMarginCents: 12, resolvedScoreCertainFloorCents: 5, placeholderBandCents: 0.5, placeholderStaleMin: 10, staleExtremeCents: 2, hysteresisCents: 3, hysteresisTicks: 2, railGsProbCeiling: 0.95 };
 
 test("P1 classifyZombie (a): a game-state-resolved leg priced far below 100¢ is a resolved_price zombie", () => {
   // both teams scored → BTTS-Yes gsProb ≈ 1, but the book still sits at 50¢ (Vardar)

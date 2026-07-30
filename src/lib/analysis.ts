@@ -293,7 +293,20 @@ export async function runStrategists(
   }
   // Only replace existing proposals if we actually have usable probabilities — a
   // degenerate state must not wipe the previous good proposals with nothing.
-  if (!freshMarkets.some((m) => m.ai_prob != null)) return { betsCreated: 0, decisions: [] };
+  if (!freshMarkets.some((m) => m.ai_prob != null)) {
+    // БОНУС КАРАНТИНА, КОТОРЫЙ НАДО СЧИТАТЬ. Мёртвая доска, отсечённая ДО стратега, — это не только
+    // непойманный фантом, но и несделанный LLM-вызов: 30.07 стратег честно жевал шесть досок, где
+    // выбирать было не из чего, и на каждой платил полным контекстом. Экономия обязана быть в журнале,
+    // иначе о ней узнают только по счёту от провайдера.
+    if (hidden.size) {
+      try {
+        R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? "", minute: null, type: "skip",
+          text: `dead_board_llm_saved: ${hidden.size} из ${allMarkets.length} рынков скрыто (планка/зеркала) — торгуемых котировок не осталось, стратег НЕ вызван (сэкономлен LLM-вызов на матче, где выбирать не из чего)`,
+          dedup_key: `deadboard:${matchId}:${stage}`, created_at: now() });
+      } catch { /* улика не имеет права ломать анализ */ }
+    }
+    return { betsCreated: 0, decisions: [] };
+  }
   // P4 [batch-7]: a stable in-cycle catalog id (m1..mN) per market so the strategist selects BY REFERENCE, not
   // by a free-text paraphrase of the label (a paraphrase miss silently dropped Lugano ML @44¢/78%). Built once
   // from freshMarkets (fetched once), so the id the prompt shows and the id the match loop reads are identical.

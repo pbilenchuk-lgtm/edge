@@ -27,12 +27,13 @@ import * as R from "./repo.js";
 
 const FOOTBALL_STRATS = new Set(["prematch_value", "overreaction"]);
 export type UnfillReason =
-  | "empty_book" | "depth_floor" | "clamp" | "zombie_resolved" | "zombie_notation" | "zombie_stale"
+  | "empty_book" | "depth_floor" | "clamp" | "zombie_resolved" | "zombie_notation" | "zombie_stale" | "zombie_rail"
   | "untradeable" | "stale_proposal" | "incoherent_book" | "no_market" | "risk_block" | "other";
 
 /** Map a not_filled bet's rationale to a canonical unfillable reason (the spec's reason vocabulary). */
 export function classifyReason(rationale: string | null | undefined): UnfillReason {
   const s = String(rationale ?? "").toLowerCase();
+  if (/zombie_quarantine:rail_price|zombie_quarantine:rail_unexplained/.test(s)) return "zombie_rail";
   if (/zombie_quarantine:resolved_price/.test(s)) return "zombie_resolved";
   if (/zombie_quarantine:notation_desync/.test(s)) return "zombie_notation";
   if (/zombie_quarantine:stale_book/.test(s)) return "zombie_stale";
@@ -47,7 +48,7 @@ export function classifyReason(rationale: string | null | undefined): UnfillReas
   return "other";
 }
 
-const isZombieReason = (r: UnfillReason) => r === "zombie_resolved" || r === "zombie_notation" || r === "zombie_stale";
+const isZombieReason = (r: UnfillReason) => r === "zombie_resolved" || r === "zombie_notation" || r === "zombie_stale" || r === "zombie_rail";
 
 interface DepthSnap { label: string | null; token_id: string; asks_json: string | null; best_ask_cents: number | null; ask_depth_usd: number | null; at: string }
 
