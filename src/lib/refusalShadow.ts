@@ -23,6 +23,7 @@ import type { EngineDeps } from "./engine.js";
 import { resolveFootballMarket } from "./settlement.js";
 import { marketFamily } from "./signals.js";
 import { collapseToSignals, signalTests } from "./signals.js";
+import { buildFillabilityProbe } from "./unfillableEdge.js";
 import type { BetRec } from "./profileAnalytics.js";
 
 /** Minimum |edge| (fraction) a walked-away market must carry to be worth scoring. Below this the refusal is
@@ -105,6 +106,14 @@ export function resolveRefusalShadowSignals(db: Database, deps: EngineDeps = {})
 
 export interface RefusalShadowReport {
   edgeFloor: number; needN: number;
+  /** Покрытие снимков книги + доля исполнимых. Читается ПЕРВЫМ: доля fillable на нулевом покрытии
+   *  неотличима от «ничего не исполнимо», и вердикт на таких данных нечитаем. */
+  fillability: {
+    snapshots: number; matchesWithSnapshots: number; earliestSnapshotAt: string | null; latestSnapshotAt: string | null;
+    params: { minSizeUsd: number; bandCents: number; snapshotWindowMin: number };
+    scoredTotal: number; fillable: number; unfillable: number; unknown: number; fillablePct: number | null;
+    note: string;
+  };
   counts: { total: number; pending: number; won: number; lost: number; void: number; unresolved: number };
   scored: number; winPct: number | null; meanEdgePct: number | null; meanImpliedPct: number | null;
   wouldBePnlUsd: number;                   // flat $100 stakes — a unit-scale read, not a claim about sizing
@@ -120,7 +129,30 @@ export function buildRefusalShadow(db: Database, env: Record<string, string | un
   const rows = db.prepare(`SELECT market_label, our_prob, implied, edge, entry_cents, status, match_id, created_at, kickoff_at FROM refusal_shadow_signals`).all() as any[];
   const c = { total: rows.length, pending: 0, won: 0, lost: 0, void: 0, unresolved: 0 };
   for (const r of rows) (c as any)[r.status]++;
-  const scored = rows.filter((r) => r.status === "won" || r.status === "lost");
+  const scoredAll = rows.filter((r) => r.status === "won" || r.status === "lost");
+  // ═══ ФИЛЬТР ИСПОЛНИМОСТИ ═══
+  // Определение would-be С САМОГО НАЧАЛА требовало исполнимости, просто она не проверялась. Отказной
+  // сигнал, «выигравший» по цене, которой на книге не существовало, — это не доказательство перекрученной
+  // гайки, а тот самый класс «был бы прав на зомби-книге», который мы запретили засчитывать месяц назад.
+  // Прод 30.07 показал, насколько это не гипотеза: на четырёх живых матчах по 10 тоталов «с заявленным
+  // краем» записывались would-be на досках, где 36 из 40 рынков стояли у планки, а implied 18.2% при
+  // win 39.9% — подпись нарисованных лонгшотов, а не нашей правоты.
+  //
+  // Фильтр — не новое условие когорты: если бы вердикт смотрел в другую сторону, он требовался бы точно
+  // так же. Стандарт берётся ДОСЛОВНО из unfillable_edge (общий зонд), чтобы «исполнимо» значило одно и
+  // то же во всех отчётах.
+  const cohortFromMs = rows.reduce((min: number, r: any) => {
+    const t = Date.parse(r.created_at); return Number.isFinite(t) && t < min ? t : min;
+  }, Date.now());
+  const probe = buildFillabilityProbe(db, { fromMs: cohortFromMs, env });
+  const fillOf = new Map<any, boolean | null>();
+  for (const r of scoredAll) fillOf.set(r, probe(r.match_id, r.market_label, r.entry_cents, r.created_at));
+  const fCount = { fillable: 0, unfillable: 0, unknown: 0 };
+  for (const r of scoredAll) { const f = fillOf.get(r); if (f === true) fCount.fillable++; else if (f === false) fCount.unfillable++; else fCount.unknown++; }
+  // Вердикт читается ТОЛЬКО по подтверждённо исполнимым. «Неизвестно» не засчитывается ни в одну сторону —
+  // снимки копятся с деплоя и не бэкфиллятся, а презумпция исполнимости здесь и была бы исходной ошибкой.
+  const scored = scoredAll.filter((r) => fillOf.get(r) === true);
+  const fillablePct = scoredAll.length ? Math.round((1000 * fCount.fillable) / scoredAll.length) / 10 : null;
   const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
   const winPct = scored.length ? Math.round((1000 * scored.filter((r) => r.status === "won").length) / scored.length) / 10 : null;
   const meanEdge = mean(scored.map((r) => r.edge));
@@ -152,16 +184,28 @@ export function buildRefusalShadow(db: Database, env: Record<string, string | un
     : lostMoney ? "discipline_right" : "mixed";
   return {
     edgeFloor: REFUSAL_EDGE_MIN(env), needN: REFUSAL_NEED_N, counts: c, scored: scored.length,
+    fillability: {
+      snapshots: probe.coverage.snapshots, matchesWithSnapshots: probe.coverage.matches,
+      earliestSnapshotAt: probe.coverage.earliestAt, latestSnapshotAt: probe.coverage.latestAt,
+      params: probe.params,
+      scoredTotal: scoredAll.length, fillable: fCount.fillable, unfillable: fCount.unfillable, unknown: fCount.unknown,
+      fillablePct,
+      note: probe.coverage.snapshots === 0
+        ? `снимков книги за период когорты НЕТ — исполнимость непроверяема, вердикт НЕЧИТАЕМ. Копим вперёд уже с фильтром; снимки не бэкфиллятся.`
+        : `${fCount.fillable} из ${scoredAll.length} решённых сигналов подтверждённо исполнимы (${fillablePct}%); ${fCount.unfillable} неисполнимы, ${fCount.unknown} без снимка в окне ±${probe.params.snapshotWindowMin}м. Порог: ≥$${probe.params.minSizeUsd} в ≤${probe.params.bandCents}¢ от цены сигнала.`,
+    },
     winPct, meanEdgePct: meanEdge == null ? null : Math.round(meanEdge * 1000) / 10,
     meanImpliedPct: meanImplied == null ? null : Math.round(meanImplied * 1000) / 10,
     wouldBePnlUsd: Math.round(pnl * 100) / 100, matured,
     verdict,
     note: !matured
-      ? `копим: ${t.nDecided}/${REFUSAL_NEED_N} решённых отказных сигналов (порог edge ≥${Math.round(REFUSAL_EDGE_MIN(env) * 100)}%). До созревания жёсткость НЕ трогаем — она выведена из реальных ловушек, а не из вкуса.`
+      ? (probe.coverage.snapshots === 0
+        ? `ВЕРДИКТ НЕЧИТАЕМ: снимков книги за период когорты нет, исполнимость не проверяется. Читать вердикт на неотфильтрованной когорте нельзя — «выиграл бы по цене, которой не было» доказательством не является. Копим вперёд УЖЕ С ФИЛЬТРОМ.`
+        : `копим: ${t.nDecided}/${REFUSAL_NEED_N} ИСПОЛНИМЫХ решённых отказных сигналов (из ${scoredAll.length} решённых всего: ${fCount.fillable} исполнимы, ${fCount.unfillable} нет, ${fCount.unknown} без снимка). Порог edge ≥${Math.round(REFUSAL_EDGE_MIN(env) * 100)}%. До созревания жёсткость НЕ трогаем.`)
       : verdict === "screw_too_tight"
-        ? `ГАЙКА ПЕРЕКРУЧЕНА: отказные сигналы бьют собственный implied (win ${t.winVsImplied.winPct}% vs рынок ${t.winVsImplied.meanImpliedPct}%, Poisson-бином p=${t.winVsImplied.binomP}) и заработали бы $${Math.round(pnl)} на плоских ставках $100 при n=${t.nDecided}. Анти-фантомный порог калибруется ПО ДАННЫМ.`
+        ? `ГАЙКА ПЕРЕКРУЧЕНА: отказные сигналы бьют собственный implied (win ${t.winVsImplied.winPct}% vs рынок ${t.winVsImplied.meanImpliedPct}%, Poisson-бином p=${t.winVsImplied.binomP}) и заработали бы $${Math.round(pnl)} на плоских ставках $100 при n=${t.nDecided} ИСПОЛНИМЫХ сигналах (из ${scoredAll.length} решённых). Анти-фантомный порог калибруется ПО ДАННЫМ.`
         : verdict === "discipline_right"
-          ? `ДИСЦИПЛИНА ПРАВА: отказные сигналы потеряли бы $${Math.round(pnl)} на плоских ставках $100 при n=${t.nDecided} (win ${t.winVsImplied.winPct}% vs implied ${t.winVsImplied.meanImpliedPct}%). Засуха входов — цена того, чтобы не быть неправым.`
+          ? `ДИСЦИПЛИНА ПРАВА: отказные сигналы потеряли бы $${Math.round(pnl)} на плоских ставках $100 при n=${t.nDecided} ИСПОЛНИМЫХ (win ${t.winVsImplied.winPct}% vs implied ${t.winVsImplied.meanImpliedPct}%). Засуха входов — цена того, чтобы не быть неправым.`
           : `СМЕШАННО при n=${t.nDecided}: отказники не бьют свой implied убедительно и не теряют явно (win ${t.winVsImplied.winPct}% vs ${t.winVsImplied.meanImpliedPct}%, P&L $${Math.round(pnl)}). Порог не трогаем, копим дальше.`,
   };
 }

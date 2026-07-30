@@ -67,6 +67,56 @@ function fillableUsdWithin(snap: DepthSnap, signalCents: number, bandCents: numb
   return usd;
 }
 
+/**
+ * ИСПОЛНИМОСТЬ — ОДНА РЕАЛИЗАЦИЯ НА ВЕСЬ ПРОЕКТ.
+ *
+ * «Fillable» = на момент сигнала книга держала мин-размер профиля в ≤3¢ от цены сигнала, по ЗАМОРОЖЕННОМУ
+ * снимку глубины. Это определение уже было здесь, но жило внутри одного отчёта — а второму потребителю
+ * (refusal_shadow) оно нужно дословно то же. Два одинаковых по замыслу порога, написанных дважды, у нас уже
+ * разъезжались (порог планки), поэтому зонд вынесен наружу, а не скопирован.
+ *
+ * `null` — снимка в окне нет. Честный третий ответ: снимки копятся с деплоя и не бэкфиллятся, поэтому
+ * «не знаем» обязано отличаться от «не исполнимо».
+ */
+export interface FillabilityProbe {
+  (matchId: string, label: string, signalCents: number, atIso: string): boolean | null;
+  params: { minSizeUsd: number; bandCents: number; snapshotWindowMin: number };
+  /** Сколько снимков вообще попало в окно — без этого доля fillable нечитаема (нулевое покрытие
+   *  выглядит как «ничего не исполнимо», а это разные вещи). */
+  coverage: { snapshots: number; matches: number; earliestAt: string | null; latestAt: string | null };
+}
+
+export function buildFillabilityProbe(
+  db: Database, opts: { fromMs: number; env?: Record<string, string | undefined> },
+): FillabilityProbe {
+  const env = opts.env ?? process.env;
+  const minSizeUsd = Math.max(1, Number(env.FOOTBALL_MIN_DEPTH_USD ?? 50));
+  const bandCents = Math.max(0, Number(env.UNFILLABLE_BAND_CENTS ?? 3));
+  const snapWinMin = Math.max(1, Number(env.UNFILLABLE_SNAPSHOT_WIN_MIN ?? 12));
+  const snapRows = db.prepare(
+    `SELECT match_id, label, token_id, asks_json, best_ask_cents, ask_depth_usd, at FROM book_depth_snapshots WHERE at >= ?`,
+  ).all(new Date(opts.fromMs - snapWinMin * 60_000).toISOString()) as (DepthSnap & { match_id: string })[];
+  const byMatch = new Map<string, (DepthSnap & { match_id: string })[]>();
+  for (const s of snapRows) (byMatch.get(s.match_id) ?? byMatch.set(s.match_id, []).get(s.match_id)!).push(s);
+  const norm = (x: string) => x.toLowerCase().replace(/\s+/g, " ").trim();
+  const ats = snapRows.map((s) => s.at).filter(Boolean).sort();
+  const fn = ((matchId: string, label: string, signalCents: number, atIso: string): boolean | null => {
+    const arr = byMatch.get(matchId); if (!arr) return null;
+    const t = Date.parse(atIso); if (!Number.isFinite(t)) return null;
+    let best: DepthSnap | null = null, bestDt = Infinity;
+    for (const s of arr) {
+      if (s.label && norm(s.label) !== norm(label)) continue;
+      const dt = Math.abs(Date.parse(s.at) - t);
+      if (dt < bestDt && dt <= snapWinMin * 60_000) { best = s; bestDt = dt; }
+    }
+    if (!best) return null;
+    return fillableUsdWithin(best, signalCents, bandCents) >= minSizeUsd;
+  }) as FillabilityProbe;
+  fn.params = { minSizeUsd, bandCents, snapshotWindowMin: snapWinMin };
+  fn.coverage = { snapshots: snapRows.length, matches: byMatch.size, earliestAt: ats[0] ?? null, latestAt: ats[ats.length - 1] ?? null };
+  return fn;
+}
+
 export interface UnfillableEdgeReport {
   generatedAt: string;
   window: { days: number; fromMs: number; toMs: number };
@@ -97,24 +147,8 @@ export function buildUnfillableEdge(db: Database, opts: { nowMs?: number; window
     return { league: String(c.external_league ?? c.name ?? "—"), sport: c.sport_id };
   };
 
-  // Book-depth snapshots grouped by match for the nearest-in-time fillability lookup.
-  const snapRows = db.prepare(`SELECT match_id, label, token_id, asks_json, best_ask_cents, ask_depth_usd, at FROM book_depth_snapshots WHERE at >= ?`).all(new Date(fromMs - snapWinMin * 60_000).toISOString()) as (DepthSnap & { match_id: string })[];
-  const snapsByMatch = new Map<string, (DepthSnap & { match_id: string })[]>();
-  for (const s of snapRows) (snapsByMatch.get(s.match_id) ?? snapsByMatch.set(s.match_id, []).get(s.match_id)!).push(s);
-  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
-  /** fillable? true/false from the nearest snapshot within the window; null when there's no snapshot. */
-  const fillableAt = (matchId: string, label: string, signalCents: number, atIso: string): boolean | null => {
-    const arr = snapsByMatch.get(matchId); if (!arr) return null;
-    const t = Date.parse(atIso); if (!Number.isFinite(t)) return null;
-    let best: (DepthSnap) | null = null, bestDt = Infinity;
-    for (const s of arr) {
-      if (s.label && norm(s.label) !== norm(label)) continue;
-      const dt = Math.abs(Date.parse(s.at) - t);
-      if (dt < bestDt && dt <= snapWinMin * 60_000) { best = s; bestDt = dt; }
-    }
-    if (!best) return null;
-    return fillableUsdWithin(best, signalCents, bandCents) >= minSizeUsd;
-  };
+  // Один общий зонд исполнимости (см. buildFillabilityProbe) — та же реализация, что читает refusal_shadow.
+  const fillableAt = buildFillabilityProbe(db, { fromMs, env });
 
   // Collect edge signals: every football prematch_value/overreaction bet the engine sized in the window.
   const aggr = new Map<string, { league: string; strategy: string; reason: UnfillReason; count: number; stakeUsd: number }>();
