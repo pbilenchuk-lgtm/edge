@@ -47,6 +47,18 @@ export async function GET() {
       // visible at a glance instead of living in chat memory. Full breakdown at ?report=overreaction_gate.
       overreactionGate: await (async () => { try { const { buildOverreactionGate } = await import("@/lib/overreactionGate"); const g = buildOverreactionGate(db); return { progress: g.progress, cleanCycles: g.cleanCycles, target: g.target, verdict: g.verdict }; } catch { return null; } })(),
       tennisLinkRate,
+      // Здоровье теннисного СКАУТА — единственного, что переводит теннисный матч в live. Его простой
+      // виден снаружи только так: 30.07 он молчал 13 часов, ~40 матчей висели в «ждём корт», а наружу
+      // не торчало ни одного числа — нашли вручную. Теперь торчит: когда был последний завершённый
+      // прогон, сколько строк вернул провайдер, сколько из них in-play, и текст его отказа, если он был.
+      tennisScout: await (async () => {
+        try {
+          const { tennisScoutHealth, tennisScoutSilence } = await import("@/lib/tennisScout");
+          const h = tennisScoutHealth(db);
+          const s = tennisScoutSilence(db);
+          return { ...h, silent: s.silent, note: s.note || null };
+        } catch { return null; }
+      })(),
     });
   } catch (e) {
     return NextResponse.json(

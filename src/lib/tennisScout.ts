@@ -114,20 +114,60 @@ export function normalizeLive(m: any): TennisLive | null {
   };
 }
 
-/** Fetch live tennis matches from API-Tennis. Never throws — returns [] on failure. */
-export async function fetchTennisLivescores(cfg: TennisConfig, deps: EngineDeps = {}): Promise<TennisLive[]> {
-  if (!cfg.enabled) return [];
+// ── ОТКАЗ ПРОВАЙДЕРА ОБЯЗАН НАЗЫВАТЬСЯ ОТКАЗОМ ──────────────────────────────────────────────
+// Обе выборки возвращали ГОЛЫЙ [] на любом исходе: HTTP 403 по квоте, конверт `{"success":0,
+// "result":{"error":...}}`, таймаут, брошенное исключение — и «в мире реально нет лайв-матчей».
+// Четыре разные причины схлопывались в одно неотличимое значение, поэтому скаут мог 13 часов
+// быть СЛЕПЫМ, а сторож при этом честно печатал «провайдер отдаёт пусто/не мапится» — диагноз,
+// который нельзя было ни подтвердить, ни опровергнуть. Хуже: обёртка в collectTennisSnapshots
+// ждала ИСКЛЮЧЕНИЯ, чтобы записать маркер ошибки, а функция не бросала никогда — маркер
+// `tennis_scout_last_error` был мёртвой проводкой ровно того класса, который мы уже ловили
+// сторожем ратифицированных фич.
+//
+// Поэтому выборка возвращает КОНВЕРТ: строки + причина, если строк нет по вине провайдера.
+// «Пусто» остаётся законным ответом — но только когда провайдер ответил успехом и пустым списком.
+export interface TennisFetch { rows: TennisLive[]; error: string | null }
+
+/** Достать человеческое сообщение об ошибке из ответа API-Tennis (форма плавает от метода к методу). */
+function apiErrorText(j: any): string {
+  const cand = j?.result?.error ?? j?.error ?? j?.message ?? j?.result;
+  if (typeof cand === "string" && cand.trim()) return cand.trim().slice(0, 160);
+  try { return JSON.stringify(cand ?? j).slice(0, 160); } catch { return "неразборчивый ответ"; }
+}
+
+/** Разобрать конверт API-Tennis. success!==1 или result не массив — это ОТКАЗ, а не пустой слейт. */
+function parseTennisEnvelope(j: any): { rows: any[]; error: string | null } {
+  if (Array.isArray(j?.result)) {
+    // success приходит и числом, и строкой; отсутствие поля при массиве-результате считаем успехом.
+    if (j.success != null && Number(j.success) !== 1) return { rows: [], error: `api success=${j.success}: ${apiErrorText(j)}` };
+    return { rows: j.result, error: null };
+  }
+  return { rows: [], error: `api_error: ${apiErrorText(j)}` };
+}
+
+/** Классифицировать брошенное исключение: обрыв по таймауту читается иначе, чем сетевой отказ. */
+function fetchErrorText(e: unknown, timeoutMs: number): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  const aborted = (e as { name?: string } | null)?.name === "AbortError" || /abort/i.test(msg);
+  return aborted ? `timeout ${timeoutMs}ms` : `exception: ${msg.slice(0, 160)}`;
+}
+
+/** Живые теннисные матчи из API-Tennis. Не бросает — отдаёт конверт {rows, error}. */
+export async function fetchTennisLivescores(cfg: TennisConfig, deps: EngineDeps = {}): Promise<TennisFetch> {
+  if (!cfg.enabled) return { rows: [], error: "ключ API_TENNIS_KEY не задан" };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
   try {
     const doFetch = deps.fetchImpl ?? fetch;
     const url = `${cfg.base}?method=get_livescore&APIkey=${encodeURIComponent(cfg.key)}`;
     const res = await doFetch(url, { signal: ctrl.signal });
-    if (!res.ok) return [];
-    const j = (await res.json()) as { success?: number; result?: unknown };
-    const rows = Array.isArray(j?.result) ? j.result : [];
-    return rows.map(normalizeLive).filter((x): x is TennisLive => x != null);
-  } catch { return []; }
+    if (!res.ok) return { rows: [], error: `http ${res.status}` };
+    let j: any;
+    try { j = await res.json(); } catch { return { rows: [], error: "тело ответа — не JSON" }; }
+    const env = parseTennisEnvelope(j);
+    if (env.error) return { rows: [], error: env.error };
+    return { rows: env.rows.map(normalizeLive).filter((x): x is TennisLive => x != null), error: null };
+  } catch (e) { return { rows: [], error: fetchErrorText(e, cfg.timeoutMs) }; }
   finally { clearTimeout(timer); }
 }
 
@@ -146,25 +186,28 @@ const TENNIS_FIXTURES_MAX_BYTES = (() => { const n = Number(process.env.TENNIS_F
  * get_livescore, this returns COMPLETED matches carrying `event_winner` + final `scores` — the
  * only authoritative way to settle a tennis match that ended normally (and just vanished from the
  * live feed). `wantedKeys` (if given) filters to just those event_keys BEFORE building any objects,
- * so retained memory is bounded to the handful of matches we care about. Never throws — returns []
- * on failure or an over-cap payload. date* are YYYY-MM-DD.
+ * so retained memory is bounded to the handful of matches we care about. Never throws — returns the
+ * {rows,error} envelope; an over-cap payload is a NAMED refusal, not a silent empty. date* YYYY-MM-DD.
  */
-export async function fetchTennisFixtures(cfg: TennisConfig, dateStart: string, dateStop: string, deps: EngineDeps = {}, wantedKeys?: Set<string>): Promise<TennisLive[]> {
-  if (!cfg.enabled) return [];
+export async function fetchTennisFixtures(cfg: TennisConfig, dateStart: string, dateStop: string, deps: EngineDeps = {}, wantedKeys?: Set<string>): Promise<TennisFetch> {
+  if (!cfg.enabled) return { rows: [], error: "ключ API_TENNIS_KEY не задан" };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
   try {
     const doFetch = deps.fetchImpl ?? fetch;
     const url = `${cfg.base}?method=get_fixtures&date_start=${encodeURIComponent(dateStart)}&date_stop=${encodeURIComponent(dateStop)}&APIkey=${encodeURIComponent(cfg.key)}`;
     const res = await doFetch(url, { signal: ctrl.signal });
-    if (!res.ok) return [];
+    if (!res.ok) return { rows: [], error: `http ${res.status}` };
     const text = await res.text();
-    if (text.length > TENNIS_FIXTURES_MAX_BYTES) return []; // too big to parse safely → skip (availability over settlement)
-    const j = JSON.parse(text) as { success?: number; result?: unknown };
-    const rows = Array.isArray(j?.result) ? j.result : [];
-    const wanted = wantedKeys ? rows.filter((r: any) => wantedKeys.has(String(r?.event_key))) : rows;
-    return wanted.map(normalizeLive).filter((x): x is TennisLive => x != null);
-  } catch { return []; }
+    // too big to parse safely → skip (availability over settlement), but SAY SO
+    if (text.length > TENNIS_FIXTURES_MAX_BYTES) return { rows: [], error: `ответ ${text.length}б > лимита ${TENNIS_FIXTURES_MAX_BYTES}б — не парсим (защита от OOM)` };
+    let j: any;
+    try { j = JSON.parse(text); } catch { return { rows: [], error: "тело ответа — не JSON" }; }
+    const env = parseTennisEnvelope(j);
+    if (env.error) return { rows: [], error: env.error };
+    const wanted = wantedKeys ? env.rows.filter((r: any) => wantedKeys.has(String(r?.event_key))) : env.rows;
+    return { rows: wanted.map(normalizeLive).filter((x): x is TennisLive => x != null), error: null };
+  } catch (e) { return { rows: [], error: fetchErrorText(e, cfg.timeoutMs) }; }
   finally { clearTimeout(timer); }
 }
 
@@ -320,19 +363,18 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
   if (!cfg.enabled) return 0;
   const batchAt = nowFn(deps)();
   const nowMs = Date.parse(batchAt) || Date.now();
-  // (b) Unwrap the provider fetch: a failure here used to propagate as a bare swallowed step-error
-  // (a stdout line that scrolls away). Record a QUERYABLE breadcrumb + re-throw so the step log still
-  // fires. The OWN liveness stamp below stays stale (we didn't complete), so the watchdog can tell a
-  // provider that THROWS apart from a loop that never ran (H2 vs H1) — the self-concealing death the
-  // scout had no signal for. (The Fable lesson in a third form: graceful degradation hid the failure.)
-  let raw: Awaited<ReturnType<typeof fetchTennisLivescores>>;
-  try { raw = await fetchTennisLivescores(cfg, deps); }
-  catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    try { R.metaSet(db, TENNIS_SCOUT_ERR_KEY, `${nowMs}|${msg.slice(0, 200)}`, batchAt); } catch { /* never block on a marker */ }
-    console.error(`[tennisScout] ПРОВАЙДЕР УПАЛ (снапшотов в этот тик нет): ${msg}`);
-    throw e;
+  // (b) Провайдерская выборка теперь возвращает ПРИЧИНУ пустоты, а не голый []. Прошлая версия ловила
+  // ИСКЛЮЧЕНИЕ, чтобы записать маркер, — а выборка не бросала никогда, так что маркер был мёртвой
+  // проводкой: 13 часов слепоты выглядели ровно как «в мире нет лайв-матчей». Теперь отказ провайдера
+  // записывается как отказ, а чистый прогон СНИМАЕТ маркер, чтобы старая ошибка не липла навсегда.
+  const fetched = await fetchTennisLivescores(cfg, deps);
+  if (fetched.error) {
+    try { R.metaSet(db, TENNIS_SCOUT_ERR_KEY, `${nowMs}|${fetched.error.slice(0, 200)}`, batchAt); } catch { /* never block on a marker */ }
+    console.error(`[tennisScout] ПРОВАЙДЕР ОТКАЗАЛ (снапшотов в этот тик нет): ${fetched.error}`);
+  } else if (R.metaGet(db, TENNIS_SCOUT_ERR_KEY)) {
+    try { R.metaSet(db, TENNIS_SCOUT_ERR_KEY, "", batchAt); } catch { /* best-effort */ }
   }
+  const raw = fetched.rows;
   // Keep in-play rows AND any TERMINAL transition row the feed happens to emit (live=0 + "Finished"/
   // "Retired"): that row carries the final result and MUST be persisted — dropping it was why a
   // normally-finished match never settled. (The primary terminal path is the get_fixtures poller,
@@ -387,11 +429,12 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
     written++;
   }
   // (a) OWN liveness signal — stamped on EVERY completed run, independent of match.state (which is
-  // scout-derived and dies WITH the scout). `written=0` while the schedule says a match should be
-  // live is the "provider returned empty / nothing mapped" signature (a blind loop, not a dead one).
-  try { R.metaSet(db, TENNIS_SCOUT_OK_KEY, `${nowMs}|${written}`, batchAt); } catch { /* never block on a marker */ }
+  // scout-derived and dies WITH the scout). Пишем ТРИ числа, а не одно: `written` без `raw` не
+  // различает «провайдер вернул 0 строк» и «вернул 40 строк, но ни одна не live / не смапилась» —
+  // а это разные поломки и чинятся они разным.
+  try { R.metaSet(db, TENNIS_SCOUT_OK_KEY, `${nowMs}|${written}|${raw.length}|${live.length}`, batchAt); } catch { /* never block on a marker */ }
   // P1.3: make the savings legible (skipped CLOB fetches / redundant finished writes this pass).
-  try { R.metaSet(db, "tennis_scout_savings", JSON.stringify({ tierSkipped, finishedSkipped, written, at: batchAt }), batchAt); } catch { /* ignore */ }
+  try { R.metaSet(db, "tennis_scout_savings", JSON.stringify({ tierSkipped, finishedSkipped, written, rawRows: raw.length, liveRows: live.length, error: fetched.error, at: batchAt }), batchAt); } catch { /* ignore */ }
   return written;
 }
 
@@ -464,10 +507,14 @@ const TENNIS_SCOUT_SILENT_MIN = (() => { const n = Number(process.env.TENNIS_SCO
  * SCOUT WATCHDOG (the signal the scout never had). Compares the scout's data-freshness to the EXTERNAL
  * schedule (match kickoff times, which don't die with the scout — unlike match.state, which the scout
  * itself drives). Returns silent=true when ≥1 tennis match should be live per its kickoff yet no
- * snapshot has landed in TENNIS_SCOUT_SILENT_MIN, with an H1/H2 cause hint from the OK/ERR markers:
+ * snapshot has landed in TENNIS_SCOUT_SILENT_MIN, with a cause hint from the OK/ERR markers:
+ *   • recent ERR marker             → провайдер ОТКАЗАЛ, с его собственным текстом (H3)
  *   • OK stamp fresh, writes stale  → loop ALIVE, provider blind/empty (H2)
- *   • recent ERR marker             → provider is throwing
  *   • OK stamp stale                → scout not being called at all — loop/process down (H1)
+ * ПОРЯДОК ВЕТОК — ЧАСТЬ ДИАГНОЗА. Раньше «луп жив» стояла первой и выигрывала всегда: скаут добегает
+ * до конца и при отказе провайдера, поэтому OK-штамп свежий ВСЕГДА, и реальная причина («http 403»,
+ * «api success=0: quota exceeded») никогда не печаталась. Прод 13 часов сообщал «провайдер отдаёт
+ * пусто/не мапится» — формально правду, но диагноз, по которому нечего чинить. Ошибка идёт первой.
  * Pure read; the caller alerts (throttled). No due-live match → not silent (a genuinely quiet slate).
  */
 export function tennisScoutSilence(db: Database, deps: EngineDeps = {}): { silent: boolean; note: string } {
@@ -483,17 +530,46 @@ export function tennisScoutSilence(db: Database, deps: EngineDeps = {}): { silen
   const lastWrite = (db.prepare(`SELECT MAX(batch_at) b FROM tennis_snapshots`).get() as { b?: string } | undefined)?.b;
   const writeAgeMin = lastWrite ? (nowMs - (Date.parse(lastWrite) || 0)) / 60_000 : Infinity;
   if (writeAgeMin <= TENNIS_SCOUT_SILENT_MIN) return { silent: false, note: "" };
-  const okRaw = R.metaGet(db, TENNIS_SCOUT_OK_KEY);
-  const okMs = okRaw ? Number(okRaw.split("|")[0]) || 0 : 0;
-  const errRaw = R.metaGet(db, TENNIS_SCOUT_ERR_KEY);
-  const errMs = errRaw ? Number(errRaw.split("|")[0]) || 0 : 0;
-  const recentErr = errMs > nowMs - TENNIS_SCOUT_SILENT_MIN * 60_000;
-  const cause = okMs > nowMs - TENNIS_SCOUT_SILENT_MIN * 60_000
-    ? "луп ЖИВ, но провайдер отдаёт пусто/не мапится (H2 — слепой скаут)"
-    : recentErr ? `провайдер падает: ${errRaw!.split("|").slice(1).join("|")}`
-    : "скаут не вызывался — луп/процесс его не крутит (H1)";
+  const h = tennisScoutHealth(db, nowMs);
+  const cause = h.error
+    ? `ПРОВАЙДЕР ОТКАЗАЛ: ${h.error} (H3 — чинится ключом/квотой, не кодом)`
+    : h.okFresh
+      ? `луп ЖИВ, провайдер ответил успехом: строк ${h.rawRows ?? "?"}, из них in-play ${h.liveRows ?? "?"} — пусто/не мапится (H2)`
+      : "скаут не вызывался — луп/процесс его не крутит (H1)";
   const ageTxt = Number.isFinite(writeAgeMin) ? `${Math.round(writeAgeMin)} мин` : "никогда";
   return { silent: true, note: `⚠ СКАУТ МОЛЧИТ (${ageTxt}) при ${due.length} матч(ах), которые по расписанию должны быть live — ${cause}` };
+}
+
+/** Сырое состояние скаут-маркеров: когда последний завершённый прогон, что он увидел, и жив ли отказ
+ *  провайдера. Отдельная функция, потому что это нужно ДВУМ потребителям — сторожу (диагноз) и
+ *  /api/health (внешний монитор). Здоровье, которое можно прочитать только из алерта в логах, —
+ *  это не здоровье: сегодняшний простой мы нашли только потому, что владелец пожаловался вручную. */
+export interface TennisScoutHealth {
+  lastOkAt: string | null; lastOkAgeMin: number | null; okFresh: boolean;
+  written: number | null; rawRows: number | null; liveRows: number | null;
+  error: string | null; errorAt: string | null;
+  lastWriteAt: string | null; lastWriteAgeMin: number | null;
+}
+export function tennisScoutHealth(db: Database, nowMs = Date.now()): TennisScoutHealth {
+  const num = (s: string | undefined) => { const n = Number(s); return Number.isFinite(n) ? n : null; };
+  const okRaw = R.metaGet(db, TENNIS_SCOUT_OK_KEY) || "";
+  const okParts = okRaw ? okRaw.split("|") : [];
+  const okMs = num(okParts[0]) ?? 0;
+  const errRaw = R.metaGet(db, TENNIS_SCOUT_ERR_KEY) || "";
+  const errParts = errRaw ? errRaw.split("|") : [];
+  const errMs = num(errParts[0]) ?? 0;
+  const lastWrite = (db.prepare(`SELECT MAX(batch_at) b FROM tennis_snapshots`).get() as { b?: string } | undefined)?.b ?? null;
+  const ageMin = (ms: number) => (ms > 0 ? Math.round(((nowMs - ms) / 60_000) * 10) / 10 : null);
+  // Ошибка «живая» ровно то же окно, что и молчание скаута: старее — это уже история, а не текущий отказ.
+  const errFresh = errMs > 0 && errMs > nowMs - TENNIS_SCOUT_SILENT_MIN * 60_000;
+  return {
+    lastOkAt: okMs > 0 ? new Date(okMs).toISOString() : null, lastOkAgeMin: ageMin(okMs),
+    okFresh: okMs > nowMs - TENNIS_SCOUT_SILENT_MIN * 60_000,
+    written: num(okParts[1]), rawRows: num(okParts[2]), liveRows: num(okParts[3]),
+    error: errFresh ? errParts.slice(1).join("|") : null,
+    errorAt: errMs > 0 ? new Date(errMs).toISOString() : null,
+    lastWriteAt: lastWrite, lastWriteAgeMin: lastWrite ? Math.round(((nowMs - (Date.parse(lastWrite) || 0)) / 60_000) * 10) / 10 : null,
+  };
 }
 
 // ── §4 Passive break marker: the panic window on the broken player's winner market ──

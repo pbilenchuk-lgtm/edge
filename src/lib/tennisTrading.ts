@@ -223,7 +223,11 @@ export async function pollTennisFinals(db: Database, deps: EngineDeps = {}): Pro
   let written = 0;
   for (const [start, cands] of byStart) {
     const wanted = new Set(cands.map((x) => x.eventKey));
-    const fixtures = await fetchTennisFixtures(cfg, start, start, deps, wanted).catch(() => [] as Awaited<ReturnType<typeof fetchTennisFixtures>>);
+    const res = await fetchTennisFixtures(cfg, start, start, deps, wanted).catch((e) => ({ rows: [], error: e instanceof Error ? e.message : String(e) }));
+    // Отказ провайдера при ЗАСТРЯВШИХ позициях — не «нет данных», а причина, по которой они висят.
+    // Молча уходя в continue, поллер оставлял позиции незакрытыми и ни строчки об этом не писал.
+    if (res.error) { console.error(`[tennisFinalPoll] get_fixtures ${start} ОТКАЗ (${cands.length} застрявш. позиц. остаются открытыми): ${res.error}`); continue; }
+    const fixtures = res.rows;
     if (!fixtures.length) continue;
     const byKey = new Map(fixtures.map((f) => [f.eventKey, f]));
     for (const cand of cands) {
