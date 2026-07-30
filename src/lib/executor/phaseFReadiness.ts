@@ -114,49 +114,6 @@ export function buildPhaseFReadiness(
   add("target_exercised", `${targetStrategy} реально прогнан в dry`, tgtFills > 0 ? "pass" : tgtOrders > 0 ? "warn" : "fail",
     tgtFills > 0 ? `${tgtFills} dry-филлов из ${tgtOrders} ордеров по целевой стратегии` : tgtOrders > 0 ? `${tgtOrders} ордеров, но 0 филлов — целевая стратегия не дошла до книги` : `⛔ 0 ордеров по ${targetStrategy} — нечего оценивать для реала`);
 
-  // ── [пункт 7] ПАРА ИСПОЛНЕНИЯ: два блокера, которые обязаны стоять здесь явно ──────────────────
-  //
-  // (1) ВЕЕР ПО ЛИКВИДНОСТИ. Книга ордеров кэшируется на цикл, и несколько ставок (профили одной
-  // стратегии, а то и разные стратегии) исполняются об ОДИН И ТОТ ЖЕ стакан, НЕ съедая его: каждая
-  // получает полную глубину, как будто пришла первой. На бумаге это бесплатно, на реальных деньгах —
-  // нет: второй ордер идёт по худшей цене или не проходит вовсе. Значит ВСЯ статистика исполнения
-  // систематически оптимистична, и любой вывод о ВМЕСТИМОСТИ, снятый с неё, завышен. Это не «замечание
-  // к отчёту»: пока веер есть, число «сколько мы можем поставить» не является измерением. Гейт держит
-  // Phase F до тех пор, пока веер по ЦЕЛЕВОЙ стратегии не устранён или честно не отнесён владельцем.
-  const fanRows = db.prepare(
-    `SELECT b.strategy_id AS sid, SUM(f.notional_usd) AS usd, COUNT(*) AS n
-       FROM fill_costs f JOIN bets b ON b.id = f.bet_id
-      WHERE f.side='buy' AND f.from_book=1
-      GROUP BY f.match_id, b.market_label, f.created_at, b.strategy_id
-     HAVING COUNT(*) > 1`,
-  ).all() as { sid: string; usd: number; n: number }[];
-  const allBuy = ((db.prepare(`SELECT COALESCE(SUM(notional_usd),0) AS x, COUNT(*) AS n FROM fill_costs WHERE side='buy' AND from_book=1`).get() as any) ?? { x: 0, n: 0 });
-  const tgtFan = fanRows.filter((r) => r.sid === targetStrategy);
-  const tgtFanUsd = Math.round(tgtFan.reduce((a, r) => a + (r.usd ?? 0), 0));
-  const allFanUsd = Math.round(fanRows.reduce((a, r) => a + (r.usd ?? 0), 0));
-  const fanPct = allBuy.x > 0 ? Math.round((1000 * allFanUsd) / allBuy.x) / 10 : null;
-  add("liquidity_fanout", "Нет веера по ликвидности у целевой стратегии",
-    Number(allBuy.n) === 0 ? "warn" : tgtFanUsd > 0 ? "fail" : allFanUsd > 0 ? "warn" : "pass",
-    Number(allBuy.n) === 0
-      ? "книжных филлов ещё нет — веер не измерен, и это значит «неизвестно», а не «нет»"
-      : tgtFanUsd > 0
-        ? `⛔ $${tgtFanUsd} входов ${targetStrategy} исполнены об ОДИН стакан в один момент (${tgtFan.length} случаев) — глубина не съедалась, статистика исполнения завышена. Вывод о вместимости на этих числах строить нельзя, пока веер не устранён или не отнесён явно.`
-        : allFanUsd > 0
-          ? `у ${targetStrategy} веера нет, но по остальным стратегиям $${allFanUsd} (${fanPct}% книжного объёма) — их числа вместимости завышены`
-          : `каждый книжный филл единственный на свой стакан — глубина не переиспользована`);
-
-  // (2) ПРЕДОХРАНИТЕЛЬ-БЕРСЕРК СЧИТАЛ СИМУЛЯЦИЮ ЗА РЕАЛЬНЫЕ ДЕНЬГИ. В real_orders не было признака
-  // сухого прогона, и лимит «N ордеров/час» складывал оба контура: в dry он молча подрезал сухую воронку
-  // (а причина не называлась), а в момент перехода на реал первые же настоящие ордера могли быть
-  // отклонены квотой, потраченной симуляцией. Колонка `dry` и раздельный счёт это чинят; проверка стоит
-  // здесь, потому что доверять сухой статистике можно только зная, что её не подрезал чужой лимит.
-  const dryCol = (db.prepare(`SELECT COUNT(*) n FROM pragma_table_info('real_orders') WHERE name='dry'`).get() as any).n as number;
-  const mixed = dryCol ? ((db.prepare(`SELECT COUNT(*) n FROM real_orders WHERE dry NOT IN (0,1)`).get() as any).n as number) : -1;
-  add("berserk_scope", "Предохранитель считает свой контур", dryCol === 0 ? "fail" : mixed > 0 ? "fail" : "pass",
-    dryCol === 0 ? "⛔ у real_orders нет признака dry — предохранитель ордеров/час считает симуляцию наравне с реальными деньгами"
-      : mixed > 0 ? `⛔ ${mixed} ордеров с неопределённым режимом — счётчик контура неоднозначен`
-      : "сухие и реальные ордера считаются раздельно — квота симуляции не расходует реальную");
-
   const counts = { pass: checks.filter((c) => c.status === "pass").length, warn: checks.filter((c) => c.status === "warn").length, fail: checks.filter((c) => c.status === "fail").length };
   const verdict: PhaseFReadiness["verdict"] = counts.fail > 0 ? "hold" : counts.warn > 0 ? "review" : "go";
   const note = verdict === "hold"

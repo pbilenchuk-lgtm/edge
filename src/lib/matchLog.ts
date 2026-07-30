@@ -113,45 +113,8 @@ export function entryBlockerDiag(db: Database, matchId: string, env: Record<stri
     const preLineupHold = R.LINEUP_SPORTS.has(sportId) && !m.lineup_out && (m.state === "upcoming" || m.state === "lineup");
     if (preLineupHold) out.push("ПРЕВЬЮ ДО СОСТАВОВ: lineup_out=false и состояние upcoming/lineup → предложения держатся как превью (это и есть ветка превью)");
     else out.push(`превью-ветка НЕ активна (составы ${m.lineup_out ? "out" : "не out"}, состояние ${m.state}) — невход объясняется НЕ ею`);
-    // Gate 2 — СТАДИЯ, на которой умер каждый pick, а не бинарное «предложений нет». [W4 / batch-12]
-    // Старый текст «стратег не выдал ни одной ставки» печатался, когда в снимке нет строк proposed/filled —
-    // но pick, отклонённый НА ФИЛЛЕ, к этому моменту уже not_filled, то есть ни то ни другое. Hacken: 16
-    // picks, все отклонены stale_proposal — а шапка отправила чинить стратега. Диагноз, который врёт про
-    // стадию, хуже отсутствия диагноза: он тратит следующий раунд расследования на здоровый компонент.
-    const notFilled = bets.filter((b) => b.status === "not_filled");
-    if (!proposed.length && !filled.length && !notFilled.length) {
-      out.push("strategist_empty: стратег не выдал ни одной ставки — заполнять было нечего (гейты входа даже не достигнуты)");
-      return out;
-    }
-    if (notFilled.length) {
-      // Классификация по ФАКТИЧЕСКОМУ пути из rationale: до-филловые гейты ≠ отказ исполнителя. Порядок
-      // проверок = порядок гейтов в autoEnter, чтобы у строки с несколькими метками победила первая стадия.
-      const GATE: [RegExp, string][] = [
-        [/zombie_quarantine:(\w+)/, "gate_blocked:zombie_quarantine"],
-        [/draw_canon:(\w+)/, "gate_blocked:draw_canon"],
-        [/thesis_cap\b/, "gate_blocked:thesis_cap"],
-        [/daily_cluster_cap/, "gate_blocked:daily_cluster_cap"],
-        [/ft_blind_placeholder/, "gate_blocked:ft_blind_placeholder"],
-      ];
-      const FILL: [RegExp, string][] = [
-        [/stale_proposal/, "fill_rejected:stale_proposal"],
-        [/depth_floor_skip/, "fill_rejected:depth_floor"],
-        [/ft_blind_min_stake/, "fill_rejected:ft_blind_min_stake"],
-        [/entry_phantom_block/, "fill_rejected:phantom"],
-        [/untradeable_market_block/, "fill_rejected:untradeable"],
-        [/orderbook_unavailable/, "fill_rejected:orderbook_unavailable"],
-      ];
-      const tally = new Map<string, number>();
-      for (const b of notFilled) {
-        const r = b.rationale ?? "";
-        const hit = GATE.find(([re]) => re.test(r)) ?? FILL.find(([re]) => re.test(r));
-        const key = hit ? hit[1] : "not_filled:без_метки";
-        tally.set(key, (tally.get(key) ?? 0) + 1);
-      }
-      const parts = [...tally.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ×${n}`).join(" · ");
-      out.push(`ПРЕДЛОЖЕНИЯ БЫЛИ, отклонены по стадиям: ${parts} (всего ${notFilled.length}) — чинить надо названную стадию, НЕ стратега`);
-    }
-    if (!proposed.length && !filled.length) return out;
+    // Gate 2 — was there anything to fill?
+    if (!proposed.length && !filled.length) { out.push("НЕТ ПРЕДЛОЖЕНИЙ: стратег не выдал ни одной ставки — заполнять было нечего (гейты входа даже не достигнуты)"); return out; }
     if (!proposed.length) return out;
     // Gate 3 — live coverage vs ft_blind eligibility, per proposal. The env flag is read by the SAME name and
     // the SAME comparison ftBlindConfig uses (`FT_BLIND_ENABLED === "true"`, case-insensitive) — a diagnostic

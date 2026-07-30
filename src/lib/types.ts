@@ -192,8 +192,6 @@ export interface Bet {
    *  "early" = cashed out at market; "partial" = a partial-fixation child slice.
    *  Only resolution-settled bets feed the predictive metrics (Brier/CLV). */
   settled_by?: string | null;
-  /** [batch-11] Provenance of the PM-resolution cross-check token: which source supplied the complement. */
-  settled_via?: string | null;
   /** When the bet was closed/settled (ISO) — for the closures-log timestamp. */
   settled_at?: string | null;
   /** JSON snapshot of the decision-time context (edge/kelly/probs/calibration/phase/
@@ -246,9 +244,6 @@ export interface TradeLogEntry {
   text: string;
   created_at: string;
   dedup_key?: string | null; // Z3: when set, a duplicate (match_id, type, dedup_key) insert is ignored
-  /** [пункт 6] Однозначный адрес строки выхода: чья это ставка. Пара (стратегия + ярлык рынка) адресом не
-   *  является — два профиля одной стратегии держат тот же рынок и пишут неразличимые строки. */
-  bet_id?: string | null;
 }
 
 export interface CalibrationBucket {

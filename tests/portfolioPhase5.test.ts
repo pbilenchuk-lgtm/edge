@@ -38,11 +38,8 @@ function seedPortfolio(db: any) {
   R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: null, color: null, version: 1, prompt: "", prompt_live: null, params: null, model: null, model_live: null, created_at: "t" } as any);
   // clean-epoch (e5) totals bets: mix of wins/losses with CLV that tracks P&L (positive corr).
   const mk = (i: number, won: boolean, clvC: number, createdAt: string) => {
-    // end_time = "t" не парсится, поэтому отсечка берётся от кикоффа; линия — снимок котировки внутри окна.
-    R.insertMatch(db, { id: "m" + i, competition_id: "c1", home: "H" + i, away: "A" + i, state: "finished", lineup_out: true, kickoff_at: createdAt, minute: null, score_home: null, score_away: null, final_score: "2-1", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "m" + i } as any);
+    R.insertMatch(db, { id: "m" + i, competition_id: "c1", home: "H" + i, away: "A" + i, state: "finished", lineup_out: true, kickoff_at: createdAt, minute: null, score_home: null, score_away: null, final_score: "2-1", kickoff_time: null, end_time: "t", duration: null, end_note: null, external_ref: "m" + i } as any);
     const stake = 100, entry = 50, close = 50 + clvC;
-    // [пункт 6] Линия закрытия живёт в снимках котировок, а не в поле ставки — сеем то, что и есть линия.
-    R.insertMarket(db, { id: R.uid(), match_id: "m" + i, label: "Over 2.5", price: close, ai_prob: null, liquidity: null, external_ref: null, token_second: null, snapshot_at: new Date(Date.parse(createdAt) + 110 * 60_000).toISOString(), is_closing: false } as any);
     db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,proposed_price,entry_price,current_price,closing_price,ai_prob,stake,rationale,entered_minute,result,payout,settled_by,settled_at,entry_meta,code_version,decision_id,origin,origin_source,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run("b" + i, "m" + i, "prematch_value", "medium", "Over 2.5", won ? "settled_won" : "settled_lost", entry, entry, entry, close, 0.6, stake, "r", "предматч", won ? "won" : "lost", won ? stake * 2 : 0, "settle", createdAt, JSON.stringify({ phase: "prematch" }), "e5", "d" + i, "prematch", "decision", createdAt);
   };

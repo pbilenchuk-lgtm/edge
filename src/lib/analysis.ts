@@ -10,7 +10,6 @@
 // Graceful: a failed model call marks the assessment failed (§6), no crash.
 // ============================================================
 
-import { isRailPrice } from "./zombieMarket.js";
 import { recordRefusalForMatch } from "./refusalShadow.js";
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
@@ -18,7 +17,7 @@ import { assessMatchLLM, assessFootballStructured, assessCategoryModifier, effec
 import { assembleFootball, type AssembledAnalysis } from "./assembler.js";
 import { footballLabelProb } from "./footballMarkets.js";
 import { impliedProbs, probSumFlags, sizePrematch, correlationKey } from "./strategist.js";
-import { matchThesisRoom, bankUsd } from "./thesisExposure.js";
+import { matchThesisRoom } from "./thesisExposure.js";
 import { marketFamily } from "./signals.js";
 import { recordFamilyShadowSignal, killedFamilies, isDemotedFamily } from "./familyShadow.js";
 import { getProfileConfig } from "./riskConfig.js";
@@ -242,32 +241,7 @@ export async function runStrategists(
   const duel = loadAnalysisDuel(env);
   const analysisTag = duel.enabled && assessment.model ? analysisModelTag(assessment.model) : null;
 
-  // [прод-разбор 29.07] ПЛАНОЧНЫЕ ЦЕНЫ НЕ ПОКАЗЫВАЕМ СТРАТЕГУ НА НЕСЫГРАННОМ МАТЧЕ.
-  //
-  // Карантин зомби-рынков работает ТОЛЬКО для live-футбола (footballZombieMap гейтится на state==='live'),
-  // поэтому в предматче стратег получал книгу как есть — а она была отравлена: 2030 из 6660 рынков стояли
-  // у планки, 865 из них на матчах, которые ещё не начались. Стратег вёл себя правильно и отказывался
-  // торговать целиком («котировки нерепрезентативны, ждать live-глубины», picks: []) — то есть мусор в
-  // книге останавливал торговлю, а не отдельную ставку. Убираем такие рынки из его поля зрения: у
-  // несыгранного матча планка означает мёртвую/одностороннюю книгу, а не эффективную котировку.
-  //
-  // Завершённый матч не трогаем: там планка — честная цена разрешения, и прятать её незачем.
-  // Граница — СТАРТОВЫЙ СВИСТОК: после него планку объясняет счёт (этим занимается resolved_price), и
-  // прятать «Over 0.5 @98¢» при забитом голе было бы враньём. См. zombieMarket.isRailPrice.
-  const kickedOff = match.state === "live" || match.state === "finished"
-    || (!!match.kickoff_at && (Date.parse(match.kickoff_at) || Infinity) <= (Date.parse(now()) || Date.now()));
-  const allMarkets = R.latestMarkets(db, matchId);
-  const railed = kickedOff ? [] : allMarkets.filter((m) => m.price != null && isRailPrice(m.price));
-  const freshMarkets = railed.length ? allMarkets.filter((m) => !railed.includes(m)) : allMarkets;
-  if (railed.length) {
-    // Цена скрытия обязана быть посчитана: молча сузить стратегу выбор — это тот же класс, что молча
-    // отказать во входе. Одна строка на матч, не на рынок.
-    try {
-      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? "", minute: null, type: "skip",
-        text: `rail_price: ${railed.length} из ${allMarkets.length} рынков у планки ДО стартового свистка — скрыты от стратега (мёртвая/односторонняя книга, не котировка)`,
-        dedup_key: `rail:${matchId}:${stage}`, created_at: now() });
-    } catch { /* улика не имеет права ломать анализ */ }
-  }
+  const freshMarkets = R.latestMarkets(db, matchId);
   // Only replace existing proposals if we actually have usable probabilities — a
   // degenerate state must not wipe the previous good proposals with nothing.
   if (!freshMarkets.some((m) => m.ai_prob != null)) return { betsCreated: 0, decisions: [] };
@@ -349,28 +323,20 @@ export async function runStrategists(
       R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `стратег недоступен (${dec.error || "нет ответа ИИ"}) — входов нет (без базовой подмены)`, created_at: now() });
     }
 
-    // [batch-12 W5-аудит] Экспозиция матча и кластера СЧИТАЕТСЯ ПО open+proposed. Раньше — только по open,
-    // и это асимметрично соседней строке: comp-кэп (strategyCompExposure) proposed уже включал. Стадии
-    // pre_lineup и post_lineup — два независимых прогона, autoAnalyze идёт ДО autoEnter в тике, поэтому
-    // второй прогон не видел предложений первого и мог напредлагать ещё столько же: до 2× кэпа матча и
-    // кластера, оба пакета филлятся (openKey-дедуп ловит лишь идентичный рынок пары, а тезисный кэп по
-    // умолчанию выключен). Футбол в дефолте прикрыт lineup-гейтом, но теннис/киберспорт и краевые случаи
-    // футбола (перенос, откатывающий lineup_out) — нет. Считать надо ОБЯЗАТЕЛЬСТВА, а не только исполненное.
-    const committed = committedBets(R.betsForMatch(db, matchId, strat.id), profile);
     const held = new Set(openPos.map((b) => norm(b.market_label)));
     let exposure = strategyCompExposure(db, match.competition_id, strat.id, profile) - strategyCompRealized(db, match.competition_id, strat.id, profile);
     const cfg = getProfileConfig(db, profile);
     const psFlags = probSumFlags(quotes, cfg);
-    let matchExposure = committed.reduce((s, b) => s + (b.stake ?? 0), 0);
+    let matchExposure = openPos.reduce((s, b) => s + (b.stake ?? 0), 0);
     // Same-event correlation exposure, seeded from positions this pair already
     // holds so a fresh correlated market sizes against the existing stack, not
     // from zero (see correlationKey / the cluster cap in sizePrematch).
     const clusterExp = new Map<string, number>();
-    for (const b of committed) { const k = correlationKey(b.market_label, match.home, match.away); if (k) clusterExp.set(k, (clusterExp.get(k) ?? 0) + (b.stake ?? 0)); }
+    for (const b of openPos) { const k = correlationKey(b.market_label, match.home, match.away); if (k) clusterExp.set(k, (clusterExp.get(k) ?? 0) + (b.stake ?? 0)); }
     // T3.2: a market the strategist listed in rejected[] must never be entered, even if it also appears in
     // picks — rejected is authoritative over picks (Hammarby BTTS-Yes). The execution gate reads it.
     const rejectedSet = new Set((dec.ok && dec.rejected ? dec.rejected : []).map((r) => norm(r.market)));
-    let entries = 0, skipped = 0, flagged = 0, selfRefuted = 0;
+    let entries = 0, skipped = 0, flagged = 0;
     const battle: any[] = [];
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
       .map((m) => { const implied = impliedMap.get(m.label)?.implied ?? m.price / 100; return { m, implied, edge: (m.ai_prob as number) - implied }; })
@@ -390,20 +356,6 @@ export async function runStrategists(
       if (conflicts.has(m.label)) { flagged++; battle.push({ market: m.label, status: "flag", reason: conflicts.get(m.label) }); continue; }
       const ourProb = pick?.prob != null ? pick.prob : (m.ai_prob as number);
       if (pick?.prob != null) R.setMarketAiProb(db, m.id, pick.prob);
-      // [прод-разбор 30.07] САМООПРОВЕРГАЮЩИЙСЯ PICK: стратег кладёт рынок в `picks` и ТУТ ЖЕ пишет, что
-      // покупать его нельзя. Живой пример из лога Bay FC — NJ/NY Gotham:
-      //   { "label": "Over 3.5", "prob": 0.31, "reason": "discounted — цена выше моей оценки, ставить Over
-      //     нельзя", "totalCheck": "цена 48.5 при derived 31% — рынок над оценкой, edge отрицательный" }
-      // Деньги это не трогало: сайзинг убивал такую заявку по «edge < порога». Врала ДИАГНОСТИКА — в журнал
-      // уходило «стратег выбрал 1 pick(s), ни один не прошёл вход», то есть виноватым выглядел код-гейт,
-      // хотя стратег не выбрал НИ ОДНОГО. Ровно тот класс, что мы чиним весь день: счётчик, который
-      // рассказывает не то, что произошло. Проверка машинная — по его же числам, а не по словам в reason:
-      // собственная вероятность ниже подразумеваемой ценой = это не покупка, чем бы её ни назвали.
-      if (pick && pick.prob != null && pick.prob <= implied) {
-        selfRefuted++;
-        battle.push({ market: m.label, status: "skip", reason: `pick_self_refuted: собственная оценка ${Math.round(pick.prob * 100)}% ≤ подразумеваемой ценой ${Math.round(implied * 100)}% — это не покупка (стратег назвал рынок и сам же его опроверг)` });
-        continue;
-      }
       if (psFlags.has(m.label)) { flagged++; battle.push({ market: m.label, status: "flag", reason: "prob_sum вне допуска" }); continue; }
       const cKey = correlationKey(m.label, match.home, match.away);
       // Executable-ask edge (fix #1): a BUY pays the ASK, not the mid. Size/gate against the executable
@@ -414,12 +366,7 @@ export async function runStrategists(
       const execCents = askUsable ? (m.ask_cents as number) : m.price;
       const edgeSource: "executable" | "mid_fallback" = askUsable ? "executable" : "mid_fallback";
       const effImplied = askUsable ? execCents / 100 : implied;
-      // bankCeiling: the sizing_insanity backstop, built after a corrupted budget sized a $28k tennis stake on a
-      // $1k bank, was wired into tennis ONLY — football sized off `competitions.budget` (a DB row, i.e. the exact
-      // corruptible input) with no absolute floor under it. Undeclared bank → 0 → undefined → guard stays inert,
-      // so nothing changes for a deployment that never stated its bank.
-      const bank = bankUsd(env) || undefined;
-      const r = sizePrematch({ ourProb, priceCents: execCents, implied: effImplied, calibration, liquidity: parseLiq(m.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg, bankCeiling: bank });
+      const r = sizePrematch({ ourProb, priceCents: execCents, implied: effImplied, calibration, liquidity: parseLiq(m.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg });
       // S5 (R0.5): MATCH-WIDE thesis cap — a correlated stack (dom:/total: cluster) is one thesis across ALL
       // strategies/profiles, so clamp the entry to the thesis' remaining room on the match (not just this
       // pair's). Off by default (THESIS_MATCH_CAP_USD unset → room=Infinity → no-op); the real=on blocker.
@@ -523,22 +470,18 @@ export async function runStrategists(
           const nRef = recordRefusalForMatch(db, matchId, strat.id, (dec as { note?: string }).note ?? null, now());
           if (nRef > 0) R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `refusal_shadow: ${nRef} тотал(ов) с заявленным краем записаны would-be — отказ будет оценён когортой, а не спором`, created_at: now() });
         } catch { /* measurement must never break the decision path */ }
-      } else if (dec.ok && (skipped + flagged + selfRefuted) > 0) {   // самоопровергнутая заявка тоже обязана дать строку
+      } else if (dec.ok && (skipped + flagged) > 0) {
         // TRUTHFUL audit (правдивый лог): `skipped` = markets the STRATEGIST chose not to pick (his
         // judgement: no edge there), NOT markets a code threshold rejected — so "N рынков ниже порога"
         // was a lie of the engine. And if the strategist DID name picks (nPicks>0) that then failed to
         // enter, say THAT — "chose N, none passed entry" is a different event than "chose nothing",
         // and the difference matters for audit (his call vs the code's gate).
-        // Самоопровергнутые заявки НЕ считаются выбором стратега: он назвал рынок и сам же написал, что
-        // покупать нельзя. Считать их «выбранными» — значит перекладывать его отказ на код-гейт.
-        const nPicks = Math.max(0, (Array.isArray(picksArr) ? picksArr.length : 0) - selfRefuted);
+        const nPicks = Array.isArray(picksArr) ? picksArr.length : 0;
         const why = nPicks > 0
-          ? `стратег выбрал ${nPicks} pick(s), ни один не прошёл вход${flagged > 0 ? ` (${flagged} снят предохранителем)` : " (порог edge / неисполнимо на книге)"}${selfRefuted > 0 ? ` · ещё ${selfRefuted} заявк(и) стратег опроверг собственными числами (pick_self_refuted)` : ""}`
-          : selfRefuted > 0
-            ? `стратег назвал ${selfRefuted} рынк(ов) и сам же опроверг их собственными числами — покупки не было ни одной (pick_self_refuted)`
-            : flagged > 0
-              ? `флаги предохранителей сняли ${flagged} рынк.`
-              : `стратег не выбрал ни один рынок (нет края по его оценке)`;
+          ? `стратег выбрал ${nPicks} pick(s), ни один не прошёл вход${flagged > 0 ? ` (${flagged} снят предохранителем)` : " (порог edge / неисполнимо на книге)"}`
+          : flagged > 0
+            ? `флаги предохранителей сняли ${flagged} рынк.`
+            : `стратег не выбрал ни один рынок (нет края по его оценке)`;
         R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — ${why}`, created_at: now() });
       }
     }
@@ -795,12 +738,6 @@ export function strategyCompExposure(db: Database, competitionId: string, strate
     for (const b of R.betsForMatch(db, mt.id, strategyId))
       if ((b.status === "open" || b.status === "proposed") && (profileId == null || (b.risk_profile_id ?? "medium") === profileId)) sum += b.stake ?? 0;
   return sum;
-}
-/** [batch-12 W5-аудит] ОБЯЗАТЕЛЬСТВА пары на ОДНОМ матче: open + ещё не отменённые proposed. Тот же счёт,
- *  что и у comp-кэпа выше — кэп матча и кластера обязан читать его же, иначе два прогона одного тика
- *  (pre_lineup и post_lineup) видят пустой матч дважды и предлагают до 2× кэпа. */
-export function committedBets<T extends { status: string; risk_profile_id?: string | null }>(bets: T[], profileId: string): T[] {
-  return bets.filter((b) => (b.status === "open" || b.status === "proposed") && (b.risk_profile_id ?? "medium") === profileId);
 }
 /** Realized P&L ($) a (strategy, profile) pair booked across the WHOLE competition
  *  (bankroll = budget + realized, so a loss elsewhere shrinks what's re-stakeable

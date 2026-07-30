@@ -46,11 +46,6 @@ export async function GET() {
       // Overreaction sample gate self-announces its progress ("6/30") so the strategy-verdict readiness is
       // visible at a glance instead of living in chat memory. Full breakdown at ?report=overreaction_gate.
       overreactionGate: await (async () => { try { const { buildOverreactionGate } = await import("@/lib/overreactionGate"); const g = buildOverreactionGate(db); return { progress: g.progress, cleanCycles: g.cleanCycles, target: g.target, verdict: g.verdict }; } catch { return null; } })(),
-      // [ratified #1] The void rate self-announces, next to the other gates. Built because the complement bug
-      // was found by ACCIDENT: 225 bets sat booked as refunds while their markets had resolved, and no number
-      // anywhere could have shouted. This does not detect that bug (it is fixed) — it detects the CLASS, «the
-      // ledger has quietly drifted from reality», whatever the next cause turns out to be.
-      voidWatch: await (async () => { try { const { buildVoidWatch } = await import("@/lib/voidWatch"); const v = buildVoidWatch(db); return { verdict: v.verdict, voidPct: v.voidPct, voids: v.voids, decided: v.decided, byReason: v.byReason, note: v.note }; } catch { return null; } })(),
       tennisLinkRate,
     });
   } catch (e) {

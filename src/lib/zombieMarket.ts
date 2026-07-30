@@ -21,9 +21,7 @@
 // only on unambiguous contradictions; anything it can't classify is left tradeable (fail-open on ambiguity).
 // ============================================================
 
-import { RESOLVED_RAIL_CENTS } from "./polymarket.js";
-
-export type ZombieCode = "rail_price" | "resolved_price" | "notation_desync" | "placeholder_mid" | "stale_book";
+export type ZombieCode = "resolved_price" | "notation_desync" | "placeholder_mid" | "stale_book";
 export interface ZombieReason { code: ZombieCode; detail: string }
 
 export interface ZombieConfig {
@@ -92,43 +90,10 @@ export interface ZombieInput {
   bookAgeMin: number | null;
   /** is the match live right now (gates the stale-book rule). */
   live: boolean;
-  /** Начался ли матч. `false` включает правило (a0): планка ДО свистка — не цена. После свистка цену
-   *  объясняет СЧЁТ, и этим занимается resolved_price. `undefined` — правило не срабатывает. */
-  matchKickedOff?: boolean;
-}
-
-/**
- * [прод-разбор 29.07] ЦЕНА У ПЛАНКИ НА МАТЧЕ, КОТОРЫЙ ЕЩЁ НЕ НАЧАЛСЯ — ЭТО НЕ ЦЕНА.
- *
- * `Fenerbahçe — Yes 100¢`, `Górnik — Yes 0.1¢`, `Draw — Yes 0.1¢`; по всей базе 828 таких рынков стояло на
- * матчах, которые ещё не стартовали. До стартового свистка никакой счёт не может оправдать планку: это
- * мёртвая или односторонняя книга, а не эффективная котировка. Стратег отказывался торговать её целиком
- * («котировки нерепрезентативны») — то есть мусор останавливал торговлю, а карантин его пропускал:
- * единственное правило, способное поймать (`stale_book`), ИМЕННО такие цены и освобождало через `extreme`.
- *
- * ГРАНИЦА ПРАВИЛА — СТАРТОВЫЙ СВИСТОК, А НЕ ФИНАЛЬНЫЙ. Первая версия ключевалась на «матч не завершён», и
- * прод показал цену этой ошибки в тот же вечер: на 90'+4' матча Bay FC — NJ/NY Gotham (0:1) правило писало
- * «цена 98.5¢ у планки на НЕСЫГРАННОМ матче» про `Draw — No` и карантинило `Over 0.5 @98¢` — цены
- * АБСОЛЮТНО верные, потому что гол уже забит. Заодно вернулось хлопанье карантин↔снятие (3-я минута:
- * карантин → снят → карантин), ради устранения которого освобождение `extreme` и писалось.
- *
- * После свистка цену объясняет СЧЁТ, и для этого есть своё правило (resolved_price сравнивает цену с
- * game-state вероятностью). До свистка объяснять нечем — там работает это правило, и только там.
- */
-export function isRailPrice(priceCents: number): boolean {
-  // ОДИН порог с путём записи (`polymarket.RESOLVED_RAIL_CENTS`, «effectively-resolved / dead line»).
-  // В первой версии здесь стоял `staleExtremeCents` (2¢) — я объявил «один порог, не два» и тут же завёл
-  // второй. Из-за него под правило попадали живые длинные ставки в 1.5–2¢.
-  return priceCents <= RESOLVED_RAIL_CENTS || priceCents >= 100 - RESOLVED_RAIL_CENTS;
 }
 
 /** Classify a single market. Returns the FIRST matching zombie reason (a → b → c), or null if tradeable. */
 export function classifyZombie(inp: ZombieInput, cfg: ZombieConfig): ZombieReason | null {
-  // (a0) Планочная цена на НЕЗАВЕРШЁННОМ матче. Проверяется ПЕРВОЙ: пока цена не является ценой, все
-  // остальные суждения о ней (насколько отстала от исхода, разошлись ли нотации) бессмысленны.
-  if (inp.matchKickedOff === false && isRailPrice(inp.priceCents)) {
-    return { code: "rail_price", detail: `цена ${Math.round(inp.priceCents * 10) / 10}¢ у планки ДО стартового свистка — книга мёртвая/односторонняя, это не котировка` };
-  }
   // (a) price contradicts a completed event: the leg is game-state-resolved yes but priced far below 100¢.
   // F6: compare against the live executable ask when we have one — a resolved leg whose real book already sits
   // at ~100¢ (only the stored mid lagged) is NOT a phantom and must not flap-quarantine; only quarantine when
