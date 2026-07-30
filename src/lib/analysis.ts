@@ -370,7 +370,7 @@ export async function runStrategists(
     // T3.2: a market the strategist listed in rejected[] must never be entered, even if it also appears in
     // picks — rejected is authoritative over picks (Hammarby BTTS-Yes). The execution gate reads it.
     const rejectedSet = new Set((dec.ok && dec.rejected ? dec.rejected : []).map((r) => norm(r.market)));
-    let entries = 0, skipped = 0, flagged = 0;
+    let entries = 0, skipped = 0, flagged = 0, selfRefuted = 0;
     const battle: any[] = [];
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
       .map((m) => { const implied = impliedMap.get(m.label)?.implied ?? m.price / 100; return { m, implied, edge: (m.ai_prob as number) - implied }; })
@@ -390,6 +390,20 @@ export async function runStrategists(
       if (conflicts.has(m.label)) { flagged++; battle.push({ market: m.label, status: "flag", reason: conflicts.get(m.label) }); continue; }
       const ourProb = pick?.prob != null ? pick.prob : (m.ai_prob as number);
       if (pick?.prob != null) R.setMarketAiProb(db, m.id, pick.prob);
+      // [прод-разбор 30.07] САМООПРОВЕРГАЮЩИЙСЯ PICK: стратег кладёт рынок в `picks` и ТУТ ЖЕ пишет, что
+      // покупать его нельзя. Живой пример из лога Bay FC — NJ/NY Gotham:
+      //   { "label": "Over 3.5", "prob": 0.31, "reason": "discounted — цена выше моей оценки, ставить Over
+      //     нельзя", "totalCheck": "цена 48.5 при derived 31% — рынок над оценкой, edge отрицательный" }
+      // Деньги это не трогало: сайзинг убивал такую заявку по «edge < порога». Врала ДИАГНОСТИКА — в журнал
+      // уходило «стратег выбрал 1 pick(s), ни один не прошёл вход», то есть виноватым выглядел код-гейт,
+      // хотя стратег не выбрал НИ ОДНОГО. Ровно тот класс, что мы чиним весь день: счётчик, который
+      // рассказывает не то, что произошло. Проверка машинная — по его же числам, а не по словам в reason:
+      // собственная вероятность ниже подразумеваемой ценой = это не покупка, чем бы её ни назвали.
+      if (pick && pick.prob != null && pick.prob <= implied) {
+        selfRefuted++;
+        battle.push({ market: m.label, status: "skip", reason: `pick_self_refuted: собственная оценка ${Math.round(pick.prob * 100)}% ≤ подразумеваемой ценой ${Math.round(implied * 100)}% — это не покупка (стратег назвал рынок и сам же его опроверг)` });
+        continue;
+      }
       if (psFlags.has(m.label)) { flagged++; battle.push({ market: m.label, status: "flag", reason: "prob_sum вне допуска" }); continue; }
       const cKey = correlationKey(m.label, match.home, match.away);
       // Executable-ask edge (fix #1): a BUY pays the ASK, not the mid. Size/gate against the executable
@@ -509,18 +523,22 @@ export async function runStrategists(
           const nRef = recordRefusalForMatch(db, matchId, strat.id, (dec as { note?: string }).note ?? null, now());
           if (nRef > 0) R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `refusal_shadow: ${nRef} тотал(ов) с заявленным краем записаны would-be — отказ будет оценён когортой, а не спором`, created_at: now() });
         } catch { /* measurement must never break the decision path */ }
-      } else if (dec.ok && (skipped + flagged) > 0) {
+      } else if (dec.ok && (skipped + flagged + selfRefuted) > 0) {   // самоопровергнутая заявка тоже обязана дать строку
         // TRUTHFUL audit (правдивый лог): `skipped` = markets the STRATEGIST chose not to pick (his
         // judgement: no edge there), NOT markets a code threshold rejected — so "N рынков ниже порога"
         // was a lie of the engine. And if the strategist DID name picks (nPicks>0) that then failed to
         // enter, say THAT — "chose N, none passed entry" is a different event than "chose nothing",
         // and the difference matters for audit (his call vs the code's gate).
-        const nPicks = Array.isArray(picksArr) ? picksArr.length : 0;
+        // Самоопровергнутые заявки НЕ считаются выбором стратега: он назвал рынок и сам же написал, что
+        // покупать нельзя. Считать их «выбранными» — значит перекладывать его отказ на код-гейт.
+        const nPicks = Math.max(0, (Array.isArray(picksArr) ? picksArr.length : 0) - selfRefuted);
         const why = nPicks > 0
-          ? `стратег выбрал ${nPicks} pick(s), ни один не прошёл вход${flagged > 0 ? ` (${flagged} снят предохранителем)` : " (порог edge / неисполнимо на книге)"}`
-          : flagged > 0
-            ? `флаги предохранителей сняли ${flagged} рынк.`
-            : `стратег не выбрал ни один рынок (нет края по его оценке)`;
+          ? `стратег выбрал ${nPicks} pick(s), ни один не прошёл вход${flagged > 0 ? ` (${flagged} снят предохранителем)` : " (порог edge / неисполнимо на книге)"}${selfRefuted > 0 ? ` · ещё ${selfRefuted} заявк(и) стратег опроверг собственными числами (pick_self_refuted)` : ""}`
+          : selfRefuted > 0
+            ? `стратег назвал ${selfRefuted} рынк(ов) и сам же опроверг их собственными числами — покупки не было ни одной (pick_self_refuted)`
+            : flagged > 0
+              ? `флаги предохранителей сняли ${flagged} рынк.`
+              : `стратег не выбрал ни один рынок (нет края по его оценке)`;
         R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `пропуск матча — ${why}`, created_at: now() });
       }
     }
