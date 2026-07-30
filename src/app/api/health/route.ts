@@ -52,6 +52,18 @@ export async function GET() {
       // ledger has quietly drifted from reality», whatever the next cause turns out to be.
       voidWatch: await (async () => { try { const { buildVoidWatch } = await import("@/lib/voidWatch"); const v = buildVoidWatch(db); return { verdict: v.verdict, voidPct: v.voidPct, voids: v.voids, decided: v.decided, byReason: v.byReason, note: v.note }; } catch { return null; } })(),
       tennisLinkRate,
+      // Здоровье теннисного СКАУТА — единственного, что переводит теннисный матч в live. Его простой
+      // виден снаружи только так: 30.07 он молчал 13 часов, ~40 матчей висели в «ждём корт», а наружу
+      // не торчало ни одного числа — нашли вручную. Теперь торчит: когда был последний завершённый
+      // прогон, сколько строк вернул провайдер, сколько из них in-play, и текст его отказа, если он был.
+      tennisScout: await (async () => {
+        try {
+          const { tennisScoutHealth, tennisScoutSilence } = await import("@/lib/tennisScout");
+          const h = tennisScoutHealth(db);
+          const s = tennisScoutSilence(db);
+          return { ...h, silent: s.silent, note: s.note || null };
+        } catch { return null; }
+      })(),
     });
   } catch (e) {
     return NextResponse.json(
