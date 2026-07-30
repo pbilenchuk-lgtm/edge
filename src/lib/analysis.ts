@@ -27,6 +27,7 @@ import { winsOnEventOccurrence } from "./thresholds.js";
 import { serializeEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { loadAnalysisDuel, pickAnalysisModel, analysisModelTag } from "./analysisDuel.js";
+import { canonicalizeDrawForMatch, drawCanonEnabled } from "./drawCanon.js";
 
 export interface AnalyzeDeps {
   fetchImpl?: typeof fetch;
@@ -258,7 +259,29 @@ export async function runStrategists(
     || (!!match.kickoff_at && (Date.parse(match.kickoff_at) || Infinity) <= (Date.parse(now()) || Date.now()));
   const allMarkets = R.latestMarkets(db, matchId);
   const railed = kickedOff ? [] : allMarkets.filter((m) => m.price != null && isRailPrice(m.price));
-  const freshMarkets = railed.length ? allMarkets.filter((m) => !railed.includes(m)) : allMarkets;
+  // ОДИН ИСХОД — ОДНА ЦЕНА. Polymarket выставляет ничью под несколькими ярлыками («Draw», «Draw (A vs. B)»,
+  // «Draw (B vs. A)»), и в каталог они попадали ВСЕ. В логе Atert–ETO стратег увидел один и тот же исход по
+  // 33¢, 16.5¢ и 0.1¢ и написал: «дубликат-конфликт — артефакт данных, не торговать без подтверждения» —
+  // и отказался от ВСЕЙ доски, не только от ничьей. Канонизатор для этого и написан, но был подключён лишь
+  // на этапе меты ставки: он чинил запись о сделке, которой из-за него же не случалось. Зеркальные нотации
+  // (сумма 1X2 не сходится — это ДРУГОЙ контракт, а не та же ничья по кривой цене) убираем из каталога.
+  const drawMirrors = (() => {
+    if (!drawCanonEnabled(deps.env ?? process.env)) return new Set<string>();
+    try {
+      const dc = canonicalizeDrawForMatch(db, matchId, deps.env ?? process.env);
+      return new Set((dc?.mirrors ?? []).map((s) => s.toLowerCase().trim()));
+    } catch { return new Set<string>(); }   // канон не имеет права ломать анализ
+  })();
+  const mirrored = drawMirrors.size ? allMarkets.filter((m) => drawMirrors.has(m.label.toLowerCase().trim())) : [];
+  const hidden = new Set([...railed, ...mirrored]);
+  const freshMarkets = hidden.size ? allMarkets.filter((m) => !hidden.has(m)) : allMarkets;
+  if (mirrored.length) {
+    try {
+      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? "", minute: null, type: "skip",
+        text: `draw_mirror: ${mirrored.length} зеркальн. нотаци(й) ничьей скрыты от стратега — один исход обязан иметь одну цену (${mirrored.map((m) => m.label).join(", ")})`,
+        dedup_key: `drawmirror:${matchId}:${stage}`, created_at: now() });
+    } catch { /* улика не имеет права ломать анализ */ }
+  }
   if (railed.length) {
     // Цена скрытия обязана быть посчитана: молча сузить стратегу выбор — это тот же класс, что молча
     // отказать во входе. Одна строка на матч, не на рынок.

@@ -31,6 +31,17 @@
 import "./http.js"; // configure proxy dispatcher for server-side fetch
 import type { OrderBook } from "./execution.js";
 
+// ОДИН порог планки на весь проект. Импорт отказывался принимать такие цены, а обновление котировок
+// их спокойно ДОПИСЫВАЛО — и книга травилась задним числом. Раз правило одно, то и число одно: два
+// независимых порога здесь уже разъезжались (я сам однажды завёл второй через коммит после того, как
+// написал «порог один»).
+export const RESOLVED_RAIL_CENTS = 1;
+/** Цена у планки разрешения: не котировка, а мёртвая/односторонняя книга. */
+export function isRailCents(priceCents: number): boolean {
+  return priceCents <= RESOLVED_RAIL_CENTS || priceCents >= 100 - RESOLVED_RAIL_CENTS;
+}
+
+
 export interface PolymarketConfig {
   enabled: boolean;
   gammaBase: string;
@@ -704,7 +715,7 @@ export function matchMarketSnapshots(
       if (dropNoise && isNoiseMarket(m.label)) continue;
       for (const side of marketSides(m)) {
         if (side.price == null) continue;
-        if (dropNoise && (side.price <= 1 || side.price >= 99)) continue; // effectively-resolved / dead line
+        if (dropNoise && isRailCents(side.price)) continue; // effectively-resolved / dead line
         const key = side.label.toLowerCase().trim();
         if (seen.has(key)) continue;
         seen.add(key);
