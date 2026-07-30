@@ -658,7 +658,7 @@ const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "analysis_artif
  * bounds the Polymarket catch-all discovery flood (up to ~200 matches/sport/day
  * into unfunded `pm-*` comps). Returns the number of matches removed.
  */
-export interface MatchLogRow { id: string; match: string; sport: string; compName: string; finalScore: string | null; endIso: string | null; kickoffAt: string | null; endLabel: string | null; endNote: string | null; broken: boolean; betCount: number }
+export interface MatchLogRow { id: string; match: string; sport: string; compName: string; finalScore: string | null; endIso: string | null; kickoffAt: string | null; endLabel: string | null; endNote: string | null; broken: boolean; betCount: number; endTimeMalformed: boolean }
 /** Lean archive query for the «Логи» page — ONE row per finished match, straight from SQL, NOT the fat
  *  buildAppData payload. This is what decouples the log archive from the per-poll payload: keep finished matches
  *  as long as you like without bloating what the browser downloads each tick. Newest-first; bounded by `limit`. */
@@ -682,13 +682,29 @@ export function listMatchLogs(db: Database, limit = 1000): MatchLogRow[] {
         -- a real bet is kept (a bet on a match that broke IS worth reviewing).
         AND NOT (COALESCE(m.end_note,'') LIKE '⚠ поломан%'
                  AND NOT EXISTS (SELECT 1 FROM bets b3 WHERE b3.match_id = m.id AND b3.status NOT IN ('proposed','not_filled')))
-      ORDER BY COALESCE(m.end_time, m.kickoff_at) DESC
+      -- СОРТИРОВКА ПО НОРМАЛИЗОВАННОМУ ВРЕМЕНИ, А НЕ ПО СЫРОЙ СТРОКЕ.
+      -- Прод 30.07: архив «Логи» перестал показывать новое. Событий было 49 за день — они просто уехали
+      -- на 22-ю позицию и ниже. Наверху намертво сидели 20 строк, у которых end_time записан ГОЛЫМ
+      -- ВРЕМЕНЕМ («23:51»), а не ISO. Сортировка тут лексикографическая, и "23:51" > "2026-07-30T…",
+      -- потому что на второй позиции '3' > '0'. То есть КАЖДАЯ такая строка вечно выше ЛЮБОЙ даты, и
+      -- чем дольше живёт архив, тем толще пробка. Со стороны это неотличимо от «ничего не добавляется».
+      -- Чиним сортировку: значение, не похожее на ISO, к сортировке не допускается — падаем на kickoff_at.
+      -- Сам дефект записи НЕ маскируем, а помечаем полем endTimeMalformed (иначе починим симптом и
+      -- потеряем причину — ровно то, за что ругали немые нули).
+      ORDER BY COALESCE(
+                 CASE WHEN m.end_time LIKE '____-__-__T%' THEN m.end_time END,
+                 m.kickoff_at,
+                 m.end_time
+               ) DESC
       LIMIT ?`,
   ).all(Math.max(1, limit)) as { id: string; home: string; away: string; final_score: string | null; end_time: string | null; kickoff_at: string | null; end_note: string | null; sport: string; comp_name: string; bet_count: number }[];
   return rows.map((r) => ({
     id: r.id, match: `${r.home}–${r.away}`, sport: r.sport, compName: r.comp_name, finalScore: r.final_score,
     endIso: r.end_time, kickoffAt: r.kickoff_at, endLabel: warsawLabel(r.end_time) ?? warsawLabel(r.kickoff_at),
     endNote: r.end_note, broken: (r.end_note ?? "").startsWith("⚠ поломан"), betCount: Number(r.bet_count) || 0,
+    // Улика, а не заплатка: строка, у которой end_time не ISO, названа таковой. Их 20 на проде, и пока
+    // источник записи не найден, они обязаны быть видимы, а не тихо переехать вниз.
+    endTimeMalformed: !!r.end_time && !/^\d{4}-\d{2}-\d{2}T/.test(String(r.end_time)),
   }));
 }
 
