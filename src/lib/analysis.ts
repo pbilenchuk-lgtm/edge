@@ -28,6 +28,7 @@ import { serializeEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { loadAnalysisDuel, pickAnalysisModel, analysisModelTag } from "./analysisDuel.js";
 import { canonicalizeDrawForMatch, drawCanonEnabled } from "./drawCanon.js";
+import { captureShadowDepth } from "./bookDepthCapture.js";
 
 export interface AnalyzeDeps {
   fetchImpl?: typeof fetch;
@@ -400,6 +401,10 @@ export async function runStrategists(
     const rejectedSet = new Set((dec.ok && dec.rejected ? dec.rejected : []).map((r) => norm(r.market)));
     let entries = 0, skipped = 0, flagged = 0;
     const battle: any[] = [];
+    // ИНВАРИАНТ КЛАССА (31.07): would-be запись обязана нести снимок исполнимости в момент записи.
+    // Копим цели по ходу разбора рынков и снимаем их ОДНИМ проходом после — по рынку за раз это
+    // был бы запрос на каждый демоутнутый рынок внутри горячего цикла.
+    const shadowDepthTargets: { matchId: string; token: string; label: string }[] = [];
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
       .map((m) => { const implied = impliedMap.get(m.label)?.implied ?? m.price / 100; return { m, implied, edge: (m.ai_prob as number) - implied }; })
       .sort((x, y) => y.edge - x.edge);
@@ -450,6 +455,9 @@ export async function runStrategists(
           r.status = "skip"; r.reason = `family_kill: «${fam}» — созревший ОТРИЦАТЕЛЬНЫЙ сигнальный вердикт; семья снята и с денег, и с shadow (R0.1)`;
         } else if (isDemotedFamily(strat.id, fam)) {
           recordFamilyShadowSignal(db, { matchId, strategyId: strat.id, label: m.label, family: fam, ourProb, implied, edge: r.edge, wouldBeStake: r.stake, entryCents: execCents, kickoffAt: match.kickoff_at ?? null, codeVersion: effectiveCodeVersion(db, analysisTag), at: now() });
+          // Тот же инвариант для family_shadow: он пишется из ЭТОГО ЖЕ предматчевого анализа, значит болел
+          // бы ровно тем же — его зрелость встретила бы нас тем же сюрпризом «140 из 143 unknown».
+          if (m.external_ref) shadowDepthTargets.push({ matchId, token: m.external_ref, label: m.label });
           r.status = "skip"; r.reason = `family_shadow: prematch_value ставит деньги только в «totals» — «${fam}» демоутнут в shadow-когорту (kill/promote по созревшему R0.1-вердикту), капитал не выделен`;
         }
       }
@@ -505,6 +513,10 @@ export async function runStrategists(
         R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `стратег назвал рынок(и) без id и без совпадения ярлыка: ${labelMiss.slice(0, 3).map((p) => `«${p.label}»`).join(", ")}`, created_at: now() });
       }
     }
+    if (shadowDepthTargets.length) {
+      try { await captureShadowDepth(db, shadowDepthTargets, "family_shadow", deps, now()); }
+      catch { /* измерение не имеет права ломать путь решения */ }
+    }
     try { R.saveArtifact(db, { match_id: matchId, kind: "battle_sheet", label: pairLabel, stage, content: JSON.stringify({ pair: pairLabel, profile, budget, calibration, positions: battle, flagged, ...(dec.ok && dec.liveTriggersArmed ? { live_triggers_armed: dec.liveTriggersArmed } : {}), ...(dec.ok && dec.liveEntryConfig ? { live_entry_config: dec.liveEntryConfig } : {}), strategist_plan: dec.ok ? dec : { ok: false } }, null, 2), model: stratModel, created_at: now() }); } catch { /* best-effort */ }
     // Overreaction and Live xG open nothing pre-match by design — they ARM the
     // live window (buyback triggers / xG-entry config). Log THAT, not a misleading
@@ -529,8 +541,14 @@ export async function runStrategists(
         // DELIBERATE refusal (ok=true, zero picks) qualifies — a failed or gated call is not a judgement and
         // must never enter this cohort. Never blocks the flow.
         try {
-          const nRef = recordRefusalForMatch(db, matchId, strat.id, (dec as { note?: string }).note ?? null, now());
-          if (nRef > 0) R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `refusal_shadow: ${nRef} тотал(ов) с заявленным краем записаны would-be — отказ будет оценён когортой, а не спором`, created_at: now() });
+          const ref = recordRefusalForMatch(db, matchId, strat.id, (dec as { note?: string }).note ?? null, now());
+          if (ref.frozen > 0) {
+            // ИНВАРИАНТ: would-be запись обязана нести снимок исполнимости В МОМЕНТ ЗАПИСИ. Без него
+            // когорта рождается невердиктной — прод дал 140 из 143 «без снимка», и вердикт с p=0
+            // оказался нечитаем. Захват идёт по РОВНО тем рынкам, что заморожены.
+            const snaps = await captureShadowDepth(db, ref.targets, "refusal_shadow", deps, now());
+            R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null, type: "skip", text: `refusal_shadow: ${ref.frozen} тотал(ов) с заявленным краем записаны would-be (глубина снята по ${snaps}) — отказ будет оценён когортой, а не спором`, created_at: now() });
+          }
         } catch { /* measurement must never break the decision path */ }
       } else if (dec.ok && (skipped + flagged) > 0) {
         // TRUTHFUL audit (правдивый лог): `skipped` = markets the STRATEGIST chose not to pick (his

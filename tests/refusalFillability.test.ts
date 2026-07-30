@@ -105,3 +105,47 @@ test("зонд исполнимости — одна реализация: те 
   assert.equal(probe("m1", "Нет такого", 40, AT), null);
   assert.equal(probe.coverage.snapshots, 1);
 });
+
+// ── ИНВАРИАНТ КЛАССА: КОГОРТА БЕЗ СНИМКА РОЖДАЕТСЯ НЕВЕРДИКТНОЙ ──────────────────────────────────
+import { buildCohortAccrual } from "../src/lib/refusalShadow.js";
+
+test("аудит класса: обе предматчевые когорты проверяются одним проходом, stale_proposal чист по построению", () => {
+  const db = openDb(":memory:");
+  seedMatch(db, "m1");
+  recordRefusalShadow(db, { matchId: "m1", strategyId: "s", marketLabel: "Over 2.5", family: "totals", ourProb: 0.6, implied: 0.4, edge: 0.2, entryCents: 40, kickoffAt: AT, codeVersion: null, note: null, at: AT });
+  recordRefusalShadow(db, { matchId: "m1", strategyId: "s", marketLabel: "Over 3.5", family: "totals", ourProb: 0.6, implied: 0.3, edge: 0.3, entryCents: 30, kickoffAt: AT, codeVersion: null, note: null, at: AT });
+  depthSnap(db, "m1", "Over 2.5", [[41, 200]]);   // снимок только у одного
+
+  const a = buildCohortAccrual(db, Date.parse(AT) + 3600_000, {});
+  const byName = new Map(a.rows.map((r) => [r.cohort, r]));
+  const ref = byName.get("refusal_shadow")!;
+  assert.equal(ref.total, 2);
+  assert.equal(ref.withDepth, 1, "вторая запись родилась без снимка");
+  assert.equal(ref.verdictable, false, "и потому когорта пока НЕВЕРДИКТНА");
+  assert.match(ref.note, /не оживут/, "старые записи без снимка не воскресают — сказано прямо");
+
+  // family_shadow пишется из ТОЙ ЖЕ точки, поэтому проверяется тем же проходом, а не ждёт своей очереди.
+  assert.ok(byName.has("family_shadow"), "вторая предматчевая когорта в аудите есть");
+  // stale_proposal рождается на филле, где книга уже запрошена.
+  assert.equal(byName.get("stale_proposal")!.verdictable, true);
+  assert.match(byName.get("stale_proposal")!.note, /по построению/);
+});
+
+test("ETA считается по форвард-потоку, а нулевой поток называется поводом проверить захват", () => {
+  const db = openDb(":memory:");
+  seedMatch(db, "m1");
+  // Ни одной записи со снимком за неделю → ETA неизвестна, и это САМО ПО СЕБЕ сигнал.
+  recordRefusalShadow(db, { matchId: "m1", strategyId: "s", marketLabel: "Over 2.5", family: "totals", ourProb: 0.6, implied: 0.4, edge: 0.2, entryCents: 40, kickoffAt: AT, codeVersion: null, note: null, at: AT });
+  const dry = buildCohortAccrual(db, Date.parse(AT) + 3600_000, {});
+  assert.equal(dry.refusalPerWeek, 0);
+  assert.equal(dry.etaWeeks, null);
+  assert.match(dry.etaNote, /повод проверить, доезжает ли захват/);
+
+  // Со снимками поток появляется, и «копим» получает дату.
+  depthSnap(db, "m1", "Over 2.5", [[41, 200]]);
+  const live = buildCohortAccrual(db, Date.parse(AT) + 3600_000, {});
+  assert.equal(live.refusalPerWeek, 1);
+  assert.equal(live.refusalWithDepth, 1);
+  assert.ok(live.etaWeeks && live.etaWeeks > 0, "ETA — число недель, а не настроение");
+  assert.match(live.etaNote, /ETA ≈/);
+});
