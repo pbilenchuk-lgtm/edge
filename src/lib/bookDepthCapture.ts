@@ -80,3 +80,51 @@ export async function captureBookDepth(db: Database, deps: EngineDeps = {}, nowM
   try { db.prepare(`DELETE FROM book_depth_snapshots WHERE at < ?`).run(new Date(nowMs - RETENTION_DAYS * 86400_000).toISOString()); } catch { /* ignore */ }
   return ok + empty;
 }
+
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ИНВАРИАНТ КЛАССА: WOULD-BE ЗАПИСЬ ОБЯЗАНА НЕСТИ СНИМОК ИСПОЛНИМОСТИ В МОМЕНТ ЗАПИСИ
+//
+// 31.07. Фильтр исполнимости на refusal_shadow дал 2 из 143 (1.4%), и 140 из 143 оказались НЕ
+// «неисполнимы», а «без снимка». Причина структурная, и она не про объём: снимков было 25 418 за
+// пять дней. Просто когорта пишется в ТОЧКЕ A (предматчевый анализ), а глубина снималась в ТОЧКЕ B
+// (живой цикл) — пересечение почти пусто. Вердикт screw_too_tight с p=0 рассыпался от одного вопроса
+// «а существовали ли эти цены».
+//
+// Дыра этого КЛАССА не уникальна для refusal_shadow: family_shadow пишется из того же предматчевого
+// анализа и болел бы тем же — его зрелость встретила бы нас тем же сюрпризом. (stale_proposal чист:
+// он рождается на филле, где книга уже запрошена.)
+//
+// Отсюда правило, а не заплатка: КОГОРТА, РОЖДЁННАЯ БЕЗ СНИМКА ИСПОЛНИМОСТИ, РОЖДАЕТСЯ НЕВЕРДИКТНОЙ.
+// Точка записи обязана звать этот захват сама — тем же замороженным стандартом полей, что читают
+// unfillable_edge и refusal_shadow. Один стандарт исполнимости на все когорты, без диалектов.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/** Сколько книг максимум тянуть за одну would-be запись — бюджет API, не «сколько влезет». */
+const SHADOW_MAX_TOKENS = (env: Record<string, string | undefined>) => num(env.SHADOW_DEPTH_MAX_TOKENS, 8);
+
+/**
+ * Снять глубину ПО РЫНКАМ С ЗАЯВЛЕННЫМ КРАЕМ в момент записи would-be сигнала. Возвращает число
+ * сохранённых снимков. Никогда не бросает: измерение не имеет права ломать путь решения — но и
+ * молчать о своём отказе не имеет права, поэтому счётчик отдаётся наружу.
+ */
+export async function captureShadowDepth(
+  db: Database, targets: BookTarget[], source: string, deps: EngineDeps = {}, nowIso?: string,
+): Promise<number> {
+  const env = deps.env ?? process.env;
+  const poly = deps.polymarket ?? loadPolymarketConfig(env);
+  if (!poly.enabled || !targets.length) return 0;
+  const at = nowIso ?? (deps.now?.() ?? new Date().toISOString());
+  const cache = new Map<string, OrderBookFetch>();
+  let ok = 0;
+  for (const t of targets.slice(0, SHADOW_MAX_TOKENS(env))) {
+    try {
+      const res = await classifyOrderBook(t.token, poly, deps, cache);
+      // Пустая книга — ФАКТ ёмкости («налить было нечем»), а не сбой: пишем её нулём.
+      // Недоступная — сбой запроса, и притворяться, что там нет ликвидности, нельзя: пропускаем.
+      if (res.status === "ok") { saveBookDepth(db, t, res.book, source, at); ok++; }
+      else if (res.status === "empty") { saveBookDepth(db, t, { bids: [], asks: [] }, `${source}_empty`, at); ok++; }
+    } catch { /* одна книга не имеет права уронить запись когорты */ }
+  }
+  return ok;
+}

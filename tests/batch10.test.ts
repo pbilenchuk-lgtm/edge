@@ -80,7 +80,7 @@ function seedRefusal(db: any, aiProb: number, price: number, score: [number, num
 test("R5: only totals with a committed edge over the floor are frozen — other families and thin edges are not", () => {
   const db = openDb(":memory:"); initSchema(db);
   seedRefusal(db, 0.70, 50, [2, 1]);            // Over 2.5: our 70% vs implied 50% → 20% edge
-  const n = recordRefusalForMatch(db, "m1", "prematch_value", "полный пропуск", "2026-07-26T12:00:00Z", {});
+  const n = recordRefusalForMatch(db, "m1", "prematch_value", "полный пропуск", "2026-07-26T12:00:00Z", {}).frozen;
   assert.equal(n, 1, "the Draw market is out of scope even at a 60% edge — the question is scoped to totals");
   const rows = db.prepare(`SELECT market_label, edge, status FROM refusal_shadow_signals`).all() as any[];
   assert.equal(rows[0].market_label, "Over 2.5");
@@ -88,7 +88,7 @@ test("R5: only totals with a committed edge over the floor are frozen — other 
   // A thin edge is not a refusal anyone would argue with.
   const db2 = openDb(":memory:"); initSchema(db2);
   seedRefusal(db2, 0.52, 50, [2, 1]);
-  assert.equal(recordRefusalForMatch(db2, "m1", "prematch_value", null, "t", {}), 0, "2% edge → nothing to answer for");
+  assert.equal(recordRefusalForMatch(db2, "m1", "prematch_value", null, "t", {}).frozen, 0, "2% edge → nothing to answer for");
 });
 
 test("R5: refusals resolve by the SAME settlement code as money, and the verdict waits for n≥25", () => {

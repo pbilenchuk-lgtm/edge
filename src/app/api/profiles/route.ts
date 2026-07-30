@@ -167,6 +167,14 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: true, at: now,
         linkRate: { inDiscoveryLinkPct: lr.inDiscoveryLinkPct, auto: lr.auto, listable: lr.inDiscoveryEvents, note: lr.note },
         cohortAccrual: svCohortAccrual(db, now),
+        // R5-фикс (31.07): «копим» обязано иметь ДАТУ, а не настроение. Старые записи без снимка
+        // исполнимости не оживут никогда — счётчик идёт только форвард-потоком, поэтому ETA считается
+        // от записей СО СНИМКОМ за неделю. Здесь же аудит класса: какие shadow-когорты вообще родились
+        // вердиктными (refusal и family пишутся из одной точки, stale_proposal чист по построению).
+        shadowCohortAccrual: await (async () => {
+          try { const { buildCohortAccrual } = await import("@/lib/refusalShadow"); return buildCohortAccrual(db, Date.parse(now)); }
+          catch { return null; }
+        })(),
         dryFillWatch,
         blindFundedCount: listBlindFundedFootball(db, { nowMs: Date.parse(now) || Date.now() }).length,
         noFeedDigest: noFeed,

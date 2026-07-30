@@ -60,11 +60,14 @@ export function recordRefusalShadow(db: Database, s: RefusalInput): void {
 export function recordRefusalForMatch(
   db: Database, matchId: string, strategyId: string, note: string | null, now: string,
   env: Record<string, string | undefined> = process.env,
-): number {
+): { frozen: number; targets: { matchId: string; token: string; label: string }[] } {
   const m = R.getMatch(db, matchId);
-  if (!m) return 0;
+  if (!m) return { frozen: 0, targets: [] };
   const floor = REFUSAL_EDGE_MIN(env);
   let n = 0;
+  // Цели для снимка глубины — РОВНО те рынки, что заморожены. Пересчитывать фильтр на стороне
+  // вызывающего значило бы завести второй экземпляр того же условия; мы это уже проходили.
+  const targets: { matchId: string; token: string; label: string }[] = [];
   for (const mk of R.latestMarkets(db, matchId)) {
     if (mk.ai_prob == null || !Number.isFinite(mk.price) || mk.price <= 0) continue;
     const family = marketFamily(mk.label);
@@ -78,8 +81,9 @@ export function recordRefusalForMatch(
       kickoffAt: m.kickoff_at ?? null, codeVersion: null, note, at: now,
     });
     n++;
+    if (mk.external_ref) targets.push({ matchId, token: mk.external_ref, label: mk.label });
   }
-  return n;
+  return { frozen: n, targets };
 }
 
 /** Resolve pending refusals against finished matches — the SAME settlement code the money path uses, so a
@@ -207,5 +211,74 @@ export function buildRefusalShadow(db: Database, env: Record<string, string | un
         : verdict === "discipline_right"
           ? `ДИСЦИПЛИНА ПРАВА: отказные сигналы потеряли бы $${Math.round(pnl)} на плоских ставках $100 при n=${t.nDecided} ИСПОЛНИМЫХ (win ${t.winVsImplied.winPct}% vs implied ${t.winVsImplied.meanImpliedPct}%). Засуха входов — цена того, чтобы не быть неправым.`
           : `СМЕШАННО при n=${t.nDecided}: отказники не бьют свой implied убедительно и не теряют явно (win ${t.winVsImplied.winPct}% vs ${t.winVsImplied.meanImpliedPct}%, P&L $${Math.round(pnl)}). Порог не трогаем, копим дальше.`,
+  };
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// АУДИТ КЛАССА: КАКИЕ SHADOW-КОГОРТЫ РОДИЛИСЬ НЕВЕРДИКТНЫМИ
+//
+// Дешевле проверить все когорты ОДНИМ проходом сейчас, чем находить по одной в момент чтения каждого
+// вердикта. Три когорты, три разных места рождения:
+//   refusal_shadow — предматчевый анализ (болела: 140 из 143 без снимка);
+//   family_shadow  — ТОТ ЖЕ предматчевый анализ (болела бы так же — фикс поставлен туда же);
+//   stale_proposal — филл реальной ставки, где книга УЖЕ запрошена (чиста по построению).
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+export interface CohortDepthRow {
+  cohort: string; bornAt: string; total: number; withDepth: number; pctWithDepth: number | null;
+  verdictable: boolean; note: string;
+}
+export interface CohortAccrual {
+  rows: CohortDepthRow[];
+  /** Форвард-поток refusal-когорты: записей СО СНИМКОМ в неделю и ETA до n≥25. Старые unknown не оживут
+   *  никогда, поэтому «копим» обязано иметь дату, а не настроение. */
+  refusalPerWeek: number; refusalWithDepth: number; needN: number; etaWeeks: number | null; etaNote: string;
+}
+
+/** Несёт ли запись когорты снимок глубины в окне ±N мин от своего создания. Тот же зонд, что читает вердикт. */
+function withDepthCount(db: Database, rows: { match_id: string; market_label: string; entry_cents: number; created_at: string }[], env: Record<string, string | undefined>): number {
+  if (!rows.length) return 0;
+  const fromMs = rows.reduce((min, r) => { const t = Date.parse(r.created_at); return Number.isFinite(t) && t < min ? t : min; }, Date.now());
+  const probe = buildFillabilityProbe(db, { fromMs, env });
+  let n = 0;
+  for (const r of rows) if (probe(r.match_id, r.market_label, r.entry_cents, r.created_at) != null) n++;
+  return n;
+}
+
+export function buildCohortAccrual(db: Database, nowMs = Date.now(), env: Record<string, string | undefined> = process.env): CohortAccrual {
+  const q = (sql: string) => { try { return db.prepare(sql).all() as any[]; } catch { return []; } };
+  const ref = q(`SELECT match_id, market_label, entry_cents, created_at FROM refusal_shadow_signals`);
+  const fam = q(`SELECT match_id, market_label, entry_cents, created_at FROM family_shadow_signals`);
+  const refDepth = withDepthCount(db, ref, env);
+  const famDepth = withDepthCount(db, fam, env);
+  const row = (cohort: string, bornAt: string, total: number, withDepth: number, cleanByConstruction = false): CohortDepthRow => {
+    const pct = total ? Math.round((1000 * withDepth) / total) / 10 : null;
+    const verdictable = cleanByConstruction || (total > 0 && withDepth >= REFUSAL_NEED_N);
+    return {
+      cohort, bornAt, total, withDepth, pctWithDepth: pct, verdictable,
+      note: cleanByConstruction
+        ? "рождается на филле — книга уже запрошена, снимок есть по построению"
+        : total === 0 ? "записей нет"
+        : verdictable ? `${withDepth} из ${total} несут снимок (${pct}%) — вердикт читаем`
+        : `${withDepth} из ${total} несут снимок (${pct}%) — до n≥${REFUSAL_NEED_N} вердикт НЕЧИТАЕМ; записи без снимка не оживут`,
+    };
+  };
+  // Скорость форвард-потока: записи со снимком за последние 7 суток.
+  const weekAgo = new Date(nowMs - 7 * 86_400_000).toISOString();
+  const recent = ref.filter((r) => String(r.created_at) >= weekAgo);
+  const perWeek = withDepthCount(db, recent, env);
+  const remaining = Math.max(0, REFUSAL_NEED_N - refDepth);
+  const etaWeeks = remaining === 0 ? 0 : perWeek > 0 ? Math.round((remaining / perWeek) * 10) / 10 : null;
+  return {
+    rows: [
+      row("refusal_shadow", "предматчевый анализ", ref.length, refDepth),
+      row("family_shadow", "предматчевый анализ (тот же)", fam.length, famDepth),
+      row("stale_proposal", "филл реальной ставки", 0, 0, true),
+    ],
+    refusalPerWeek: perWeek, refusalWithDepth: refDepth, needN: REFUSAL_NEED_N, etaWeeks,
+    etaNote: remaining === 0 ? `когорта набрана: ${refDepth}/${REFUSAL_NEED_N} со снимком — вердикт можно читать`
+      : perWeek > 0 ? `${refDepth}/${REFUSAL_NEED_N} со снимком, поток ${perWeek}/нед → ETA ≈ ${etaWeeks} нед. Старые записи без снимка НЕ оживут — счётчик идёт только вперёд.`
+      : `${refDepth}/${REFUSAL_NEED_N} со снимком, за последнюю неделю НИ ОДНОЙ записи со снимком — ETA неизвестна, и это само по себе повод проверить, доезжает ли захват глубины.`,
   };
 }
