@@ -1547,6 +1547,7 @@ export function footballZombieMap(
   // Consecutive clean-with-margin readings per label, persisted across ticks in the episode marker so the
   // dwell survives process restarts (an in-memory counter would reset every deploy and defeat the point).
   const clearTicks = new Map<string, number>();
+  const railUnexplained: string[] = [];   // (a1) копим на матч — печатаем одной строкой, не по рынку
   for (const rec of R.metaByPrefix(db, `${ZOMBIE_EP}${m.id} `)) {
     const label = rec.key.slice(`${ZOMBIE_EP}${m.id} `.length);
     try { const p = JSON.parse(rec.value); if (Number(p.clear ?? 0) > 0) clearTicks.set(label, Number(p.clear)); } catch { /* ignore */ }
@@ -1561,6 +1562,11 @@ export function footballZombieMap(
     if (z) {
       out.set(mk.label, z);
       clearTicks.delete(mk.label); // any fresh breach restarts the dwell — protection engages instantly
+      // (a1) rail_unexplained накрывает ДОСКУ ЦЕЛИКОМ, а не отдельный рынок: на проде 30.07 это 36 из 40
+      // рынков одного матча. Существующий троттл эпизодный, но ключуется на (матч+ярлык) — то есть дал бы
+      // 36 строк на первом же тике. Это ровно тот лог-потоп, ради которого Z1 и вводился. Поэтому такой
+      // код копим и печатаем ОДНОЙ строкой на матч ниже; поимённый список рынков остаётся в детали.
+      if (z.code === "rail_unexplained") { railUnexplained.push(mk.label); continue; }
       if (logSid) throttleZombieLog(db, m, mk.label, z.code, `zombie_quarantine:${z.code} «${mk.label}»: ${z.detail} — рынок на карантине для всех потребителей (вход/контекст)`, logSid, now);
       continue;
     }
@@ -1587,6 +1593,22 @@ export function footballZombieMap(
   // book never revived, the map just didn't classify it that tick. A lift must be EARNED: re-measure the book
   // and require it to be demonstrably fresh (age < the stale threshold, or no age reading at all → nothing to
   // hold against it). The observed age is printed so a premature lift can never again hide.
+  // (a1) ОДНА строка на матч за эпизод. Эпизод — непрерывный отрезок, пока доска остаётся у планки;
+  // ключ помнит РАЗМЕР накрытия, поэтому «стало хуже» (было 12 из 40, стало 36 из 40) печатается заново,
+  // а «то же самое каждые 20 секунд» — нет.
+  if (logSid && railUnexplained.length) {
+    const key = `${ZOMBIE_EP}rail_unexp ${m.id}`;
+    let prev = 0; try { const v = R.metaGet(db, key); if (v) prev = Number(JSON.parse(v).n ?? 0); } catch { /* новый эпизод */ }
+    if (railUnexplained.length > prev) {
+      const shown = railUnexplained.slice(0, 6).join(", ");
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: logSid, minute: minuteLabel(m), type: "skip",
+        text: `zombie_quarantine:rail_unexplained ${railUnexplained.length} из ${markets.length} рынков у планки, не объяснённой состоянием игры — доска мёртвая, скрыта от стратега целиком (${shown}${railUnexplained.length > 6 ? `, +${railUnexplained.length - 6}` : ""})`,
+        created_at: now });
+    }
+    try { R.metaSet(db, key, JSON.stringify({ n: railUnexplained.length }), now); } catch { /* best-effort */ }
+  } else if (logSid) {
+    try { R.metaDelete(db, `${ZOMBIE_EP}rail_unexp ${m.id}`); } catch { /* эпизод закончился — сбрасываем */ }
+  }
   if (logSid) {
     const priceOf = new Map(markets.map((mk) => [mk.label, mk.price] as const));
     for (const rec of R.metaByPrefix(db, `${ZOMBIE_EP}${m.id} `)) {
