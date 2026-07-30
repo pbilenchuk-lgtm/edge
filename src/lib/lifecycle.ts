@@ -1556,7 +1556,7 @@ export function footballZombieMap(
       ? liveAdjustedProb(mk.label, { home: m.home, away: m.away, scoreHome: m.score_home, scoreAway: m.score_away, minute, core }, lpCfg)
       : null;
     const bookAge = R.bookStaleMinutes(db, m.id, mk.label, mk.price, now);
-    const zi = { label: mk.label, priceCents: mk.price, askCents: mk.ask_cents ?? null, gsProb: gs?.prob ?? null, groupSpreadCents: spreads.get(mk.label) ?? null, bookAgeMin: bookAge, live: true };
+    const zi = { label: mk.label, priceCents: mk.price, askCents: mk.ask_cents ?? null, gsProb: gs?.prob ?? null, groupSpreadCents: spreads.get(mk.label) ?? null, bookAgeMin: bookAge, live: true, matchKickedOff: true };  // карта строится только для state==="live" — свисток уже был, планку объясняет счёт
     const z = classifyZombie(zi, cfg);
     if (z) {
       out.set(mk.label, z);

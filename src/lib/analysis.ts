@@ -10,6 +10,7 @@
 // Graceful: a failed model call marks the assessment failed (§6), no crash.
 // ============================================================
 
+import { isRailPrice } from "./zombieMarket.js";
 import { recordRefusalForMatch } from "./refusalShadow.js";
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
@@ -26,6 +27,7 @@ import { winsOnEventOccurrence } from "./thresholds.js";
 import { serializeEntryMeta, type BetEntryMeta } from "./betMeta.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { loadAnalysisDuel, pickAnalysisModel, analysisModelTag } from "./analysisDuel.js";
+import { canonicalizeDrawForMatch, drawCanonEnabled } from "./drawCanon.js";
 
 export interface AnalyzeDeps {
   fetchImpl?: typeof fetch;
@@ -241,7 +243,54 @@ export async function runStrategists(
   const duel = loadAnalysisDuel(env);
   const analysisTag = duel.enabled && assessment.model ? analysisModelTag(assessment.model) : null;
 
-  const freshMarkets = R.latestMarkets(db, matchId);
+  // [прод-разбор 29.07] ПЛАНОЧНЫЕ ЦЕНЫ НЕ ПОКАЗЫВАЕМ СТРАТЕГУ НА НЕСЫГРАННОМ МАТЧЕ.
+  //
+  // Карантин зомби-рынков работает ТОЛЬКО для live-футбола (footballZombieMap гейтится на state==='live'),
+  // поэтому в предматче стратег получал книгу как есть — а она была отравлена: 2030 из 6660 рынков стояли
+  // у планки, 865 из них на матчах, которые ещё не начались. Стратег вёл себя правильно и отказывался
+  // торговать целиком («котировки нерепрезентативны, ждать live-глубины», picks: []) — то есть мусор в
+  // книге останавливал торговлю, а не отдельную ставку. Убираем такие рынки из его поля зрения: у
+  // несыгранного матча планка означает мёртвую/одностороннюю книгу, а не эффективную котировку.
+  //
+  // Завершённый матч не трогаем: там планка — честная цена разрешения, и прятать её незачем.
+  // Граница — СТАРТОВЫЙ СВИСТОК: после него планку объясняет счёт (этим занимается resolved_price), и
+  // прятать «Over 0.5 @98¢» при забитом голе было бы враньём. См. zombieMarket.isRailPrice.
+  const kickedOff = match.state === "live" || match.state === "finished"
+    || (!!match.kickoff_at && (Date.parse(match.kickoff_at) || Infinity) <= (Date.parse(now()) || Date.now()));
+  const allMarkets = R.latestMarkets(db, matchId);
+  const railed = kickedOff ? [] : allMarkets.filter((m) => m.price != null && isRailPrice(m.price));
+  // ОДИН ИСХОД — ОДНА ЦЕНА. Polymarket выставляет ничью под несколькими ярлыками («Draw», «Draw (A vs. B)»,
+  // «Draw (B vs. A)»), и в каталог они попадали ВСЕ. В логе Atert–ETO стратег увидел один и тот же исход по
+  // 33¢, 16.5¢ и 0.1¢ и написал: «дубликат-конфликт — артефакт данных, не торговать без подтверждения» —
+  // и отказался от ВСЕЙ доски, не только от ничьей. Канонизатор для этого и написан, но был подключён лишь
+  // на этапе меты ставки: он чинил запись о сделке, которой из-за него же не случалось. Зеркальные нотации
+  // (сумма 1X2 не сходится — это ДРУГОЙ контракт, а не та же ничья по кривой цене) убираем из каталога.
+  const drawMirrors = (() => {
+    if (!drawCanonEnabled(deps.env ?? process.env)) return new Set<string>();
+    try {
+      const dc = canonicalizeDrawForMatch(db, matchId, deps.env ?? process.env);
+      return new Set((dc?.mirrors ?? []).map((s) => s.toLowerCase().trim()));
+    } catch { return new Set<string>(); }   // канон не имеет права ломать анализ
+  })();
+  const mirrored = drawMirrors.size ? allMarkets.filter((m) => drawMirrors.has(m.label.toLowerCase().trim())) : [];
+  const hidden = new Set([...railed, ...mirrored]);
+  const freshMarkets = hidden.size ? allMarkets.filter((m) => !hidden.has(m)) : allMarkets;
+  if (mirrored.length) {
+    try {
+      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? "", minute: null, type: "skip",
+        text: `draw_mirror: ${mirrored.length} зеркальн. нотаци(й) ничьей скрыты от стратега — один исход обязан иметь одну цену (${mirrored.map((m) => m.label).join(", ")})`,
+        dedup_key: `drawmirror:${matchId}:${stage}`, created_at: now() });
+    } catch { /* улика не имеет права ломать анализ */ }
+  }
+  if (railed.length) {
+    // Цена скрытия обязана быть посчитана: молча сузить стратегу выбор — это тот же класс, что молча
+    // отказать во входе. Одна строка на матч, не на рынок.
+    try {
+      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? "", minute: null, type: "skip",
+        text: `rail_price: ${railed.length} из ${allMarkets.length} рынков у планки ДО стартового свистка — скрыты от стратега (мёртвая/односторонняя книга, не котировка)`,
+        dedup_key: `rail:${matchId}:${stage}`, created_at: now() });
+    } catch { /* улика не имеет права ломать анализ */ }
+  }
   // Only replace existing proposals if we actually have usable probabilities — a
   // degenerate state must not wipe the previous good proposals with nothing.
   if (!freshMarkets.some((m) => m.ai_prob != null)) return { betsCreated: 0, decisions: [] };
