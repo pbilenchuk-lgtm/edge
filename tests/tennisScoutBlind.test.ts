@@ -45,7 +45,7 @@ test("fetchTennisLivescores: КАЖДАЯ причина пустоты назв
 
   // 3. success=0 ПРИ массиве-результате: раньше проходило как валидная пустота.
   const zeroOk = await fetchTennisLivescores(CFG, { fetchImpl: jsonFetch({ success: 0, result: [] }) });
-  assert.match(String(zeroOk.error), /success=0/);
+  assert.match(String(zeroOk.error), /success=0/, "флаг конверта процитирован даже при пустом result");
 
   // 4. Исключение в самом fetch (сеть) — тоже названо.
   const boom = (async () => { throw new Error("ECONNRESET"); }) as unknown as typeof fetch;
@@ -122,4 +122,28 @@ test("tennisScoutSilence: отказ провайдера НАЗЫВАЕТСЯ, 
   assert.equal(s2.silent, true);
   assert.match(s2.note, /H2/, "успех + пустота — это по-прежнему слепой скаут, а не отказ");
   assert.match(s2.note, /строк 0/, "и говорит, СКОЛЬКО строк вернул провайдер");
+});
+
+test("ФОРМА 1006: {\"error\":\"1\",\"result\":[{msg,cod}]} — отказ, а не пустой слейт", async () => {
+  // Дословный ответ прода 30.07 на протухший ключ. Первая версия этого разбора его ПРОПУСКАЛА:
+  // поле называется `error`, а не `success`, и объект-ошибка лежит ВНУТРИ массива `result`.
+  // Массив → «успех», одна строка → normalizeLive выбрасывает её (нет event_key) → наружу
+  // выходило `rawRows: 0, error: null`. Провайдер писал «оплатите аккаунт», прибор — «пусто».
+  const body = { error: "1", result: [{ param: null, msg: "Please make the payment for your account!", cod: 1006 }] };
+  const r = await fetchTennisLivescores(CFG, { fetchImpl: jsonFetch(body) });
+  assert.deepEqual(r.rows, []);
+  assert.match(String(r.error), /оплатите|payment/i, "сообщение провайдера процитировано дословно");
+  assert.match(String(r.error), /1006/, "и его код тоже — по нему ищется тариф");
+  assert.equal(r.rawCount, 1, "СЫРОЕ число строк провайдера = 1, а не 0: «строка есть, но это не матч» — улика");
+});
+
+test("сырое число строк отличается от распознанного — иначе мусорная строка читается как пустой ответ", async () => {
+  const db = openDb(":memory:");
+  const deps = { env: { API_TENNIS_KEY: "k", API_TENNIS_BASE: "https://x/" }, now: () => "2026-07-30T17:00:00.000Z" } as any;
+  const body = { error: "1", result: [{ msg: "Please make the payment for your account!", cod: 1006 }] };
+  await collectTennisSnapshots(db, { ...deps, fetchImpl: jsonFetch(body) });
+  const h = tennisScoutHealth(db, Date.parse("2026-07-30T17:00:00.000Z"));
+  assert.match(String(h.error), /1006/, "причина доехала до маркера");
+  assert.equal(h.rawRows, 1, "провайдер вернул одну строку");
+  assert.equal(h.parsedRows, 0, "распознано матчей ноль — два РАЗНЫХ числа, схлопывать нельзя");
 });

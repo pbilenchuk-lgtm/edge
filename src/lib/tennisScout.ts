@@ -126,23 +126,53 @@ export function normalizeLive(m: any): TennisLive | null {
 //
 // Поэтому выборка возвращает КОНВЕРТ: строки + причина, если строк нет по вине провайдера.
 // «Пусто» остаётся законным ответом — но только когда провайдер ответил успехом и пустым списком.
-export interface TennisFetch { rows: TennisLive[]; error: string | null }
+// ВТОРАЯ ИТЕРАЦИЯ, И ОНА ВАЖНЕЕ ПЕРВОЙ. Первая версия этого разбора проверяла только `success!==1`
+// и «result не массив». Реальный отказ API-Tennis выглядит иначе — вот он, дословно с прода:
+//
+//   {"error":"1","result":[{"param":null,"msg":"Please make the payment for your account!","cod":1006}]}
+//
+// Поле называется `error`, а НЕ `success`; и объект-ошибка приходит ВНУТРИ массива `result`. Разбор
+// видел массив, не находил `success`, считал ответ успехом, отдавал одну строку — а `normalizeLive`
+// молча выбрасывал её, потому что там нет `event_key`. Наружу выходило `rawRows: 0, error: null`.
+// Провайдер прямым текстом писал «оплатите аккаунт», а прибор, построенный НАЗЫВАТЬ причину,
+// печатал «пусто». Тот же грех, что и в коде, который он чинил, — просто на уровень глубже.
+//
+// Отсюда два вывода, зашитые ниже:
+//   1) отказ ищется во ВСЕХ известных полях (`error`, `success`, `cod`/`msg` внутри result), а не в одном;
+//   2) считается СЫРОЕ число строк провайдера отдельно от распознанных: «вернул 1 строку, ни одна
+//      не является матчем» — это улика, а «вернул 0 строк» — другая. Схлопывать их нельзя.
+export interface TennisFetch { rows: TennisLive[]; error: string | null; rawCount: number }
 
 /** Достать человеческое сообщение об ошибке из ответа API-Tennis (форма плавает от метода к методу). */
 function apiErrorText(j: any): string {
-  const cand = j?.result?.error ?? j?.error ?? j?.message ?? j?.result;
-  if (typeof cand === "string" && cand.trim()) return cand.trim().slice(0, 160);
-  try { return JSON.stringify(cand ?? j).slice(0, 160); } catch { return "неразборчивый ответ"; }
+  const first = Array.isArray(j?.result) ? j.result[0] : null;
+  const msg = first?.msg ?? j?.result?.error ?? j?.result?.msg ?? j?.message ?? null;
+  const code = first?.cod ?? first?.code ?? null;
+  // Флаги конверта цитируем ВСЕГДА: при пустом result они — единственная улика, и без них
+  // сообщение вырождалось в бесполезное «— []».
+  const flags = [j?.error != null ? `error=${j.error}` : null, j?.success != null ? `success=${j.success}` : null]
+    .filter(Boolean).join(" ");
+  const body = typeof msg === "string" && msg.trim() ? msg.trim()
+    : (() => { try { return JSON.stringify(j?.result ?? j); } catch { return "неразборчивый ответ"; } })();
+  return [flags || null, code != null ? `код ${code}` : null, body].filter(Boolean).join(", ").slice(0, 200);
 }
 
-/** Разобрать конверт API-Tennis. success!==1 или result не массив — это ОТКАЗ, а не пустой слейт. */
+/** Ответ несёт признак отказа? `error` у API-Tennis — строка "1"/"0", `success` — 1 при успехе.
+ *  Ни одно из полей не обязательно, поэтому проверяем каждое отдельно и не считаем отсутствие отказом. */
+function envelopeRefusal(j: any): boolean {
+  if (j?.error != null && String(j.error) !== "0" && String(j.error).toLowerCase() !== "false") return true;
+  if (j?.success != null && Number(j.success) !== 1) return true;
+  // Объект-ошибка ВНУТРИ result (форма 1006): ни одного event_key и есть msg/cod — это не расписание.
+  const first = Array.isArray(j?.result) ? j.result[0] : null;
+  if (first && first.event_key == null && (first.msg != null || first.cod != null)) return true;
+  return false;
+}
+
+/** Разобрать конверт API-Tennis. Любой признак отказа — это ОТКАЗ, а не пустой слейт. */
 function parseTennisEnvelope(j: any): { rows: any[]; error: string | null } {
-  if (Array.isArray(j?.result)) {
-    // success приходит и числом, и строкой; отсутствие поля при массиве-результате считаем успехом.
-    if (j.success != null && Number(j.success) !== 1) return { rows: [], error: `api success=${j.success}: ${apiErrorText(j)}` };
-    return { rows: j.result, error: null };
-  }
-  return { rows: [], error: `api_error: ${apiErrorText(j)}` };
+  if (envelopeRefusal(j)) return { rows: [], error: `отказ API-Tennis — ${apiErrorText(j)}` };
+  if (Array.isArray(j?.result)) return { rows: j.result, error: null };
+  return { rows: [], error: `неожиданный формат ответа — ${apiErrorText(j)}` };
 }
 
 /** Классифицировать брошенное исключение: обрыв по таймауту читается иначе, чем сетевой отказ. */
@@ -154,20 +184,20 @@ function fetchErrorText(e: unknown, timeoutMs: number): string {
 
 /** Живые теннисные матчи из API-Tennis. Не бросает — отдаёт конверт {rows, error}. */
 export async function fetchTennisLivescores(cfg: TennisConfig, deps: EngineDeps = {}): Promise<TennisFetch> {
-  if (!cfg.enabled) return { rows: [], error: "ключ API_TENNIS_KEY не задан" };
+  if (!cfg.enabled) return { rows: [], error: "ключ API_TENNIS_KEY не задан", rawCount: 0 };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
   try {
     const doFetch = deps.fetchImpl ?? fetch;
     const url = `${cfg.base}?method=get_livescore&APIkey=${encodeURIComponent(cfg.key)}`;
     const res = await doFetch(url, { signal: ctrl.signal });
-    if (!res.ok) return { rows: [], error: `http ${res.status}` };
+    if (!res.ok) return { rows: [], error: `http ${res.status}`, rawCount: 0 };
     let j: any;
-    try { j = await res.json(); } catch { return { rows: [], error: "тело ответа — не JSON" }; }
+    try { j = await res.json(); } catch { return { rows: [], error: "тело ответа — не JSON", rawCount: 0 }; }
     const env = parseTennisEnvelope(j);
-    if (env.error) return { rows: [], error: env.error };
-    return { rows: env.rows.map(normalizeLive).filter((x): x is TennisLive => x != null), error: null };
-  } catch (e) { return { rows: [], error: fetchErrorText(e, cfg.timeoutMs) }; }
+    if (env.error) return { rows: [], error: env.error, rawCount: Array.isArray(j?.result) ? j.result.length : 0 };
+    return { rows: env.rows.map(normalizeLive).filter((x): x is TennisLive => x != null), error: null, rawCount: env.rows.length };
+  } catch (e) { return { rows: [], error: fetchErrorText(e, cfg.timeoutMs), rawCount: 0 }; }
   finally { clearTimeout(timer); }
 }
 
@@ -190,24 +220,24 @@ const TENNIS_FIXTURES_MAX_BYTES = (() => { const n = Number(process.env.TENNIS_F
  * {rows,error} envelope; an over-cap payload is a NAMED refusal, not a silent empty. date* YYYY-MM-DD.
  */
 export async function fetchTennisFixtures(cfg: TennisConfig, dateStart: string, dateStop: string, deps: EngineDeps = {}, wantedKeys?: Set<string>): Promise<TennisFetch> {
-  if (!cfg.enabled) return { rows: [], error: "ключ API_TENNIS_KEY не задан" };
+  if (!cfg.enabled) return { rows: [], error: "ключ API_TENNIS_KEY не задан", rawCount: 0 };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
   try {
     const doFetch = deps.fetchImpl ?? fetch;
     const url = `${cfg.base}?method=get_fixtures&date_start=${encodeURIComponent(dateStart)}&date_stop=${encodeURIComponent(dateStop)}&APIkey=${encodeURIComponent(cfg.key)}`;
     const res = await doFetch(url, { signal: ctrl.signal });
-    if (!res.ok) return { rows: [], error: `http ${res.status}` };
+    if (!res.ok) return { rows: [], error: `http ${res.status}`, rawCount: 0 };
     const text = await res.text();
     // too big to parse safely → skip (availability over settlement), but SAY SO
-    if (text.length > TENNIS_FIXTURES_MAX_BYTES) return { rows: [], error: `ответ ${text.length}б > лимита ${TENNIS_FIXTURES_MAX_BYTES}б — не парсим (защита от OOM)` };
+    if (text.length > TENNIS_FIXTURES_MAX_BYTES) return { rows: [], error: `ответ ${text.length}б > лимита ${TENNIS_FIXTURES_MAX_BYTES}б — не парсим (защита от OOM)`, rawCount: 0 };
     let j: any;
-    try { j = JSON.parse(text); } catch { return { rows: [], error: "тело ответа — не JSON" }; }
+    try { j = JSON.parse(text); } catch { return { rows: [], error: "тело ответа — не JSON", rawCount: 0 }; }
     const env = parseTennisEnvelope(j);
-    if (env.error) return { rows: [], error: env.error };
+    if (env.error) return { rows: [], error: env.error, rawCount: Array.isArray(j?.result) ? j.result.length : 0 };
     const wanted = wantedKeys ? env.rows.filter((r: any) => wantedKeys.has(String(r?.event_key))) : env.rows;
-    return { rows: wanted.map(normalizeLive).filter((x): x is TennisLive => x != null), error: null };
-  } catch (e) { return { rows: [], error: fetchErrorText(e, cfg.timeoutMs) }; }
+    return { rows: wanted.map(normalizeLive).filter((x): x is TennisLive => x != null), error: null, rawCount: env.rows.length };
+  } catch (e) { return { rows: [], error: fetchErrorText(e, cfg.timeoutMs), rawCount: 0 }; }
   finally { clearTimeout(timer); }
 }
 
@@ -432,9 +462,9 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
   // scout-derived and dies WITH the scout). Пишем ТРИ числа, а не одно: `written` без `raw` не
   // различает «провайдер вернул 0 строк» и «вернул 40 строк, но ни одна не live / не смапилась» —
   // а это разные поломки и чинятся они разным.
-  try { R.metaSet(db, TENNIS_SCOUT_OK_KEY, `${nowMs}|${written}|${raw.length}|${live.length}`, batchAt); } catch { /* never block on a marker */ }
+  try { R.metaSet(db, TENNIS_SCOUT_OK_KEY, `${nowMs}|${written}|${fetched.rawCount}|${live.length}|${raw.length}`, batchAt); } catch { /* never block on a marker */ }
   // P1.3: make the savings legible (skipped CLOB fetches / redundant finished writes this pass).
-  try { R.metaSet(db, "tennis_scout_savings", JSON.stringify({ tierSkipped, finishedSkipped, written, rawRows: raw.length, liveRows: live.length, error: fetched.error, at: batchAt }), batchAt); } catch { /* ignore */ }
+  try { R.metaSet(db, "tennis_scout_savings", JSON.stringify({ tierSkipped, finishedSkipped, written, rawRows: fetched.rawCount, parsedRows: raw.length, liveRows: live.length, error: fetched.error, at: batchAt }), batchAt); } catch { /* ignore */ }
   return written;
 }
 
@@ -534,7 +564,7 @@ export function tennisScoutSilence(db: Database, deps: EngineDeps = {}): { silen
   const cause = h.error
     ? `ПРОВАЙДЕР ОТКАЗАЛ: ${h.error} (H3 — чинится ключом/квотой, не кодом)`
     : h.okFresh
-      ? `луп ЖИВ, провайдер ответил успехом: строк ${h.rawRows ?? "?"}, из них in-play ${h.liveRows ?? "?"} — пусто/не мапится (H2)`
+      ? `луп ЖИВ, провайдер ответил успехом: строк ${h.rawRows ?? "?"}, распознано как матчи ${h.parsedRows ?? "?"}, из них in-play ${h.liveRows ?? "?"} — пусто/не мапится (H2)`
       : "скаут не вызывался — луп/процесс его не крутит (H1)";
   const ageTxt = Number.isFinite(writeAgeMin) ? `${Math.round(writeAgeMin)} мин` : "никогда";
   return { silent: true, note: `⚠ СКАУТ МОЛЧИТ (${ageTxt}) при ${due.length} матч(ах), которые по расписанию должны быть live — ${cause}` };
@@ -546,7 +576,7 @@ export function tennisScoutSilence(db: Database, deps: EngineDeps = {}): { silen
  *  это не здоровье: сегодняшний простой мы нашли только потому, что владелец пожаловался вручную. */
 export interface TennisScoutHealth {
   lastOkAt: string | null; lastOkAgeMin: number | null; okFresh: boolean;
-  written: number | null; rawRows: number | null; liveRows: number | null;
+  written: number | null; rawRows: number | null; liveRows: number | null; parsedRows: number | null;
   error: string | null; errorAt: string | null;
   lastWriteAt: string | null; lastWriteAgeMin: number | null;
 }
@@ -565,7 +595,7 @@ export function tennisScoutHealth(db: Database, nowMs = Date.now()): TennisScout
   return {
     lastOkAt: okMs > 0 ? new Date(okMs).toISOString() : null, lastOkAgeMin: ageMin(okMs),
     okFresh: okMs > nowMs - TENNIS_SCOUT_SILENT_MIN * 60_000,
-    written: num(okParts[1]), rawRows: num(okParts[2]), liveRows: num(okParts[3]),
+    written: num(okParts[1]), rawRows: num(okParts[2]), liveRows: num(okParts[3]), parsedRows: num(okParts[4]),
     error: errFresh ? errParts.slice(1).join("|") : null,
     errorAt: errMs > 0 ? new Date(errMs).toISOString() : null,
     lastWriteAt: lastWrite, lastWriteAgeMin: lastWrite ? Math.round(((nowMs - (Date.parse(lastWrite) || 0)) / 60_000) * 10) / 10 : null,
