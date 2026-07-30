@@ -290,17 +290,22 @@ test("прод-поправка: отказ на филле пишет маши�
 import { classifyZombie, loadZombieConfig, isRailPrice } from "../src/lib/zombieMarket.js";
 import { runStrategists } from "../src/lib/analysis.js";
 
-test("прод-поправка: планка на несыгранном матче — карантин; на завершённом — законная цена", () => {
+test("прод-поправка: планка ДО свистка — карантин; после свистка цену объясняет счёт", () => {
   const cfg = loadZombieConfig({});
   const base = { label: "Over 2.5", gsProb: null, groupSpreadCents: null, bookAgeMin: 1, live: true, askCents: null };
-  assert.equal(classifyZombie({ ...base, priceCents: 100, matchFinished: false }, cfg)?.code, "rail_price");
-  assert.equal(classifyZombie({ ...base, priceCents: 0.1, matchFinished: false }, cfg)?.code, "rail_price");
-  assert.equal(classifyZombie({ ...base, priceCents: 100, matchFinished: true }, cfg), null,
-    "на завершённом матче планка — честная цена разрешения, прятать нечего");
-  assert.equal(classifyZombie({ ...base, priceCents: 55, matchFinished: false }, cfg), null, "живая цена не трогается");
-  // Раньше ИМЕННО эти цены освобождались от единственного правила, которое могло их поймать.
-  assert.equal(isRailPrice(99.5, cfg), true);
-  assert.equal(isRailPrice(97, cfg), false);
+  assert.equal(classifyZombie({ ...base, priceCents: 100, matchKickedOff: false }, cfg)?.code, "rail_price");
+  assert.equal(classifyZombie({ ...base, priceCents: 0.1, matchKickedOff: false }, cfg)?.code, "rail_price");
+  // Прод, Bay FC — NJ/NY Gotham, 90'+4', счёт 0:1: первая версия правила карантинила ВЕРНЫЕ цены,
+  // потому что ключевалась на «матч не завершён». Гол забит — 98.5¢ на «Draw — No» это правда.
+  assert.equal(classifyZombie({ ...base, label: "Draw — No", priceCents: 98.5, matchKickedOff: true }, cfg), null,
+    "после свистка планку объясняет счёт — прятать нечего");
+  assert.equal(classifyZombie({ ...base, label: "Over 0.5", priceCents: 98, matchKickedOff: true }, cfg), null);
+  assert.equal(classifyZombie({ ...base, priceCents: 55, matchKickedOff: false }, cfg), null, "живая цена не трогается");
+  // Один порог с путём записи: 1.5¢ до свистка — это длинная ставка, а не планка (раньше ловилось как планка).
+  assert.equal(isRailPrice(99.5), true);
+  assert.equal(isRailPrice(1.5), false);
+  assert.equal(isRailPrice(0.5), true);
+  assert.equal(isRailPrice(97), false);
 });
 
 // Карантин зомби работает только для live-футбола, поэтому в ПРЕДМАТЧЕ отравленная книга доезжала до
