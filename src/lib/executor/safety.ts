@@ -94,7 +94,7 @@ export interface CapDecision {
  * a defensive EXIT is NEVER blocked here (a stop must always be able to leave — blocking it is the
  * worse failure). Reads live state from real_orders/real_ledger (the belt owns the truth, not the caller).
  */
-export function enforceCaps(db: Database, o: { sizeUsd: number; isEntry: boolean; dry: 0 | 1 }, nowMs: number, caps: SafetyCaps): CapDecision {
+export function enforceCaps(db: Database, o: { sizeUsd: number; isEntry: boolean }, nowMs: number, caps: SafetyCaps): CapDecision {
   // Exits bypass exposure / orders-per-hour / daily-loss (a defensive exit must always leave). They are
   // still size-clamped only if truly absurd — but a position exit sells what's held, so we pass it through.
   if (!o.isEntry) return { action: "allow", sizeUsd: o.sizeUsd, clamped: false };
@@ -113,10 +113,7 @@ export function enforceCaps(db: Database, o: { sizeUsd: number; isEntry: boolean
   // Berserk-loop guard: too many orders this hour → reject (a bug spamming orders hits the cap, not the
   // bank). Reads the PERSISTENT real_orders table, so the count survives a process restart (not an
   // in-memory counter) — a restart mid-berserk doesn't reset the guard to zero.
-  // [пункт 7] Счёт ведётся ПО СВОЕМУ РЕЖИМУ: сухие ордера ограничивают сухой контур, реальные — реальный.
-  // Единый счётчик и подрезал сухую воронку (делая статистику исполнения неполной, а причину — невидимой),
-  // и отдавал бы реальным деньгам предохранитель, уже израсходованный симуляцией.
-  if (RR.realOrdersLastHour(db, nowMs, o.dry) >= caps.maxOrdersPerHour) return { action: "reject", sizeUsd: 0, clamped: false, reason: `${caps.maxOrdersPerHour} ордеров/час достигнут (${o.dry ? "сухой" : "реальный"} контур) — предохранитель от цикла-берсерка` };
+  if (RR.realOrdersLastHour(db, nowMs) >= caps.maxOrdersPerHour) return { action: "reject", sizeUsd: 0, clamped: false, reason: `${caps.maxOrdersPerHour} ордеров/час достигнут — предохранитель от цикла-берсерка` };
 
   // Order-size clamp: whatever the sizer asked, never exceed the per-order ceiling.
   let size = o.sizeUsd, clamped = false;

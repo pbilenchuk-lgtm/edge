@@ -301,16 +301,7 @@ export function finalSetsFromRaw(raw: string | null): FinalSets | null {
   for (const s of sets) { if (s.p1 > s.p2) setsWonP1++; else if (s.p2 > s.p1) setsWonP2++; matchGames += s.p1 + s.p2; }
   return { sets, setsWonP1, setsWonP2, matchGames };
 }
-// ЗАВЕРШЁННЫЙ СЕТ ПО ПРАВИЛАМ ТЕННИСА, а не «кто-то дошёл до шести». Прежний предикат (max ≥ 6) считал
-// завершёнными счета 6-5 и 6-6 — состояния, в которых сет ЕЩЁ ИДЁТ. При ретайре на 6-5 это сеттлило
-// set_winner и посетовые тоталы по недоигранному сету вместо void: проигрывающий снимался, а мы книжили
-// «победителя сета», которого не было. Правило: 6+ с отрывом ≥2, либо 7-6 (тай-брейк). 7-5 покрыто первым
-// условием, 6-6 (тай-брейк идёт) — не покрыто ничем, и правильно.
-const setCompleted = (s: { p1: number; p2: number } | undefined): boolean => {
-  if (!s) return false;
-  const hi = Math.max(s.p1, s.p2), lo = Math.min(s.p1, s.p2);
-  return (hi >= 6 && hi - lo >= 2) || (hi === 7 && lo === 6);
-};
+const setCompleted = (s: { p1: number; p2: number } | undefined): boolean => !!s && Math.max(s.p1, s.p2) >= 6;
 
 // A completed set N resolves its own props even after a later retire (Gate 0.2). These families need
 // only their UNIT to complete; Total Sets / Set Handicap / match-total-games need the whole MATCH.

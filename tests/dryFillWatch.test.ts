@@ -19,7 +19,7 @@ function seed() {
 const bet = (db: any, o: { decision?: string | null } = {}) => R.insertBet(db, { id: R.uid(), match_id: "m1", strategy_id: "overreaction", risk_profile_id: "medium", market_label: "Over 2.5", status: "open", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: null, ai_prob: 0.6, stake: 40, rationale: "r", entered_minute: "30'", result: null, payout: null, decision_id: o.decision === undefined ? "d1" : o.decision, created_at: NOW } as any);
 const order = (db: any, o: { status: RR.RealOrderStatus; note: string; filled?: number }) => {
   const id = R.uid();
-  RR.insertRealOrder(db, { id, client_order_id: id, exchange_order_id: null, decision_id: "d1", strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "0xTOK", side: "BUY", leg: "entry", limit_price_cents: 50, size_usd: 20, tif_sec: 30, status: o.status, code_version: null, whitelist_version: 1, note: o.note, dry: 1, created_at: NOW } as any);
+  RR.insertRealOrder(db, { id, client_order_id: id, exchange_order_id: null, decision_id: "d1", strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "0xTOK", side: "BUY", leg: "entry", limit_price_cents: 50, size_usd: 20, tif_sec: 30, status: o.status, code_version: null, whitelist_version: 1, note: o.note, created_at: NOW } as any);
   if (o.filled) db.prepare(`UPDATE real_orders SET filled_size_usd=?, status=? WHERE id=?`).run(o.filled, o.status, id);
 };
 

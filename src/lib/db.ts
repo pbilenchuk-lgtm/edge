@@ -35,7 +35,7 @@ export interface Database {
 }
 
 interface SqliteModule {
-  DatabaseSync: new (path: string, opts?: { readOnly?: boolean }) => Database;
+  DatabaseSync: new (path: string) => Database;
 }
 
 let _db: Database | null = null;
@@ -184,32 +184,8 @@ export function transact<T>(db: Database, fn: () => T): T {
 export function openDb(path: string): Database {
   const { DatabaseSync } = require("node:sqlite") as SqliteModule;
   const db = new DatabaseSync(path);
-  // busy_timeout, or a CLI that writes while the app is running dies on the first contended statement with
-  // "database is locked" — SQLite's default is to fail INSTANTLY rather than wait. The main connection has
-  // always had WAL (a database-level property, so this handle inherits it), but readers and writers still
-  // contend for the write lock, and a maintenance script is by definition the one that should yield.
-  db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 10000;");
+  db.exec("PRAGMA foreign_keys = ON;");
   initSchema(db);
-  return db;
-}
-
-/**
- * Открыть базу ТОЛЬКО НА ЧТЕНИЕ — для отчётов и диагностики.
- *
- * `openDb` вызывает `initSchema`, а тот прогоняет всю schema.sql, список ALTER-миграций И маркировку
- * settle_suspect. То есть каждый «read-only отчёт», открытый через openDb, на самом деле писал в прод-базу:
- * `npm run guard:check` одним запуском пометил 135 ставок. Измерение, меняющее измеряемое, хуже отсутствия
- * измерения — оно выглядит как наблюдение.
- *
- * Здесь соединение открывается флагом SQLite: любая попытка записи не «пропускается тихо», а падает с
- * ошибкой. Это и есть смысл — скрипт, который случайно попробует что-то изменить, обязан сломаться громко,
- * а не молча испортить данные. Схема не создаётся: базы нет — отчёту нечего показывать, и притворяться
- * незачем.
- */
-export function openDbReadOnly(path: string): Database {
-  const { DatabaseSync } = require("node:sqlite") as SqliteModule;
-  const db = new DatabaseSync(path, { readOnly: true });
-  db.exec("PRAGMA busy_timeout = 10000;");   // приложение пишет параллельно — читателю положено ждать, а не падать
   return db;
 }
 
@@ -267,45 +243,17 @@ export function initSchema(db: Database): void {
     "ALTER TABLE markets ADD COLUMN token_second TEXT",
     // origin phase as a FIELD with provenance (was read-time inferred in profileAnalytics). Backfilled
     // once by migrateBetOrigin below; new bets stamp it in insertBet.
-    // [batch-11] WHERE the PM-resolution cross-check token came from: 'stored_complement' (markets.token_second)
-    // or 'match_complement' (found among the match's own markets when the pointer was never stored). A settle
-    // dispute has to be answerable from the row itself.
-    "ALTER TABLE bets ADD COLUMN settled_via TEXT",
     "ALTER TABLE bets ADD COLUMN origin TEXT",
     "ALTER TABLE bets ADD COLUMN origin_source TEXT",
     // P0.1: the bound ESPN event's ISO date, frozen at bind time — the two-leg fixture-identity key.
     "ALTER TABLE match_live ADD COLUMN espn_event_date TEXT",
     // P0.1: settle-contamination quarantine — a bet whose match may have settled on ANOTHER leg's result.
     "ALTER TABLE bets ADD COLUMN settle_suspect INTEGER NOT NULL DEFAULT 0",
-    // Снятие карантина ОСОЗНАННЫМ решением (доказанная привязка / честный пере-сеттл). Отличается от
-    // settle_suspect=0 тем, что означает «проверено», а не «ещё не смотрели» — иначе грубая пометка по
-    // перечню турниров возвращала бы метку при каждом открытии базы.
-    "ALTER TABLE bets ADD COLUMN settle_verified INTEGER NOT NULL DEFAULT 0",
-    // W1/Z2: судьба куска (payout−stake на закрытии) — ОТДЕЛЬНОЕ поле от исхода рынка, чтобы торговый
-    // P&L куска больше никогда не маскировался под предсказание (Over 1.5: lost@11.7 + won@54.8 на одном
-    // рынке — рынок «разрешился в обе стороны», потому что метка шла от знака P&L).
-    "ALTER TABLE bets ADD COLUMN piece_pnl REAL",
-    // 0 = метка куска ещё не сверена с рынком · 1 = выставлена по исходу рынка · 2 = accounting_unverifiable
-    // (проверить нечем — потребители калибровки обязаны отбрасывать, как settle_suspect).
-    "ALTER TABLE bets ADD COLUMN market_labeled INTEGER NOT NULL DEFAULT 0",
     // P0.5: football epoch tag on the bet (parallels tennis «пороги:…»); backfilled or epoch_unknown.
     "ALTER TABLE bets ADD COLUMN football_epoch TEXT",
     // Z3 (batch-5): idempotency key for trade-log lines — a re-render / double-write of the SAME event
     // (enter dup: Kansas, Hammarby) collapses to one row. Partial unique index so only keyed rows dedup.
     "ALTER TABLE trade_log ADD COLUMN dedup_key TEXT",
-    // [пункт 6, batch-12] АДРЕС ВЫХОДА. Выходы сопоставлялись со ставкой по (стратегия + подстрока ярлыка) —
-    // а два профиля одной стратегии держат ОДИН И ТОТ ЖЕ рынок и пишут неразличимые строки. Каждая из двух
-    // ставок забирала ОБА выхода: удвоенные счётчики триггеров, чужая метка model_fill, чужие «частично».
-    // Ставка — единственный однозначный адрес, и теперь он стоит на строке.
-    "ALTER TABLE trade_log ADD COLUMN bet_id TEXT",
-    // [пункт 7] РЕЖИМ НА ОРДЕРЕ. У real_orders не было признака сухого прогона вообще — «в сухом режиме
-    // все ордера сухие» держалось только на том, что настоящий исполнитель ещё не включён. Из-за этого
-    // предохранитель от цикла-берсерка (N ордеров/час) считал СИМУЛЯЦИЮ наравне с реальными деньгами:
-    // в dry он молча подрезал сухую воронку (а статистика исполнения делалась неполной), а в момент
-    // перехода на реал первые же настоящие ордера могли быть отклонены квотой, уже потраченной на
-    // симуляцию. DEFAULT 1 — это и есть бэкфилл истории: все существующие строки сухие по построению
-    // (единственный, кто их пишет, — DryRunExecutor). Новые вставки обязаны передавать значение явно.
-    "ALTER TABLE real_orders ADD COLUMN dry INTEGER NOT NULL DEFAULT 1",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_tradelog_dedup ON trade_log(match_id, type, dedup_key) WHERE dedup_key IS NOT NULL",
     // Z2(b) (batch-5): payout-consistency flag — set at settle when |payout − expected| exceeds a
     // commission tolerance (a decimal shift like the Kansas «payout ≈ тек/10»). Caught at birth, not a week later.
@@ -319,7 +267,7 @@ export function initSchema(db: Database): void {
   // P0.1: conservative settle-contamination quarantine — tag settled bets on UEFA two-leg comps
   // `settle_suspect` so verdict cuts drop them NOW (no network); the ESPN date backfill clears the clean
   // ones later. Idempotent (only settle_suspect=0 rows). Cheap boot query is safe here (not a full scan).
-  try { const n = markUefaSettleSuspect(db, process.env); if (n > 0) console.log(`[migrate] settle_suspect quarantine (UEFA two-leg): ${n} settled bets tagged — excluded from verdict cuts until the ESPN date backfill proves them clean`); } catch { /* best-effort */ }
+  try { const n = markUefaSettleSuspect(db); if (n > 0) console.log(`[migrate] settle_suspect quarantine (UEFA two-leg): ${n} settled bets tagged — excluded from verdict cuts until the ESPN date backfill proves them clean`); } catch { /* best-effort */ }
   // P0.5: tag pre-fix football bets epoch_unknown (clean era starts after P0.1-P0.3) — dropped from cuts.
   try { const n = migrateFootballEpochUnknown(db); if (n > 0) console.log(`[migrate] football_epoch: ${n} pre-fix football bets tagged epoch_unknown (excluded from verdict cuts)`); } catch { /* best-effort */ }
   // Deterministic epoch backfill: recover rows that were tagged epoch_unknown ONLY because football_epoch

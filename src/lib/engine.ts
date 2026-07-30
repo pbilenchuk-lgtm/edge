@@ -19,7 +19,7 @@ import { reassessNarrative, effectiveEnv } from "./llm.js";
 import { settleBet, resolveFootballMarket, matchPhase, isResolutionSettle } from "./settlement.js";
 import { isFtBlindBet } from "./betMeta.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
-import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig, RESOLVED_RAIL_CENTS } from "./polymarket.js";
+import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig } from "./polymarket.js";
 import { liquidationCents } from "./execution.js";
 import { loadShadowConfig, shadowOnExit } from "./shadow.js";
 import { recordComebackLatency } from "./overreactionLatency.js";
@@ -130,9 +130,9 @@ function strategiesWithOpenBets(db: Database, matchId: string): string[] {
 
 export async function refreshMatchOdds(
   db: Database, matchId: string, deps: EngineDeps = {},
-): Promise<{ updated: number; triggers: ReassessResult[]; railSkipped: number }> {
+): Promise<{ updated: number; triggers: ReassessResult[] }> {
   const match = R.getMatch(db, matchId);
-  if (!match) return { updated: 0, triggers: [], railSkipped: 0 };
+  if (!match) return { updated: 0, triggers: [] };
   const cfg = deps.config ?? loadEngineConfig(deps.env);
   const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
   const now = nowFn(deps)();
@@ -142,24 +142,12 @@ export async function refreshMatchOdds(
   const byTok: Record<string, number | null> = {};
   for (const q of quotes) byTok[q.tokenId] = q.priceCents;
 
-  let updated = 0, railSkipped = 0;
+  let updated = 0;
   const triggers: ReassessResult[] = [];
   for (const m of markets) {
     if (!m.external_ref) continue;
     const price = byTok[m.external_ref];
     if (price == null || price === m.price) continue;
-    // [прод-разбор 29.07] ВЕРХНЯЯ/НИЖНЯЯ ОТСЕЧКА, ЗЕРКАЛЬНАЯ ИМПОРТНОЙ. Импорт отказывается заводить
-    // рынок с ценой у планки — `polymarket.ts:707`, «effectively-resolved / dead line». У рефреша такой
-    // проверки не было вовсе: единственный фильтр выше — «цена не null и изменилась». Поэтому книга
-    // РАЗРЕШИВШЕГОСЯ рынка продолжала записываться снапшот за снапшотом (Ypiranga—Barra: весь набор
-    // 99.5–99.6¢ / 0.5¢ на сыгранном матче), светилась в «Котировках» как живая котировка и кормила
-    // расчёт эджа мёртвой ценой. Зомби-карантин это не ловит по построению: ≥98¢ у него в ИСКЛЮЧЕНИИ
-    // правила протухания (`zombieMarket.ts:130`, staleExtremeCents=2) — то есть в белом списке.
-    // Один порог на оба пути, а не два разных: что импорт считает мёртвым, то и рефреш не пишет.
-    if (price <= RESOLVED_RAIL_CENTS || price >= 100 - RESOLVED_RAIL_CENTS) {
-      railSkipped++;
-      continue;
-    }
     updated++;
     // new versioned snapshot (§2.10)
     // Quote-refresh updates the mid from CLOB /midpoint (no fresh book). The book's SPREAD structure
@@ -195,7 +183,7 @@ export async function refreshMatchOdds(
       }
     }
   }
-  return { updated, triggers, railSkipped };
+  return { updated, triggers };
 }
 
 // ------------------------------------------------------------
@@ -389,11 +377,9 @@ export function reSettleSuspectBets(db: Database, deps: EngineDeps = {}): { regr
     const won = resolveOutcome(bet, m, {});
     if (won == null) { deferred++; continue; } // unresolvable label with a known score → PM-resolution / void (P2)
     const nextStatus = won ? "settled_won" : "settled_lost";
-    // settle_verified=1 вместе со снятием: решение принято по доказанной привязке, и грубый карантин по
-    // перечню турниров не должен вернуть метку при следующем же открытии базы.
-    if (bet.status === nextStatus) { db.prepare(`UPDATE bets SET settle_suspect=0, settle_verified=1 WHERE id=?`).run(id); confirmed++; continue; } // already honest
+    if (bet.status === nextStatus) { db.prepare(`UPDATE bets SET settle_suspect=0 WHERE id=?`).run(id); confirmed++; continue; } // already honest
     const patch = settleBet({ entry_price: bet.entry_price, stake: bet.stake }, won, bet.closing_price ?? null);
-    db.prepare(`UPDATE bets SET status=?, result=?, payout=?, settled_by='match_score', settled_at=?, settle_suspect=0, settle_verified=1 WHERE id=?`)
+    db.prepare(`UPDATE bets SET status=?, result=?, payout=?, settled_by='match_score', settled_at=?, settle_suspect=0 WHERE id=?`)
       .run(patch.status, patch.result, patch.payout, now, id);
     R.insertTradeLog(db, {
       id: R.uid(), match_id: m.id, strategy_id: bet.strategy_id, minute: "пересчёт", type: "settle",
@@ -1145,21 +1131,8 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
             console.warn(`[enrich] fixture_leg_mismatch date_gap: «${c0.home}–${c0.away}» запись ${c0.kickoff_at} vs ESPN ${s.date} (${league}) — НЕ привязано (чужой круг/перенос)`);
             continue; // the date says this event is not any of these records — never wire a foreign leg
           }
-        } else if (candidates.length === 1) {
-          m = candidates[0]; // no event date, но кандидат ЕДИНСТВЕННЫЙ — привязывать не из чего выбирать
         } else {
-          // [batch-12, п.5 / аудит] БЕЗ ДАТЫ И С НЕСКОЛЬКИМИ КАНДИДАТАМИ ПРИВЯЗКА — ЖРЕБИЙ.
-          // StatPal-фид (parseStatpalSoccer) даты события не отдаёт вовсе: evMs=NaN, и весь дата-гейт выше
-          // проваливался в `candidates[0]` — «первый попавшийся из тех, у кого совпали имена». Для двухматчевых
-          // пар UEFA/CONMEBOL это перехвачено списком, но пара «кубок + лига» одних и тех же команд в списке
-          // не значится: класс Seattle–Portland (одни соперники дважды за неделю в РАЗНЫХ турнирах) бился
-          // ровно сюда. Цена ошибки — не пропущенная привязка, а ЧУЖОЙ СЧЁТ на живом матче и сеттл по нему.
-          // Имена совпали у двоих, различить нечем → не привязываем ни к кому, громко и со счётчиком.
-          legTally.dateGap++;
-          const c0 = candidates[0];
-          recordReject(c0.home, c0.away, c0.kickoff_at, s.date ?? null, league, "no_date_ambiguous");
-          console.warn(`[enrich] fixture_leg_mismatch no_date_ambiguous: «${c0.home}–${c0.away}» — у события нет даты, а кандидатов ${candidates.length} (${candidates.map((c) => c.kickoff_at ?? "—").join(", ")}) [${league}] — НЕ привязано (различить нечем)`);
-          continue;
+          m = candidates[0]; // single-leg, no event date → can't gate; legacy team-name binding
         }
       }
       // Suffix mismatch (record league vs board league) is LEGAL — PM files quals under the main league and
@@ -1184,22 +1157,6 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       // in settleMatch (called by syncMatchStatus, guarded on from!=="finished"),
       // so if enrich flips a match to finished first, syncMatchStatus would skip
       // it forever and its open bets would never resolve. Settle here instead.
-      // A MATCH CANNOT BE OVER BEFORE IT STARTS. The two-leg date gate above stops a foreign leg from BINDING,
-      // but rows bound before that gate existed keep their poisoned binding, and every later poll happily
-      // re-applies the foreign event's «finished / 90' / 2:3» onto a fixture that has not kicked off. That is
-      // how 28.07 went silent: five qualification second legs sat `finished` with first-leg scores from 22.07,
-      // and a match the system believes is played never enters the live phase, never reaches the strategist
-      // and never trades. Not a threshold — a logical impossibility, so it is refused outright.
-      // The window is one match-length: a kickoff time that is merely slightly off must not be fought over,
-      // but an event finishing hours before its fixture begins is somebody else's match.
-      const koMsNow = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
-      const claimsOver = s.final || s.state === "finished" || s.state === "live";
-      if (claimsOver && Number.isFinite(koMsNow) && koMsNow - Date.parse(now) > 2 * 3_600_000) {
-        legTally.dateGap++;
-        recordReject(m.home, m.away, m.kickoff_at, s.date ?? null, league, "finished_before_kickoff");
-        console.warn(`[enrich] finished_before_kickoff: «${m.home}–${m.away}» кикофф ${m.kickoff_at}, а событие ESPN уже «${s.state}${s.final ? "/final" : ""}» (${s.date ?? "—"}) — состояние НЕ применено (чужой круг на нашей записи)`);
-        continue;
-      }
       const becameFinished = (s.final || s.state === "finished") && m.state !== "finished";
       // Never regress state or wipe a known score on a stale/glitchy poll.
       const nextState = STATE_RANK[s.state] >= STATE_RANK[m.state] ? s.state : m.state;

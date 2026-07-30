@@ -926,18 +926,3 @@ CREATE TABLE IF NOT EXISTS real_control_log (
   at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_real_control_log_at ON real_control_log(at);
-
--- W5 (batch-12): shadow отклонённых по stale_proposal входов — измеритель порога дрейфа. Заморозка в момент
--- отказа (цена филла — та, которую МЫ БЫ получили), резолв по исходу рынка, критерий объявлен в модуле.
-CREATE TABLE IF NOT EXISTS stale_proposal_shadow (
-  id             TEXT PRIMARY KEY,        -- match|label|proposed|fill: повтор того же отказа не раздувает выборку
-  match_id       TEXT NOT NULL REFERENCES matches(id),
-  strategy_id    TEXT NOT NULL,
-  market_label   TEXT NOT NULL,
-  proposed_cents REAL NOT NULL,
-  fill_cents     REAL NOT NULL,
-  drift_cents    REAL NOT NULL,
-  status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','won','lost','unverifiable')),
-  created_at     TEXT NOT NULL,
-  resolved_at    TEXT
-);

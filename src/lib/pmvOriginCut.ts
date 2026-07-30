@@ -19,7 +19,6 @@
 // own precondition check, so "is the column confirmed?" is answered mechanically, not by remembering order.
 // ============================================================
 
-import { clvLeg } from "./clv.js";
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 
@@ -91,10 +90,8 @@ export function buildPmvOriginCut(db: Database): PmvOriginCut {
     if ((b as any).origin == null) originNull++;
     if (src != null && !KNOWN_SOURCES.has(src)) unknownSource++;
     const settled = R.isSettled(b.status);
-    // [пункт 6] CLV — по линии закрытия из снимков, а не по `closing_price` (при досрочном выходе там наша
-    // цена выхода, при расчёте — цена разрешения; см. clv.ts). Нет линии → нет числа, а не суррогат.
-    const mm = R.getMatch(db, b.match_id);
-    const clv = mm ? clvLeg(db, mm, { market_label: b.market_label, entry_price: b.entry_price }).clvCents : null;
+    const entry = b.entry_price, closing = b.closing_price;
+    const clv = entry != null && closing != null ? Math.round((closing - entry) * 10) / 10 : null;
     const outcome: Row["outcome"] = !settled ? "open" : b.result === "won" ? "won" : b.result === "lost" ? "lost" : "void";
     const pnl = settled && b.payout != null ? Math.round((b.payout - (b.stake ?? 0)) * 100) / 100 : null;
     const settledAt = (b as any).settled_at as string | null;

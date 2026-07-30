@@ -117,7 +117,7 @@ export class DryRunExecutor implements Executor {
 
     // §4.1 belt: hard caps (entries gated; a defensive exit passes). Clamp/reject/pause.
     const isEntry = order.leg === "entry";
-    const cap = enforceCaps(db, { sizeUsd: order.sizeUsd, isEntry, dry: 1 }, nowMs, caps);
+    const cap = enforceCaps(db, { sizeUsd: order.sizeUsd, isEntry }, nowMs, caps);
     if (cap.action !== "allow") return this.ack(order, "rejected", 0, null, `кэп (${cap.action}): ${cap.reason}`);
 
     // §4.1 fifth cap: conform to the market tick + min. The whitelist layer feeds per-market values
@@ -151,7 +151,7 @@ export class DryRunExecutor implements Executor {
         // S3b: stamp the ENTRY epoch (same source as bets.code_version) so dry-order cuts read a real
         // epoch instead of collapsing every fill into «legacy» — a verdict is only readable per clean epoch.
         code_version: effectiveCodeVersion(db), whitelist_version: this.ctx.whitelistVersion ?? null,
-        note: `dry-run${cap.clamped ? ` · урезан кэпом до $${sizeUsd}` : ""}`, dry: 1, created_at: nowIso,
+        note: `dry-run${cap.clamped ? ` · урезан кэпом до $${sizeUsd}` : ""}`, created_at: nowIso,
       });
       RR.transitionRealOrder(db, orderId, "placed", nowIso, { note: "dry-run placed (не отправлено)" });
       if (expired) { RR.transitionRealOrder(db, orderId, "expired", nowIso, { filledSizeUsd: 0, note: `TIF expired · ${fill.note}` }); return; }

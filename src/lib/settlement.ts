@@ -112,13 +112,9 @@ export function resolveFootballMarket(
   const l = label.toLowerCase();
 
   // A YES/NO market surfaced as two sides ("<market> — Yes" / "— No"): resolve
-  // the BASE market and negate for the No side. The separator may be an em-dash, a colon or a plain
-  // HYPHEN — the hyphen form is real Polymarket notation ("Draw - No") and used to fall through here,
-  // leaving the market unresolvable (→ null → accounting_unverifiable) purely because of the dash
-  // character. What keeps "Draw No Bet" safe is not the separator set but the END ANCHOR: that label
-  // ends in "bet", so it never matches. Same widening as correlationKey — the two must agree on what a
-  // side is, or one of them clusters a market the other cannot settle.
-  const sideSuffix = l.match(/[—:-]\s*(yes|no)\s*$/);
+  // the BASE market and negate for the No side. Only the explicit suffix form
+  // (em-dash/colon + Yes|No at the very end), so "Draw No Bet" isn't mistaken.
+  const sideSuffix = l.match(/[—:]\s*(yes|no)\s*$/);
   if (sideSuffix) {
     const base = label.slice(0, sideSuffix.index).replace(/[\s—:]+$/, "");
     const r = resolveFootballMarket(base, scoreHome, scoreAway, teams, phase); // forward phase to the base

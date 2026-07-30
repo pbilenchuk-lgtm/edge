@@ -5,10 +5,10 @@
 //   aggregates (occurred-after-cut fraction, missed delta) bucketed by cut minute.
 //   npm run melt:report
 // ============================================================
-import { openDbReadOnly, dbPath } from "../src/lib/db.js";
+import { openDb, dbPath } from "../src/lib/db.js";
 import { meltingOptionCutReport } from "../src/lib/meltReport.js";
 
-const db = openDbReadOnly(dbPath());
+const db = openDb(dbPath());
 const rep = meltingOptionCutReport(db);
 
 const pct = (x: number | null) => (x == null ? "—" : `${Math.round(x * 100)}%`);

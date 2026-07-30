@@ -96,7 +96,7 @@ test("dry/real separation: a dry-run session leaves the REAL books EMPTY (no dry
 test("checkOrphanPositions: a REAL open position + a no-exit mode → loud persistent alert", () => {
   const d = db();
   // Simulate a REAL fill: an order WITH an exchange id + a position on its token.
-  RR.insertRealOrder(d, { id: "ro", client_order_id: "rc", exchange_order_id: "0xhash", decision_id: "dec", strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "tokR", side: "BUY", leg: "entry", limit_price_cents: 45, size_usd: 50, tif_sec: 45, code_version: null, whitelist_version: 1, note: null, dry: 1, created_at: NOW });
+  RR.insertRealOrder(d, { id: "ro", client_order_id: "rc", exchange_order_id: "0xhash", decision_id: "dec", strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "tokR", side: "BUY", leg: "entry", limit_price_cents: 45, size_usd: 50, tif_sec: 45, code_version: null, whitelist_version: 1, note: null, created_at: NOW });
   RR.upsertRealPosition(d, { token_id: "tokR", match_id: "m1", strategy_id: "overreaction", size_shares: 100, avg_price_cents: 45, realized_pnl_usd: 0, unrealized_pnl_usd: null, updated_at: NOW });
   const off = checkOrphanPositions(d, "off", NOW);
   assert.equal(off.alert, true, "real position + off (no exits) → orphan alert");
@@ -110,7 +110,7 @@ test("checkOrphanPositions: a REAL open position + a no-exit mode → loud persi
 test("checkOrphanPositions: a DRY-run position never triggers the sentinel (no real risk)", () => {
   const d = db();
   // A dry position: order with NO exchange id (dry) + a position.
-  RR.insertRealOrder(d, { id: "do", client_order_id: "dc", exchange_order_id: null, decision_id: "dec", strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "tokD", side: "BUY", leg: "entry", limit_price_cents: 45, size_usd: 50, tif_sec: 45, code_version: null, whitelist_version: 1, note: null, dry: 1, created_at: NOW });
+  RR.insertRealOrder(d, { id: "do", client_order_id: "dc", exchange_order_id: null, decision_id: "dec", strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "tokD", side: "BUY", leg: "entry", limit_price_cents: 45, size_usd: 50, tif_sec: 45, code_version: null, whitelist_version: 1, note: null, created_at: NOW });
   RR.upsertRealPosition(d, { token_id: "tokD", match_id: "m1", strategy_id: "overreaction", size_shares: 100, avg_price_cents: 45, realized_pnl_usd: 0, unrealized_pnl_usd: null, updated_at: NOW });
   assert.equal(checkOrphanPositions(d, "off", NOW).alert, false, "dry position carries no real risk → no false alarm in dry-run");
 });

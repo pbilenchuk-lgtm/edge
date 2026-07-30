@@ -18,7 +18,7 @@ function withEnv(v: string | undefined, fn: () => void) {
 }
 
 function workingOrder(d: any, id: string) {
-  RR.insertRealOrder(d, { id, client_order_id: id, exchange_order_id: `ex-${id}`, decision_id: `dec-${id}`, strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "tok1", side: "BUY", leg: "entry", limit_price_cents: 45, size_usd: 30, tif_sec: 45, code_version: "e", whitelist_version: 1, note: null, dry: 1, created_at: NOW });
+  RR.insertRealOrder(d, { id, client_order_id: id, exchange_order_id: `ex-${id}`, decision_id: `dec-${id}`, strategy_id: "overreaction", profile_id: "medium", match_id: "m1", token_id: "tok1", side: "BUY", leg: "entry", limit_price_cents: 45, size_usd: 30, tif_sec: 45, code_version: "e", whitelist_version: 1, note: null, created_at: NOW });
   RR.transitionRealOrder(d, id, "placed", NOW, {});
 }
 

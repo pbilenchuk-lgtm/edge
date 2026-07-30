@@ -26,7 +26,6 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
-import { resolveComplement } from "./complementMarket.js";
 import { isStateSuspect } from "./engine.js";
 import { settleBet } from "./settlement.js";
 import { isFtBlindBet } from "./betMeta.js";
@@ -57,16 +56,7 @@ export function loadPmResolutionConfig(env: Record<string, string | undefined> =
 export interface TokenResolution { priceCents: number | null; closed: boolean }
 export type ResolveTokensFn = (tokenIds: string[]) => Promise<Record<string, TokenResolution>>;
 
-/** Машинная причина возврата — пишется в `bets.settled_via` и ЕСТЬ то, по чему voidWatch делит возвраты.
- *  `no_complement` — НАША неспособность сверить (одиночный токен); `market_void` — решение биржи;
- *  `timeout_not_closed` — рынок так и не закрылся за отведённый срок. Разные факты, не один статус. */
-export type VoidVia = "no_complement" | "market_void" | "timeout_not_closed";
-
 export interface PmResolutionResult {
-  /** [batch-11] Which source supplied the cross-check complement. A rising match_complement share is the
-   *  fallback working; it is reported rather than silent so nobody has to trust that it stayed conservative. */
-  viaStoredComplement: number;
-  viaMatchComplement: number;
   candidates: number;        // open bets on PM-only (score-less) finished football fixtures examined
   settled: number; won: number; lost: number;
   marketVoid: number;        // closed=true + non-resolving price → PM refunded
@@ -76,9 +66,6 @@ export interface PmResolutionResult {
   pendingStable: number;     // resolving price, no closed flag → awaiting the second stable poll
   pendingUnresolved: number; // no resolving price yet, still inside the timeout
   zombieBackfill: number;    // = candidates: the hidden already-eternal-open tail this pass cleared/examined
-  /** Ставки, рассчитанные ДРУГИМ путём, пока шёл сетевой resolver — pm_resolution их не перезаписывает.
-   *  Ненулевое значение = гонка сеттл-путей реально случается; полезно видеть, а не молча пропускать. */
-  alreadySettled: number;
   // Proof #2: the one-time bank impact of this pass (a backfill settles a tail that accrued for weeks — a
   // STEP on the P&L curve, not a trading result). settled_by="pm_resolution"/void tags segment it out of daily cuts.
   bankDeltaUsd: number;      // Σ P&L booked this pass (won/lost payouts − stakes; a void refund is 0)
@@ -100,7 +87,7 @@ export async function settlePmResolutionBets(
   const nowMs = Date.parse(now) || Date.now();
   const cfg = loadPmResolutionConfig(deps.env);
   const shadowCfg = loadShadowConfig(db, deps.env);
-  const res: PmResolutionResult = { candidates: 0, settled: 0, won: 0, lost: 0, marketVoid: 0, voidTimeout: 0, suspect: 0, frozenSuspect: 0, viaStoredComplement: 0, viaMatchComplement: 0, pendingStable: 0, pendingUnresolved: 0, zombieBackfill: 0, alreadySettled: 0, bankDeltaUsd: 0, reservesFreedUsd: 0 };
+  const res: PmResolutionResult = { candidates: 0, settled: 0, won: 0, lost: 0, marketVoid: 0, voidTimeout: 0, suspect: 0, frozenSuspect: 0, pendingStable: 0, pendingUnresolved: 0, zombieBackfill: 0, bankDeltaUsd: 0, reservesFreedUsd: 0 };
   const suspectAgeMs = cfg.suspectAgeH * 3_600_000;
 
   // 1) Gather candidates. Two signatures of the SAME class — "no trustworthy score of ours, defer to PM":
@@ -109,7 +96,7 @@ export async function settlePmResolutionBets(
   //        any, is not to be trusted. Once the freeze has hung past a grace window (suspectAgeH beyond expected
   //        finish), route its open bets to PM resolution too. Athletic–São Bernardo (score ?:? forever, Draw-No
   //        $120 hanging) is exactly this. The six e7 resolution rules below apply to both, unchanged.
-  const cands: { betId: string; matchId: string; kickoffAt: string | null; createdAt: string; token: string | null; token2: string | null; frozen: boolean; via: string | null }[] = [];
+  const cands: { betId: string; matchId: string; kickoffAt: string | null; createdAt: string; token: string | null; token2: string | null; frozen: boolean }[] = [];
   const tokenSet = new Set<string>();
   for (const comp of R.listCompetitions(db).filter((c) => c.sport_id === "football")) {
     for (const m of R.listMatches(db, comp.id)) {
@@ -127,20 +114,12 @@ export async function settlePmResolutionBets(
       const frozen = frozenAged; // pulled via the state_suspect extension (its score, if present, is untrusted)
       for (const b of R.betsForMatch(db, m.id)) {
         if (b.status !== "open") continue;
-        const mkts = R.latestMarkets(db, m.id);
-        const mk = mkts.find((x) => x.label === b.market_label);
+        const mk = R.latestMarkets(db, m.id).find((x) => x.label === b.market_label);
         const token = mk?.external_ref ?? null;
-        // [batch-11] The cross-check token, preferring the stored pointer. 37% of market rows never got one,
-        // so without the fallback those positions can only ever void — see complementMarket.ts. The fallback
-        // supplies the SAME kind of token from the match's own catalogue; every downstream check is unchanged.
-        // NB: named compTok, not comp — `comp` is the competition loop variable above, and shadowing it
-        // here would read as the competition three lines later.
-        const compTok = resolveComplement(b.market_label, mk?.token_second ?? null, mkts);
-        const token2 = compTok?.token ?? null;
-        const via = compTok ? (compTok.via === "stored" ? "stored_complement" : "match_complement") : null;
+        const token2 = mk?.token_second ?? null;
         if (token) tokenSet.add(token);
         if (token2) tokenSet.add(token2);
-        cands.push({ betId: b.id, matchId: m.id, kickoffAt: m.kickoff_at, createdAt: b.created_at, token, token2, frozen, via });
+        cands.push({ betId: b.id, matchId: m.id, kickoffAt: m.kickoff_at, createdAt: b.created_at, token, token2, frozen });
         if (frozen) res.frozenSuspect++;
       }
     }
@@ -157,34 +136,20 @@ export async function settlePmResolutionBets(
   const isLostSide = (p: number | null) => p != null && p <= cfg.loCents;
   const isResolving = (p: number | null) => isWonSide(p) || isLostSide(p);
 
-  const settle = (betId: string, won: boolean, priceCents: number | null, via: string | null = null) => {
+  const settle = (betId: string, won: boolean, priceCents: number | null) => {
     const b = R.getBet(db, betId); if (!b) return;
-    // ПЕРЕЧИТАТЬ СТАТУС ПОСЛЕ await. Кандидаты собираются ДО сетевого resolver'а, и за время запроса ставку
-    // мог рассчитать другой путь (settleMatch по счёту, ретро-аудит, ручной разбор). Без этой проверки
-    // pm_resolution перезаписывал бы уже проведённый расчёт: статус, payout и settled_by менялись бы задним
-    // числом на строке, которая деньги уже отдала. Тот же класс, что двойной сеттл в closeBetEarly — там
-    // fresh-read стоит с самого начала, здесь его не было.
-    if (b.status !== "open") { res.alreadySettled++; return; }
     // Rule 4: redemption is not a trade — settleBet books payout from entry/stake with NO exit fee.
     const patch = settleBet({ entry_price: b.entry_price, stake: b.stake }, won, priceCents);
-    R.updateBet(db, betId, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price, settled_at: now, settled_by: "pm_resolution", settled_via: via });
+    R.updateBet(db, betId, { status: patch.status, result: patch.result, payout: patch.payout, closing_price: patch.closing_price, settled_at: now, settled_by: "pm_resolution" });
     try { shadowOnExit(db, betId, 1, shadowCfg, now); } catch { /* observe-only */ }
     try { R.metaDelete(db, `${PMRES_OBS}${betId}`); } catch { /* best-effort */ }
     R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: "финал", type: "settle", text: `${b.market_label}: PM-резолюция → ${won ? "выигрыш" : "проигрыш"} (цена ${priceCents ?? "?"}¢) · выплата $${(patch.payout ?? 0).toFixed(2)} (P&L ${(patch.pnl).toFixed(2)}) [pm_resolution]`, created_at: now });
     res.settled++; won ? res.won++ : res.lost++;
-    if (via === "match_complement") res.viaMatchComplement++; else if (via === "stored_complement") res.viaStoredComplement++;
     res.bankDeltaUsd += patch.pnl; res.reservesFreedUsd += b.stake ?? 0;
   };
-  // [четвёрка, п.1] ПРИЧИНА ВОЗВРАТА — МАШИННАЯ, а не проза. voidWatch существует, чтобы отличать «биржа
-  // отменила рынок» от «мы не смогли сверить» — это противоположные факты под одним статусом, и весь смысл
-  // сторожа в их разделении. Но различал он их регуляркой по `b.rationale`, куда причина возврата НИКОГДА не
-  // писалась: detail уходил в trade_log, а rationale хранит причину ВХОДА. Поэтому главная причина —
-  // «нет комплемента», наша собственная неспособность сверить, — печаталась как market_void, решение биржи.
-  // Сторож на своей же первой причине показывал ровно обратное. Тот же класс, что `d.reason` вместо `d.kind`.
-  const voidBet = (betId: string, tag: "void" | "void_timeout", detail: string, via: VoidVia) => {
+  const voidBet = (betId: string, tag: "void" | "void_timeout", detail: string) => {
     const b = R.getBet(db, betId); if (!b) return;
-    if (b.status !== "open") { res.alreadySettled++; return; }   // та же защита: возврат не переписывает расчёт
-    R.updateBet(db, betId, { status: "settled_void", result: null, payout: b.stake ?? 0, settled_at: now, closing_price: b.current_price ?? b.entry_price ?? null, settled_by: tag, settled_via: via });
+    R.updateBet(db, betId, { status: "settled_void", result: null, payout: b.stake ?? 0, settled_at: now, closing_price: b.current_price ?? b.entry_price ?? null, settled_by: tag });
     try { shadowOnExit(db, betId, 1, shadowCfg, now); } catch { /* observe-only */ }
     try { R.metaDelete(db, `${PMRES_OBS}${betId}`); } catch { /* best-effort */ }
     R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: "финал", type: "settle", text: `${b.market_label}: ${detail} — возврат ставки $${(b.stake ?? 0).toFixed(2)} (P&L $0) [${tag}]`, created_at: now });
@@ -220,14 +185,14 @@ export async function settlePmResolutionBets(
         if (cs === "mismatch") { res.suspect++; suspectLog(db, c, t, comp, now); continue; }
         if (cs === "missing" && strictComplement) {
           // single-token market: hold (don't settle on an un-cross-checkable token); void only when overdue.
-          if (overdue) { voidBet(c.betId, "void", `одиночный токен без комплемента, просрочено ${cfg.voidTimeoutH}ч — не сеттлю на один токен (C4)`, "no_complement"); }
+          if (overdue) { voidBet(c.betId, "void", `одиночный токен без комплемента, просрочено ${cfg.voidTimeoutH}ч — не сеттлю на один токен (C4)`); }
           else { res.pendingUnresolved++; suspectLog(db, c, t, comp, now); }
           continue;
         }
-        settle(c.betId, isWonSide(t.priceCents), t.priceCents, c.via);
+        settle(c.betId, isWonSide(t.priceCents), t.priceCents);
       } else {
         // Rule 3: closed with a non-resolving price = a real market void/refund.
-        voidBet(c.betId, "void", `рынок закрыт с неразрешающей ценой ${t.priceCents ?? "?"}¢ — рыночный void/refund`, "market_void");
+        voidBet(c.betId, "void", `рынок закрыт с неразрешающей ценой ${t.priceCents ?? "?"}¢ — рыночный void/refund`);
       }
       continue;
     }
@@ -240,11 +205,11 @@ export async function settlePmResolutionBets(
         const cs = complementStatus();
         if (cs === "mismatch") { res.suspect++; suspectLog(db, c, t, comp, now); continue; }
         if (cs === "missing" && strictComplement) { // single token, no cross-check → hold; void only when overdue
-          if (overdue) { voidBet(c.betId, "void", `одиночный токен без комплемента, просрочено ${cfg.voidTimeoutH}ч — не сеттлю на один токен (C4)`, "no_complement"); }
+          if (overdue) { voidBet(c.betId, "void", `одиночный токен без комплемента, просрочено ${cfg.voidTimeoutH}ч — не сеттлю на один токен (C4)`); }
           else { res.pendingUnresolved++; }
           continue;
         }
-        settle(c.betId, side === "won", t.priceCents, c.via);
+        settle(c.betId, side === "won", t.priceCents);
       } else {
         if (!prev || prev.side !== side) writeObs(db, c.betId, side, now); // (re)start the stability clock
         res.pendingStable++;
@@ -253,7 +218,7 @@ export async function settlePmResolutionBets(
     }
 
     // Not closed, not resolving. Rule 3: only NOW may the timeout void fire.
-    if (overdue) voidBet(c.betId, "void_timeout", `не разрешилось за ${cfg.voidTimeoutH}ч (PM не закрыл рынок)`, "timeout_not_closed");
+    if (overdue) voidBet(c.betId, "void_timeout", `не разрешилось за ${cfg.voidTimeoutH}ч (PM не закрыл рынок)`);
     else res.pendingUnresolved++;
   }
 
@@ -277,7 +242,7 @@ function suspectLog(db: Database, c: { betId: string; matchId: string }, t: Toke
 /** Default resolver: Gamma market state per token (closed flag + resolved outcomePrices) — the source that
  *  survives archival, so a historical backfill resolves correctly. Bounded + hard-timeout inside
  *  fetchTokenResolution; an unknown token is absent from the map → the caller reads it as unresolved. */
-export function defaultResolveTokens(deps: EngineDeps): ResolveTokensFn {
+function defaultResolveTokens(deps: EngineDeps): ResolveTokensFn {
   return async (tokenIds: string[]) => {
     const poly = deps.polymarket ?? loadPolymarketConfig(deps.env);
     return fetchTokenResolution(poly, tokenIds, { fetchImpl: deps.fetchImpl });

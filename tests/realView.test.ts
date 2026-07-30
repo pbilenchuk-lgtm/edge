@@ -14,7 +14,7 @@ function seed() {
   const mid = R.uid();
   R.insertMatch(d, { id: mid, competition_id: "epl", home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: "t", minute: 30, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid } as any);
   R.insertBet(d, { id: "twin", match_id: mid, strategy_id: "overreaction", risk_profile_id: "medium", market_label: "O", status: "open", proposed_price: 45, entry_price: 45, current_price: 45, closing_price: null, ai_prob: 0.6, stake: 30, rationale: "r", entered_minute: "3'", result: null, payout: null, settled_by: null, settled_at: null, entry_meta: null, code_version: "e", decision_id: "dec1", created_at: NOW } as any);
-  RR.insertRealOrder(d, { id: "o1", client_order_id: "c1", exchange_order_id: null, decision_id: "dec1", strategy_id: "overreaction", profile_id: "medium", match_id: mid, token_id: "tok1", side: "BUY", leg: "entry", limit_price_cents: 45, size_usd: 30, tif_sec: 45, code_version: "e", whitelist_version: 3, note: null, dry: 1 as const, created_at: NOW });
+  RR.insertRealOrder(d, { id: "o1", client_order_id: "c1", exchange_order_id: null, decision_id: "dec1", strategy_id: "overreaction", profile_id: "medium", match_id: mid, token_id: "tok1", side: "BUY", leg: "entry", limit_price_cents: 45, size_usd: 30, tif_sec: 45, code_version: "e", whitelist_version: 3, note: null, created_at: NOW });
   RR.transitionRealOrder(d, "o1", "placed", NOW, {});
   RR.transitionRealOrder(d, "o1", "filled", NOW, { filledSizeUsd: 30, avgFillCents: 46 });
   RR.insertRealLedger(d, { kind: "fill", amount_usd: -30, token_id: "tok1", order_id: "o1", ref: null, dry: 1, at: NOW, created_at: NOW });

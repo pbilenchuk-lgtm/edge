@@ -41,13 +41,7 @@ test("classifyExitTrigger: honest trigger categories", () => {
 test("CLV is close − entry for a Yes-side AND a No-side market (audit: both directions)", () => {
   const { db, comp, strat } = setup();
   const mid = R.uid();
-  // [пункт 6] Линия закрытия — это СНИМОК КОТИРОВКИ до конца матча, а не `bets.closing_price` (туда при
-  // досрочном выходе пишется наша собственная цена выхода). Раньше тест сеял её в ставку и потому сходился
-  // с багом; теперь он сеет то, что и есть линия. Матчу нужны часы — иначе отсечку не от чего считать.
-  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "2026-07-20T18:00:00Z", minute: 90, score_home: 2, score_away: 0, final_score: "2:0", kickoff_time: null, end_time: "2026-07-20T19:50:00Z", duration: null, end_note: null, external_ref: mid });
-  const line = (label: string, price: number) => R.insertMarket(db, { id: R.uid(), match_id: mid, label, price, ai_prob: null, liquidity: null, external_ref: null, token_second: null, snapshot_at: "2026-07-20T19:45:00Z", is_closing: false });
-  line("Over 1.5", 55);
-  line("BTTS — No", 52);
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: null, minute: 90, score_home: 2, score_away: 0, final_score: "2:0", kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
   // Yes side: bought "Over 1.5" at 40¢, closing (T-0) 55¢ → CLV +15¢ (market moved our way).
   R.insertBet(db, bet({ id: R.uid(), match_id: mid, strategy_id: strat.id, market_label: "Over 1.5", status: "settled_won", entry_price: 40, closing_price: 55, ai_prob: 0.6, stake: 100, result: "won", payout: 250, settled_at: "t", entry_meta: meta({ winsOnEvent: true }) }));
   // No side: bought "BTTS — No" at 60¢, closing 52¢ → CLV −8¢ (moved against us).
@@ -162,25 +156,4 @@ test("export: bets CSV carries every Part-1 column and one row per bet", () => {
   assert.match(csv, /b1/); assert.match(csv, /settle/);
   const exitsCsvOut = exitsCsv(db);
   assert.match(exitsCsvOut, /Over 1\.5/);
-});
-
-
-// [пункт 6] Главное следствие: собственная цена выхода больше не выдаёт себя за линию рынка. При досрочном
-// закрытии `closing_price` = цена, по которой ВЫШЛИ МЫ; считая CLV по ней, всякая фиксация прибыли давала
-// положительный «CLV» по построению, и две ноги вердикта переставали быть независимыми.
-test("CLV: цена собственного выхода не является линией закрытия — без снимка это n/a", () => {
-  const { db, comp, strat } = setup();
-  const mid = R.uid();
-  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "2026-07-20T18:00:00Z", minute: 90, score_home: 2, score_away: 0, final_score: "2:0", kickoff_time: null, end_time: "2026-07-20T19:50:00Z", duration: null, end_note: null, external_ref: mid });
-  // Досрочный выход в плюс: вход 40¢, вышли по 70¢ — closing_price=70 стоит на ставке, но снимка НЕТ.
-  R.insertBet(db, bet({ id: "co", match_id: mid, strategy_id: strat.id, market_label: "Over 1.5", status: "settled_won", entry_price: 40, closing_price: 70, ai_prob: 0.6, stake: 100, result: "won", payout: 175, settled_by: "early", settled_at: "t", entry_meta: meta({}) }));
-  const r = betRecords(db).find((x) => x.id === "co")!;
-  assert.equal(r.clvCents, null, "по своей цене выхода CLV не считается");
-  assert.equal(r.clvSource, "no_snapshot", "и причина n/a названа: линии нет в данных");
-  assert.equal(r.closingCents, 70, "сырое поле ставки остаётся видимым — мы его не переписываем, а перестаём выдавать за линию");
-  // Появился снимок котировки до конца матча — линия есть, и нога считается по НЕЙ.
-  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Over 1.5", price: 48, ai_prob: null, liquidity: null, external_ref: null, token_second: null, snapshot_at: "2026-07-20T19:40:00Z", is_closing: false });
-  const r2 = betRecords(db).find((x) => x.id === "co")!;
-  assert.equal(r2.clvCents, 8, "48 − 40 = +8¢ по линии, а не +30¢ по собственному выходу");
-  assert.equal(r2.clvSource, "closing_line");
 });

@@ -16,7 +16,7 @@ function seed() {
   const twin = (decision: string, entry: number, stake: number, payout: number) =>
     R.insertBet(d, { id: R.uid(), match_id: mid, strategy_id: "overreaction", risk_profile_id: "medium", market_label: "Over 1.5", status: payout >= stake ? "settled_won" : "settled_lost", proposed_price: entry, entry_price: entry, current_price: entry, closing_price: entry, ai_prob: 0.6, stake, rationale: "r", entered_minute: "3'", result: payout >= stake ? "won" : "lost", payout, settled_by: "early", settled_at: NOW, entry_meta: null, code_version: "e1", decision_id: decision, created_at: NOW } as any);
   const ord = (decision: string, status: RR.RealOrderStatus, avgFill: number | null, filled: number) => {
-    RR.insertRealOrder(d, { id: "o-" + decision, client_order_id: "c-" + decision, exchange_order_id: null, decision_id: decision, strategy_id: "overreaction", profile_id: "medium", match_id: mid, token_id: "tk-" + decision, side: "BUY", leg: "entry", limit_price_cents: 45, size_usd: filled || 30, tif_sec: 45, code_version: "e1", whitelist_version: 1, note: null, dry: 1 as const, created_at: NOW });
+    RR.insertRealOrder(d, { id: "o-" + decision, client_order_id: "c-" + decision, exchange_order_id: null, decision_id: decision, strategy_id: "overreaction", profile_id: "medium", match_id: mid, token_id: "tk-" + decision, side: "BUY", leg: "entry", limit_price_cents: 45, size_usd: filled || 30, tif_sec: 45, code_version: "e1", whitelist_version: 1, note: null, created_at: NOW });
     RR.transitionRealOrder(d, "o-" + decision, status, NOW, { filledSizeUsd: filled, avgFillCents: avgFill });
   };
   // A: filled at 46¢ vs paper decision 45¢ → entry slip +1¢. Twin won (+10).

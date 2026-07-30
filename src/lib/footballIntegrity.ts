@@ -38,86 +38,12 @@ function uefaMatchIds(db: Database): string[] {
 
 /** Conservative P0.1 quarantine: tag every SETTLED bet on a UEFA two-leg match `settle_suspect`. Immediate,
  *  no network — protects the verdict cuts before the precise date backfill runs. Idempotent. */
-export function markUefaSettleSuspect(db: Database, _env: Record<string, string | undefined> = process.env): number {
+export function markUefaSettleSuspect(db: Database): number {
   const ids = uefaMatchIds(db);
   if (!ids.length) return 0;
   const ph = ids.map(() => "?").join(",");
-  // `settle_verified` — И ЭТО НЕ ТО ЖЕ САМОЕ, ЧТО «привязка сейчас чистая».
-  //
-  // Эта функция зовётся из initSchema, то есть при КАЖДОМ открытии базы — включая любой отчёт. Тик тем
-  // временем снимает метку с проверенных (backfillEspnEventDates / reSettleSuspectBets), и получался
-  // маятник: доказали и сняли → следующий же openDb пометил заново. `guard:check` одним запуском вернул
-  // 135 ставок. Флаг, по которому вердиктные срезы выбрасывают строки, начинал зависеть от истории
-  // запусков, а не от данных.
-  //
-  // Первая попытка чинить это «не метить матчи с чистой привязкой» была НЕВЕРНА, и тест Raków это поймал:
-  // там привязка чистая СЕЙЧАС, а расчёт делался РАНЬШЕ, по грязной. Чистота привязки в настоящем ничего
-  // не говорит о том, по какой привязке считали в прошлом, — снятие карантина по ней сняло бы его ровно с
-  // тех строк, которые действительно посчитаны по чужому матчу.
-  //
-  // Поэтому различается не состояние привязки, а СОБЫТИЕ: строку уже осмотрели и осознанно освободили.
-  // Такое снятие ставит `settle_verified=1`, и грубый карантин по перечню турниров к ней больше не
-  // возвращается. Непроверенная строка метится как прежде.
-  const r = db.prepare(
-    `UPDATE bets SET settle_suspect=1 WHERE settle_suspect=0 AND settle_verified=0 AND status LIKE 'settled%' AND match_id IN (${ph})`,
-  ).run(...ids);
+  const r = db.prepare(`UPDATE bets SET settle_suspect=1 WHERE settle_suspect=0 AND status LIKE 'settled%' AND match_id IN (${ph})`).run(...ids);
   return Number(r.changes ?? 0);
-}
-
-export interface LegGapSuspectRow { matchId: string; match: string; competition: string; kickoffAt: string | null; eventDate: string | null; gapDays: number; betsTagged: number }
-export interface LegGapSuspectResult { scanned: number; mismatched: number; betsTagged: number; rows: LegGapSuspectRow[] }
-
-/**
- * ПОДОЗРЕНИЕ ПО ФАКТУ РАЗРЫВА, а не по названию турнира и не в момент расчёта.
- *
- * Две независимые дыры сошлись на Seattle Sounders–Portland Timbers: разрыв привязки 16 дней — самый грубый
- * из всех найденных — и `settle_suspect=0`.
- *
- *   1. ПО СПИСКУ. `markUefaSettleSuspect` метит матчи из перечня двухматчевых турниров (UEFA + CONMEBOL).
- *      Seattle–Portland — это MLS, в перечень не входит, значит не метится НИКОГДА, какой бы разрыв ни был.
- *      Перечень отвечает на вопрос «бывают ли здесь два круга», а метить надо по «эта запись привязана к
- *      чужому событию» — свойству строки, а не лиги.
- *   2. В МОМЕНТ РАСЧЁТА. Уточняющая маркировка живёт в сеттл-пути (`backfillEspnEventDates`, пере-сеттл в
- *      engine). Позиция, закрытая ДОСРОЧНО (early/partial), до расчёта по счёту не доходит вовсе — и метка
- *      её не догоняет. Все девять сиэтловских ставок закрыты именно так.
- *
- * Поэтому здесь: проход по ВСЕМ привязанным матчам любого спорта и турнира, сравнение замороженной даты
- * события с кикоффом, и пометка ВСЕХ ставок матча — независимо от того, каким путём они закрылись и
- * закрылись ли вообще. Деньги это не меняет (досрочный выход считает P&L по цене продажи, а не по счёту) —
- * меняет честность агрегатов: вердиктные срезы выбрасывают suspect-строки, и решение по стратегии не должно
- * опираться на сделки, принятые по чужому матчу.
- */
-export function markLegGapSuspect(
-  db: Database, env: Record<string, string | undefined> = process.env, opts: { apply?: boolean } = { apply: true },
-): LegGapSuspectResult {
-  const gap = LEG_GAP_MS(env);
-  const res: LegGapSuspectResult = { scanned: 0, mismatched: 0, betsTagged: 0, rows: [] };
-  const rows = db.prepare(
-    `SELECT ml.match_id mid, ml.espn_event_date ed FROM match_live ml WHERE ml.espn_event_date IS NOT NULL AND ml.espn_event_date <> ''`,
-  ).all() as { mid: string; ed: string }[];
-  const compById = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
-  for (const r of rows) {
-    res.scanned++;
-    const m = R.getMatch(db, r.mid);
-    if (!m?.kickoff_at) continue;
-    const koMs = Date.parse(m.kickoff_at), evMs = Date.parse(r.ed);
-    if (!Number.isFinite(koMs) || !Number.isFinite(evMs)) continue;
-    const diff = Math.abs(evMs - koMs);
-    if (diff <= gap) continue;                       // привязка в пределах допуска — запись честная
-    res.mismatched++;
-    // Все ставки матча, а не только settled: открытая позиция на чужой привязке — та же ложная посылка,
-    // просто ещё не реализованная.
-    const upd = opts.apply
-      ? Number(db.prepare(`UPDATE bets SET settle_suspect=1 WHERE match_id=? AND settle_suspect=0`).run(r.mid).changes ?? 0)
-      : Number((db.prepare(`SELECT COUNT(*) n FROM bets WHERE match_id=? AND settle_suspect=0`).get(r.mid) as { n: number }).n);
-    res.betsTagged += upd;
-    res.rows.push({
-      matchId: r.mid, match: `${m.home} — ${m.away}`, competition: compById.get(m.competition_id)?.name ?? m.competition_id,
-      kickoffAt: m.kickoff_at, eventDate: r.ed, gapDays: Math.round((diff / 86_400_000) * 10) / 10, betsTagged: upd,
-    });
-  }
-  res.rows.sort((a, b) => b.gapDays - a.gapDays);
-  return res;
 }
 
 export interface SvEspnDateProvider { eventDate(sport: string, league: string, eventId: string): Promise<string | null> }
@@ -150,9 +76,7 @@ export async function backfillEspnEventDates(
     // Re-decide suspect by the same gate: proven clean (|Δ| ≤ gap) clears; otherwise it stays quarantined.
     const koMs = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN, evMs = Date.parse(date);
     const clean = Number.isFinite(koMs) && Number.isFinite(evMs) && Math.abs(evMs - koMs) <= LEG_GAP_MS(env);
-    // Снятие — осознанное решение по доказательству, поэтому оно и ФИКСИРУЕТСЯ: settle_verified=1 не даёт
-    // грубому карантину по перечню турниров вернуть метку на следующем же открытии базы.
-    if (clean) { const r = db.prepare(`UPDATE bets SET settle_suspect=0, settle_verified=1 WHERE match_id=? AND settle_suspect=1`).run(row.mid); cleared += Number(r.changes ?? 0); }
+    if (clean) { const r = db.prepare(`UPDATE bets SET settle_suspect=0 WHERE match_id=? AND settle_suspect=1`).run(row.mid); cleared += Number(r.changes ?? 0); }
     else stillSuspect++;
   }
   return { dated, cleared, stillSuspect };

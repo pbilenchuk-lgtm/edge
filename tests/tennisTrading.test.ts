@@ -789,9 +789,7 @@ test("fetchTennisFixtures OOM guard: an over-cap payload is skipped (never parse
   // A body larger than the 6MB cap must be dropped WITHOUT JSON.parse (the OOM cause on a 512MB box).
   const huge = "x".repeat(6_000_001);
   const hugeFetch = (async () => ({ ok: true, status: 200, text: async () => huge })) as unknown as typeof fetch;
-  const over = await fetchTennisFixtures(cfg, "2026-07-14", "2026-07-14", { fetchImpl: hugeFetch });
-  assert.deepEqual(over.rows, [], "over-cap payload skipped, not parsed");
-  assert.match(String(over.error), /лимит/, "и отказ НАЗВАН, а не отдан пустым списком");
+  assert.deepEqual(await fetchTennisFixtures(cfg, "2026-07-14", "2026-07-14", { fetchImpl: hugeFetch }), [], "over-cap payload skipped, not parsed");
   // wantedKeys returns ONLY the requested event_key (retention bounded to what we asked for).
   const body = { result: [
     { event_key: "A", event_first_player: "a", event_second_player: "b", event_live: "0", event_status: "Finished", scores: [] },
@@ -799,7 +797,7 @@ test("fetchTennisFixtures OOM guard: an over-cap payload is skipped (never parse
   ] };
   const okFetch = (async () => ({ ok: true, status: 200, text: async () => JSON.stringify(body) })) as unknown as typeof fetch;
   const res = await fetchTennisFixtures(cfg, "2026-07-14", "2026-07-14", { fetchImpl: okFetch }, new Set(["A"]));
-  assert.equal(res.error, null); assert.equal(res.rows.length, 1); assert.equal(res.rows[0].eventKey, "A");
+  assert.equal(res.length, 1); assert.equal(res[0].eventKey, "A");
 });
 
 test("advanceClocks tennis: a no-bet match stuck live past the ceiling is FINISHED (bounds the phantom 300')", async () => {
