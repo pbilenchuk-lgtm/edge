@@ -323,3 +323,28 @@ test("прод-поправка: планочные рынки не показы
   assert.ok(line, "скрытие рынков записано, а не сделано молча");
   assert.match(String(line!.text), /3 из 4/, "скрыты ровно планочные, живой рынок остался");
 });
+
+// ── Самоопровергающийся pick ────────────────────────────────────────────────────────────────────
+// Стратег кладёт рынок в `picks` и тут же пишет, что покупать его нельзя (лог Bay FC — NJ/NY Gotham:
+// «Over 3.5», prob 0.31, цена 48.5¢, reason «цена выше моей оценки, ставить Over нельзя»). Деньги это не
+// трогало — сайзинг убивал заявку по порогу. Врала ДИАГНОСТИКА: «стратег выбрал 1 pick(s), ни один не
+// прошёл вход» перекладывало его отказ на код-гейт.
+test("прод-поправка: pick, опровергнутый собственными числами, не считается выбором стратега", async () => {
+  const db = openDb(":memory:"); seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0)!;
+  const strat = R.listStrategies(db, "football").find((s) => s.id === "prematch_value") ?? R.listStrategies(db, "football")[0];
+  R.setShare(db, { competition_id: comp.id, strategy_id: strat.id, pct: 50 });
+  R.insertMatch(db, { id: "msr", competition_id: comp.id, home: "A", away: "B", state: "upcoming", lineup_out: true, kickoff_at: "2026-07-31T18:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "msr" } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: "msr", label: "Over 3.5", price: 48.5, ai_prob: 0.31, liquidity: "900", external_ref: "T1", token_second: null, snapshot_at: "t", is_closing: false } as any);
+  R.upsertAssessment(db, { id: R.uid(), match_id: "msr", stage: "post_lineup", status: "ok", short: "s", verdict: "v", confidence: "средняя", body: "{}", model: "m", created_at: "t" } as any);
+  // Стратег называет рынок И сам же его опровергает: 31% против подразумеваемых 48.5%.
+  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({
+    picks: [{ label: "Over 3.5", marketId: "m1", prob: 0.31, conviction: "средняя", reason: "discounted — цена выше моей оценки, ставить Over нельзя" }],
+    exits: [], rejected: [], note: "n" }) }] }) })) as unknown as typeof fetch;
+  await runStrategists(db, "msr", { fetchImpl, env: { ANTHROPIC_API_KEY: "k" }, now: () => "2026-07-30T12:00:00Z" });
+  assert.equal(R.betsForMatch(db, "msr").length, 0, "покупки не было — деньги не двинулись (как и раньше)");
+  const line = R.tradeLogForMatch(db, "msr").find((l) => /pick_self_refuted/.test(l.text));
+  assert.ok(line, "и это НАЗВАНО");
+  assert.match(String(line!.text), /сам же опроверг/, "отказ приписан стратегу, а не код-гейту");
+  assert.doesNotMatch(String(line!.text), /выбрал 1 pick/, "старая ложь «выбрал 1, не прошёл вход» больше не пишется");
+});
