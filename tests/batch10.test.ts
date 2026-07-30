@@ -99,12 +99,18 @@ test("R5: refusals resolve by the SAME settlement code as money, and the verdict
   assert.equal(r.resolved, 1);
   assert.equal((db.prepare(`SELECT status FROM refusal_shadow_signals`).get() as any).status, "won", "the walked-away market did win");
   const rep = buildRefusalShadow(db, {});
-  assert.equal(rep.scored, 1);
-  assert.equal(rep.winPct, 100);
-  assert.ok(rep.wouldBePnlUsd > 0, "flat-$100 accounting shows what the refusal forwent");
+  assert.equal(rep.counts.won, 1, "разрешение прошло тем же кодом сеттла, что и деньги");
   assert.equal(rep.matured, false);
   assert.equal(rep.verdict, "insufficient", `one anecdote proves nothing — the verdict needs ${REFUSAL_NEED_N}`);
-  assert.match(rep.note, /жёсткость НЕ трогаем/, "…and the note says the screw stays untouched meanwhile");
+  // ФИЛЬТР ИСПОЛНИМОСТИ (31.07). Снимка книги на этот сигнал нет, поэтому в ВЕРДИКТ он не идёт: определение
+  // would-be с самого начала требовало исполнимости, просто она не проверялась. «Нет снимка» — третий ответ,
+  // не «исполнимо»; презумпция исполнимости и была исходной ошибкой. Разрешение при этом не пострадало —
+  // сигнал остаётся в когорте со статусом won, он просто не может подпирать вывод о пороге.
+  assert.equal(rep.scored, 0, "без снимка книги сигнал не входит в вердикт");
+  assert.equal(rep.fillability.scoredTotal, 1);
+  assert.equal(rep.fillability.unknown, 1);
+  assert.equal(rep.fillability.snapshots, 0);
+  assert.match(rep.note, /НЕЧИТАЕМ/, "нулевое покрытие названо прямо, а не спрятано за «мало данных»");
 });
 
 // ── R1: repaired gate + quasi-locked tail ────────────────────────────────────────────────────────
