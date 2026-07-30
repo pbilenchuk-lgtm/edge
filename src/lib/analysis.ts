@@ -10,7 +10,7 @@
 // Graceful: a failed model call marks the assessment failed (§6), no crash.
 // ============================================================
 
-import { loadZombieConfig, isRailPrice } from "./zombieMarket.js";
+import { isRailPrice } from "./zombieMarket.js";
 import { recordRefusalForMatch } from "./refusalShadow.js";
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
@@ -252,16 +252,19 @@ export async function runStrategists(
   // несыгранного матча планка означает мёртвую/одностороннюю книгу, а не эффективную котировку.
   //
   // Завершённый матч не трогаем: там планка — честная цена разрешения, и прятать её незачем.
-  const zCfg = loadZombieConfig(env);
+  // Граница — СТАРТОВЫЙ СВИСТОК: после него планку объясняет счёт (этим занимается resolved_price), и
+  // прятать «Over 0.5 @98¢» при забитом голе было бы враньём. См. zombieMarket.isRailPrice.
+  const kickedOff = match.state === "live" || match.state === "finished"
+    || (!!match.kickoff_at && (Date.parse(match.kickoff_at) || Infinity) <= (Date.parse(now()) || Date.now()));
   const allMarkets = R.latestMarkets(db, matchId);
-  const railed = match.state === "finished" ? [] : allMarkets.filter((m) => m.price != null && isRailPrice(m.price, zCfg));
+  const railed = kickedOff ? [] : allMarkets.filter((m) => m.price != null && isRailPrice(m.price));
   const freshMarkets = railed.length ? allMarkets.filter((m) => !railed.includes(m)) : allMarkets;
   if (railed.length) {
     // Цена скрытия обязана быть посчитана: молча сузить стратегу выбор — это тот же класс, что молча
     // отказать во входе. Одна строка на матч, не на рынок.
     try {
       R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? "", minute: null, type: "skip",
-        text: `rail_price: ${railed.length} из ${allMarkets.length} рынков у планки на несыгранном матче — скрыты от стратега (мёртвая/односторонняя книга, не котировка)`,
+        text: `rail_price: ${railed.length} из ${allMarkets.length} рынков у планки ДО стартового свистка — скрыты от стратега (мёртвая/односторонняя книга, не котировка)`,
         dedup_key: `rail:${matchId}:${stage}`, created_at: now() });
     } catch { /* улика не имеет права ломать анализ */ }
   }
