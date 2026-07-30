@@ -440,7 +440,24 @@ export function advanceClocks(db: Database, deps: EngineDeps = {}): void {
       } else if (m.state === "upcoming" || m.state === "lineup") {
         // Pre-live scheduling for display only — NEVER clock-flip tennis to live (only the scout does).
         const hh = hoursUntil(m.kickoff_at, nowMs);
-        if (hh != null && hh > 0 && hh <= LINEUP_HOURS && m.state !== "lineup") R.updateMatch(db, m.id, { state: "lineup", lineup_out: true });
+        if (hh != null && hh > 0 && hh <= LINEUP_HOURS && m.state !== "lineup") { R.updateMatch(db, m.id, { state: "lineup", lineup_out: true }); continue; }
+        // ЖНЕЦ ПРИЗРАКОВ «ЖДЁМ КОРТ». Выше есть потолок для матча, ЗАВИСШЕГО В LIVE, — но не для
+        // зависшего в lineup, а выводит из lineup только скаут. Слепой скаут 30.07 оставил 123
+        // теннисных матча запертыми в lineup навсегда (69 из них с кикоффом >3ч назад), и это
+        // ударило НЕ ПО ТЕННИСУ: runLiveCycle считает in-play всё, где lineup_out, поэтому набор
+        // раздулся до 130, живой цикл каждые 20с перемалывал их все, держа общий engineLock, и
+        // медленный цикл — где живут анализ и входы — просто не мог его взять. Футбол не входил
+        // никуда потому, что теннисный скаут ослеп. Одна поломка через общий лок съела вторую.
+        //
+        // Мы НЕ выдумываем терминальное состояние: результата у нас нет. Матч просто перестаёт
+        // числиться «в игре» — это обратимо, скаут всё ещё активен на нём и переведёт его в live,
+        // если игра появится в ленте. Деньги неприкосновенны: с открытой позицией не трогаем
+        // (ей владеют сеттл и get_fixtures-поллер, как и в live-ветке выше).
+        const staleMin = m.kickoff_at ? (nowMs - (Date.parse(m.kickoff_at) || nowMs)) / 60_000 : null;
+        if (m.lineup_out && staleMin != null && staleMin > maxLiveMinutes("tennis")
+            && !R.betsForMatch(db, m.id).some((b) => b.status === "open")) {
+          R.updateMatch(db, m.id, { state: "upcoming", lineup_out: false });
+        }
       }
       continue;
     }
