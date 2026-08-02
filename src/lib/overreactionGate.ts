@@ -22,7 +22,7 @@
 import { clvLeg, clvCoverage, type ClvLeg } from "./clv.js";
 import type { Database } from "./db.js";
 import { codeEpochOf, crossEpoch, epochNum } from "./codeEpoch.js";
-import { betRecords } from "./profileAnalytics.js";
+import { betRecords, type BetRec } from "./profileAnalytics.js";
 import { cleanEpochRecords } from "./profileEpochCut.js";
 import { signalCohort } from "./signals.js";
 
@@ -84,7 +84,7 @@ export interface OverreactionGate {
 }
 
 /** Count clean-epoch, same-epoch, resolution-settled Overreaction cycles against the n≥30 gate. */
-export function buildOverreactionGate(db: Database, target = 30, cleanEpochMin = 5): OverreactionGate {
+export function buildOverreactionGate(db: Database, target = 30, cleanEpochMin = 5, recsOverride?: BetRec[]): OverreactionGate {
   const rows = db.prepare(
     `SELECT b.status, b.settled_by, b.code_version, b.exit_code_version, b.settle_suspect,
             b.payout, b.stake, b.entry_price, b.closing_price, b.market_label, b.entry_meta,
@@ -164,7 +164,11 @@ export function buildOverreactionGate(db: Database, target = 30, cleanEpochMin =
   // alike — collapsed to signals and scored by the standard tests. betRecords already drops settle_suspect,
   // epoch_unknown and token-poisoned rows; cleanEpochRecords adds the e5 floor and the cross-epoch quarantine,
   // so the two filters agree with the legacy numerator by construction.
-  const recs = cleanEpochRecords(betRecords(db, { strategyId: "overreaction" }), cleanEpochMin);
+  // `recsOverride` подставляется ТОЛЬКО пере-снимком меток (labelEpochSnapshot): он гоняет этот же самый
+  // гейт на ДОмиграционном наборе меток, чтобы сдвиг вердикта был посчитан ЭТИМ кодом, а не его копией.
+  // Счётчик зрелости выше от меток не зависит по построению (миграция не меняет ни settled_by, ни сам факт
+  // расчёта — только won/lost), поэтому подмена корректно бьёт ровно в ту часть, которая от меток зависит.
+  const recs = cleanEpochRecords(recsOverride ?? betRecords(db, { strategyId: "overreaction" }), cleanEpochMin);
   const cohort = signalCohort(recs, { strategyId: "overreaction" });
   const sg = {
     nSignals: cohort.nSignals, nDecided: cohort.nDecided, matured: cohort.matured,

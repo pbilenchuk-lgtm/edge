@@ -246,6 +246,35 @@ export interface PieceMigrationAudit {
 }
 
 const emptyTally = (): PieceFlipTally => ({ total: 0, wonToLost: 0, lostToWon: 0, byStrategy: {} });
+
+interface PieceRow { id: string; sid: string; status: string; piece_pnl: number; market_labeled: number }
+function migratedPieces(db: Database): PieceRow[] {
+  return db.prepare(
+    `SELECT id, strategy_id sid, status, piece_pnl, market_labeled
+       FROM bets
+      WHERE settled_by IN ('early','partial') AND status LIKE 'settled%' AND piece_pnl IS NOT NULL`,
+  ).all() as PieceRow[];
+}
+/** Правило реконструкции. Ровно ноль — ВНЕ его области определения (см. `indeterminate`). */
+const oldLabel = (pnl: number) => (pnl > 0 ? "settled_won" : "settled_lost");
+
+/**
+ * КАКОЙ БЫЛА МЕТКА ДО МИГРАЦИИ — единственный источник ответа на этот вопрос. И аудит, и пере-снимок
+ * потребителей обязаны спрашивать ЗДЕСЬ: две копии правила разошлись бы ровно в тот день, когда одну из
+ * них поправили, а вторую забыли, — это именной класс проекта, и заводить его четвёртый раз не будем.
+ *
+ * Возвращает ТОЛЬКО перевёрнутые строки: у остальных «до» совпадает с «сейчас», и класть их в карту
+ * значило бы делать вид, что мы знаем о них больше, чем знаем.
+ */
+export function preMigrationStatus(db: Database): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const p of migratedPieces(db)) {
+    if (p.piece_pnl === 0 || p.market_labeled !== 1) continue;
+    const was = oldLabel(p.piece_pnl);
+    if (was !== p.status) out.set(p.id, was);
+  }
+  return out;
+}
 const addFlip = (t: PieceFlipTally, from: string, to: string, sid: string) => {
   t.total++;
   if (from === "settled_won" && to === "settled_lost") t.wonToLost++;
@@ -265,12 +294,7 @@ export function auditPieceMigration(db: Database): PieceMigrationAudit {
   }
 
   // ── B: реконструкция из знака piece_pnl + КОНТРОЛЬ правила на нетронутых строках.
-  const pieces = db.prepare(
-    `SELECT id, strategy_id sid, status, piece_pnl, market_labeled
-       FROM bets
-      WHERE settled_by IN ('early','partial') AND status LIKE 'settled%' AND piece_pnl IS NOT NULL`,
-  ).all() as { id: string; sid: string; status: string; piece_pnl: number; market_labeled: number }[];
-  const oldLabel = (pnl: number) => (pnl > 0 ? "settled_won" : "settled_lost");
+  const pieces = migratedPieces(db);
   const reconstructed = emptyTally();
   let checked = 0, agree = 0, indeterminate = 0;
   for (const p of pieces) {

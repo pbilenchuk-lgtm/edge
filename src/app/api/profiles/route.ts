@@ -151,6 +151,26 @@ export async function GET(req: Request) {
       const { buildRatificationRegistry } = await import("@/lib/ratifications");
       return NextResponse.json({ ok: true, registry: buildRatificationRegistry(db, Date.now()) });
     }
+    // ?report=label_epoch → [ратификация 02.08] ПЕРЕ-СНИМОК ПОТРЕБИТЕЛЕЙ МЕТОК одним проходом: каждая
+    // ячейка, читающая метку как предсказание, посчитана ДО и ПОСЛЕ миграции ТЕМ ЖЕ производственным кодом
+    // на ДОмиграционном наборе записей. База НЕ пишется. Порядок чтения ратифицирован: золотая ячейка →
+    // гейт e5 → футбольные Brier/калибровка и family_shadow → exit_honesty. Теннис в проход не входит и
+    // несёт постоянную пометку labels_unverified. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "label_epoch") {
+      const { buildLabelEpochSnapshot, labelEpochLine } = await import("@/lib/labelEpochSnapshot");
+      const rep = buildLabelEpochSnapshot(db);
+      return NextResponse.json({ ok: true, report: rep, line: labelEpochLine(rep) });
+    }
+    // ?report=complement_audit → детали ПОСЛЕДНЕГО ежедневного слива возвратов. Пульс джоб показывает
+    // только возврат шага (`reSettled`), а он не различает «проверено 40, находок нет» и «проверять было
+    // нечего» — тот же немой ноль. Здесь наружу выходят examined/deferred/Δбанка, и ноль становится читаем.
+    if (new URL(req.url).searchParams.get("report") === "complement_audit") {
+      const { metaGet } = await import("@/lib/repo");
+      const raw = metaGet(db, "complement_audit_last");
+      return NextResponse.json(raw
+        ? { ok: true, report: JSON.parse(raw) }
+        : { ok: true, report: null, note: "проход ещё не отчитывался в этом инстансе — ОТСУТСТВИЕ ЗАМЕРА, а не ноль находок" });
+    }
     // ?report=piece_relabel → «до/после» миграции меток кусков, ИЗМЕРЕННОЕ, а не вспомненное. `before` —
     // снимок, снятый ДО самого первого прохода и записанный один раз; `now` — текущее состояние; `last` —
     // счётчики последнего прохода с Δ книги. Двусторонний критерий владельца читается прямо отсюда:
@@ -303,6 +323,15 @@ export async function GET(req: Request) {
             const { buildEntryFunnel, funnelLine } = await import("@/lib/entryFunnel");
             const f = buildEntryFunnel(db, { nowMs: Date.parse(now) || Date.now() });
             return { line: funnelLine(f), today: f.days[0] ?? null, baselines: f.baselines, investigate: f.investigate };
+          } catch { return null; }
+        })(),
+        // Эпоха меток в еженедельнике: 227 переворотов сдвинули линейку, и читать win-rate недели, не зная
+        // об этом, значит сравнивать до-миграционные числа с после-миграционными как однородные.
+        labelEpoch: await (async () => {
+          try {
+            const { buildLabelEpochSnapshot, labelEpochLine } = await import("@/lib/labelEpochSnapshot");
+            const s2 = buildLabelEpochSnapshot(db, now);
+            return { line: labelEpochLine(s2), flips: s2.flipsTotal, gate: s2.gate, tennisTag: s2.tennis.tag };
           } catch { return null; }
         })(),
         // [O7] Ратификации, которые не доехали, — та же строка «ЗАВЕСТИ РАССЛЕДОВАНИЕ», что у мёртвых фич.
