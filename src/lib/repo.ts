@@ -658,7 +658,24 @@ const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "analysis_artif
  * bounds the Polymarket catch-all discovery flood (up to ~200 matches/sport/day
  * into unfunded `pm-*` comps). Returns the number of matches removed.
  */
-export interface MatchLogRow { id: string; match: string; sport: string; compName: string; finalScore: string | null; endIso: string | null; kickoffAt: string | null; endLabel: string | null; endNote: string | null; broken: boolean; betCount: number; endTimeMalformed: boolean; futureSortKey: boolean }
+export interface MatchLogRow {
+  id: string; match: string; sport: string; compName: string;
+  finalScore: string | null;
+  /** ТОЛЬКО валидный ISO-инстант или null. Поле с именем `endIso`, в котором лежит «23:51», — ложь в типе:
+   *  30 таких строк на проде превращали группировку по дню в корзины с именами «23:51», «22:59». Сырое
+   *  значение не теряется, оно уходит в `endTimeRaw` — дефект виден, но больше не притворяется временем. */
+  endIso: string | null;
+  /** Сырое содержимое `end_time`, когда оно НЕ ISO. Улика, а не заплатка. */
+  endTimeRaw: string | null;
+  kickoffAt: string | null;
+  /** ЕДИНСТВЕННЫЙ ключ порядка — ровно тот, по которому отсортировал SQL. Клиент обязан брать его, а не
+   *  выводить свой из сырых полей: до этого UI пересортировывал список по `endIso || kickoffAt` и тем
+   *  ОТМЕНЯЛ серверную нормализацию — химера с кикоффом в будущем возвращалась на верх экрана, хотя SQL
+   *  увёл её вниз. Два авторитета на один порядок — тот же класс, что «скрипт мимо кода» у CLV. */
+  sortIso: string | null;
+  endLabel: string | null; endNote: string | null; broken: boolean; betCount: number;
+  endTimeMalformed: boolean; futureSortKey: boolean;
+}
 /** Lean archive query for the «Логи» page — ONE row per finished match, straight from SQL, NOT the fat
  *  buildAppData payload. This is what decouples the log archive from the per-poll payload: keep finished matches
  *  as long as you like without bloating what the browser downloads each tick. Newest-first; bounded by `limit`. */
@@ -671,7 +688,20 @@ export function listMatchLogs(db: Database, limit = 1000, nowMs = Date.now()): M
   const rows = db.prepare(
     `SELECT m.id AS id, m.home AS home, m.away AS away, m.final_score AS final_score, m.end_time AS end_time,
             m.kickoff_at AS kickoff_at, m.end_note AS end_note, c.sport_id AS sport, c.name AS comp_name,
-            (SELECT COUNT(*) FROM bets b WHERE b.match_id = m.id AND b.status NOT IN ('proposed','not_filled')) AS bet_count
+            (SELECT COUNT(*) FROM bets b WHERE b.match_id = m.id AND b.status NOT IN ('proposed','not_filled')) AS bet_count,
+            -- СЧЁТ ТЕННИСА ЖИВЁТ НЕ ТАМ, ГДЕ ФУТБОЛЬНЫЙ. matches.final_score теннис не заполняет, поэтому
+            -- ВСЕ 386 теннисных строк архива показывали пустую колонку счёта — половина списка выглядела
+            -- недосчитанной. Сеты лежат в последнем снимке скаута; берём их оттуда (индекс
+            -- idx_tennis_snap_match(pm_match_id, batch_at) делает это дешёвым) и показываем как 2:0.
+            (SELECT ts.sets_p1 || ':' || ts.sets_p2 FROM tennis_snapshots ts
+               WHERE ts.pm_match_id = m.id AND ts.sets_p1 IS NOT NULL AND ts.sets_p2 IS NOT NULL
+               ORDER BY ts.batch_at DESC LIMIT 1) AS tennis_sets,
+            -- Ключ порядка ОТДАЁТСЯ наружу — тот же самый, что в ORDER BY ниже. Клиент не выводит свой.
+            COALESCE(
+              CASE WHEN m.end_time LIKE '____-__-__T%' AND m.end_time <= :nowIso THEN m.end_time END,
+              CASE WHEN m.kickoff_at <= :nowIso THEN m.kickoff_at END,
+              CASE WHEN m.end_time <= :nowIso THEN m.end_time END
+            ) AS sort_iso
        FROM matches m JOIN competitions c ON c.id = m.competition_id
       WHERE m.state = 'finished'
         AND NOT (c.sport_id = 'tennis' AND (
@@ -705,17 +735,28 @@ export function listMatchLogs(db: Database, limit = 1000, nowMs = Date.now()): M
                  CASE WHEN m.end_time <= :nowIso THEN m.end_time END
                ) DESC
       LIMIT :limit`,
-  ).all({ nowIso: new Date(nowMs).toISOString(), limit: Math.max(1, limit) } as any) as { id: string; home: string; away: string; final_score: string | null; end_time: string | null; kickoff_at: string | null; end_note: string | null; sport: string; comp_name: string; bet_count: number }[];
-  return rows.map((r) => ({
-    id: r.id, match: `${r.home}–${r.away}`, sport: r.sport, compName: r.comp_name, finalScore: r.final_score,
-    endIso: r.end_time, kickoffAt: r.kickoff_at, endLabel: warsawLabel(r.end_time) ?? warsawLabel(r.kickoff_at),
-    endNote: r.end_note, broken: (r.end_note ?? "").startsWith("⚠ поломан"), betCount: Number(r.bet_count) || 0,
-    // Улика, а не заплатка: строка, у которой end_time не ISO, названа таковой. Их 20 на проде, и пока
-    // источник записи не найден, они обязаны быть видимы, а не тихо переехать вниз.
-    endTimeMalformed: !!r.end_time && !/^\d{4}-\d{2}-\d{2}T/.test(String(r.end_time)),
-    // Завершённый матч с временем в БУДУЩЕМ — химера (futureFinished.ts): он не торгуется вообще.
-    futureSortKey: [r.end_time, r.kickoff_at].some((v) => !!v && Date.parse(String(v)) > nowMs),
-  }));
+  ).all({ nowIso: new Date(nowMs).toISOString(), limit: Math.max(1, limit) } as any) as { id: string; home: string; away: string; final_score: string | null; end_time: string | null; kickoff_at: string | null; end_note: string | null; sport: string; comp_name: string; bet_count: number; tennis_sets: string | null; sort_iso: string | null }[];
+  return rows.map((r) => {
+    const isoish = !!r.end_time && /^\d{4}-\d{2}-\d{2}T/.test(String(r.end_time));
+    return {
+      id: r.id, match: `${r.home}–${r.away}`, sport: r.sport, compName: r.comp_name,
+      // Теннис не пишет `final_score` — его счёт это сеты из последнего снимка скаута.
+      finalScore: r.final_score ?? (r.sport === "tennis" ? r.tennis_sets : null),
+      // `endIso` обязан быть ИСТИННЫМ инстантом или null — иначе клиент, режущий его на дату, получает
+      // корзину с именем «23:51». Сырьё уходит в `endTimeRaw` и остаётся видимым.
+      endIso: isoish ? r.end_time : null,
+      endTimeRaw: isoish ? null : (r.end_time ?? null),
+      kickoffAt: r.kickoff_at,
+      sortIso: r.sort_iso ?? null,
+      endLabel: warsawLabel(r.end_time) ?? warsawLabel(r.kickoff_at),
+      endNote: r.end_note, broken: (r.end_note ?? "").startsWith("⚠ поломан"), betCount: Number(r.bet_count) || 0,
+      // Улика, а не заплатка: строка, у которой end_time не ISO, названа таковой. Пока источник записи
+      // не найден, они обязаны быть видимы, а не тихо переехать вниз.
+      endTimeMalformed: !!r.end_time && !isoish,
+      // Завершённый матч с временем в БУДУЩЕМ — химера (futureFinished.ts): он не торгуется вообще.
+      futureSortKey: [r.end_time, r.kickoff_at].some((v) => !!v && Date.parse(String(v)) > nowMs),
+    };
+  });
 }
 
 /** Backstop cap on the no-bet finished-match ARCHIVE. Two tiers, bet-bearing matches NEVER touched:

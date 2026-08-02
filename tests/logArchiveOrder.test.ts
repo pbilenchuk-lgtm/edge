@@ -119,3 +119,80 @@ test("прошлое по-прежнему сортируется по врем�
   assert.equal(rows[0].id, "newer");
   assert.equal(rows[1].id, "older");
 });
+
+// ── …И КЛИЕНТ НЕ ИМЕЕТ ПРАВА СОРТИРОВАТЬ ПО-СВОЕМУ ──────────────────────────────────────────────
+// Прод 02.08, жалоба владельца: «в логах явный хаос». Сортировка на сервере к тому моменту была уже
+// починена дважды — но UI пересортировывал список СВОИМ ключом: `Date.parse(endIso || kickoffAt)`.
+// Это отменяло обе правки: значение из будущего клиент читал как валидную дату и поднимал химеру
+// наверх, а голое «23:51» давало NaN→0 и сваливало 30 строк в недатированный ком внизу.
+// Два авторитета на один порядок. Лечение то же, что у CLV: ключ считается ОДИН раз, там же, где
+// сортировали, и отдаётся наружу.
+
+test("sortIso отдаётся наружу и равен тому, по чему реально отсортировано", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seed(db);
+  finished(db, "ok", "2026-08-02T10:00:00.000Z", "2026-08-02T08:00:00Z");
+  finished(db, "bare", "21:10", "2026-08-01T14:00:00Z");          // кривое время → падаем на кикофф
+  finished(db, "future", null, "2026-08-08T22:30:00Z");           // химера → к сортировке не допускается
+
+  const by = new Map(R.listMatchLogs(db, 50, NOW).map((r) => [r.id, r]));
+  assert.equal(by.get("ok")!.sortIso, "2026-08-02T10:00:00.000Z");
+  assert.equal(by.get("bare")!.sortIso, "2026-08-01T14:00:00Z", "негодное время — ключ берётся у кикоффа");
+  assert.equal(by.get("future")!.sortIso, null, "будущее ключом не становится вовсе");
+});
+
+test("порядок по sortIso совпадает с порядком, который вернул SQL — иначе клиент его отменит", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seed(db);
+  finished(db, "old", "2026-07-30T10:00:00.000Z", "2026-07-30T08:00:00Z");
+  finished(db, "new", "2026-08-02T10:00:00.000Z", "2026-08-02T08:00:00Z");
+  finished(db, "chimera", null, "2026-08-08T22:30:00Z");
+
+  const rows = R.listMatchLogs(db, 50, NOW);
+  const clientOrder = [...rows].sort((a, b) => (Date.parse(b.sortIso || "") || 0) - (Date.parse(a.sortIso || "") || 0));
+  assert.deepEqual(clientOrder.map((r) => r.id), rows.map((r) => r.id),
+    "клиент, сортирующий по sortIso, обязан получить ТОТ ЖЕ список");
+  assert.equal(rows[0].id, "new");
+});
+
+test("endIso — истинный инстант или null; сырое «23:51» уходит в endTimeRaw, а не притворяется временем", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seed(db);
+  finished(db, "bare", "23:51", "2026-07-23T21:00:00Z");
+  finished(db, "good", "2026-08-02T10:00:00.000Z", "2026-08-02T08:00:00Z");
+
+  const by = new Map(R.listMatchLogs(db, 50, NOW).map((r) => [r.id, r]));
+  assert.equal(by.get("bare")!.endIso, null, "поле с именем endIso не имеет права содержать «23:51»");
+  assert.equal(by.get("bare")!.endTimeRaw, "23:51", "дефект НЕ теряется — он назван отдельным полем");
+  assert.equal(by.get("bare")!.endTimeMalformed, true);
+  assert.equal(by.get("good")!.endIso, "2026-08-02T10:00:00.000Z");
+  assert.equal(by.get("good")!.endTimeRaw, null);
+  // Группировка по дню на клиенте — это endIso.slice(0,10). Раньше отсюда бралась корзина «23:51».
+  assert.equal(by.get("bare")!.endIso?.slice(0, 10) ?? null, null);
+});
+
+test("теннис показывает счёт по сетам — 386 пустых клеток архива были не «нет данных», а не тем полем", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "atp", sport_id: "tennis", name: "ATP", budget: 0, external_league: null, created_at: "t" });
+  R.insertMatch(db, {
+    id: "t1", competition_id: "atp", home: "Player A", away: "Player B", state: "finished", lineup_out: true,
+    kickoff_at: "2026-08-02T09:00:00Z", minute: null, score_home: null, score_away: null, final_score: null,
+    kickoff_time: null, end_time: "2026-08-02T11:00:00.000Z", duration: null, end_note: null, external_ref: "t1",
+  } as never);
+  const snap = (id: string, s1: number, s2: number, live: number, status: string, at: string) =>
+    db.prepare(`INSERT INTO tennis_snapshots(id,provider,event_key,pm_match_id,p1,p2,sets_p1,sets_p2,live,status,batch_at,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, "api-tennis", "ek1", "t1", "Player A", "Player B", s1, s2, live, status, at, at);
+  snap("s1", 1, 0, 1, "In Progress", "2026-08-02T10:00:00Z");
+  snap("s2", 2, 1, 0, "Finished", "2026-08-02T10:58:00Z");
+
+  const row = R.listMatchLogs(db, 50, NOW)[0];
+  assert.equal(row.finalScore, "2:1", "счёт берётся из ПОСЛЕДНЕГО снимка, а не из первого попавшегося");
+});
+
+test("футбольный счёт не подменяется теннисным путём — источник по виду спорта", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seed(db);
+  finished(db, "f1", "2026-08-02T10:00:00.000Z", "2026-08-02T08:00:00Z");
+  assert.equal(R.listMatchLogs(db, 50, NOW)[0].finalScore, "1:0", "футбол читает final_score как раньше");
+});

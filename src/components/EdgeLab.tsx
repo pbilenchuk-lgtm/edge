@@ -276,7 +276,14 @@ function collectLogEvents(competitions: any[], matchDb: any) {
     for (const mid of comp.matches || []) {
       const m = matchDb[mid];
       if (!m || m.state !== "finished") continue;   // a log is only complete once the event is over
-      const sortKey = Date.parse(m.endIso || m.kickoffAt || "") || 0;
+      // Тот же запрет, что и в loadLogs: ключ порядка не выводится из сырых полей. Здесь источник —
+      // buildAppData (резервный путь, когда /api/logs недоступен), нормализованного ключа в нём нет,
+      // поэтому негодные значения отбраковываются ЯВНО: не-ISO и будущее к сортировке не допускаются.
+      const norm = (v: unknown): number => {
+        const t = Date.parse(String(v ?? ""));
+        return Number.isFinite(t) && t <= Date.now() ? t : 0;
+      };
+      const sortKey = norm(m.endIso) || norm(m.kickoffAt);
       out.push({
         id: m.id, match: `${m.home}–${m.away}`, finalScore: m.finalScore,
         sport: comp.sport, sportLabel: sportLabel[comp.sport] ?? comp.sport, compName: comp.name,
@@ -371,7 +378,15 @@ export default function EdgeLab({ initial }: { initial: AppData }) {
         setLogEvents(j.logs.map((r: any) => ({
           id: r.id, match: r.match, finalScore: r.finalScore, sport: r.sport, sportLabel: SPL[r.sport] ?? r.sport,
           compName: r.compName, broken: !!r.broken, endLabel: r.endLabel, endNote: r.endNote, betCount: r.betCount ?? 0,
-          sortKey: Date.parse(r.endIso || r.kickoffAt || "") || 0,
+          endTimeMalformed: !!r.endTimeMalformed, futureSortKey: !!r.futureSortKey, endTimeRaw: r.endTimeRaw ?? null,
+          // ПОРЯДОК БЕРЁТСЯ У СЕРВЕРА, А НЕ ВЫВОДИТСЯ ЗАНОВО. Здесь стояло
+          //   sortKey: Date.parse(r.endIso || r.kickoffAt || "") || 0
+          // — и это ОТМЕНЯЛО серверную нормализацию: SQL уводит вниз значение из будущего, а клиент читал
+          // сырой kickoff «08.08» как валидную дату и возвращал химеру на верх экрана. Плюс 30 строк с
+          // голым «23:51» давали Date.parse=NaN → 0 и слипались в недатированный ком внизу. Два авторитета
+          // на один порядок — тот же класс, что «скрипт мимо кода» у CLV: спорить, чей порядок правильный,
+          // бессмысленно, когда ключ уже посчитан там, где сортировали.
+          sortKey: Date.parse(r.sortIso || "") || 0,
         })));
       }
     } catch { /* keep the current list on a transient failure */ }
