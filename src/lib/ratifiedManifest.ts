@@ -101,6 +101,20 @@ export const RATIFIED_MANIFEST: RatifiedEntry[] = [
     namedCase: "conservative-1.0 в проде против conservative-2.0 в коде: 18 отказов у бара 0.55, снятого 25.07",
   },
   {
+    module: "src/lib/configEpoch.ts",
+    ratification: "O1 — эффективная конфигурация есть ДАННЫЕ, а не память",
+    guards: "«под какими порогами это решалось» отвечается JOIN-ом: boot-echo, config_hash на каждой ставке, журнал смен эпохи",
+    callers: ["src/lib/db.ts", "src/lib/repo.ts", "src/app/api/profiles/route.ts"],
+    namedCase: "conservative-1.0 в проде против 2.0 в коде — неделя поисков там, где хватило бы одной строки старта",
+  },
+  {
+    module: "src/lib/ratifications.ts",
+    ratification: "O7 — реестр ратификаций (амендмент к ТЗ наблюдаемости)",
+    guards: "класс «ратифицировано, но не доехало» для СТРОК ТЗ, которые манифест не ловит по построению — у него нет файла и вызывающего пути",
+    callers: ["src/app/api/profiles/route.ts"],
+    namedCase: "четыре экземпляра за сутки: Z2 (9д), Фаза 1.3 (8д), теннисный счёт (19д), CLV (4д)",
+  },
+  {
     module: "src/lib/profileDrift.ts",
     ratification: "класс «ратифицировано, но не доехало» для КОНФИГОВ",
     guards: "расхождение код↔база по пресетам называется поимённо и навсегда — молчаливых правок в коде, невидимых базе, больше не существует",

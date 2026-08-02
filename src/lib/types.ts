@@ -195,6 +195,8 @@ export interface Bet {
   /** [batch-11] Provenance of the PM-resolution cross-check token: which source supplied the complement. */
   settled_via?: string | null;
   /** Когда и каким предикатом снят карантин settle_suspect (дата + версия classifySuspect). */
+  /** [O1] Короткий хэш эффективного набора порогов на момент решения (см. configEpoch.ts). */
+  config_hash?: string | null;
   settle_verified_at?: string | null;
   settle_verified_by?: string | null;
   /** When the bet was closed/settled (ISO) — for the closures-log timestamp. */
