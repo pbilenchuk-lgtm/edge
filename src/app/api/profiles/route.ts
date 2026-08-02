@@ -159,17 +159,26 @@ export async function GET(req: Request) {
       const { labelDistribution, PIECE_RELABEL_BEFORE_KEY, PIECE_RELABEL_LAST_KEY } = await import("@/lib/pieceRelabel");
       const { metaGet } = await import("@/lib/repo");
       const j = (k: string) => { try { return JSON.parse(metaGet(db, k) ?? "null"); } catch { return null; } };
+      const { auditPieceMigration } = await import("@/lib/pieceRelabel");
       const before = j(PIECE_RELABEL_BEFORE_KEY), last = j(PIECE_RELABEL_LAST_KEY);
       const now = labelDistribution(db);
-      const dWin = before?.labels?.winPct != null && now.winPct != null
-        ? Math.round((now.winPct - before.labels.winPct) * 10) / 10 : null;
-      const { bookTotals } = await import("@/lib/suspectBreakdown");
-      const dBook = before?.book?.pnlSum != null
-        ? Math.round((bookTotals(db).pnlSum - before.book.pnlSum) * 100) / 100 : null;
-      return NextResponse.json({ ok: true, before, now, last, deltaWinPp: dWin, deltaBookUsd: dBook,
-        verdict: before == null ? "миграция ещё не запускалась — «до» не зафиксировано"
-          : dBook === 0 ? "метки сдвинулись, деньги нет — СНЯТИЕ ИСКАЖЕНИЯ (двусторонний критерий, сторона 1)"
-          : "деньги сдвинулись вместе с метками — БАГ МИГРАЦИИ, payout она не трогает по определению (сторона 2)" });
+      const audit = auditPieceMigration(db);
+      // ДЕЛЬТА КНИГИ БЕРЁТСЯ ИЗ ПРОХОДА, А НЕ ИЗ РАЗНОСТИ СО СНИМКОМ. Здесь стояло
+      // `bookTotals(db).pnlSum − before.book.pnlSum`, то есть книга СЕГОДНЯ против книги на момент снимка:
+      // за это время закрылись новые ставки, и разность заведомо ненулевая ПО ОБЫЧНОЙ ТОРГОВЛЕ. Вердикт
+      // при этом печатал «деньги сдвинулись вместе с метками — БАГ МИГРАЦИИ». Ложная тревога, встроенная
+      // в конструкцию, и уже живая на проде. Корректная величина — `last.bookDeltaUsd`: она снята ДО и
+      // ПОСЛЕ внутри одного прохода, и только она отвечает на вопрос «двигала ли деньги миграция».
+      const dBookPass = typeof last?.bookDeltaUsd === "number" ? last.bookDeltaUsd : null;
+      return NextResponse.json({
+        ok: true, before, now, last, audit,
+        deltaWinPp: audit.deltaWinPp,          // из реконструкции «до», а не из снимка сомнительной свежести
+        passBookDeltaUsd: dBookPass,
+        storedSnapshot: audit.storedSnapshot,  // можно ли вообще считать сохранённый снимок за «до»
+        verdict: dBookPass == null ? "проход ещё не отчитывался в этом инстансе — Δ книги НЕ ИЗМЕРЕНА (это отсутствие замера, а не ноль)"
+          : dBookPass === 0 ? "метки сдвинулись, деньги нет — СНЯТИЕ ИСКАЖЕНИЯ (двусторонний критерий, сторона 1)"
+          : "деньги сдвинулись ВНУТРИ ПРОХОДА — БАГ МИГРАЦИИ, payout она не трогает по определению (сторона 2)",
+      });
     }
     // ?report=settle_suspect → почему каждая карантинная ставка ВСЁ ЕЩЁ в карантине. Раскладка на три
     // класса: готова к снятию (прогон reSettleSuspectBets закроет) / привязка честно недоказуема (остаётся

@@ -24,7 +24,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { relabelPiecesByMarket, labelDistribution, PIECE_RELABEL_BEFORE_KEY, PIECE_RELABEL_LAST_KEY } from "../src/lib/pieceRelabel.js";
+import { relabelPiecesByMarket, labelDistribution, PIECE_RELABEL_BEFORE_KEY, PIECE_RELABEL_LAST_KEY, auditPieceMigration } from "../src/lib/pieceRelabel.js";
 import { betRecords } from "../src/lib/profileAnalytics.js";
 import { betsCsv } from "../src/lib/profileExport.js";
 
@@ -156,4 +156,71 @@ test("непроверяемый ярлык помечается 2, а не мо
   const b = db.prepare(`SELECT market_labeled ml, status FROM bets WHERE id='b1'`).get() as any;
   assert.equal(b.ml, 2, "потребители калибровки обязаны отбрасывать такую строку, как settle_suspect");
   assert.equal(b.status, "settled_won", "старая метка НЕ трогается — гадать хуже, чем признать непроверяемость");
+});
+
+// ── 4. АУДИТ ЗАДНИМ ЧИСЛОМ: «ДО» НЕ БЫЛО СНЯТО ВОВРЕМЯ ──────────────────────────────────────────
+// Прод 02.08: ключ снимка появился в #108, а миграция поехала в #76 — четырьмя сутками раньше. Откат
+// 30.07 снёс код, но не строки. Значит снимок поймал состояние ПОСЛЕ, а имя ключа обещало «до».
+// Ратифицированное «до/после» из него не собирается — оно собирается из ДВУХ независимых следов.
+
+test("аудит: два независимых источника сходятся на числе и направлении переворотов", () => {
+  const db = seed();
+  finished(db, "m1", 0, 0); piece(db, "b1", "m1", "Over 1.5", 100, 140);   // рынок проиграл, кусок в плюс
+  finished(db, "m2", 3, 0); piece(db, "b2", "m2", "Over 1.5", 100, 60);    // рынок выиграл, кусок в минус
+  finished(db, "m3", 3, 0); piece(db, "b3", "m3", "Over 1.5", 100, 140);   // согласны — не переворот
+  relabelPiecesByMarket(db);
+
+  const a = auditPieceMigration(db);
+  assert.equal(a.logged.total, 2, "журнал миграции: два переворота");
+  assert.equal(a.reconstructed.total, 2, "реконструкция из знака piece_pnl: столько же");
+  assert.equal(a.logged.wonToLost, 1); assert.equal(a.logged.lostToWon, 1);
+  assert.deepEqual(
+    [a.reconstructed.wonToLost, a.reconstructed.lostToWon], [1, 1],
+    "направление тоже обязано совпасть — совпадение ЧИСЛА при разном направлении было бы совпадением, а не согласием",
+  );
+  assert.ok(a.agreement.same);
+  assert.match(a.agreement.note, /сошлись/);
+});
+
+test("аудит: правило реконструкции ПРОВЕРЯЕТСЯ на строках, которых миграция не касалась", () => {
+  const db = seed();
+  finished(db, "m1", 0, 0); piece(db, "b1", "m1", "Over 1.5", 100, 140);
+  // Матч не финиширован → кусок остаётся market_labeled=0 и служит контролем.
+  R.insertMatch(db, { id: "m9", competition_id: "c1", home: "X", away: "Y", state: "live", lineup_out: true, kickoff_at: KO, minute: 60, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "m9" } as never);
+  piece(db, "b9", "m9", "Over 1.5", 100, 130);
+  relabelPiecesByMarket(db);
+
+  const a = auditPieceMigration(db);
+  assert.ok(a.control.checked >= 1, "контрольная выборка обязана быть непустой, иначе точность не измерена");
+  assert.equal(a.control.agreePct, 100, "на нетронутых строках метка = знак P&L — правило подтверждено ДАННЫМИ");
+  assert.match(a.note, /точность правила 100%/);
+});
+
+test("аудит: «до» восстановлено, дельта win-rate подписана миграцией и НАЗВАНА реконструкцией", () => {
+  const db = seed();
+  finished(db, "m1", 0, 0); piece(db, "b1", "m1", "Over 1.5", 100, 140);   // won → lost
+  finished(db, "m2", 3, 0); piece(db, "b2", "m2", "Over 1.5", 100, 140);   // won → won (согласен)
+  relabelPiecesByMarket(db);
+
+  const a = auditPieceMigration(db);
+  assert.equal(a.before.winPct, 100, "до миграции обе метки были won (знак P&L)");
+  assert.equal(a.after.winPct, 50, "после — по исходу рынка");
+  assert.equal(a.deltaWinPp, -50);
+  assert.match(a.note, /РЕКОНСТРУКЦИЯ, а не замер в моменте/, "восстановимость не выдаётся за измерение");
+});
+
+test("аудит: снимок, снятый ПОСЛЕ миграции, помечается как непригодный для «до»", () => {
+  const db = seed();
+  finished(db, "m1", 0, 0); piece(db, "b1", "m1", "Over 1.5", 100, 140);
+  relabelPiecesByMarket(db);                                  // снимок пишется здесь — он ЧЕСТНЫЙ «до»
+  const good = auditPieceMigration(db);
+  assert.equal(good.storedSnapshot.trustworthy, true);
+  assert.match(good.storedSnapshot.note, /снимку можно верить/);
+
+  // Теперь имитируем прод: снимок затёрт состоянием ПОСЛЕ перемаркировки.
+  R.metaSet(db, PIECE_RELABEL_BEFORE_KEY, JSON.stringify({ at: "2026-08-02T11:20:50Z", labels: labelDistribution(db) }), "2026-08-02T11:20:50Z");
+  const bad = auditPieceMigration(db);
+  assert.equal(bad.storedSnapshot.trustworthy, false);
+  assert.match(bad.storedSnapshot.note, /ПОСЛЕ того, как миграция уже переставила метки/);
+  assert.match(bad.storedSnapshot.note, /НЕ ИСПОЛЬЗОВАТЬ/);
 });
