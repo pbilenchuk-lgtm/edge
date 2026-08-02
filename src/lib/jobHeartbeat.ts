@@ -99,9 +99,19 @@ export function expectedTickJobs(tickMin: number): { label: string; everyMin: nu
     "analyze", "runStrategists", "reassess", "exits", "autoEnter", "complementAudit", "pmResolution",
     "tennisScout", "tennisPrematchScout", "tennisExit", "tennisFinalPoll",
     "aliasOverlay", "repairLeagueMap", "dedupe", "reSettleSuspects", "staleShadowResolve", "pieceRelabel",
-    "legGapSuspect", "reSettleSuspectsFresh", "boundNoScoreChase", "blindFundedAudit", "advanceClocks", "stats", "settleStale",
+    "legGapSuspect", "reSettleSuspectsFresh", "blindFundedAudit", "advanceClocks", "stats", "settleStale",
     "captureLiveOpens", "tennisFinish", "tennisScoreBackfill", "tennisSettle", "tennisPmvSettle",
     "pmvShadowResolve", "familyShadowResolve", "refusalShadowResolve", "svShadowResolve",
     "prune", "pruneProviderSnapshots", "noFeedCoverage", "sweepAbandoned", "pruneMatches", "capLogArchive",
+    "tennisScoutWatchdog", "tennisBreakMarks", "reconcileFootball", "pruneCategories",
   ].map((label) => ({ label, everyMin: tickMin }));
 }
+
+/**
+ * Шаги, СОЗНАТЕЛЬНО не находящиеся под наблюдением, и почему. Список существует затем, чтобы «шага нет
+ * в перечне» означало решение, а не забывчивость: обратная проверка (тест) сверяет перечень с реальными
+ * шагами цикла и падает на любом новом непокрытом, если он не назван здесь.
+ */
+export const UNWATCHED_STEPS: Record<string, string> = {
+  dryExitSweep: "включается режимом торговли (readTradingMode ≠ off); при выключенном режиме «НИ РАЗУ» было бы ложной тревогой",
+};

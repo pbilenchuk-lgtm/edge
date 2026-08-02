@@ -14,7 +14,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
-import { recordJobRun, readJobRun, buildJobHeartbeat, cycleSummaryLine, expectedTickJobs, JOB_STALE_FACTOR } from "../src/lib/jobHeartbeat.js";
+import { recordJobRun, readJobRun, buildJobHeartbeat, cycleSummaryLine, expectedTickJobs, JOB_STALE_FACTOR, UNWATCHED_STEPS } from "../src/lib/jobHeartbeat.js";
 
 const NOW = Date.parse("2026-08-02T12:00:00Z");
 const at = (minAgo: number) => new Date(NOW - minAgo * 60_000).toISOString();
@@ -95,3 +95,47 @@ test("пустая база: все ожидаемые шаги — «НИ РА�
   assert.equal(h.neverRan.length, h.rows.length);
   assert.match(h.note, /ни разу не запускались/);
 });
+
+// ── СПИСОК СТОРОЖА ПРОВЕРЯЕТСЯ САМ ──────────────────────────────────────────────────────────────
+// Первый же прогон на проде показал `boundNoScoreChase` в списке ДВАЖДЫ: я добавил его в
+// async-блок, не заметив, что он уже стоит в sync-блоке. Дубль не безобиден — он ДВАЖДЫ попадает в
+// `neverRan`/`stale`, то есть раздувает тревогу вдвое и сдвигает вердикт «требуют внимания».
+// И вторая, более важная проверка: каждая строка перечня обязана соответствовать РЕАЛЬНОМУ шагу цикла.
+// Иначе перечень начинает жить своей жизнью — а он существует ровно затем, чтобы «шага нет в метриках»
+// было отличимо от «мы про него забыли». Опечатка в метке даёт вечное «НИ РАЗУ» и ложную тревогу.
+
+test("перечень ожидаемых не содержит дублей — иначе один шаг раздувает тревогу вдвое", () => {
+  const labels = expectedTickJobs(30).map((j) => j.label);
+  const dupes = labels.filter((l, i) => labels.indexOf(l) !== i);
+  assert.deepEqual([...new Set(dupes)], [], `дубли в перечне: ${[...new Set(dupes)].join(", ")}`);
+});
+
+test("каждая метка перечня — РЕАЛЬНЫЙ шаг цикла; опечатка = вечное «НИ РАЗУ»", async () => {
+  const declared = await cycleSteps();
+  const missing = expectedTickJobs(30).map((j) => j.label).filter((l) => !declared.has(l));
+  assert.deepEqual(missing, [], `в перечне есть метки, которых нет среди шагов цикла: ${missing.join(", ")}`);
+});
+
+// ОБРАТНОЕ НАПРАВЛЕНИЕ — ОПАСНЕЕ ПРЯМОГО. Лишняя метка даёт ложную тревогу; НЕДОСТАЮЩАЯ даёт МОЛЧАНИЕ:
+// шаг перестал ходить, а пульс об этом не знает, потому что шага в перечне нет. Именно так класс
+// «ратифицировано, но не доехало» и копится. Новый шаг обязан либо попасть под наблюдение, либо быть
+// НАЗВАННЫМ в UNWATCHED_STEPS с причиной — молчаливого третьего варианта не существует.
+test("шаг цикла либо под наблюдением, либо ЯВНО назван исключением с причиной", async () => {
+  const declared = await cycleSteps();
+  const expected = new Set(expectedTickJobs(30).map((j) => j.label));
+  const unwatched = [...declared].filter((l) => !expected.has(l) && !(l in UNWATCHED_STEPS));
+  assert.deepEqual(unwatched, [], `шаги вне пульса и вне списка исключений: ${unwatched.join(", ")}`);
+  for (const [label, why] of Object.entries(UNWATCHED_STEPS)) {
+    assert.ok(declared.has(label), `${label} значится исключением, но такого шага в цикле нет`);
+    assert.ok(why.length > 20, `${label}: причина обязана быть читаемой, а не отпиской`);
+  }
+});
+
+/** Метки шагов ПОЛНОГО цикла прямо из исходника — так же, как манифест читает вызывающие пути. */
+async function cycleSteps(): Promise<Set<string>> {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/lib/lifecycle.ts", import.meta.url), "utf8");
+  const out = new Set<string>();
+  for (const m of src.matchAll(/\bstep(?:Sync)?\(\s*"([A-Za-z][A-Za-z0-9_]*)"/g)) out.add(m[1]);
+  return out;
+}
