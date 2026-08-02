@@ -71,6 +71,11 @@ export const RATIFICATIONS: Ratification[] = [
 
   // ── (б) Новые ратификации из чата. Строка заводится ПРИ ВЗЯТИИ В РАБОТУ, а не после.
   {
+    id: "observability-o5-line", at: "2026-08-02", source: "ТЗ наблюдаемости, O5",
+    statement: "строка = машиночитаемый префикс (точка/вердикт/код причины/config_hash) + человеческий хвост; причины из словаря",
+    status: "deployed", closedBy: "#113 (logLine + reasonsOutsideDictionary; старые строки не переписываются массово)", lateDays: 0,
+  },
+  {
     id: "bound-no-score-chase", at: "2026-08-02", source: "чат, решение 1",
     statement: "счёт для bound_no_score добирается штатным score-sync через date-гейт; противоречие сеттлам → settle_suspect на группу, не тихая перезапись",
     status: "pending", closedBy: null,
@@ -88,12 +93,12 @@ export const RATIFICATIONS: Ratification[] = [
   {
     id: "observability-o4-heartbeat", at: "2026-08-02", source: "ТЗ наблюдаемости, O4",
     statement: "каждый манифестный гейт ведёт суточный счётчик evaluated/triggered; evaluated=0 при живой торговле → расследование",
-    status: "pending", closedBy: null,
+    status: "deployed", closedBy: "#113 (gateHeartbeat; гейты БЕЗ знаменателя честно помечены «не измеряется», а не закрашены нулём)", lateDays: 0,
   },
   {
     id: "observability-o6-acceptance", at: "2026-08-02", source: "ТЗ наблюдаемости, O6",
     statement: "приёмка = симуляция инцидента: сдвиг порога ловится ТРЕМЯ независимыми сигналами (воронка, full_drift, базлайн)",
-    status: "pending", closedBy: null,
+    status: "deployed", closedBy: "#113 (observabilityAcceptance: обе симуляции, три независимых источника)", lateDays: 0,
   },
 ];
 
