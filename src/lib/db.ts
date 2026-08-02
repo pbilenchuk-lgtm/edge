@@ -16,6 +16,7 @@ import { mkdirSync } from "node:fs";
 import { migrateCanonicalPrompts, migrateStrategyRoster, migrateSharesToAggressive, migrateSharesAllPairs, migrateSharesGrid, migratePrematchValueV3, migrateOverreactionV2, migrateLiveXgV2, migrateTennisStrategy, migrateTennisSetValueStrategy, migrateTennisPmvStrategy, migrateVoidOutOfScopePmv, migrateVoidAllOpenPmv, migrateResettleExtraTimeVoids, migrateResetTennisMarks, migrateRetireFable, migrateBetOrigin } from "./seed.js";
 import { markUefaSettleSuspect, migrateFootballEpochUnknown, backfillFootballEpoch } from "./footballIntegrity.js";
 import { seedRiskProfiles, migrateRiskProfileExits, migrateRenameRpLiteToMax } from "./riskConfig.js";
+import { migrateRiskPresetsToCode } from "./riskPresetMigration.js";
 import { migrateCategoryModifiers } from "./categoryModifiers.js";
 import { migrateQuarantinePoisonedTennis } from "./tennisTrading.js";
 
@@ -88,6 +89,13 @@ export function getDb(path = dbPath()): Database {
   // Owner decision 23.07.2026 (b): rename the super-risky `rp-lite-*` profile → `max` (config kept as-is).
   try { migrateRenameRpLiteToMax(db, new Date().toISOString()); }
   catch { /* non-fatal: history reads still alias rp-lite→max even if the rename hasn't run */ }
+  // Owner decision 02.08.2026: pull the preset profiles up to their CODE definition, ONE pass over all of
+  // them. Phase 1.3 (conservative-2.0, ratified 25.07) had been sitting in code for a week while prod kept
+  // entering under conservative-1.0 — `seedRiskProfiles` above returns early whenever any profile exists, so
+  // a preset change never reaches a live DB on its own. One-time and marker-guarded: it repairs exactly this
+  // recorded gap and does not become a standing "code always wins" that would silently erase owner edits.
+  try { migrateRiskPresetsToCode(db, new Date().toISOString()); }
+  catch { /* non-fatal: the drift report keeps naming the gap even if the sync failed */ }
   // Ensure the three real strategists exist and, on the first boot after this
   // ships, retire the legacy "wc" strategy and assign the trio (medium profile)
   // to every competition. One-time (gated on wc existing); non-recurring.

@@ -40,6 +40,9 @@ export interface ProfileDriftRow {
   codeVersion: string | null;
   /** Профиля нет в базе — он будет создан посевом при первом пустом старте. */
   missing: boolean;
+  /** В базе есть, а пресета в коде НЕТ — сравнивать не с чем (напр. `max`: он собран из legacy-строки
+   *  по решению владельца 23.07 «как есть», это дизайн, а не дрейф). Такой профиль не мигрируется. */
+  noCodePreset: boolean;
   fields: ProfileDriftField[];
 }
 
@@ -48,8 +51,13 @@ export interface ProfileDriftReport {
   profiles: ProfileDriftRow[];
   driftedProfiles: number;
   driftedFields: number;
+  /** Отметка о выполненной синхронизации пресетов (эпоха переключения), если она была. */
+  epochCut: unknown | null;
   note: string;
 }
+
+/** Снимок расхождения, снятый ПЕРЕД разовой синхронизацией пресетов, + метка эпохи переключения. */
+export const PRESET_EPOCH_CUT_KEY = "risk_preset_epoch_cut";
 
 /** Поля, где БОЛЬШЕЕ значение = более строгий вход (порог, который надо перепрыгнуть). */
 const HIGHER_IS_STRICTER = new Set([
@@ -87,7 +95,7 @@ export function buildProfileDrift(db: Database, nowIso: string): ProfileDriftRep
     const codeVersion = String((def.values as { config_version?: unknown }).config_version ?? "") || null;
 
     if (!row) {
-      profiles.push({ id: def.id, name: def.name, prodVersion: null, codeVersion, missing: true, fields: [] });
+      profiles.push({ id: def.id, name: def.name, prodVersion: null, codeVersion, missing: true, noCodePreset: false, fields: [] });
       continue;
     }
 
@@ -105,21 +113,37 @@ export function buildProfileDrift(db: Database, nowIso: string): ProfileDriftRep
       if (HIGHER_IS_STRICTER.has(path) && typeof prod === "number" && typeof code === "number") prodStricter = prod > code;
       fields.push({ path, prod: prod ?? null, code, prodStricter });
     }
-    profiles.push({ id: def.id, name: def.name, prodVersion, codeVersion, missing: false, fields });
+    profiles.push({ id: def.id, name: def.name, prodVersion, codeVersion, missing: false, noCodePreset: false, fields });
+  }
+
+  // Профили, живущие ТОЛЬКО в базе (сегодня это `max`). Молча их пропустить нельзя — иначе отчёт про
+  // «все пресеты» врёт объёмом. Но и сравнить не с чем: у них нет определения в коде, они собраны по
+  // решению владельца. Поэтому они перечислены отдельным классом и НЕ мигрируются.
+  const known = new Set(RISK_PROFILE_DEFS.map((d) => d.id));
+  for (const row of stored.values()) {
+    if (known.has(row.id)) continue;
+    let ver: string | null = null;
+    try { ver = String((JSON.parse(row.content) as { config_version?: unknown })?.config_version ?? "") || null; } catch { ver = null; }
+    profiles.push({ id: row.id, name: row.name, prodVersion: ver, codeVersion: null, missing: false, noCodePreset: true, fields: [] });
   }
 
   const driftedProfiles = profiles.filter((p) => p.missing || p.fields.length > 0).length;
   const driftedFields = profiles.reduce((n, p) => n + p.fields.length, 0);
   const stricter = profiles.flatMap((p) => p.fields).filter((f) => f.prodStricter === true).length;
 
+  let epochCut: unknown | null = null;
+  try { epochCut = JSON.parse(R.metaGet(db, PRESET_EPOCH_CUT_KEY) ?? "null"); } catch { epochCut = null; }
+
+  const noCode = profiles.filter((p) => p.noCodePreset).map((p) => p.id);
+  const tail = noCode.length ? ` Вне сравнения (нет пресета в коде, дизайн владельца): ${noCode.join(", ")}.` : "";
   const note = driftedFields === 0
-    ? "пресеты профилей в базе совпадают с кодом — решающее правило одно и то же"
+    ? "пресеты профилей в базе совпадают с кодом — решающее правило одно и то же." + tail
     : `РАСХОЖДЕНИЕ: профилей ${driftedProfiles}, полей ${driftedFields}, из них ${stricter} — там, где ПРОД СТРОЖЕ кода. `
       + "Пресеты в коде не доезжают до живой базы: seedRiskProfiles выходит, если профили уже есть. "
       + "Автоматически не подтягиваем — правка владельца и невыехавший пресет в базе неразличимы, "
-      + "а пороги входа меняет владелец, а не миграция.";
+      + "а пороги входа меняет владелец, а не миграция." + tail;
 
-  return { at: nowIso, profiles, driftedProfiles, driftedFields, note };
+  return { at: nowIso, profiles, driftedProfiles, driftedFields, epochCut, note };
 }
 
 /** Одна строка для еженедельника — «объявись сам». */
