@@ -224,3 +224,24 @@ test("аудит: снимок, снятый ПОСЛЕ миграции, пом
   assert.match(bad.storedSnapshot.note, /ПОСЛЕ того, как миграция уже переставила метки/);
   assert.match(bad.storedSnapshot.note, /НЕ ИСПОЛЬЗОВАТЬ/);
 });
+
+test("аудит: кусок с РОВНО нулевым piece_pnl вне области определения правила, а не его ошибка", () => {
+  const db = seed();
+  finished(db, "m1", 0, 0); piece(db, "b1", "m1", "Over 1.5", 100, 140);   // нормальный переворот
+  // Кусок, проданный ровно в ноль: знака нет. Прод дал ровно пять таких, и все пять числились
+  // «исключениями» точности 98.1% — хотя правило к ним просто неприменимо.
+  finished(db, "m2", 3, 0);
+  R.insertBet(db, {
+    id: "bz", match_id: "m2", strategy_id: "prematch_value", risk_profile_id: "medium", market_label: "Over 1.5",
+    status: "settled_won", proposed_price: 50, entry_price: 50, current_price: 50, closing_price: 50,
+    ai_prob: 0.6, stake: 100, rationale: "r", entered_minute: "60'", result: "won", payout: 100, created_at: KO,
+  } as never);
+  db.prepare(`UPDATE bets SET settled_by='early', piece_pnl=0, market_labeled=2 WHERE id='bz'`).run();
+  relabelPiecesByMarket(db);
+
+  const a = auditPieceMigration(db);
+  assert.equal(a.indeterminate, 1, "нулевой кусок посчитан отдельно");
+  assert.equal(a.control.agreePct, checkedOrNull(a), "точность считается БЕЗ него — край очерчен, а не размыт");
+  assert.match(a.note, /вне области определения/);
+});
+function checkedOrNull(a: ReturnType<typeof auditPieceMigration>) { return a.control.checked ? 100 : null; }
