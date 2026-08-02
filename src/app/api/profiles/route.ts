@@ -98,6 +98,22 @@ export async function GET(req: Request) {
       const { buildSvSizingAudit } = await import("@/lib/svSizingAudit");
       return NextResponse.json({ ok: true, audit: buildSvSizingAudit(db) });
     }
+    // ?report=job_heartbeat → [O3] пульс периодических шагов: когда каждый запускался последний раз и с
+    // каким результатом. Отвечает на вопрос, который молчание не различает: «шаг ничего не сделал» или
+    // «шаг перестал вызываться». Read-only.
+    if (new URL(req.url).searchParams.get("report") === "job_heartbeat") {
+      const { buildJobHeartbeat, expectedTickJobs } = await import("@/lib/jobHeartbeat");
+      const tickMin = Math.max(1, Number(process.env.TICK_INTERVAL_MIN ?? 30));
+      return NextResponse.json({ ok: true, tickMin, report: buildJobHeartbeat(db, expectedTickJobs(tickMin)) });
+    }
+    // ?report=entry_funnel → [O2] воронка входа за окно: разобрано → отказы по причинам словаря → входы,
+    // с НЕВЯЗКОЙ (отказы, которых словарь не знает — сам по себе алерт) и базлайнами против медианы 7 дней.
+    // Ответ на «входов нет — где проблема?» одной строкой вместо дней поисков. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "entry_funnel") {
+      const { buildEntryFunnel } = await import("@/lib/entryFunnel");
+      const d = Number(new URL(req.url).searchParams.get("days"));
+      return NextResponse.json({ ok: true, report: buildEntryFunnel(db, { days: Number.isFinite(d) && d > 0 ? d : undefined }) });
+    }
     // ?report=config_epoch → [O1] «под какими порогами это решалось»: текущая эффективная конфигурация,
     // её хэш, история эпох и журнал системных событий (старт, смена эпохи, миграция пресета). Ответ на
     // инцидент пресета: вопрос «что было настроено в тот вторник» решается JOIN-ом, а не археологией.
@@ -237,6 +253,23 @@ export async function GET(req: Request) {
         noFeedDigest: noFeed,
         // Форензик 02.08: решающее правило в живой базе может тихо разойтись с кодом — пресеты профилей
         // сеются только в ПУСТУЮ базу. Молчащее расхождение стоит канала входа, поэтому строка тут.
+        // [O3] Пульс джоб: устаревший шаг — это мёртвая проводка, а не тихий день.
+        jobHeartbeat: await (async () => {
+          try {
+            const { buildJobHeartbeat, expectedTickJobs } = await import("@/lib/jobHeartbeat");
+            const tickMin = Math.max(1, Number(process.env.TICK_INTERVAL_MIN ?? 30));
+            const h = buildJobHeartbeat(db, expectedTickJobs(tickMin), Date.parse(now) || Date.now());
+            return { note: h.note, stale: h.stale.map((r) => r.label), neverRan: h.neverRan.map((r) => r.label) };
+          } catch { return null; }
+        })(),
+        // [O2] Воронка входа: «анализ N · входы 0 · причина X» — то, чего не хватило 29.07 и в инциденте пресета.
+        entryFunnel: await (async () => {
+          try {
+            const { buildEntryFunnel, funnelLine } = await import("@/lib/entryFunnel");
+            const f = buildEntryFunnel(db, { nowMs: Date.parse(now) || Date.now() });
+            return { line: funnelLine(f), today: f.days[0] ?? null, baselines: f.baselines, investigate: f.investigate };
+          } catch { return null; }
+        })(),
         // [O7] Ратификации, которые не доехали, — та же строка «ЗАВЕСТИ РАССЛЕДОВАНИЕ», что у мёртвых фич.
         ratifications: await (async () => {
           try {

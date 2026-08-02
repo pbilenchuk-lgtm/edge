@@ -56,6 +56,7 @@ import { resolvePmvShadowSignals } from "./tennisPmvShadow.js";
 import { resolveFamilyShadowSignals } from "./familyShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
+import { recordJobRun, cycleSummaryLine } from "./jobHeartbeat.js";
 import { relabelPiecesByMarket } from "./pieceRelabel.js";
 import { recordStaleProposalShadow, resolveStaleProposalShadow } from "./staleProposalShadow.js";
 import { persistNoFeedCoverage } from "./noFeedCoverage.js";
@@ -2570,8 +2571,21 @@ export async function runAutoCycle(
   const step = async <T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
     try { return await fn(); } catch (e) { console.error(`[autoCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
   };
+  // [O3] ГРОМКИЙ НОЛЬ КАК СТАНДАРТ — ЦЕНТРАЛЬНО, А НЕ ПО ОДНОЙ ДЖОБЕ. Каждый шаг оставляет ФАКТ запуска и
+  // результат ДАННЫМИ (app_meta), даже когда результат нулевой: «не запускалось» перестаёт быть
+  // неотличимым от «отработало впустую» — ровно тот дефект, что был у piece_relabel и у счётчика глубины.
+  // В лог при этом идёт ОДНА сводная строка на цикл (см. ниже), а не сорок: принцип ТЗ прямо запрещает
+  // «логировать всё», и потоп мы уже проходили на карантине.
+  const _cycleT0 = Date.now();
+  const cycleSteps: { label: string; result: number | null; ok: boolean }[] = [];
+  const noteStep = (label: string, result: unknown, ok: boolean) => {
+    const num = typeof result === "number" ? result : null;
+    cycleSteps.push({ label, result: num, ok });
+    recordJobRun(db, label, { at: nowFn(deps)(), result: num, ms: 0, ok });
+  };
   const stepSync = <T>(label: string, fn: () => T, fallback: T): T => {
-    try { return fn(); } catch (e) { console.error(`[autoCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
+    try { const r = fn(); noteStep(label, r, true); return r; }
+    catch (e) { noteStep(label, null, false); console.error(`[autoCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
   };
 
   // [M13] Refresh the persisted team-alias overlay ONCE at the top of the cycle — BEFORE discover/import
@@ -2796,6 +2810,10 @@ export async function runAutoCycle(
     keepSports: new Set(Object.keys(SPORT_LABELS)),
     tennisSeriesAllow: seriesAllowFor("tennis", deps.env), // null = unrestricted (keep all liquid tennis)
   }), 0);
+  // [O3] ОДНА сводная строка на цикл, где присутствуют ВСЕ шаги — включая нулевые. Ноль виден ровно так
+  // же, как двести, и при этом не стоит сорока строк лога.
+  try { console.log(cycleSummaryLine("autoCycle", cycleSteps, Date.now() - _cycleT0)); } catch { /* лог не роняет цикл */ }
+
   return {
     synced: synced.length, imported: synced.filter((r) => r.created).length, discovered,
     oddsMatches: odds.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),
