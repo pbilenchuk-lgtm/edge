@@ -489,8 +489,24 @@ export function listMatches(db: Database, competitionId: string): Match[] {
   return (db.prepare(`SELECT * FROM matches WHERE competition_id=?`).all(competitionId) as any[])
     .map(mapMatch);
 }
+/** ТРАССЕР ИСТОЧНИКА КРИВОГО `end_time`.
+ *
+ *  На проде 30 строк несут в `end_time` голое время («23:51») вместо ISO. Сортировка и группировка от
+ *  них защищены, дефект помечен флагом — но КТО их пишет, до сих пор неизвестно, и археология по факту
+ *  всегда дороже, чем метка в момент записи. Поэтому: любая запись не-ISO в `end_time` печатает стек
+ *  вызова. Источник представится сам на следующем экземпляре, искать его не придётся.
+ *
+ *  Дешёвый по построению: срабатывает только на негодном значении, то есть в норме — никогда. */
+function traceMalformedEndTime(id: string, value: unknown): void {
+  const v = String(value);
+  if (/^\d{4}-\d{2}-\d{2}T/.test(v)) return;                       // нормальный ISO — молчим
+  const where = (new Error().stack ?? "").split("\n").slice(2, 6).map((x) => x.trim()).join(" ← ");
+  console.warn(`[end_time:malformed] матч ${id}: записывается «${v}» вместо ISO. Писатель: ${where}`);
+}
+
 export function updateMatch(db: Database, id: string, patch: Partial<Match>): void {
   const map: Record<string, unknown> = { ...patch };
+  if (map.end_time != null) traceMalformedEndTime(id, map.end_time);
   if ("lineup_out" in map) map.lineup_out = patch.lineup_out ? 1 : 0;
   const keys = Object.keys(map);
   if (!keys.length) return;
@@ -675,6 +691,10 @@ export interface MatchLogRow {
   sortIso: string | null;
   endLabel: string | null; endNote: string | null; broken: boolean; betCount: number;
   endTimeMalformed: boolean; futureSortKey: boolean;
+  /** ПОЧЕМУ клетка счёта пуста. Пустая клетка без причины читается как «недосчитано» — то есть как
+   *  поломка. Причина превращает её в факт: счёта нет в НАШИХ источниках, а исход при этом известен
+   *  (ставки таких матчей закрываются по PM-резолюции). Дыру не чиним — называем её тип. */
+  noScoreReason: "no_feed" | "score_source_expired" | "broken" | null;
 }
 /** Lean archive query for the «Логи» page — ONE row per finished match, straight from SQL, NOT the fat
  *  buildAppData payload. This is what decouples the log archive from the per-poll payload: keep finished matches
@@ -689,6 +709,9 @@ export function listMatchLogs(db: Database, limit = 1000, nowMs = Date.now()): M
     `SELECT m.id AS id, m.home AS home, m.away AS away, m.final_score AS final_score, m.end_time AS end_time,
             m.kickoff_at AS kickoff_at, m.end_note AS end_note, c.sport_id AS sport, c.name AS comp_name,
             (SELECT COUNT(*) FROM bets b WHERE b.match_id = m.id AND b.status NOT IN ('proposed','not_filled')) AS bet_count,
+            -- Есть ли вообще привязка к провайдеру: без неё счёта не откуда взяться, и это НЕ поломка,
+            -- а известный класс покрытия (лиги без фида торгуются вслепую и сеттлятся по PM-резолюции).
+            EXISTS(SELECT 1 FROM match_live ml WHERE ml.match_id = m.id) AS has_bind,
             -- СЧЁТ ТЕННИСА ЖИВЁТ НЕ ТАМ, ГДЕ ФУТБОЛЬНЫЙ. matches.final_score теннис не заполняет, поэтому
             -- ВСЕ 386 теннисных строк архива показывали пустую колонку счёта — половина списка выглядела
             -- недосчитанной. Сеты лежат в последнем снимке скаута; берём их оттуда (индекс
@@ -735,7 +758,7 @@ export function listMatchLogs(db: Database, limit = 1000, nowMs = Date.now()): M
                  CASE WHEN m.end_time <= :nowIso THEN m.end_time END
                ) DESC
       LIMIT :limit`,
-  ).all({ nowIso: new Date(nowMs).toISOString(), limit: Math.max(1, limit) } as any) as { id: string; home: string; away: string; final_score: string | null; end_time: string | null; kickoff_at: string | null; end_note: string | null; sport: string; comp_name: string; bet_count: number; tennis_sets: string | null; sort_iso: string | null }[];
+  ).all({ nowIso: new Date(nowMs).toISOString(), limit: Math.max(1, limit) } as any) as { id: string; home: string; away: string; final_score: string | null; end_time: string | null; kickoff_at: string | null; end_note: string | null; sport: string; comp_name: string; bet_count: number; tennis_sets: string | null; sort_iso: string | null; has_bind: number }[];
   return rows.map((r) => {
     const isoish = !!r.end_time && /^\d{4}-\d{2}-\d{2}T/.test(String(r.end_time));
     return {
@@ -752,6 +775,14 @@ export function listMatchLogs(db: Database, limit = 1000, nowMs = Date.now()): M
       endNote: r.end_note, broken: (r.end_note ?? "").startsWith("⚠ поломан"), betCount: Number(r.bet_count) || 0,
       // Улика, а не заплатка: строка, у которой end_time не ISO, названа таковой. Пока источник записи
       // не найден, они обязаны быть видимы, а не тихо переехать вниз.
+      // Тип дыры, а не вид поломки. `no_feed` — привязки к провайдеру нет вовсе (счёта в наших источниках
+      // не существует, исход известен по PM-резолюции); `score_source_expired` — теннис, чей снимок съеден
+      // ретенцией (источник жил короче архива); `broken` — матч помечен поломанным.
+      noScoreReason: (r.final_score ?? (r.sport === "tennis" ? r.tennis_sets : null))
+        ? null
+        : (r.end_note ?? "").startsWith("⚠ поломан") ? "broken"
+        : r.sport === "tennis" ? "score_source_expired"
+        : Number(r.has_bind) ? null : "no_feed",
       endTimeMalformed: !!r.end_time && !isoish,
       // Завершённый матч с временем в БУДУЩЕМ — химера (futureFinished.ts): он не торгуется вообще.
       futureSortKey: [r.end_time, r.kickoff_at].some((v) => !!v && Date.parse(String(v)) > nowMs),

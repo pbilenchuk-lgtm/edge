@@ -196,3 +196,53 @@ test("футбольный счёт не подменяется теннисны
   finished(db, "f1", "2026-08-02T10:00:00.000Z", "2026-08-02T08:00:00Z");
   assert.equal(R.listMatchLogs(db, 50, NOW)[0].finalScore, "1:0", "футбол читает final_score как раньше");
 });
+
+// ── ТИП ДЫРЫ ВМЕСТО ВИДА ПОЛОМКИ ────────────────────────────────────────────────────────────────
+// 114 футбольных строк архива показывали пустую клетку счёта. Пустая клетка без причины читается как
+// «недосчитано», то есть как наша поломка. На деле это известный класс покрытия: лига без фида
+// торгуется вслепую и сеттлится по PM-резолюции — счёта в НАШИХ источниках не существует, а исход есть.
+// Данные не чиним, тип дыры называем.
+
+test("нет привязки к провайдеру → no_feed: счёта не существует, а не «недосчитан»", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seed(db);
+  R.insertMatch(db, {
+    id: "nf", competition_id: "c1", home: "H", away: "A", state: "finished", lineup_out: true,
+    kickoff_at: "2026-08-01T18:00:00Z", minute: null, score_home: null, score_away: null, final_score: null,
+    kickoff_time: null, end_time: "2026-08-01T20:00:00.000Z", duration: null, end_note: null, external_ref: "nf",
+  } as never);
+  assert.equal(R.listMatchLogs(db, 50, NOW)[0].noScoreReason, "no_feed");
+});
+
+test("привязка есть, счёта нет — это НЕ no_feed: причину не выдумываем", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seed(db);
+  R.insertMatch(db, {
+    id: "bd", competition_id: "c1", home: "H", away: "A", state: "finished", lineup_out: true,
+    kickoff_at: "2026-08-01T18:00:00Z", minute: null, score_home: null, score_away: null, final_score: null,
+    kickoff_time: null, end_time: "2026-08-01T20:00:00.000Z", duration: null, end_note: null, external_ref: "bd",
+  } as never);
+  db.prepare(`INSERT INTO match_live(match_id,espn_event_date,updated_at) VALUES(?,?,?)`).run("bd", "2026-08-01T18:00:00Z", "t");
+  assert.equal(R.listMatchLogs(db, 50, NOW)[0].noScoreReason, null);
+});
+
+test("матч со счётом причины не несёт — метка только там, где клетка пуста", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seed(db);
+  finished(db, "ok", "2026-08-01T20:00:00.000Z", "2026-08-01T18:00:00Z");
+  const r = R.listMatchLogs(db, 50, NOW)[0];
+  assert.equal(r.finalScore, "1:0");
+  assert.equal(r.noScoreReason, null);
+});
+
+test("теннис без снимка → score_source_expired: источник жил короче архива", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "tennis", "Теннис");
+  R.upsertCompetition(db, { id: "atp", sport_id: "tennis", name: "ATP", budget: 0, external_league: null, created_at: "t" });
+  R.insertMatch(db, {
+    id: "t9", competition_id: "atp", home: "A", away: "B", state: "finished", lineup_out: true,
+    kickoff_at: "2026-07-20T09:00:00Z", minute: null, score_home: null, score_away: null, final_score: null,
+    kickoff_time: null, end_time: "2026-07-20T11:00:00.000Z", duration: null, end_note: null, external_ref: "t9",
+  } as never);
+  assert.equal(R.listMatchLogs(db, 50, NOW)[0].noScoreReason, "score_source_expired");
+});

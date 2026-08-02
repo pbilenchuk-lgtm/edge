@@ -108,7 +108,12 @@ const TENNIS_STRATEGIES = new Set([TENNIS_STRATEGY, SET_VALUE_STRATEGY]);
 /** Latest scout state for a Polymarket-linked match: the final result if it's over.
  *  `manual` = finished but we cannot safely name the winner (no event_winner and the set score can't
  *  disambiguate — e.g. a retirement) → settle NOTHING, flag for a human. Honest "don't know". */
-export interface TennisFinal { finished: boolean; canceled: boolean; retired: boolean; advancing: "first" | "second" | null; manual: boolean; p1: string; p2: string }
+export interface TennisFinal {
+  finished: boolean; canceled: boolean; retired: boolean; advancing: "first" | "second" | null;
+  manual: boolean; p1: string; p2: string;
+  /** Счёт по сетам из ТЕРМИНАЛЬНОГО снимка — то, что обязано переехать в карточку матча. */
+  setsP1: number | null; setsP2: number | null;
+}
 export function tennisFinalResult(db: Database, matchId: string): TennisFinal | null {
   // Newest snapshot whose pm_match_id == this match.
   const rows = db.prepare(`SELECT p1,p2,sets_p1,sets_p2,live,status,raw FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).all(matchId) as any[];
@@ -156,7 +161,10 @@ export function tennisFinalResult(db: Database, matchId: string): TennisFinal | 
   } else {
     manual = true; // finished, no event_winner, no decisive score → honest don't-know
   }
-  return { finished: true, canceled, retired, advancing, manual, p1: String(r.p1 ?? ""), p2: String(r.p2 ?? "") };
+  return {
+    finished: true, canceled, retired, advancing, manual, p1: String(r.p1 ?? ""), p2: String(r.p2 ?? ""),
+    setsP1: r.sets_p1 == null ? null : Number(r.sets_p1), setsP2: r.sets_p2 == null ? null : Number(r.sets_p2),
+  };
 }
 
 // Per-bet "finished but winner unknown" flag: leave the bet OPEN (capital honestly still committed),
@@ -891,7 +899,18 @@ export function finishTennisMatches(db: Database, deps: EngineDeps = {}): number
     for (const m of R.listMatches(db, c.id)) {
       if (m.state === "finished") continue;
       const fin = tennisFinalResult(db, m.id);
-      if (fin?.finished && !fin.manual) { try { R.updateMatch(db, m.id, { state: "finished", end_time: now }); n++; } catch { /* best-effort */ } } // a manual (winner-unknown) match stays live + visible until resolved
+      // СЧЁТ ПЕРЕЕЗЖАЕТ В КАРТОЧКУ В МОМЕНТ ФИНИША [P2-гигиена, ратифицировано в первом теннисном ТЗ].
+      // Пока его не писали, «счёт» тенниса жил ТОЛЬКО в снимках скаута — а они чистятся по ретенции.
+      // Источник живёт короче, чем архив, который из него читает: на 02.08 376 из 386 теннисных строк
+      // «Логов» показывали пустую клетку не потому, что счёта не было, а потому, что снимок уже удалён.
+      // Терминальный снимок — единственный момент, когда счёт заведомо доступен; там его и фиксируем.
+      if (fin?.finished && !fin.manual) {
+        try {
+          const score = fin.setsP1 != null && fin.setsP2 != null ? `${fin.setsP1}:${fin.setsP2}` : null;
+          R.updateMatch(db, m.id, { state: "finished", end_time: now, ...(score ? { final_score: score, score_home: fin.setsP1, score_away: fin.setsP2 } : {}) } as never);
+          n++;
+        } catch { /* best-effort */ }
+      } // a manual (winner-unknown) match stays live + visible until resolved
     }
   }
   return n;
@@ -1561,4 +1580,39 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
     }
   }
   return opened;
+}
+
+
+// ============================================================
+// БЭКФИЛЛ ТЕННИСНОГО СЧЁТА — СПАСТИ ТО, ЧТО РЕТЕНЦИЯ ЕЩЁ НЕ СЪЕЛА
+//
+// Правка выше чинит форвард-поток. Историю она не восстанавливает: у матчей старше срока хранения
+// снимков брать сеты неоткуда, и это потеря честная. Но у матчей МОЛОЖЕ этого срока снимки ещё живы —
+// их счёт спасается ровно сейчас и больше никогда. Отсюда разовость: это не «миграция на будущее», а
+// окно, которое закрывается само.
+//
+// Что НЕ делает: не выдумывает счёт там, где снимка нет (такие остаются с пустой клеткой и честной
+// причиной «источник не пережил ретенцию»), не трогает состояние матча и не касается ставок.
+// ============================================================
+export interface TennisScoreBackfill { scanned: number; filled: number; noSnapshot: number; alreadyHad: number; note: string }
+
+export function backfillTennisScores(db: Database, deps: EngineDeps = {}): TennisScoreBackfill {
+  const res: TennisScoreBackfill = { scanned: 0, filled: 0, noSnapshot: 0, alreadyHad: 0, note: "" };
+  for (const c of R.listCompetitions(db)) {
+    if (c.sport_id !== "tennis") continue;
+    for (const m of R.listMatches(db, c.id)) {
+      if (m.state !== "finished") continue;
+      res.scanned++;
+      if (m.final_score) { res.alreadyHad++; continue; }
+      const fin = tennisFinalResult(db, m.id);
+      if (!fin || fin.setsP1 == null || fin.setsP2 == null) { res.noSnapshot++; continue; }
+      try {
+        R.updateMatch(db, m.id, { final_score: `${fin.setsP1}:${fin.setsP2}`, score_home: fin.setsP1, score_away: fin.setsP2 } as never);
+        res.filled++;
+      } catch { /* одна упрямая строка не отменяет остальные */ }
+    }
+  }
+  res.note = `теннис-финалов ${res.scanned}: счёт уже был у ${res.alreadyHad}, спасено из живых снимков ${res.filled}, `
+    + `${res.noSnapshot} без счёта НАВСЕГДА — источник (tennis_snapshots) не пережил ретенцию, восстанавливать не из чего.`;
+  return res;
 }
