@@ -51,16 +51,62 @@ export interface ForensicRow {
   finalScore: string | null; impliedByScore: boolean | null;
   flags: ForensicFlag[]; note: string;
 }
+/** Схлопывание строк в НЕЗАВИСИМЫЕ сигналы + биномиальный тест против исторической базы группы. */
+export interface GroupSignificance {
+  rows: number; signals: number; signalsWon: number;
+  /** Односторонний p ПО СИГНАЛАМ. По строкам считать нельзя: строки одного матч×рынка коррелированы. */
+  p: number | null; significant: boolean; note: string;
+}
+
 export interface AnomalyForensic {
   windowFrom: string;
   /** Зелёная аномалия — то, ради чего проход и написан. */
   green: { groups: string[]; n: number; won: number; winPct: number | null; rows: ForensicRow[] };
   /** Красная группа рядом — чтобы сверка шла по одной линейке, а не по двум. */
   red: { groups: string[]; n: number; won: number; winPct: number | null; rows: ForensicRow[] };
+  /** ГЛАВНАЯ КОЛОНКА ЭТОГО ОТЧЁТА. Значимость считается по сигналам, а не по строкам. */
+  significance: { green: GroupSignificance; red: GroupSignificance; baseWinPct: number };
   flagCounts: Record<string, number>;
   verifiable: { checked: number; agreed: number; disagreed: number; unverifiable: number };
   branch: "артефакт-найден" | "сверка-чиста" | "сверка-невозможна";
   note: string;
+}
+
+/** Историческая база группы MLS/LigaMX/CSL за весь период — то, против чего считалась «просадка». */
+export const GROUP_BASE_WIN = 0.657;
+
+function comb(n: number, k: number): number { let r = 1; for (let i = 0; i < k; i++) r = (r * (n - i)) / (i + 1); return r; }
+function binomTail(n: number, k: number, p: number, dir: "le" | "ge"): number {
+  let s = 0;
+  const from = dir === "le" ? 0 : k, to = dir === "le" ? k : n;
+  for (let i = from; i <= to; i++) s += comb(n, i) * Math.pow(p, i) * Math.pow(1 - p, n - i);
+  return Math.min(1, Math.max(0, s));
+}
+
+/**
+ * СТРОКИ КОРРЕЛИРОВАНЫ, СИГНАЛЫ — НЕТ, И ЭТО НЕ ПРИДИРКА.
+ *
+ * Одна ставка одного матча на одном рынке порождает СТОЛЬКО строк, сколько профилей её взяло (и сколько
+ * кусков она пережила). Это ОДНО событие мира, а не восемь. 02.08 я посчитал значимость по строкам и
+ * получил p=0.00004 на «24 из 24» — при том, что за ними стоят ТРИ различных сигнала. По сигналам тот же
+ * факт даёт p=0.28, то есть обычную тройку подряд.
+ *
+ * Именно ради этого в проекте есть `signals.collapseToSignals` — и я его обошёл питон-срезом, получив
+ * ложную значимость, на которой едва не построили механизм. Тот же именной класс «скрипт мимо кода».
+ * Поэтому схлопывание живёт ЗДЕСЬ, в отчёте, а не в чьём-то блокноте.
+ */
+export function groupSignificance(rows: ForensicRow[], base: number, dir: "le" | "ge"): GroupSignificance {
+  const key = (r: ForensicRow) => `${r.matchLabel}||${r.market}`;
+  const sig = new Map<string, boolean>();
+  for (const r of rows) { const k = key(r); if (!sig.has(k)) sig.set(k, r.outcome === "won"); else if (r.outcome === "won") sig.set(k, true); }
+  const n = sig.size, won = [...sig.values()].filter(Boolean).length;
+  const p = n ? binomTail(n, won, base, dir) : null;
+  const significant = p != null && p < 0.05;
+  return {
+    rows: rows.length, signals: n, signalsWon: won, p: p == null ? null : Math.round(p * 10000) / 10000, significant,
+    note: !n ? "сигналов нет"
+      : `${won}/${n} сигналов (из ${rows.length} строк — профили и куски одного матч×рынка это ОДНО событие) против базы ${Math.round(base * 1000) / 10}%: p=${p!.toFixed(3)} — ${significant ? "ЗНАЧИМО" : "НЕ значимо, дисперсия НЕ отвергнута"}`,
+  };
 }
 
 const GREEN = ["скандинавия/квалы", "южная америка"];
@@ -115,8 +161,13 @@ export function buildAnomalyForensic(db: Database, windowFrom = "2026-08-01"): A
     disagreed > 0 ? "артефакт-найден"
     : unverifiable >= Math.max(1, Math.ceil(greenRows.length / 2)) ? "сверка-невозможна"
     : "сверка-чиста";
+  const significance = {
+    green: groupSignificance(greenRows, GROUP_BASE_WIN, "ge"),
+    red: groupSignificance(redRows, GROUP_BASE_WIN, "le"),
+    baseWinPct: Math.round(GROUP_BASE_WIN * 1000) / 10,
+  };
   return {
-    windowFrom,
+    windowFrom, significance,
     green: { groups: GREEN, n: greenRows.length, won: greenRows.filter((r) => r.outcome === "won").length, winPct: pct(greenRows), rows: greenRows },
     red: { groups: RED, n: redRows.length, won: redRows.filter((r) => r.outcome === "won").length, winPct: pct(redRows), rows: redRows },
     flagCounts, verifiable: { checked: greenRows.length, agreed, disagreed, unverifiable },
@@ -125,6 +176,10 @@ export function buildAnomalyForensic(db: Database, windowFrom = "2026-08-01"): A
       ? `⚠ АРТЕФАКТ: ${disagreed} из ${greenRows.length} строк зелёной группы ПРОТИВОРЕЧАТ фактическому счёту — база, против которой считалась значимость красной группы, посчитана по загрязнённым числам. Ветка (а): фикс → пере-срез ВСЕЙ таблицы групп → и только потом D3.`
       : branch === "сверка-невозможна"
         ? `СВЕРКА НЕВОЗМОЖНА: у ${unverifiable} из ${greenRows.length} строк нет счёта — вердикт «честные» на таких данных был бы выдуман. Нужен внешний источник счёта, а не наш конвейер.`
-        : `сверка чиста: ${agreed} из ${greenRows.length} строк подтверждены счётом, противоречий нет. Ветка (б): 24/24 принимается как хвост дисперсии малого n, D3 идёт. Решение — владельца, проход только предъявил улики.`,
+        : `сверка чиста: ${agreed} из ${greenRows.length} строк подтверждены счётом, противоречий нет — АРТЕФАКТА СЕТТЛА НЕТ. `
+          + `НО значимость обеих аномалий пересчитана ПО СИГНАЛАМ: зелёная ${significance.green.note}; красная ${significance.red.note}. `
+          + (significance.red.significant
+            ? "Красная группа значима — D3 идёт."
+            : "КРАСНАЯ ГРУППА НЕ ЗНАЧИМА: условие D3 («дисперсия отвергнута») НЕ выполнено, механизм строился бы на шуме. Решение — владельца."),
   };
 }
