@@ -17,6 +17,7 @@ import type { Bet, Competition, Match, MatchState } from "./types.js";
 import type { SportsMatchStatus } from "./sports.js";
 import { reassessNarrative, effectiveEnv } from "./llm.js";
 import { settleBet, resolveFootballMarket, matchPhase, isResolutionSettle } from "./settlement.js";
+import { classifySuspect } from "./suspectBreakdown.js";
 import { isFtBlindBet } from "./betMeta.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig, RESOLVED_RAIL_CENTS } from "./polymarket.js";
@@ -369,6 +370,16 @@ export function settleStaleOpenBets(db: Database, deps: EngineDeps = {}): number
  * label) are left for the PM-resolution settler (P2) and counted `deferred`. Idempotent; recomputes metrics for
  * every strategy whose grade actually moved.
  */
+/** Допустимый разрыв «событие ESPN ↔ кикофф» в мс — ОДНА константа на пере-сеттл и на раскладку карантина.
+ *  Отчёт, считающий разрыв своим числом, однажды объявит доказуемым то, что конвейер не берёт. */
+export function legGapMs(env: Record<string, string | undefined> = process.env): number {
+  return Math.max(1, Number(env.FOOTBALL_LEG_GAP_HOURS ?? 30)) * 3_600_000;
+}
+/** Разрешение ярлыка по счёту для карантинной раскладки — тот же вызов, что делает пере-сеттл. */
+export function suspectResolveOutcome(bet: Bet, match: Match): boolean | null {
+  return resolveOutcome(bet, match, {});
+}
+
 export function reSettleSuspectBets(db: Database, deps: EngineDeps = {}): { regraded: number; confirmed: number; deferred: number } {
   const now = nowFn(deps)();
   const gap = Math.max(1, Number(deps.env?.FOOTBALL_LEG_GAP_HOURS ?? process.env.FOOTBALL_LEG_GAP_HOURS ?? 30)) * 3_600_000;
@@ -376,18 +387,15 @@ export function reSettleSuspectBets(db: Database, deps: EngineDeps = {}): { regr
   let regraded = 0, confirmed = 0, deferred = 0;
   const affected = new Set<string>();
   for (const { id } of rows) {
-    const bet = R.getBet(db, id);
-    if (!bet) { deferred++; continue; }
-    const m = R.getMatch(db, bet.match_id);
-    // Only re-grade against a trustworthy score: finished, known score, not a feed-drop freeze (F2).
-    if (!m || m.state !== "finished" || m.score_home == null || m.score_away == null || isStateSuspect(db, m.id)) { deferred++; continue; }
-    // PROVE the binding is the right leg: the bound ESPN event date must sit within ±LEG_GAP of kickoff.
-    const live = R.getMatchLive(db, m.id);
-    const koMs = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
-    const evMs = live?.espn_event_date ? Date.parse(live.espn_event_date) : NaN;
-    if (!(Number.isFinite(koMs) && Number.isFinite(evMs) && Math.abs(evMs - koMs) <= gap)) { deferred++; continue; } // → PM-resolution (P2)
-    const won = resolveOutcome(bet, m, {});
-    if (won == null) { deferred++; continue; } // unresolvable label with a known score → PM-resolution / void (P2)
+    // РЕШАЮЩИЙ ПРЕДИКАТ ОДИН на действие и на отчёт (suspectBreakdown.classifySuspect). Раньше условия
+    // «доказуема ли привязка / берём ли мы эту строку» жили ЗДЕСЬ, а раскладка карантина, если бы её
+    // написали рядом, повторила бы их своим кодом — и однажды разошлась бы. Мы этот класс уже оплатили
+    // на CLV («скрипт мимо кода»), второй раз не платим: отчёт зовёт ту же функцию и ничего не делает.
+    const cls = classifySuspect(db, id, { legGapMs: gap, isStateSuspect, resolveOutcome: (b, mm) => resolveOutcome(b, mm, {}) });
+    if (cls.cls !== "ready_regrade" && cls.cls !== "ready_confirm") { deferred++; continue; }
+    const bet = R.getBet(db, id)!;
+    const m = R.getMatch(db, bet.match_id)!;
+    const won = cls.won!;
     const nextStatus = won ? "settled_won" : "settled_lost";
     // settle_verified=1 вместе со снятием: решение принято по доказанной привязке, и грубый карантин по
     // перечню турниров не должен вернуть метку при следующем же открытии базы.
