@@ -49,7 +49,7 @@ import { hoursUntil, finishStamp } from "./time.js";
 import { loadShadowConfig, shadowOnEntries, shadowOnExit, type ShadowEntryRequest } from "./shadow.js";
 import { collectSnapshots } from "./snapshots.js";
 import { collectTennisSnapshots, collectTennisPrematchSnapshots, recordTennisBreakMarks, tennisScoutSilence } from "./tennisScout.js";
-import { tennisTradingTick, tennisSetValueTick, tennisExitTick, settleTennisBets, finishTennisMatches, tennisScoutInPlay, tennisFinalResult, pollTennisFinals } from "./tennisTrading.js";
+import { tennisTradingTick, tennisSetValueTick, tennisExitTick, settleTennisBets, finishTennisMatches, backfillTennisScores, tennisScoutInPlay, tennisFinalResult, pollTennisFinals } from "./tennisTrading.js";
 import { sweepAbandonedMatches } from "./staleSweep.js";
 import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
 import { resolvePmvShadowSignals } from "./tennisPmvShadow.js";
@@ -2721,7 +2721,15 @@ export async function runAutoCycle(
   stepSync("tennisBreakMarks", () => recordTennisBreakMarks(db, deps), 0); // mark completed break windows (≥6min old)
   await step("tennisExit", () => tennisExitTick(db, deps), 0);             // §6 paper: deterministic take_price / thesis_stop close via the book (no LLM, §9.6)
   await step("tennisFinalPoll", () => pollTennisFinals(db, deps), 0);      // A+B: chase FINAL results via get_fixtures for stranded positions (live feed drops finished matches) → writes the terminal snapshot settle consumes
-  stepSync("tennisFinish", () => finishTennisMatches(db, deps), 0);        // drive tennis matches to finished from the scout (else they pile up in live)
+  stepSync("tennisFinish", () => finishTennisMatches(db, deps), 0);
+  // Разовое окно: у теннисных финалов МОЛОЖЕ срока хранения снимков счёт ещё достижим — спасаем его
+  // сейчас, потом будет нечего. Идемпотентен (берёт только матчи с пустым final_score), поэтому просто
+  // живёт в тике и с каждым проходом делает всё меньше, пока не станет полным no-op.
+  stepSync("tennisScoreBackfill", () => {
+    const r = backfillTennisScores(db, deps);
+    if (r.filled) console.log(`[tennisScoreBackfill] ${r.note}`);
+    return r.filled;
+  }, 0);        // drive tennis matches to finished from the scout (else they pile up in live)
   stepSync("tennisSettle", () => settleTennisBets(db, deps), 0);           // safety-net settle for finished tennis matches
   stepSync("tennisPmvSettle", () => settleTennisPmvBets(db, deps), 0);     // safety-net settle for PMV props (Gate-0.2 void clauses)
   stepSync("pmvShadowResolve", () => { const r = resolvePmvShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // score flag-only would-be entries post-match (no money)

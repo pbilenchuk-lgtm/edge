@@ -2436,8 +2436,13 @@ function PortfolioScreen({ open, closed, onGoMatches }: any) {
   }
   // Завершённые: свежие исполнения сверху — и внутри группы, и группы между собой,
   // чтобы новые закрытия не приходилось искать. (ISO-строки сортируются хронологически.)
+  // Сравниваем ВРЕМЯ, а не байты строки. Комментарий выше говорил «ISO-строки сортируются хронологически» —
+  // это ПРЕДПОЛОЖЕНИЕ, и ровно оно стоило нам архива «Логов»: там такой же строкой оказалось «23:51», и
+  // лексикографика поставила её выше любой даты. Здесь `atIso` пишем мы сами и он ISO — но защита от
+  // класса стоит одну строку, а предположение стоило дня поисков.
+  const tms = (v: unknown): number => { const t = Date.parse(String(v ?? "")); return Number.isFinite(t) ? t : 0; };
   if (view === "closed")
-    for (const k in groups) groups[k].items.sort((a: any, b: any) => (a.atIso ?? "") < (b.atIso ?? "") ? 1 : (a.atIso ?? "") > (b.atIso ?? "") ? -1 : 0);
+    for (const k in groups) groups[k].items.sort((a: any, b: any) => tms(b.atIso) - tms(a.atIso));
   const closedLabel = (p: any) => p.settledBy === "void" ? "возврат ставки" : p.result === "void" ? "= в ноль" : p.result === "won" ? "✓ выигрыш" : "✕ проигрыш";
 
   return (
@@ -2479,7 +2484,7 @@ function PortfolioScreen({ open, closed, onGoMatches }: any) {
             <button style={{ ...S.pfGroupBtn, ...(groupBy === "strat" ? S.pfGroupOn : {}) }} onClick={() => setGroupBy("strat")}>по стратегии</button>
             <button style={{ ...S.pfGroupBtn, ...(groupBy === "comp" ? S.pfGroupOn : {}) }} onClick={() => setGroupBy("comp")}>по турниру</button>
           </div>
-          {Object.entries(groups).sort((a: any, b: any) => view === "closed" ? (a[1].maxAt < b[1].maxAt ? 1 : a[1].maxAt > b[1].maxAt ? -1 : 0) : 0).map(([key, g]: any) => (
+          {Object.entries(groups).sort((a: any, b: any) => view === "closed" ? tms(b[1].maxAt) - tms(a[1].maxAt) : 0).map(([key, g]: any) => (
             <div key={key} style={S.pfGroup}>
               <div style={S.pfGroupHead}>
                 {groupBy === "strat" && <span style={{ ...S.dot, background: g.color }} />}
