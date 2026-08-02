@@ -2802,6 +2802,12 @@ export async function runAutoCycle(
     const day = nowIso.slice(0, 10);
     if (R.metaGet(db, "complement_audit_day") === day) return 0;      // already run today
     const r = await auditComplementVoids(db, deps, { apply: true });
+    console.log(`[complementAudit] ${r.note}`);            // безусловно: «0 находок» звучит так же громко, как «23»
+    // СУТОЧНЫЙ СЛОТ СЖИГАЕТ ТОЛЬКО СОСТОЯВШИЙСЯ ПРОХОД. Маркер ставился безусловно, поэтому неответивший
+    // источник (сеть, тайм-аут) закрывал ретро до завтра, а снаружи это выглядело как «сегодня уже сходили».
+    // Отказ и пустой результат неразличимы в счётчике и означают противоположное — тот же немой ноль.
+    const usable = (r.complementFound ?? 0) === 0 || (r.resolvedTokens ?? 0) > 0;
+    if (!usable) { console.warn(`[complementAudit] источник не вернул ни одной цены — суточный слот НЕ сжигаем, повторим следующим тиком`); return 0; }
     try {
       R.metaSet(db, "complement_audit_day", day, nowIso);
       R.metaSet(db, "complement_audit_last", JSON.stringify({

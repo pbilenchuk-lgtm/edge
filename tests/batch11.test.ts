@@ -471,3 +471,50 @@ test("#1: причина возврата берётся из МАШИННОГО
   assert.equal(r.byReason["market_void"], undefined, "неразмеченная строка НЕ засчитана как void биржи");
   assert.equal(r.byReason["не_размечено:void"], 1, "она честно уходит в отдельную корзину");
 });
+
+// ── РЕТРО-ПРОХОД: ЗАВИСИМОСТЬ ЗНАЕТ САМ МОДУЛЬ, ДЕЛЬТА ИЗМЕРЯЕТСЯ ИЗ БАЗЫ ─────────────────────────
+// Прод 02.08: ежедневный вызов из цикла возвращал examined=43, complementFound=23, reSettled=0 с честным
+// диагнозом «резолвер токенов не передан». Передавал его только скрипт — именной класс «скрипт умеет, код
+// не умеет», тот же, что был у CLV. Лечение структурное: модуль сам подставляет зависимость, как pmResolution.
+
+/** Мир для ретро-прохода: один возврат, у которого комплемент ЕСТЬ в каталоге матча. */
+function retroWorld() {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "football", "Football");
+  R.upsertCompetition(db, { id: "c1", sport_id: "football", name: "F", budget: 8000, external_league: "nor.1", created_at: "t" } as any);
+  R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: null, color: null, version: 1, prompt: "", prompt_live: null, params: null, model: null, model_live: null, created_at: "t" } as any);
+  R.insertMatch(db, { id: "m1", competition_id: "c1", home: "A", away: "B", state: "finished", lineup_out: true, kickoff_at: "t",
+    minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "m1" } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: "m1", label: "Under 3.5", price: 99, ai_prob: 0.6, liquidity: "900", external_ref: "u", snapshot_at: "t", is_closing: false } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: "m1", label: "Over 3.5", price: 1, ai_prob: 0.4, liquidity: "900", external_ref: "o", snapshot_at: "t", is_closing: false } as any);
+  db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,payout,settled_by,created_at)
+              VALUES ('b1','m1','prematch_value','max','Under 3.5','settled_void',50,100,100,'void','t')`).run();
+  return db;
+}
+
+test("ретро БЕЗ явного резолвера больше не отказывается — модуль знает свою зависимость сам", async () => {
+  const db = retroWorld();
+  // Резолвер не передан вовсе. Раньше здесь был мгновенный отказ с note «не передан».
+  const r = await auditComplementVoids(db, { now: () => "2026-07-28T00:00:00Z" } as any, { apply: false });
+  assert.doesNotMatch(r.note, /резолвер токенов не передан/, "отказ по отсутствию зависимости снят");
+  assert.ok(r.examined > 0, "проход дошёл до работы, а не встал на пороге");
+});
+
+test("Δ книги ИЗМЕРЯЕТСЯ из базы и сверяется с обещанием предиката", async () => {
+  const db = retroWorld();
+  const resolveTokens = async () => ({ u: { priceCents: 99, closed: true }, o: { priceCents: 1, closed: true } });
+  const r = await auditComplementVoids(db, { resolveTokens, now: () => "2026-07-28T00:00:00Z" } as any, { apply: true });
+  assert.ok(r.reSettled > 0, "прогон что-то записал — иначе сверять нечего");
+  assert.ok(r.bookBefore && r.bookAfter, "книга снята ДО и ПОСЛЕ");
+  assert.equal(r.deltaAgrees, true, "обещание предиката и факт из базы сошлись");
+  assert.equal(r.bookMeasuredUsd, r.bankDeltaUsd, "два независимых пути к одному числу дали одно число");
+  assert.doesNotMatch(r.note, /РАСХОЖДЕНИЕ/);
+});
+
+test("сухой прогон книгу не двигает — измеренная дельта ровно ноль", async () => {
+  const db = retroWorld();
+  const resolveTokens = async () => ({ u: { priceCents: 99, closed: true }, o: { priceCents: 1, closed: true } });
+  const r = await auditComplementVoids(db, { resolveTokens } as any, { apply: false });
+  assert.equal(r.bookMeasuredUsd, 0, "apply=false не пишет ничего");
+  assert.ok(r.bankDeltaUsd !== 0, "но предикат честно показывает, СКОЛЬКО бы записал");
+});
