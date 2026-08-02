@@ -76,6 +76,23 @@ export const RATIFICATIONS: Ratification[] = [
     status: "deployed", closedBy: "#113 (logLine + reasonsOutsideDictionary; старые строки не переписываются массово)", lateDays: 0,
   },
   {
+    id: "d1-defensive-cut-thesis", at: "2026-08-02", source: "батч-13 D1",
+    statement: "защитный срез тающего опциона исполняется ТОЛЬКО при сломе тезиса по game-state; time_decay_floor приостановлен как класс; counter_scenario не трогать; откат при двух отрицательных неделях netHoldBenefitUsd",
+    status: "deployed", lateDays: 0,
+    closedBy: "#122 (defensiveCutGate: гейт в живом пути, порог отката зафиксирован В КОДЕ до деплоя, самоизмерение симметрично)",
+  },
+  {
+    id: "d2-anomaly-24-forensic", at: "2026-08-02", source: "батч-13 D2",
+    statement: "аномалия 24/24 сверяется поимённо ДО любого лечения красной группы; ветвление артефакт/дисперсия — решение владельца, не автоматики",
+    status: "deployed", lateDays: 0,
+    closedBy: "#122 (anomalyForensic: улики предъявляются, вердикт НЕ выносится; несверяемая строка помечается, а не засчитывается)",
+  },
+  {
+    id: "d3-group-bias-flag", at: "2026-08-02", source: "батч-13 D3",
+    statement: "групповой bias-флаг (окно 30 решённых × лиговая группа, p<0.01 → защитный режим min-edge +3пп); включается ТОЛЬКО после исхода D2",
+    status: "pending", closedBy: null,
+  },
+  {
     id: "label-consumers-resnapshot", at: "2026-08-02", source: "чат, частичное снятие моратория",
     statement: "потребители меток перечитываются одним проходом, каждый сдвиг подписан миграцией; теннис под мораторием с пометкой labels_unverified до появления проверяемой когорты",
     status: "deployed", lateDays: 0,

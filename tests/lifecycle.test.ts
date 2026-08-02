@@ -426,8 +426,13 @@ test("evaluateExits fires a planned time_stop when the minute passes and the eve
   const a = seedTS();
   R.insertMarket(a.db, { id: R.uid(), match_id: a.mid, label: "Switzerland Over 0.5", price: 25, ai_prob: 0.4, liquidity: "2000", external_ref: "TOKS", snapshot_at: "t", is_closing: false });
   const exA = await evaluateExits(a.db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.27", size: "500" }], bids: [{ price: "0.24", size: "5000" }] }) });
-  assert.ok(exA.some((e) => e.matchId === a.mid && /time_stop/.test(e.reason)), "time_stop fired past the planned minute");
-  assert.ok(R.getBet(a.db, a.bid)!.status.startsWith("settled"), "melting option closed by the planned time_stop");
+  // [D1, батч-13] КОНТРАКТ ИЗМЕНЁН РАТИФИКАЦИЕЙ. Раньше здесь утверждалось, что плановый time_stop
+  // ЗАКРЫВАЕТ тающий опцион. Замер stop_counterfactual (n=465 по time_stop) дал недобор 15.7¢ = 64.8%
+  // цены среза: «плановое» закрытие в этой семье отдаёт оставшийся шанс ровно так же, как ценовой стоп,
+  // потому что downside тающего опциона уже ≈0. Теперь позиция УДЕРЖИВАЕТСЯ, и отказ протоколируется.
+  assert.ok(!exA.some((e) => e.matchId === a.mid && /time_stop/.test(e.reason)), "тайм-стоп тающего опциона НЕ исполняется (D1)");
+  assert.equal(R.getBet(a.db, a.bid)!.status, "open", "позиция держится до сеттла — game-state слом тезиса не подтвердил");
+  assert.ok(R.tradeLogForMatch(a.db, a.mid).some((l) => l.type === "hold" && /melting_time_stop_held/.test(l.text)), "удержание помечено машиночитаемым кодом D1");
 
   // (2) Event HAPPENED — mark 95¢ (Switzerland scored) → time_stop must NOT fire (resolved).
   const b = seedTS();
@@ -455,14 +460,20 @@ test("evaluateExits time_stop fires for EACH profile of a strategy on the same m
   const strat = R.listStrategies(db, "football")[0];
   const mid = R.uid();
   R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Argentina", away: "Switzerland", state: "live", lineup_out: true, kickoff_at: null, minute: 82, score_home: 1, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
-  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Switzerland Over 0.5", price: 25, ai_prob: 0.4, liquidity: "2000", external_ref: "TOKS", snapshot_at: "t", is_closing: false });
-  // TWO profiles of the SAME strategy, each holding the same melting market, each with its
-  // own battle sheet + planned time_stop at 80'. Before the fix, the first profile's fire
-  // suppressed the second's forever (throttle keyed by strategy+market only).
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 25, ai_prob: 0.4, liquidity: "2000", external_ref: "TOKS", snapshot_at: "t", is_closing: false });
+  // TWO profiles of the SAME strategy, each holding the same market, each with its own battle
+  // sheet + planned time_stop at 80'. Before the fix, the first profile's fire suppressed the
+  // second's forever (throttle keyed by strategy+market only).
+  //
+  // [D1, батч-13] РЫНОК ЗДЕСЬ СПЕЦИАЛЬНО НЕ ТАЮЩИЙ. После D1 тайм-стоп тающего опциона удерживается,
+  // и на «Over 0.5» этот тест перестал бы доходить до троттла вообще — то есть покрытие прошлого бага
+  // (аудит [2]) тихо исчезло бы вместе с ратификацией. Свойство «троттл ключуется профилем, а не
+  // стратегией» к D1 отношения не имеет и обязано остаться проверяемым, поэтому проверяем его на
+  // Under-рынке, где защитный срез по-прежнему законен (каждый гол — необратимый шаг вниз).
   const bidM = R.uid(), bidA = R.uid();
   for (const [prof, bid] of [["medium", bidM], ["aggressive", bidA]] as const) {
-    R.saveArtifact(db, { match_id: mid, kind: "battle_sheet", label: `${strat.name} · ${prof}`, stage: "prematch", content: JSON.stringify({ positions: [{ market: "Switzerland Over 0.5", exit: { time_stop: { minute: 80, action: "close_full" } } }] }), model: "m", created_at: "t" });
-    R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, risk_profile_id: prof, market_label: "Switzerland Over 0.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 25, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
+    R.saveArtifact(db, { match_id: mid, kind: "battle_sheet", label: `${strat.name} · ${prof}`, stage: "prematch", content: JSON.stringify({ positions: [{ market: "Under 2.5", exit: { time_stop: { minute: 80, action: "close_full" } } }] }), model: "m", created_at: "t" });
+    R.insertBet(db, { id: bid, match_id: mid, strategy_id: strat.id, risk_profile_id: prof, market_label: "Under 2.5", status: "open", proposed_price: 55, entry_price: 55, current_price: 25, closing_price: null, ai_prob: 0.4, stake: 100, rationale: "r", entered_minute: "предматч", result: null, payout: null, created_at: "t" });
   }
   await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: bookFetch({ asks: [{ price: "0.27", size: "500" }], bids: [{ price: "0.24", size: "5000" }] }) });
   assert.ok(R.getBet(db, bidM)!.status.startsWith("settled"), "medium profile time-stopped");
@@ -675,8 +686,10 @@ test("evaluateExits: price stop is SUPPRESSED for a melting-option market, KEPT 
   R.insertMarket(db, { id: R.uid(), match_id: m3, label: "Switzerland Over 0.5", price: 3, ai_prob: 0.6, liquidity: "2000", external_ref: "TOK3", snapshot_at: "t", is_closing: false });
   openBet("dust-bet", m3, "Switzerland Over 0.5", 40, 3);
   const ex3 = await evaluateExits(db, { now: () => "t", polymarket: poly, fetchImpl: deep(0.03) });
-  assert.ok(ex3.some((e) => e.matchId === m3), "spent option closed by the time-decay floor");
-  assert.ok(R.tradeLogForMatch(db, m3).some((l) => l.type === "exit" && /time_decay_floor/.test(l.text)), "floor exit logged");
+  // [D1] ТАЙМ-ФЛОР ПРИОСТАНОВЛЕН КАК КЛАСС: недобор 27.2¢ = 1035% цены среза при n=58 — он продавал
+  // билет дешевле справедливой цены (на 80'+ поздний гол приходит чаще, чем 3¢). Позиция держится.
+  assert.ok(!ex3.some((e) => e.matchId === m3), "тайм-флор НЕ режет — класс приостановлен (D1)");
+  assert.ok(R.tradeLogForMatch(db, m3).some((l) => l.type === "hold" && /time_decay_floor_suspended/.test(l.text)), "приостановка протоколирована");
 });
 
 test("evaluateExits degraded-mode: an active strategist outage RESTORES the price stop to exempt markets", async () => {

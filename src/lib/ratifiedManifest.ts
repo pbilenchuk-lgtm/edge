@@ -129,6 +129,20 @@ export const RATIFIED_MANIFEST: RatifiedEntry[] = [
     namedCase: "piece_relabel и счётчик глубины 30.07 — молчание кодировало два разных факта",
   },
   {
+    module: "src/lib/defensiveCutGate.ts",
+    ratification: "D1 (батч-13) — защитный срез по слому тезиса, а не по цене",
+    guards: "тающий опцион не режется на падении цены (недобор 12.6¢ = 37.6% на n=1128); time_decay_floor приостановлен как класс; counter_scenario не тронут",
+    callers: ["src/lib/lifecycle.ts", "src/app/api/profiles/route.ts"],
+    namedCase: "time_decay_floor: недобор 27.2¢ = 1035% цены среза при n=58 — защита отдавала 27¢ с доллара",
+  },
+  {
+    module: "src/lib/anomalyForensic.ts",
+    ratification: "D2 (батч-13) — форензик 24/24 ДО лечения красной группы",
+    guards: "зелёная аномалия объясняется РАНЬШЕ красной: если 24/24 артефакт, то и база значимости красной посчитана по загрязнённым числам",
+    callers: ["src/app/api/profiles/route.ts"],
+    namedCase: "август: скандинавия+ЮА 24/24 при исторических 65.7% — p≈0.00004",
+  },
+  {
     module: "src/lib/labelEpochSnapshot.ts",
     ratification: "пере-снимок потребителей меток одним проходом; теннис — постоянная пометка labels_unverified",
     guards: "«до» считается ТЕМ ЖЕ производственным кодом на домиграционном наборе, а не второй реализацией метрик; база не пишется",
