@@ -58,6 +58,7 @@ import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
 import { recordJobRun, cycleSummaryLine } from "./jobHeartbeat.js";
 import { recordGatePulse } from "./gateHeartbeat.js";
+import { chaseBoundNoScore, chaseLine } from "./boundNoScoreChase.js";
 import { relabelPiecesByMarket } from "./pieceRelabel.js";
 import { recordStaleProposalShadow, resolveStaleProposalShadow } from "./staleProposalShadow.js";
 import { persistNoFeedCoverage } from "./noFeedCoverage.js";
@@ -2625,7 +2626,9 @@ export async function runAutoCycle(
   // stay flagged for the PM-resolution settler below. Idempotent.
   stepSync("reSettleSuspects", () => {
     const r = reSettleSuspectBets(db, deps);
-    recordGatePulse(db, "resettle_suspect", { evaluated: r.regraded + r.confirmed + r.deferred, triggered: r.regraded + r.confirmed }, nowFn(deps)());
+    // Знаменателя у этого гейта НЕТ — см. GATE_SPECS: размер карантина это БЭКЛОГ, а не «сколько раз
+    // спрашивали». Публикуем только срабатывания; `evaluated: null` честнее выдуманного знаменателя.
+    recordGatePulse(db, "resettle_suspect", { evaluated: null, triggered: r.regraded + r.confirmed }, nowFn(deps)());
     return r.regraded + r.confirmed;
   }, 0);
   // ПОДОЗРЕНИЕ ПО ФАКТУ, А НЕ ПО СПИСКУ И НЕ В МОМЕНТ РАСЧЁТА. Обе прежние маркировки пропустили самый грубый
@@ -2663,6 +2666,17 @@ export async function runAutoCycle(
     const r = reSettleSuspectBets(db, deps);
     if (r.bookDeltaUsd !== 0) console.warn(`[reSettleSuspectsFresh] Δ книги ${r.bookDeltaUsd} — ${r.note}`);
     return r.regraded + r.confirmed;
+  }, 0);
+  // ДОЖАТИЕ `bound_no_score`: привязка есть, матч завершён, счёта нет. Стоит ПОСЛЕ пере-сеттла намеренно —
+  // группа, которую этот проход отправит в карантин за противоречие сеттлу, обязана дожить до разбора
+  // человеком, а не быть снятой автоматикой в том же тике.
+  if (provider) await step("boundNoScoreChase", async () => {
+    const r = await chaseBoundNoScore(db, provider!, { now: () => nowFn(deps)(), env: deps.env ?? process.env });
+    console.log(`[boundNoScoreChase] ${r.note}`);        // безусловно: «дожато 0» звучит так же громко, как «дожато 3»
+    if (r.quarantined) console.warn(`[boundNoScoreChase] ⚠ ${chaseLine(r)}`);
+    R.metaSet(db, "bound_no_score_last", JSON.stringify(r), nowFn(deps)());
+    recordGatePulse(db, "bound_no_score_chase", { evaluated: r.scanned, triggered: r.filled + r.quarantined }, nowFn(deps)());
+    return r.filled;
   }, 0);
   // R2(б): AFTER enrich — surface funded football matches that are past kickoff yet still
   // carry no provider bind (category_tier_mismatch / name-fold / dark board). Instead of a

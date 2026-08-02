@@ -54,11 +54,19 @@ export interface GateSpec {
 
 export const GATE_SPECS: GateSpec[] = [
   { key: "piece_relabel", module: "src/lib/pieceRelabel.ts", evaluatedFrom: "scanned (куски, закрытые досрочно)", what: "метка куска переставлена по исходу рынка" },
-  { key: "resettle_suspect", module: "src/lib/suspectBreakdown.ts", evaluatedFrom: "размер карантина на входе прохода", what: "карантинная ставка снята с флага" },
+  // ИСПРАВЛЕНО ПЕРВЫМ ЖЕ ЗАМЕРОМ НА ПРОДЕ. Здесь стоял знаменатель «размер карантина», и прод сразу отдал
+  // eval=27 / trig=0 при 102 живых ставках — то есть мой же вердикт «РАССЛЕДОВАТЬ» на СТАБИЛЬНОМ И ВЕРНОМ
+  // состоянии: 27 доказуемо непривязываемых ставок лежат в вечном карантине, и снимать их НЕ НАДО. Размер
+  // карантина — это БЭКЛОГ, а не «сколько раз предохранитель спрашивали»; я принял одно за другое.
+  // Настоящий знаменатель («сколько было РАЗРЕШИМО») совпадает со срабатываниями тождественно: спросить
+  // этот гейт и снять флаг — один и тот же акт. Значит мёртвую ветку по нему детектировать нельзя, и
+  // правильный ответ — сказать это вслух, а не подставить число, из которого следует ложная тревога.
+  { key: "resettle_suspect", module: "src/lib/suspectBreakdown.ts", evaluatedFrom: null, what: "карантинная ставка снята с флага" },
   { key: "future_finished", module: "src/lib/futureFinished.ts", evaluatedFrom: "scanned (просмотренные матчи)", what: "матч, «сыгранный» до кикоффа, сброшен" },
   { key: "tennis_score_card", module: "src/lib/tennisTrading.ts", evaluatedFrom: "scanned (теннис-финалы)", what: "счёт по сетам записан в карточку" },
   { key: "clv_leg", module: "src/lib/clv.ts", evaluatedFrom: "покрытие (все ноги когорты)", what: "CLV посчитан по реальной линии закрытия" },
   { key: "void_watch", module: "src/lib/voidWatch.ts", evaluatedFrom: "decided (решённые ставки окна)", what: "возврат замечен счётчиком" },
+  { key: "bound_no_score_chase", module: "src/lib/boundNoScoreChase.ts", evaluatedFrom: "scanned (привязанные матчи без счёта)", what: "счёт дожат штатным путём либо группа отправлена в карантин" },
   // Знаменателя нет и не будет: спросить предохранитель и получить «нет» следа не оставляет.
   { key: "score_race", module: "src/lib/scoreRace.ts", evaluatedFrom: null, what: "переоценка отложена: снимок отстал от своей ленты событий" },
   { key: "sizing_insanity", module: "src/lib/strategist.ts", evaluatedFrom: null, what: "размер вне здравого смысла заблокирован" },

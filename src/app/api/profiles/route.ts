@@ -105,6 +105,17 @@ export async function GET(req: Request) {
       const { buildGateHeartbeat } = await import("@/lib/gateHeartbeat");
       return NextResponse.json({ ok: true, report: buildGateHeartbeat(db, Date.now()) });
     }
+    // ?report=bound_no_score → результат ПОСЛЕДНЕГО дожатия «привязка есть, счёта нет», как его записал сам
+    // проход в цикле. Read-only и НАМЕРЕННО не запускает дожатие: проход пишет счёт и ставит карантин, а
+    // мутация по GET-у — ровно тот класс, который здесь уже закрывали для pm_resolution.
+    if (new URL(req.url).searchParams.get("report") === "bound_no_score") {
+      const { metaGet } = await import("@/lib/repo");
+      const { chaseLine } = await import("@/lib/boundNoScoreChase");
+      const raw = metaGet(db, "bound_no_score_last");
+      if (!raw) return NextResponse.json({ ok: true, report: null, note: "проход ещё не отработал в этом инстансе — это ОТСУТСТВИЕ ЗАМЕРА, а не ноль дожатых" });
+      const report = JSON.parse(raw);
+      return NextResponse.json({ ok: true, report, line: chaseLine(report) });
+    }
     // ?report=job_heartbeat → [O3] пульс периодических шагов: когда каждый запускался последний раз и с
     // каким результатом. Отвечает на вопрос, который молчание не различает: «шаг ничего не сделал» или
     // «шаг перестал вызываться». Read-only.

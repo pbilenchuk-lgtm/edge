@@ -129,6 +129,13 @@ export const RATIFIED_MANIFEST: RatifiedEntry[] = [
     namedCase: "piece_relabel и счётчик глубины 30.07 — молчание кодировало два разных факта",
   },
   {
+    module: "src/lib/boundNoScoreChase.ts",
+    ratification: "дожатие bound_no_score штатным путём, с тремя условиями",
+    guards: "хранимая привязка перепроверяется СЕГОДНЯШНИМИ гейтами (те же функции, не копии); счёт, спорящий с состоявшимся сеттлом, НЕ пишется — вся группа в карантин",
+    callers: ["src/lib/lifecycle.ts", "src/app/api/profiles/route.ts"],
+    namedCase: "3 матча MLS вечера 23.07 (14 ставок) — привязка есть, счёт пуст, класс без имени и без пути",
+  },
+  {
     module: "src/lib/gateHeartbeat.ts",
     ratification: "O4 — «файл жив» → «путь работает»",
     guards: "гейт, чей импорт стоит в ветке без потока, объявляет себя мёртвым сам; гейт без знаменателя честно помечен «не измеряется»",
