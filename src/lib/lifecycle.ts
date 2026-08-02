@@ -58,6 +58,7 @@ import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
 import { recordJobRun, cycleSummaryLine } from "./jobHeartbeat.js";
 import { recordGatePulse } from "./gateHeartbeat.js";
+import { defensiveCutAllowed, recordHoldMark } from "./defensiveCutGate.js";
 import { chaseBoundNoScore, chaseLine } from "./boundNoScoreChase.js";
 import { relabelPiecesByMarket } from "./pieceRelabel.js";
 import { recordStaleProposalShadow, resolveStaleProposalShadow } from "./staleProposalShadow.js";
@@ -1386,7 +1387,18 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
         // Phantom-bid guard, as on every exit path: a planned close still must not dump into a
         // momentarily-broken book (≤FLOOR¢ bid far under the mark) — hold to a real book/settle.
         const phantom = sell.fromBook && sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP;
-        if (!already && !phantom) {
+        // [D1] ТАЙМ-СТОП ТАЮЩЕГО ОПЦИОНА — ТОЖЕ ЗАЩИТНЫЙ СРЕЗ. Замер: n=465, недобор 15.7¢ = 64.8%.
+        // Планировали минуту заранее — но у тающего опциона downside уже ≈0, и «плановое» закрытие в этой
+        // семье отдаёт оставшийся шанс ровно так же, как ценовой стоп. Спрашиваем ТОТ ЖЕ авторитет.
+        const tsGate = defensiveCutAllowed({
+          kind: "time_stop", melting: winsOnEventOccurrence(b.market_label), matchState: m.state,
+          minute: minNum, maxMinutes: maxLiveMinutes(sport), degraded, env: deps.env ?? process.env,
+        });
+        if (!already && !phantom && !tsGate.allow) {
+          recordHoldMark(db, m.id, b.strategy_id, b.id, tsGate.code!, sell.cents, tsGate.reason, now);
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: `${minNum}'`, type: "hold", text: `тайм-стоп отклонён по «${b.market_label}»: ${tsGate.reason}`, dedup_key: `d1ts:${b.id}`, created_at: now } as never);
+        }
+        if (!already && !phantom && tsGate.allow) {
           const planned = ts.action === "close_half" ? 0.5 : 1;
           // T3.3: book only the fraction the bid actually absorbed (planned × fillFrac), remainder re-offered.
           const tsFillFrac = sell.requestedShares > 0 ? Math.min(1, sell.filledShares / sell.requestedShares) : 1;
@@ -1470,6 +1482,18 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // (each goal there is an irreversible step down — Örgryte Under 2.5 in a goal storm).
       if (d.kind === "stop" && winsOnEventOccurrence(b.market_label) && !degraded) {
         if (sell.cents <= EXIT_TIME_FLOOR_CENTS && minNum >= EXIT_TIME_FLOOR_MIN) {
+          // [D1] ТАЙМ-ФЛОР ПРИОСТАНОВЛЕН КАК КЛАСС. Замер: недобор 27.2¢ = 1035% цены среза при n=58 —
+          // то есть флор систематически продавал билет ДЕШЕВЛЕ его справедливой цены (на 80'+ поздний гол
+          // приходит чаще, чем 4¢). Решение спрашивается у единственного авторитета — defensiveCutAllowed.
+          const g = defensiveCutAllowed({
+            kind: "time_decay_floor", melting: true, matchState: m.state, minute: minNum,
+            maxMinutes: maxLiveMinutes(sport), degraded, env: deps.env ?? process.env,
+          });
+          if (!g.allow) {
+            recordHoldMark(db, m.id, b.strategy_id, b.id, g.code!, sell.cents, g.reason, now);
+            holdOnce(`выход отклонён по ${holdKey}: ${g.reason}`, g.code!);
+            continue;
+          }
           d = { exit: true, reason: `тайм-флор: ${sell.cents}¢ на ${minNum}' — опцион на событие истёк (time_decay_floor)`, pnlFrac: d.pnlFrac, kind: "stop" };
         } else {
           holdOnce(`ценовой стоп подавлен по ${holdKey}: рынок выигрывает от наступления события — цена тает по времени, это не слом тезиса (price_stop_exempt); держим до стратег-выхода / тайм-флора / сеттла`, "price_stop_exempt");
@@ -1776,7 +1800,14 @@ export function footballZombieMap(
     if (railUnexplained.length > prev) {
       const shown = railUnexplained.slice(0, 6).join(", ");
       R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: logSid, minute: minuteLabel(m), type: "skip",
-        text: `zombie_quarantine:rail_unexplained ${railUnexplained.length} из ${markets.length} рынков у планки, не объяснённой состоянием игры — доска мёртвая, скрыта от стратега целиком (${shown}${railUnexplained.length > 6 ? `, +${railUnexplained.length - 6}` : ""})`,
+        // [D5] СТРОКА НЕ ИМЕЕТ ПРАВА ВРАТЬ О СКОУПЕ. Здесь стояло «доска мёртвая, скрыта от стратега
+        // ЦЕЛИКОМ» независимо от того, накрыло 4 рынка из 38 или все 38. Карантин порыночный по
+        // построению (это и было ратифицировано), а строка описывала board-level запрет, которого в коде
+        // нет. Разбор логов 26–28.07 показал цену такой формулировки: читатель ищет board-level дефект и
+        // не находит, потому что дефекта нет — есть неверная строка. Теперь скоуп называется числом.
+        text: `zombie_quarantine:rail_unexplained ${railUnexplained.length} из ${markets.length} рынков у планки, не объяснённой состоянием игры — `
+          + `${railUnexplained.length >= markets.length ? "скрыта ВСЯ доска" : `скрыты ЭТИ ${railUnexplained.length} рынк(ов), остальные ${markets.length - railUnexplained.length} стратегу видны`}`
+          + ` (${shown}${railUnexplained.length > 6 ? `, +${railUnexplained.length - 6}` : ""})`,
         created_at: now });
     }
     try { R.metaSet(db, key, JSON.stringify({ n: railUnexplained.length }), now); } catch { /* best-effort */ }

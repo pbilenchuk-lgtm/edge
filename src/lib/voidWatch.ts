@@ -24,6 +24,7 @@
 
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
+import { isFtBlindBet } from "./betMeta.js";
 
 /** Share of decided bets that may end as refunds before the ledger is suspect. Refunds are normal but rare —
  *  a real market void is unusual. Anything above this is not noise, it is a signal to look. */
@@ -39,6 +40,11 @@ export interface VoidWatchReport {
   voids: number;
   voidPct: number | null;
   byReason: Record<string, number>;
+  /** [D4, батч-13] РЕЖИМ ft_blind ОТДЕЛЬНОЙ СТРОКОЙ. Когорта показала void 44% (7 из 16) — это болезнь
+   *  Varbergs (возврат вместо расчёта), а не качество стратегии, и судить её по общей доле возвратов
+   *  значит хоронить по мислейблу. Разрез существует затем, чтобы болезнь была видна СЧЁТЧИКОМ, а не
+   *  раскопкой; окно то же, знаменатель тот же — решённые. */
+  ftBlind: { decided: number; voids: number; voidPct: number | null; note: string };
   alarm: boolean;
   verdict: "insufficient" | "ok" | "ALARM";
   note: string;
@@ -50,7 +56,7 @@ export interface VoidWatchReport {
  */
 export function buildVoidWatch(db: Database, windowHours = 24, nowMs = Date.now(), env: Record<string, string | undefined> = process.env): VoidWatchReport {
   const since = new Date(nowMs - windowHours * 3600_000).toISOString();
-  let decided = 0, voids = 0;
+  let decided = 0, voids = 0, fbDecided = 0, fbVoids = 0;
   const byReason: Record<string, number> = {};
   for (const c of R.listCompetitions(db)) {
     for (const m of R.listMatches(db, c.id)) {
@@ -58,8 +64,11 @@ export function buildVoidWatch(db: Database, windowHours = 24, nowMs = Date.now(
         if (!b.settled_at || b.settled_at < since) continue;
         if (!String(b.status).startsWith("settled")) continue;
         decided++;
+        const ftb = isFtBlindBet(b);
+        if (ftb) fbDecided++;
         if (b.status !== "settled_void") continue;
         voids++;
+        if (ftb) fbVoids++;
         // The reason matters more than the count. 'void'/'void_timeout' with the single-token detail is OUR
         // failure to verify; a market void is the exchange's call. Same status, opposite meaning.
         //
@@ -85,8 +94,15 @@ export function buildVoidWatch(db: Database, windowHours = 24, nowMs = Date.now(
   const enough = decided >= VOID_WATCH_MIN_N;
   const alarm = enough && pct != null && pct > thr;
   const reasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(", ") || "—";
+  const fbPct = fbDecided ? Math.round((1000 * fbVoids) / fbDecided) / 10 : null;
   return {
     windowHours, decided, voids, voidPct: pct, byReason, alarm,
+    ftBlind: {
+      decided: fbDecided, voids: fbVoids, voidPct: fbPct,
+      note: !fbDecided
+        ? "решённых ft_blind в окне нет — ОТСУТСТВИЕ ЗАМЕРА, а не ноль возвратов"
+        : `ft_blind: ${fbVoids}/${fbDecided} возвратов (${fbPct}%)${fbPct != null && pct != null && fbPct > pct ? ` — ВЫШЕ общей доли ${pct}%: болезнь режима, а не качество стратегии` : ""}`,
+    },
     verdict: !enough ? "insufficient" : alarm ? "ALARM" : "ok",
     note: !enough
       ? `решённых ставок за ${windowHours}ч всего ${decided} (нужно ≥${VOID_WATCH_MIN_N}) — доля возвратов на такой выборке ничего не значит.`

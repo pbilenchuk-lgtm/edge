@@ -151,6 +151,20 @@ export async function GET(req: Request) {
       const { buildRatificationRegistry } = await import("@/lib/ratifications");
       return NextResponse.json({ ok: true, registry: buildRatificationRegistry(db, Date.now()) });
     }
+    // ?report=hold_benefit → [D1] что удержание ВЗЯЛО и что ОТДАЛО, деньгами, по неделям. Порог отката
+    // (две отрицательные недели подряд) зафиксирован В КОДЕ до деплоя правила, а не в чьей-то памяти.
+    if (new URL(req.url).searchParams.get("report") === "hold_benefit") {
+      const { buildNetHoldBenefit, holdBenefitLine } = await import("@/lib/defensiveCutGate");
+      const rep = buildNetHoldBenefit(db);
+      return NextResponse.json({ ok: true, report: rep, line: holdBenefitLine(rep) });
+    }
+    // ?report=label_forensic_24 → [D2] ручная сверка августовской аномалии 24/24: наш сеттл и метка против
+    // ФАКТИЧЕСКОГО счёта матча, плюс отдельная колонка «не Varbergs-класс ли это» (PM-резолюция / воид,
+    // ставший победой / early-метка). Read-only: проход НИЧЕГО не чинит, он предъявляет улики.
+    if (new URL(req.url).searchParams.get("report") === "label_forensic_24") {
+      const { buildAnomalyForensic } = await import("@/lib/anomalyForensic");
+      return NextResponse.json({ ok: true, report: buildAnomalyForensic(db) });
+    }
     // ?report=label_epoch → [ратификация 02.08] ПЕРЕ-СНИМОК ПОТРЕБИТЕЛЕЙ МЕТОК одним проходом: каждая
     // ячейка, читающая метку как предсказание, посчитана ДО и ПОСЛЕ миграции ТЕМ ЖЕ производственным кодом
     // на ДОмиграционном наборе записей. База НЕ пишется. Порядок чтения ратифицирован: золотая ячейка →
@@ -323,6 +337,15 @@ export async function GET(req: Request) {
             const { buildEntryFunnel, funnelLine } = await import("@/lib/entryFunnel");
             const f = buildEntryFunnel(db, { nowMs: Date.parse(now) || Date.now() });
             return { line: funnelLine(f), today: f.days[0] ?? null, baselines: f.baselines, investigate: f.investigate };
+          } catch { return null; }
+        })(),
+        // [D1] Вклад удержания — с порогом отката: если правило отдаёт деньги две недели подряд, это
+        // видно В ЕЖЕНЕДЕЛЬНИКЕ, а не всплывает через квартал.
+        holdBenefit: await (async () => {
+          try {
+            const { buildNetHoldBenefit, holdBenefitLine } = await import("@/lib/defensiveCutGate");
+            const h = buildNetHoldBenefit(db, Date.parse(now) || Date.now());
+            return { line: holdBenefitLine(h), rollback: h.rollback, weeks: h.weeks.slice(-3) };
           } catch { return null; }
         })(),
         // Эпоха меток в еженедельнике: 227 переворотов сдвинули линейку, и читать win-rate недели, не зная
