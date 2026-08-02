@@ -98,6 +98,16 @@ export async function GET(req: Request) {
       const { buildSvSizingAudit } = await import("@/lib/svSizingAudit");
       return NextResponse.json({ ok: true, audit: buildSvSizingAudit(db) });
     }
+    // ?report=settle_suspect → почему каждая карантинная ставка ВСЁ ЕЩЁ в карантине. Раскладка на три
+    // класса: готова к снятию (прогон reSettleSuspectBets закроет) / привязка честно недоказуема (остаётся
+    // навсегда — это правильный исход) / конвейер не берёт (единственный класс, который был бы работой).
+    // Решающий предикат ОБЩИЙ с самим пере-сеттлом (classifySuspect), поэтому отчёт и действие не могут
+    // разойтись. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "settle_suspect") {
+      const { buildSuspectBreakdown } = await import("@/lib/suspectBreakdown");
+      const { isStateSuspect, suspectResolveOutcome, legGapMs } = await import("@/lib/engine");
+      return NextResponse.json({ ok: true, report: buildSuspectBreakdown(db, { legGapMs: legGapMs(), isStateSuspect, resolveOutcome: suspectResolveOutcome }) });
+    }
     // ?report=profile_drift → does the DECIDING RULE in the live DB still equal the one in code? Preset risk
     // profiles are seeded only into an EMPTY database (`seedRiskProfiles` returns early if any profile exists),
     // so a ratified threshold change in code never reaches prod. Names every differing field and which side is
