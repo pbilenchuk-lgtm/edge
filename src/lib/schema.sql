@@ -941,3 +941,25 @@ CREATE TABLE IF NOT EXISTS stale_proposal_shadow (
   created_at     TEXT NOT NULL,
   resolved_at    TEXT
 );
+
+-- ============================================================
+-- [O1] ЭФФЕКТИВНАЯ КОНФИГУРАЦИЯ КАК ДАННЫЕ
+--
+-- config_epochs: hash → полные значения порогов + окно, когда эта эпоха была активна. Ставка несёт
+-- config_hash, поэтому «под какими порогами это решалось» становится JOIN-ом, а не воспоминанием.
+-- system_events: журнал изменений системы (старт, смена эпохи конфига, миграция пресета). Нужен именно
+-- таблицей, а не логом: на график метрики требуются вертикальные линии, а строку stdout не наложишь.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS config_epochs (
+  hash        TEXT PRIMARY KEY,
+  content     TEXT NOT NULL,
+  first_seen  TEXT NOT NULL,
+  last_seen   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS system_events (
+  id     TEXT PRIMARY KEY,
+  kind   TEXT NOT NULL,
+  at     TEXT NOT NULL,
+  detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_system_events_at ON system_events(at);

@@ -98,6 +98,25 @@ export async function GET(req: Request) {
       const { buildSvSizingAudit } = await import("@/lib/svSizingAudit");
       return NextResponse.json({ ok: true, audit: buildSvSizingAudit(db) });
     }
+    // ?report=config_epoch → [O1] «под какими порогами это решалось»: текущая эффективная конфигурация,
+    // её хэш, история эпох и журнал системных событий (старт, смена эпохи, миграция пресета). Ответ на
+    // инцидент пресета: вопрос «что было настроено в тот вторник» решается JOIN-ом, а не археологией.
+    if (new URL(req.url).searchParams.get("report") === "config_epoch") {
+      const { effectiveConfig, configHash, listSystemEvents } = await import("@/lib/configEpoch");
+      const cfg = effectiveConfig(db);
+      const epochs = db.prepare(`SELECT hash, first_seen, last_seen FROM config_epochs ORDER BY last_seen DESC LIMIT 50`).all();
+      const usage = db.prepare(`SELECT COALESCE(config_hash,'(нет штампа)') h, COUNT(*) n, MIN(created_at) f, MAX(created_at) l
+                                  FROM bets GROUP BY config_hash ORDER BY n DESC LIMIT 20`).all();
+      return NextResponse.json({ ok: true, currentHash: configHash(cfg), current: cfg, epochs, betsByEpoch: usage, events: listSystemEvents(db, 100) });
+    }
+    // ?report=ratifications → [O7] реестр ратификаций: что решено, что доехало, что висит. `pending`
+    // старше срока печатается как «ЗАВЕСТИ РАССЛЕДОВАНИЕ» — тем же тоном, что мёртвая фича у ratifiedWatch.
+    // Манифест держит МОДУЛИ; строка ТЗ модулем не является и потому невидима для него по построению —
+    // эта дыра и стоила нам четвёртого экземпляра класса.
+    if (new URL(req.url).searchParams.get("report") === "ratifications") {
+      const { buildRatificationRegistry } = await import("@/lib/ratifications");
+      return NextResponse.json({ ok: true, registry: buildRatificationRegistry(db, Date.now()) });
+    }
     // ?report=piece_relabel → «до/после» миграции меток кусков, ИЗМЕРЕННОЕ, а не вспомненное. `before` —
     // снимок, снятый ДО самого первого прохода и записанный один раз; `now` — текущее состояние; `last` —
     // счётчики последнего прохода с Δ книги. Двусторонний критерий владельца читается прямо отсюда:
@@ -218,6 +237,23 @@ export async function GET(req: Request) {
         noFeedDigest: noFeed,
         // Форензик 02.08: решающее правило в живой базе может тихо разойтись с кодом — пресеты профилей
         // сеются только в ПУСТУЮ базу. Молчащее расхождение стоит канала входа, поэтому строка тут.
+        // [O7] Ратификации, которые не доехали, — та же строка «ЗАВЕСТИ РАССЛЕДОВАНИЕ», что у мёртвых фич.
+        ratifications: await (async () => {
+          try {
+            const { buildRatificationRegistry, ratificationLine } = await import("@/lib/ratifications");
+            const reg = buildRatificationRegistry(db, Date.parse(now) || Date.now());
+            return { line: ratificationLine(reg), pending: reg.pending, investigate: reg.investigate, meanLateDays: reg.meanLateDays };
+          } catch { return null; }
+        })(),
+        // [O1] Эпоха конфига в еженедельнике: если пороги сменились внутри недели, срез недели смешал
+        // две политики, и знать об этом надо ДО чтения чисел, а не после.
+        configEpoch: await (async () => {
+          try {
+            const { effectiveConfig, configHash, listSystemEvents } = await import("@/lib/configEpoch");
+            const evs = listSystemEvents(db, 50).filter((e) => e.kind === "config_epoch");
+            return { hash: configHash(effectiveConfig(db)), epochChangesLogged: evs.length, lastChangeAt: evs[0]?.at ?? null };
+          } catch { return null; }
+        })(),
         profileDrift: await (async () => {
           try {
             const { buildProfileDrift, profileDriftLine } = await import("@/lib/profileDrift");

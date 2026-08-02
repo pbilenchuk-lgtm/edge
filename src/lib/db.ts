@@ -214,6 +214,13 @@ export function openDbReadOnly(path: string): Database {
   const { DatabaseSync } = require("node:sqlite") as SqliteModule;
   const db = new DatabaseSync(path, { readOnly: true });
   db.exec("PRAGMA busy_timeout = 10000;");   // приложение пишет параллельно — читателю положено ждать, а не падать
+  // [O1] BOOT-ECHO — последним шагом инициализации, когда все миграции уже отработали и конфиг
+  // ЭФФЕКТИВЕН. Печатается всегда: «конфиг не поменялся» — такой же факт, как «поменялся», и молчание
+  // их не различает. Инцидент пресета этой строкой ловился бы в первый час, а не за неделю.
+  try {
+    const { bootEcho } = require("./configEpoch.js") as typeof import("./configEpoch.js");
+    bootEcho(db, new Date().toISOString());
+  } catch (e) { console.warn("[boot-echo] не удалось снять снимок конфига:", e instanceof Error ? e.message : String(e)); }
   return db;
 }
 
@@ -275,6 +282,9 @@ export function initSchema(db: Database): void {
     "ALTER TABLE bets ADD COLUMN settle_verified INTEGER NOT NULL DEFAULT 0",
     // Снятие карантина обязано быть ПОДПИСАНО: когда и каким предикатом. Через месяц «почему у этой
     // строки нет флага» должно отвечаться самой строкой, а не реконструкцией по датам деплоя.
+    // [O1] Под какими порогами принято ЭТО решение. Инцидент пресета показал: без штампа вопрос
+    // «что было настроено в тот вторник» решается археологией по датам деплоя, а не JOIN-ом.
+    "ALTER TABLE bets ADD COLUMN config_hash TEXT",
     "ALTER TABLE bets ADD COLUMN settle_verified_at TEXT",
     "ALTER TABLE bets ADD COLUMN settle_verified_by TEXT",
     // W1/Z2: судьба куска (payout−stake на закрытии) — ОТДЕЛЬНОЕ поле от исхода рынка, чтобы торговый

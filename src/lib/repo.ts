@@ -7,6 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { resolveBetOrigin, CODE_VERSION } from "./betMeta.js";
 import { warsawLabel } from "./time.js";
+import * as CFG from "./configEpoch.js";
 import type { Database } from "./db.js";
 import type {
   AnalysisJob,
@@ -694,7 +695,7 @@ export interface MatchLogRow {
   /** ПОЧЕМУ клетка счёта пуста. Пустая клетка без причины читается как «недосчитано» — то есть как
    *  поломка. Причина превращает её в факт: счёта нет в НАШИХ источниках, а исход при этом известен
    *  (ставки таких матчей закрываются по PM-резолюции). Дыру не чиним — называем её тип. */
-  noScoreReason: "no_feed" | "score_source_expired" | "broken" | null;
+  noScoreReason: "no_feed" | "bound_no_score" | "score_source_expired" | "broken" | null;
 }
 /** Lean archive query for the «Логи» page — ONE row per finished match, straight from SQL, NOT the fat
  *  buildAppData payload. This is what decouples the log archive from the per-poll payload: keep finished matches
@@ -782,7 +783,11 @@ export function listMatchLogs(db: Database, limit = 1000, nowMs = Date.now()): M
         ? null
         : (r.end_note ?? "").startsWith("⚠ поломан") ? "broken"
         : r.sport === "tennis" ? "score_source_expired"
-        : Number(r.has_bind) ? null : "no_feed",
+        // Привязка ЕСТЬ, а счёта нет — отдельный класс, а не «нет причины». Отказ выдумывать причину был
+        // правильным рефлексом, но у неизвестного обязано быть ИМЯ: пустая клетка без имени неотличима от
+        // поломки. На проде это 3 матча MLS одного вечера 23.07 (14 ставок) — то есть один инцидент, а не
+        // фон. Дожатие счёта идёт штатным score-sync через date-гейт (ратификация bound-no-score-chase).
+        : Number(r.has_bind) ? "bound_no_score" : "no_feed",
       endTimeMalformed: !!r.end_time && !isoish,
       // Завершённый матч с временем в БУДУЩЕМ — химера (futureFinished.ts): он не торгуется вообще.
       futureSortKey: [r.end_time, r.kickoff_at].some((v) => !!v && Date.parse(String(v)) > nowMs),
@@ -1106,6 +1111,15 @@ export function insertBet(db: Database, b: Bet): void {
   // Every bet is born with a stable decision_id (the twin link to a future real order,
   // spec §0.1). Callers may pass one to group bets under a shared decision; otherwise a
   // fresh id is minted here so no row ever lacks one.
+  // [O1] ПОД КАКИМИ ПОРОГАМИ ПРИНЯТО ЭТО РЕШЕНИЕ. Штампуется здесь, в единственной точке рождения ставки,
+  // и никогда не перечитывается позже: конфиг на момент решения — факт, а не текущее состояние. Импорт
+  // ленивый (configEpoch → repo дал бы цикл), падение штампа не имеет права отменить ставку.
+  // Цикл repo ↔ configEpoch безопасен: ни один из модулей не зовёт другой на этапе загрузки, а
+  // `import * as` даёт живой namespace — к моменту вызова оба модуля готовы.
+  let configHashAtEntry: string | null = b.config_hash ?? null;
+  if (configHashAtEntry == null) {
+    try { configHashAtEntry = CFG.currentConfigHash(db); } catch { configHashAtEntry = null; }
+  }
   const decisionId = b.decision_id ?? uid();
   // origin phase is a FIELD resolved once here (never inferred at read). A caller may pass it
   // explicitly (backfill); otherwise derive from entry_meta.phase → source 'decision'. FAIL-LOUD: a
@@ -1127,12 +1141,12 @@ export function insertBet(db: Database, b: Bet): void {
   }
   db.prepare(
     `INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,proposed_price,entry_price,
-       current_price,closing_price,ai_prob,stake,rationale,entered_minute,result,payout,settled_by,settled_at,entry_meta,code_version,decision_id,origin,origin_source,football_epoch,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       current_price,closing_price,ai_prob,stake,rationale,entered_minute,result,payout,settled_by,settled_at,entry_meta,code_version,decision_id,origin,origin_source,football_epoch,config_hash,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(
     b.id, b.match_id, b.strategy_id, b.risk_profile_id ?? null, b.market_label, b.status, b.proposed_price, b.entry_price,
     b.current_price, b.closing_price, b.ai_prob, b.stake, b.rationale, b.entered_minute,
-    b.result, b.payout, b.settled_by ?? null, b.settled_at ?? null, b.entry_meta ?? null, b.code_version ?? null, decisionId, origin, originSource, footballEpoch, b.created_at,
+    b.result, b.payout, b.settled_by ?? null, b.settled_at ?? null, b.entry_meta ?? null, b.code_version ?? null, decisionId, origin, originSource, footballEpoch, configHashAtEntry, b.created_at,
   );
 }
 export function updateBet(db: Database, id: string, patch: Partial<Bet>): void {

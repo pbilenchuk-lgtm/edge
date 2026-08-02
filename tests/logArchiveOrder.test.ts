@@ -214,7 +214,7 @@ test("нет привязки к провайдеру → no_feed: счёта н
   assert.equal(R.listMatchLogs(db, 50, NOW)[0].noScoreReason, "no_feed");
 });
 
-test("привязка есть, счёта нет — это НЕ no_feed: причину не выдумываем", () => {
+test("привязка есть, счёта нет → bound_no_score: у неизвестного есть ИМЯ, а не пустота", () => {
   const db = openDb(":memory:"); initSchema(db);
   seed(db);
   R.insertMatch(db, {
@@ -223,7 +223,8 @@ test("привязка есть, счёта нет — это НЕ no_feed: пр
     kickoff_time: null, end_time: "2026-08-01T20:00:00.000Z", duration: null, end_note: null, external_ref: "bd",
   } as never);
   db.prepare(`INSERT INTO match_live(match_id,espn_event_date,updated_at) VALUES(?,?,?)`).run("bd", "2026-08-01T18:00:00Z", "t");
-  assert.equal(R.listMatchLogs(db, 50, NOW)[0].noScoreReason, null);
+  assert.equal(R.listMatchLogs(db, 50, NOW)[0].noScoreReason, "bound_no_score",
+    "отказ выдумывать причину — правильный рефлекс; но пустая клетка без имени читается как поломка");
 });
 
 test("матч со счётом причины не несёт — метка только там, где клетка пуста", () => {
