@@ -410,7 +410,21 @@ function clockMinuteOf(status: SportsMatchStatus): number {
   const c = String(status.clock ?? "").match(/(\d{1,3})/);
   return Math.max(status.minute ?? 0, c ? Number(c[1]) : 0);
 }
-export function finishSuspectReason(status: SportsMatchStatus, env: Record<string, string | undefined> = process.env): string | null {
+export function finishSuspectReason(
+  status: SportsMatchStatus, env: Record<string, string | undefined> = process.env,
+  kickoffAt?: string | null, nowIso?: string,
+): string | null {
+  // F2, ветка «химера». Правило проверяло ТОЛЬКО часы («финиш раньше 80-й»), и класс «завершён раньше
+  // собственного кикоффа» не ловило вообще — прод 02.08 держал две такие строки (Sarpsborg–Viking и
+  // NC Courage–Washington Spirit, обе с кикоффом 08.08) БЕЗ флага state_suspect. Это не «правило не
+  // подключено к пути», а «у правила не было этой ветки»: логическая невозможность мимо порога минут.
+  // Проверяется ПЕРВОЙ — пока запись утверждает невозможное, судить её часы бессмысленно.
+  if (kickoffAt && nowIso) {
+    const ko = Date.parse(kickoffAt), now = Date.parse(nowIso);
+    if (Number.isFinite(ko) && Number.isFinite(now) && ko - now > 2 * 3_600_000) {
+      return `завершён РАНЬШЕ собственного кикоффа (${kickoffAt}) — химера чужой привязки, сеттл заморожен`;
+    }
+  }
   if (FINISH_ABANDON_AWARD.test(status.detail ?? "")) return null;            // a legitimate early terminal
   const floor = Math.max(1, Number(env.FOOTBALL_FINISH_MIN_CLOCK ?? 80));
   const min = clockMinuteOf(status);
@@ -467,7 +481,7 @@ export async function syncMatchStatus(
   let finishFrozen = false;
   if (nextState === "finished") {
     const now = nowFn(deps)();
-    const suspect = finishSuspectReason(status, deps.env ?? process.env);
+    const suspect = finishSuspectReason(status, deps.env ?? process.env, match.kickoff_at, now);
     if (suspect) {
       finishFrozen = true;
       if (!isStateSuspect(db, match.id)) {
@@ -1148,6 +1162,28 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
         legTally.orient++;
         recordReject(m.home, m.away, m.kickoff_at, s.date ?? null, league, "ambiguous_orientation");
         console.warn(`[enrich] ambiguous_orientation «${m.home}–${m.away}» vs ESPN «${s.home}–${s.away}» (${league}) — НЕ привязано (ориентация счёта неоднозначна)`);
+        continue;
+      }
+      // МАТЧ НЕ МОЖЕТ БЫТЬ ЗАВЕРШЁН РАНЬШЕ СОБСТВЕННОГО КИКОФФА. Дата-гейт выше не даёт чужому кругу
+      // ПРИВЯЗАТЬСЯ, но строки, привязанные до его появления, сохраняют испорченную привязку, и каждый
+      // следующий опрос радостно переносит «finished / 90' / 2:3» чужого события на фикстуру, которая ещё
+      // не начиналась. Так 28.07 торговля встала на восемнадцать часов: пять вторых кругов квалификации
+      // лежали finished со счетами первых кругов от 22.07, а матч, который система считает сыгранным, не
+      // входит в живую фазу, не доходит до стратега и не торгуется НИКОГДА.
+      //
+      // Это не порог, который можно подобрать, — это логическая невозможность, поэтому отказ безусловный.
+      // Окно в одну длину матча существует только чтобы не спорить о слегка неточном времени кикоффа;
+      // событие, завершившееся за часы ДО начала своей фикстуры, — это чужой матч.
+      //
+      // ВОССТАНОВЛЕНО 02.08 после того, как мой откат прода на 26.07 удалил этот модуль вместе с врезкой.
+      // На 02.08 в базе снова лежали две химеры (Sarpsborg–Viking и NC Courage–Washington Spirit, обе с
+      // кикоффом 08.08), то есть правило было не «переподключено», а просто отсутствовало.
+      const koMsNow = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
+      const claimsOver = s.final || s.state === "finished" || s.state === "live";
+      if (claimsOver && Number.isFinite(koMsNow) && koMsNow - Date.parse(now) > 2 * 3_600_000) {
+        legTally.dateGap++;
+        recordReject(m.home, m.away, m.kickoff_at, s.date ?? null, league, "finished_before_kickoff");
+        console.warn(`[enrich] finished_before_kickoff: «${m.home}–${m.away}» кикофф ${m.kickoff_at}, а событие ESPN уже «${s.state}${s.final ? "/final" : ""}» (${s.date ?? "—"}) — состояние НЕ применено (чужой круг на нашей записи)`);
         continue;
       }
       const flip = mirrored; // DB home is ESPN's away side → scores/lineups mirrored
