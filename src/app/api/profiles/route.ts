@@ -98,6 +98,13 @@ export async function GET(req: Request) {
       const { buildSvSizingAudit } = await import("@/lib/svSizingAudit");
       return NextResponse.json({ ok: true, audit: buildSvSizingAudit(db) });
     }
+    // ?report=gate_pulse → [O4] «файл жив» → «путь работает»: сколько раз каждый манифестный гейт был
+    // СПРОШЕН и сколько раз СРАБОТАЛ. Гейт без собственного знаменателя честно помечен «НЕ ИЗМЕРЯЕТСЯ» —
+    // ноль там не доказывает ни работы, ни смерти, и закрашивать его нулём значило бы врать. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "gate_pulse") {
+      const { buildGateHeartbeat } = await import("@/lib/gateHeartbeat");
+      return NextResponse.json({ ok: true, report: buildGateHeartbeat(db, Date.now()) });
+    }
     // ?report=job_heartbeat → [O3] пульс периодических шагов: когда каждый запускался последний раз и с
     // каким результатом. Отвечает на вопрос, который молчание не различает: «шаг ничего не сделал» или
     // «шаг перестал вызываться». Read-only.
@@ -253,6 +260,14 @@ export async function GET(req: Request) {
         noFeedDigest: noFeed,
         // Форензик 02.08: решающее правило в живой базе может тихо разойтись с кодом — пресеты профилей
         // сеются только в ПУСТУЮ базу. Молчащее расхождение стоит канала входа, поэтому строка тут.
+        // [O4] Пульс гейтов: импорт может стоять в ветке, куда поток не заходит месяцами.
+        gatePulse: await (async () => {
+          try {
+            const { buildGateHeartbeat, gateLine } = await import("@/lib/gateHeartbeat");
+            const g = buildGateHeartbeat(db, Date.parse(now) || Date.now());
+            return { line: gateLine(g), investigate: g.investigate.map((r) => r.key), unmeasured: g.rows.filter((r) => r.verdict === "НЕ ИЗМЕРЯЕТСЯ").map((r) => r.key) };
+          } catch { return null; }
+        })(),
         // [O3] Пульс джоб: устаревший шаг — это мёртвая проводка, а не тихий день.
         jobHeartbeat: await (async () => {
           try {

@@ -129,6 +129,19 @@ export const RATIFIED_MANIFEST: RatifiedEntry[] = [
     namedCase: "piece_relabel и счётчик глубины 30.07 — молчание кодировало два разных факта",
   },
   {
+    module: "src/lib/gateHeartbeat.ts",
+    ratification: "O4 — «файл жив» → «путь работает»",
+    guards: "гейт, чей импорт стоит в ветке без потока, объявляет себя мёртвым сам; гейт без знаменателя честно помечен «не измеряется»",
+    callers: ["src/lib/lifecycle.ts", "src/app/api/profiles/route.ts"],
+    namedCase: "quasi_locked_tail доехал МЁРТВЫМ — вызов был, срабатываний не было, и никто не видел",
+  },
+  {
+    module: "src/lib/logLine.ts",
+    ratification: "O5 — стандарт строки: машиночитаемый префикс + человеческий хвост",
+    guards: "причина берётся из СЛОВАРЯ, а не из free-text; сторож перестаёт угадывать прозу",
+    callers: ["tests/observabilityAcceptance.test.ts"],
+  },
+  {
     module: "src/lib/profileDrift.ts",
     ratification: "класс «ратифицировано, но не доехало» для КОНФИГОВ",
     guards: "расхождение код↔база по пресетам называется поимённо и навсегда — молчаливых правок в коде, невидимых базе, больше не существует",

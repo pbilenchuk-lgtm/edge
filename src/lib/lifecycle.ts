@@ -57,6 +57,7 @@ import { resolveFamilyShadowSignals } from "./familyShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
 import { recordJobRun, cycleSummaryLine } from "./jobHeartbeat.js";
+import { recordGatePulse } from "./gateHeartbeat.js";
 import { relabelPiecesByMarket } from "./pieceRelabel.js";
 import { recordStaleProposalShadow, resolveStaleProposalShadow } from "./staleProposalShadow.js";
 import { persistNoFeedCoverage } from "./noFeedCoverage.js";
@@ -2622,7 +2623,11 @@ export async function runAutoCycle(
   // backfill (which proves bindings clean): a suspect on a proven-clean finished match is re-settled off the
   // now-correct score so a Raków-class win becomes an honest record, not an eternal suspect. Unprovable ones
   // stay flagged for the PM-resolution settler below. Idempotent.
-  stepSync("reSettleSuspects", () => { const r = reSettleSuspectBets(db, deps); return r.regraded + r.confirmed; }, 0);
+  stepSync("reSettleSuspects", () => {
+    const r = reSettleSuspectBets(db, deps);
+    recordGatePulse(db, "resettle_suspect", { evaluated: r.regraded + r.confirmed + r.deferred, triggered: r.regraded + r.confirmed }, nowFn(deps)());
+    return r.regraded + r.confirmed;
+  }, 0);
   // ПОДОЗРЕНИЕ ПО ФАКТУ, А НЕ ПО СПИСКУ И НЕ В МОМЕНТ РАСЧЁТА. Обе прежние маркировки пропустили самый грубый
   // случай (Seattle–Portland, разрыв 16 дней, settle_suspect=0): одна метит по перечню двухматчевых турниров,
   // а это MLS; вторая живёт в сеттл-пути, куда досрочно закрытая позиция не приходит вовсе. Этот проход метит
@@ -2639,6 +2644,8 @@ export async function runAutoCycle(
     // было нельзя. Это тот же немой ноль, что счётчик глубины 30.07; здесь он стоил бы наблюдаемости
     // самого важного чтения проекта.
     console.log(`[pieceRelabel] ${r.note}`);
+    // [O4] Гейт публикует СВОЙ уже существующий знаменатель — второй системы учёта не заводим.
+    recordGatePulse(db, "piece_relabel", { evaluated: r.scanned, triggered: r.relabeled }, nowFn(deps)());
     return r.relabeled;
   }, 0);
   stepSync("legGapSuspect", () => {
@@ -2741,7 +2748,8 @@ export async function runAutoCycle(
   // живёт в тике и с каждым проходом делает всё меньше, пока не станет полным no-op.
   stepSync("tennisScoreBackfill", () => {
     const r = backfillTennisScores(db, deps);
-    if (r.filled) console.log(`[tennisScoreBackfill] ${r.note}`);
+    console.log(`[tennisScoreBackfill] ${r.note}`);      // [O3] безусловно: ноль так же громко, как двести
+    recordGatePulse(db, "tennis_score_card", { evaluated: r.scanned, triggered: r.filled }, nowFn(deps)());
     return r.filled;
   }, 0);        // drive tennis matches to finished from the scout (else they pile up in live)
   stepSync("tennisSettle", () => settleTennisBets(db, deps), 0);           // safety-net settle for finished tennis matches
