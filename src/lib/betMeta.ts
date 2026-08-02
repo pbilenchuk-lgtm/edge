@@ -27,7 +27,14 @@
 //       the class empty), score-locked tails now ride to resolution instead of cashing out, and sub-floor
 //       remainders close whole. Entry REACH, exit SEMANTICS and partial-exit accounting all moved, so an e8
 //       number and an e9 number are not the same measurement — hence a label, not a promise to remember.
-export const CODE_VERSION = "e9";
+//   e10 решающее правило conservative наконец доехало до базы. Фаза 1.3 (25.07) сняла старый бар профиля
+//       (edge 7% / калибровка 0.55 / ликвидность $2000) и приравняла пороги входа к `medium` (5% / 0.45 /
+//       $1000), оставив conservative дифференцированным ТОЛЬКО размером. В коде это лежало неделю, а прод
+//       всё это время входил по conservative-1.0: посев профилей выходит на первой строке, если профили в
+//       базе уже есть, и ни одно изменение пресета само не доезжало. Значит conservative ДО этой отметки и
+//       ПОСЛЕ — два разных множества входов, а не одна когорта с разным размером; смешивать их в профильном
+//       срезе нельзя. Отсюда эпоха: не «мы что-то улучшили», а «выборка сменилась».
+export const CODE_VERSION = "e10";
 
 /** Decision-time snapshot stored as JSON on the bet. Every field is what was TRUE at
  *  the instant the bet was proposed/filled — never re-read later. All optional so a
