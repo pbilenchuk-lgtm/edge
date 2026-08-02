@@ -77,3 +77,45 @@ test("матч без end_time сортируется по кикоффу и н�
   assert.equal(rows[1].id, "no-end");
   assert.equal(rows[1].endTimeMalformed, false, "отсутствие времени — не «кривой формат», это другое");
 });
+
+// ── ...И КЛЮЧ СОРТИРОВКИ НЕ ИМЕЕТ ПРАВА БЫТЬ В БУДУЩЕМ ───────────────────────────────────────────
+// Первая версия правки (01.08) отбраковала кривой end_time и упала на kickoff_at — а он у двух строк
+// стоял НА НЕДЕЛЮ ВПЕРЁД (08.08). Пробка та же, слоем глубже: я заменил одно негодное поле другим
+// вместо того, чтобы запретить негодность как класс. Дословные строки прода 02.08:
+//   endIso=NULL      kickoff=2026-08-08T22:30Z  North Carolina Courage–Washington Spirit
+//   endIso="21:10"   kickoff=2026-08-08T14:00Z  Sarpsborg 08 FF–Viking FK
+// Обе — химеры (finished при кикоффе в будущем), обе НЕ торгуются вовсе (futureFinished.ts).
+
+const NOW = Date.parse("2026-08-02T15:00:00Z");
+
+test("завершённый матч с кикоффом на неделю вперёд уходит ВНИЗ, а не занимает верх", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seed(db);
+  finished(db, "chimera-null-end", null, "2026-08-08T22:30:00Z");   // NC Courage
+  finished(db, "chimera-bare-end", "21:10", "2026-08-08T14:00:00Z"); // Sarpsborg
+  finished(db, "today", "2026-08-02T14:52:39.885Z", "2026-08-02T13:00:00Z");
+
+  const rows = R.listMatchLogs(db, 50, NOW);
+  assert.equal(rows[0].id, "today", "сегодняшний матч ПЕРВЫЙ — химеры больше не держат верх");
+  assert.ok(rows.slice(1).every((r) => r.futureSortKey), "обе химеры ушли вниз");
+});
+
+test("химера помечена флагом — она не торгуется, прятать её молча нельзя", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seed(db);
+  finished(db, "chimera", null, "2026-08-08T22:30:00Z");
+  finished(db, "normal", "2026-08-02T14:52:39.885Z", "2026-08-02T13:00:00Z");
+  const by = new Map(R.listMatchLogs(db, 50, NOW).map((r) => [r.id, r]));
+  assert.equal(by.get("chimera")!.futureSortKey, true);
+  assert.equal(by.get("normal")!.futureSortKey, false);
+});
+
+test("прошлое по-прежнему сортируется по времени — правка не сломала нормальный порядок", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  seed(db);
+  finished(db, "older", "2026-08-01T10:00:00.000Z", "2026-08-01T08:00:00Z");
+  finished(db, "newer", "2026-08-02T10:00:00.000Z", "2026-08-02T08:00:00Z");
+  const rows = R.listMatchLogs(db, 50, NOW);
+  assert.equal(rows[0].id, "newer");
+  assert.equal(rows[1].id, "older");
+});

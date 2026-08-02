@@ -32,7 +32,8 @@
     "poison:count": "node --experimental-sqlite --import tsx scripts/poison-count.ts",
     "shadow:report": "node --experimental-sqlite --import tsx scripts/shadow-report.ts",
     "test": "node --experimental-sqlite --import tsx --test tests/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "future:finished": "tsx scripts/future-finished.ts"
   },
   "dependencies": {
     "next": "^15.1.6",

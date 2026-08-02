@@ -658,11 +658,11 @@ const MATCH_CHILD_TABLES = ["assessments", "assessment_history", "analysis_artif
  * bounds the Polymarket catch-all discovery flood (up to ~200 matches/sport/day
  * into unfunded `pm-*` comps). Returns the number of matches removed.
  */
-export interface MatchLogRow { id: string; match: string; sport: string; compName: string; finalScore: string | null; endIso: string | null; kickoffAt: string | null; endLabel: string | null; endNote: string | null; broken: boolean; betCount: number; endTimeMalformed: boolean }
+export interface MatchLogRow { id: string; match: string; sport: string; compName: string; finalScore: string | null; endIso: string | null; kickoffAt: string | null; endLabel: string | null; endNote: string | null; broken: boolean; betCount: number; endTimeMalformed: boolean; futureSortKey: boolean }
 /** Lean archive query for the «Логи» page — ONE row per finished match, straight from SQL, NOT the fat
  *  buildAppData payload. This is what decouples the log archive from the per-poll payload: keep finished matches
  *  as long as you like without bloating what the browser downloads each tick. Newest-first; bounded by `limit`. */
-export function listMatchLogs(db: Database, limit = 1000): MatchLogRow[] {
+export function listMatchLogs(db: Database, limit = 1000, nowMs = Date.now()): MatchLogRow[] {
   // Out-of-perimeter tennis (ITF / Challenger / WTA-ATP 125 / qualifying / doubles) is NEVER traded, so its logs
   // are noise for review — exclude them from the archive. This mirrors tennisTourOf() (tennisScout.ts, the
   // single source of truth) as a SQL port so the LIMIT counts only KEPT rows; tennisScout can't be imported here
@@ -691,13 +691,21 @@ export function listMatchLogs(db: Database, limit = 1000): MatchLogRow[] {
       -- Чиним сортировку: значение, не похожее на ISO, к сортировке не допускается — падаем на kickoff_at.
       -- Сам дефект записи НЕ маскируем, а помечаем полем endTimeMalformed (иначе починим симптом и
       -- потеряем причину — ровно то, за что ругали немые нули).
+      -- ...И КЛЮЧ СОРТИРОВКИ ЗАВЕРШЁННОГО МАТЧА НЕ ИМЕЕТ ПРАВА БЫТЬ В БУДУЩЕМ.
+      -- Первая версия этой правки (01.08) отбраковала кривой end_time и честно упала на kickoff_at —
+      -- а он у двух строк стоял на 08.08, НЕДЕЛЮ ВПЕРЁД. Матч помечен завершённым и «ещё не состоялся»:
+      -- пробка та же, просто слоем глубже, и верх архива снова занят не тем. Я заменил одно негодное
+      -- поле другим вместо того, чтобы запретить негодность как класс.
+      -- Значение в будущем к сортировке НЕ допускается: строка уходит вниз (сортируется как пустая),
+      -- а не наверх. Сам дефект помечается флагом futureSortKey — эти записи ещё и не торгуются
+      -- (см. futureFinished.ts), поэтому прятать их молча нельзя.
       ORDER BY COALESCE(
-                 CASE WHEN m.end_time LIKE '____-__-__T%' THEN m.end_time END,
-                 m.kickoff_at,
-                 m.end_time
+                 CASE WHEN m.end_time LIKE '____-__-__T%' AND m.end_time <= :nowIso THEN m.end_time END,
+                 CASE WHEN m.kickoff_at <= :nowIso THEN m.kickoff_at END,
+                 CASE WHEN m.end_time <= :nowIso THEN m.end_time END
                ) DESC
-      LIMIT ?`,
-  ).all(Math.max(1, limit)) as { id: string; home: string; away: string; final_score: string | null; end_time: string | null; kickoff_at: string | null; end_note: string | null; sport: string; comp_name: string; bet_count: number }[];
+      LIMIT :limit`,
+  ).all({ nowIso: new Date(nowMs).toISOString(), limit: Math.max(1, limit) } as any) as { id: string; home: string; away: string; final_score: string | null; end_time: string | null; kickoff_at: string | null; end_note: string | null; sport: string; comp_name: string; bet_count: number }[];
   return rows.map((r) => ({
     id: r.id, match: `${r.home}–${r.away}`, sport: r.sport, compName: r.comp_name, finalScore: r.final_score,
     endIso: r.end_time, kickoffAt: r.kickoff_at, endLabel: warsawLabel(r.end_time) ?? warsawLabel(r.kickoff_at),
@@ -705,6 +713,8 @@ export function listMatchLogs(db: Database, limit = 1000): MatchLogRow[] {
     // Улика, а не заплатка: строка, у которой end_time не ISO, названа таковой. Их 20 на проде, и пока
     // источник записи не найден, они обязаны быть видимы, а не тихо переехать вниз.
     endTimeMalformed: !!r.end_time && !/^\d{4}-\d{2}-\d{2}T/.test(String(r.end_time)),
+    // Завершённый матч с временем в БУДУЩЕМ — химера (futureFinished.ts): он не торгуется вообще.
+    futureSortKey: [r.end_time, r.kickoff_at].some((v) => !!v && Date.parse(String(v)) > nowMs),
   }));
 }
 
