@@ -78,12 +78,12 @@ export const RATIFICATIONS: Ratification[] = [
   {
     id: "observability-o2-funnel", at: "2026-08-02", source: "ТЗ наблюдаемости, O2",
     statement: "воронка со законом сохранения: вход стадии = выход + отбраковка с причинами; расхождение — алерт",
-    status: "pending", closedBy: null,
+    status: "deployed", closedBy: "#112 (entryFunnel: словарь причин, НЕВЯЗКА, базлайны против медианы 7д)", lateDays: 0,
   },
   {
     id: "observability-o3-loud-zero", at: "2026-08-02", source: "ТЗ наблюдаемости, O3",
     statement: "каждая периодическая джоба печатает строку завершения БЕЗУСЛОВНО + last_run_at в app_meta",
-    status: "pending", closedBy: null,
+    status: "deployed", closedBy: "#112 (jobHeartbeat: запуск как ДАННЫЕ + одна сводная строка на цикл)", lateDays: 0,
   },
   {
     id: "observability-o4-heartbeat", at: "2026-08-02", source: "ТЗ наблюдаемости, O4",
