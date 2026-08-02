@@ -25,6 +25,15 @@ export function thesisCapUsd(env: Record<string, string | undefined> = process.e
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
+/** The AUTHORITATIVE bank in $, or 0 when undeclared. Separate from any per-competition `budget`: a competition
+ *  budget is a DB row and can be wrong (that is the whole failure mode `sizing_insanity` exists for — a corrupted
+ *  budget produced a $28k tennis stake on a $1k bank in July). This is the one place the operator states what the
+ *  account actually is, so it is the honest ceiling to sanity-check a single position against. */
+export function bankUsd(env: Record<string, string | undefined> = process.env): number {
+  const n = Number(env.THESIS_BANK_USD);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 /** [M11] The DAILY correlated-cluster cap: a ceiling ABOVE the per-match cap for the same directional thesis
  *  stacked across DIFFERENT matches in one competition on one day (e.g. five CL "favourite wins" at $250 each
  *  = $1,250 of one directional bet the per-match cap treats as independent). Default 2× the per-match cap

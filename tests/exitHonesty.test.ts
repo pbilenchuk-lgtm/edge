@@ -20,7 +20,7 @@ function exit(db: any, decision: string, betStatus: string, exitCents: number, p
   R.insertBet(db, { id: bid, match_id: "m1", strategy_id: "prematch_value", risk_profile_id: "medium", market_label: "Over 2.5", status: "open", proposed_price: 40, entry_price: 40, current_price: 40, closing_price: null, ai_prob: 0.5, stake: 40, rationale: "r", entered_minute: null, result: null, payout: null, decision_id: decision, created_at: NOW } as any);
   db.prepare(`UPDATE bets SET status=?, settle_suspect=? WHERE id=?`).run(betStatus, settleSuspect, bid);
   const oid = R.uid();
-  RR.insertRealOrder(db, { id: oid, client_order_id: oid, exchange_order_id: null, decision_id: decision, strategy_id: "prematch_value", profile_id: "medium", match_id: "m1", token_id: "0xT", side: "SELL", leg: "exit", limit_price_cents: 95, size_usd: proceeds, tif_sec: 30, code_version: "e7", whitelist_version: 1, note: "x", created_at: NOW } as any);
+  RR.insertRealOrder(db, { id: oid, client_order_id: oid, exchange_order_id: null, decision_id: decision, strategy_id: "prematch_value", profile_id: "medium", match_id: "m1", token_id: "0xT", side: "SELL", leg: "exit", limit_price_cents: 95, size_usd: proceeds, tif_sec: 30, code_version: "e7", whitelist_version: 1, note: "x", dry: 1, created_at: NOW } as any);
   RR.insertRealFill(db, { order_id: oid, client_order_id: oid, token_id: "0xT", side: "SELL", size_usd: proceeds, price_cents: exitCents, fee_usd: 0, dry: 1, at: NOW, created_at: NOW });
 }
 

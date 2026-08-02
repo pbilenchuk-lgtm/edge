@@ -19,6 +19,7 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, reSettleSuspectBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries, repairCategoryLeagues, refreshTeamAliasOverlay } from "./engine.js";
 import { settlePmResolutionBets } from "./pmResolution.js";
+import { backfillComplementTokens, auditComplementVoids } from "./complementBackfill.js";
 import { reconcileFootballCategories } from "./seed.js";
 import { SPORT_TAG_IDS, SPORT_LABELS, loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
 import { classifyOrderBook, paperBuyFill, paperSellFill, scaleCost, ENTRY_PHANTOM_DIVERGENCE, type FillCost, type EntryFillResult, type SellFillResult } from "./executor/paperFill.js";
@@ -34,11 +35,13 @@ import { underThesisMarginGoals, resolveFootballMarket } from "./settlement.js";
 import { serializeEntryMeta, parseEntryMeta, isFtBlindBet, type BetEntryMeta } from "./betMeta.js";
 import { canonicalizeDrawForMatch, drawCanonEnabled, DRAW_YES_KEYS } from "./drawCanon.js";
 import { inAnchorWindow, ANCHOR_MAX_PER_TICK } from "./prematchAnchor.js";
+import { scoreConsistency, pendingGoalSurplus } from "./scoreRace.js";
+import { probeDrawCanon } from "./drawCanonProbe.js";
 import { resolveRefusalShadowSignals } from "./refusalShadow.js";
 import { holdTailToSettle } from "./quasiLocked.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
 import { impliedProbs, sizePrematch, correlationKey } from "./strategist.js";
-import { matchThesisRoom, thesisCapUsd, dailyClusterRoom, dailyClusterCapUsd } from "./thesisExposure.js";
+import { matchThesisRoom, thesisCapUsd, dailyClusterRoom, dailyClusterCapUsd, bankUsd } from "./thesisExposure.js";
 import { getProfileConfig } from "./riskConfig.js";
 import { stratBudget } from "./money.js";
 import { strategistDecide, effectiveEnv } from "./llm.js";
@@ -52,7 +55,9 @@ import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
 import { resolvePmvShadowSignals } from "./tennisPmvShadow.js";
 import { resolveFamilyShadowSignals } from "./familyShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
-import { backfillEspnEventDates } from "./footballIntegrity.js";
+import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
+import { relabelPiecesByMarket } from "./pieceRelabel.js";
+import { recordStaleProposalShadow, resolveStaleProposalShadow } from "./staleProposalShadow.js";
 import { persistNoFeedCoverage } from "./noFeedCoverage.js";
 import { captureBookDepth } from "./bookDepthCapture.js";
 import { overreactionGate } from "./reassessGate.js";
@@ -814,19 +819,68 @@ const FT_BLIND_GRACE_MIN = (env: Record<string, string | undefined>) => {
   const n = Number(env.FT_BLIND_LIVE_GRACE_MIN);
   return Number.isFinite(n) && n >= 0 ? n : 5;
 };
-export function ftBlindOriginOk(m: { kickoff_at?: string | null }, b: { origin?: string | null; created_at?: string | null }, env: Record<string, string | undefined>): boolean {
+//
+// [batch-12, п.5 / аудит] ГРЕЙС ОТСЧИТЫВАЕТСЯ ОТ ФИЛЛА, А НЕ ОТ СОЗДАНИЯ ПРЕДЛОЖЕНИЯ.
+//
+// Весь текст выше объясняет, почему слепой вход допустим только пока «слепо» и «до матча» — одно и то же
+// состояние. Но проверялся `b.created_at` — момент, когда ТЕЗИС РОДИЛСЯ, а не момент, когда УХОДЯТ ДЕНЬГИ.
+// Предложение, созданное за час до старта (origin=prematch, первая строка возвращала true безусловно), могло
+// пролежать «предлагается» и залиться на 40-й минуте: preLineupHold держит слепую фикстуру до перехода в live
+// (лайнапов у неё не будет НИКОГДА), а часы двигает тик. Ничто на пути не спрашивало, сколько матча уже
+// прошло к моменту филла. Это ровно тот запрет, ради которого режим существует: покупать FT-контракт, не видя
+// счёта, в матче, где голы уже могли случиться, — систематическое донорство информированной стороне.
+// Зачистка непокрытых (NO_COVERAGE_GRACE_H=0.5) дыру не закрывала: она снимает ПРЕДЛОЖЕНИЯ после 30 минут и
+// только когда открытых ставок нет.
+//
+// Порог один и тот же: FT_BLIND_LIVE_GRACE_MIN — это свойство МАТЧА («сколько после старта слепая фикстура
+// ещё информационно равна прематчу»), а не свойство предложения. Филл до стартового свистка — лучший случай
+// (слепоты нет вовсе) и разрешён всегда. Следствие для конфига: FT_BLIND_LIVE_GRACE_MIN=0 теперь означает
+// «заливаться только ДО стартового свистка», а не «только прематч-происхождение».
+//
+// ИЗВЕСТНАЯ ЦЕНА, ЗАЯВЛЕННАЯ ЗАРАНЕЕ: живой цикл (20с) крутится только когда есть матч in-play, поэтому в
+// пустое окно часы двигает тяжёлый тик (TICK_INTERVAL_MIN, по умолчанию 30) — и слепая фикстура может
+// перейти в live уже на 25-й минуте. Такие входы теперь будут отклоняться, и это НЕ повод расширять окно
+// слепоты: лечится скоростью часов, а не разрешением ставить вслепую в середину матча. Отказ пишется
+// строкой `ft_blind_late_fill`, чтобы цена была ПОСЧИТАНА, а не невидима.
+export function ftBlindOriginOk(m: { kickoff_at?: string | null }, b: { origin?: string | null; created_at?: string | null }, env: Record<string, string | undefined>, fillAt: string): boolean {
+  if (b.origin !== "prematch" && b.origin !== "live") return false;  // unknown/absent origin → fail closed
+  if (!isIsoTs(m.kickoff_at)) return false;                          // can't measure the gap → fail closed
+  const ko = Date.parse(String(m.kickoff_at));
+  const grace = FT_BLIND_GRACE_MIN(env);
+  const fillMs = Date.parse(fillAt ?? "");
+  if (!Number.isFinite(fillMs)) return false;                        // no fill clock → fail closed
+  if ((fillMs - ko) / 60_000 > grace) return false;                  // деньги уходят слепыми в середину матча
   if (b.origin === "prematch") return true;
-  if (b.origin !== "live") return false;                       // unknown/absent origin → fail closed
-  if (!isIsoTs(m.kickoff_at) || !b.created_at) return false;   // can't measure the gap → fail closed
-  const gapMin = ((Date.parse(b.created_at) || 0) - Date.parse(String(m.kickoff_at))) / 60_000;
-  return gapMin >= 0 && gapMin <= FT_BLIND_GRACE_MIN(env);
+  if (!b.created_at) return false;
+  const gapMin = ((Date.parse(b.created_at) || 0) - ko) / 60_000;
+  return gapMin >= 0 && gapMin <= grace;
 }
-function ftBlindEligible(db: Database, m: Match, b: { origin?: string | null; market_label: string; created_at?: string | null }, env: Record<string, string | undefined>): boolean {
+/** Отказ ТОЛЬКО из-за позднего филла: происхождение допустимо, рынок FT-шный, покрытия нет — деньги не ушли
+ *  единственно потому, что матч уже идёт. Отдельный предикат, чтобы ЦЕНУ нового гейта можно было посчитать,
+ *  а не угадывать: если она окажется большой, лечится скоростью часов, а не расширением окна слепоты. */
+export function ftBlindLateFill(m: { kickoff_at?: string | null }, b: { origin?: string | null; created_at?: string | null }, env: Record<string, string | undefined>, fillAt: string): boolean {
+  if (b.origin !== "prematch" && b.origin !== "live") return false;
+  if (!isIsoTs(m.kickoff_at)) return false;
+  const ko = Date.parse(String(m.kickoff_at));
+  const fillMs = Date.parse(fillAt ?? "");
+  if (!Number.isFinite(fillMs)) return false;
+  const grace = FT_BLIND_GRACE_MIN(env);
+  if ((fillMs - ko) / 60_000 <= grace) return false;      // отказ (если он был) — не из-за филла
+  if (b.origin === "prematch") return true;               // происхождение само по себе прошло бы
+  if (!b.created_at) return false;
+  const gapMin = ((Date.parse(b.created_at) || 0) - ko) / 60_000;
+  return gapMin >= 0 && gapMin <= grace;
+}
+function ftBlindEligible(db: Database, m: Match, b: { origin?: string | null; market_label: string; created_at?: string | null }, env: Record<string, string | undefined>, fillAt: string): boolean {
   if (!ftBlindConfig(env).enabled) return false;
-  if (!ftBlindOriginOk(m, b, env)) return false;  // pre-match thesis, or a live one inside the kickoff grace
+  if (!ftBlindOriginOk(m, b, env, fillAt)) return false;  // pre-match thesis, or a fill inside the kickoff grace
   if (!isFtSettledMarket(b.market_label)) return false;
   if (R.getMatchLive(db, m.id)) return false;     // has a provider row → covered, not blind
   return true;
+}
+/** Была бы ставка слепым входом, если бы не поздний филл? Всё, кроме гейта происхождения/филла. */
+function ftBlindShapeOk(db: Database, m: Match, b: { market_label: string }, env: Record<string, string | undefined>): boolean {
+  return ftBlindConfig(env).enabled && isFtSettledMarket(b.market_label) && !R.getMatchLive(db, m.id);
 }
 // R3 (e7): would ANY entry mode be able to take a position on this blind match? Only ft_blind
 // can — and only when it's enabled AND the match exposes at least one FT-settled (final-score)
@@ -881,8 +935,17 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       if (preLineupHold) continue; // preview only — keep it «предлагается» until lineups are out
       // FT-mode: a prematch_value FT-settled thesis on a Polymarket-only fixture MAY fill blind (hold to
       // settle, half size, no live rudder). Everything else with no live coverage stays a preview.
-      const ftBlind = !liveData && ftBlindEligible(db, m, b, deps.env ?? process.env);
-      if (!liveData && !ftBlind) continue; // no provider live coverage & not FT-blind-eligible → hold «предлагается»
+      const ftBlind = !liveData && ftBlindEligible(db, m, b, deps.env ?? process.env, now);
+      if (!liveData && !ftBlind) {
+        // [batch-12, п.5] Цена гейта «грейс от ФИЛЛА» должна быть посчитана. Ставка остаётся «предлагается»
+        // (как и раньше при любом отказе слепого входа), но отказ ИМЕННО по позднему филлу получает машинную
+        // строку — иначе новый запрет тихо съест слепую когорту, и мы узнаем об этом только по пустому счётчику.
+        if (ftBlindShapeOk(db, m, b, deps.env ?? process.env) && ftBlindLateFill(m, b, deps.env ?? process.env, now)) {
+          const lateMin = Math.round((Date.parse(now) - Date.parse(String(m.kickoff_at))) / 60_000);
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `ft_blind_late_fill «${b.market_label}»: филл на ${lateMin}' > грейса ${FT_BLIND_GRACE_MIN(deps.env ?? process.env)}' — вслепую в идущий матч не входим`, dedup_key: `ftb_late:${b.id}`, created_at: now });
+        }
+        continue; // no provider live coverage & not FT-blind-eligible → hold «предлагается»
+      }
       const key = pairMkt(b);
       if (openKey.has(key)) { R.updateBet(db, b.id, { status: "not_filled" }); continue; } // already in this market — drop the dup
       const mk = markets.find((x) => x.label === b.market_label);
@@ -924,6 +987,20 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
           } catch { /* stamping must never block a fill */ }
         }
       }
+      // [W2 / batch-12] Решение-1, условие №3 — «полные гейты, без скидок» — ДО СИХ ПОР не было подключено к
+      // ft_blind-пути, и Östers показал цену: два входа @50.2¢ в непроторгованный плейсхолдер ($40+$85 → void).
+      // Общий placeholder_mid его не поймал, потому что требует, чтобы книга ПРОСТОЯЛА на 50¢ ≥ stale-минут — а
+      // у слепой фикстуры истории снапшотов ещё нет. Для режима без живого руля это требование избыточно:
+      // цена в mid-полосе на фикстуре без live-данных не бывает настоящей ценой, доказывать её застой нечем и
+      // незачем. Отказ безусловный, полоса — та же ратифицированная, что у зомби-правила (один порог, не два).
+      if (ftBlind) {
+        const phBand = loadZombieConfig(deps.env ?? process.env).placeholderBandCents;
+        if (Math.abs(quote - 50) <= phBand) {
+          R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `ft_blind_placeholder: котировка ${quote}¢ в полосе 50±${phBand}¢ на слепой фикстуре — неторгованный дефолт, вход запрещён (W2)`) });
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `ft_blind_placeholder «${b.market_label}»: ${quote}¢ ~ mid на слепой фикстуре — плейсхолдер, вход отклонён`, dedup_key: `ftb_ph:${b.id}`, created_at: now });
+          continue;
+        }
+      }
       // Condition 5: a rudderless FT-blind position gets HALF the normal size until its cohort matures.
       let proposed = (b.stake ?? 0) * (ftBlind ? ftBlindConfig(deps.env ?? process.env).capFrac : 1);
 
@@ -941,6 +1018,15 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
             R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `thesis_cap «${b.market_label}»: тезис «${thesisKey}» у кэпа $${thesisCapUsd(deps.env ?? process.env)} — вход отклонён на филле`, created_at: now });
             continue;
           }
+          // LOG THE CLAMP TOO. Until now the cap only spoke when it blocked outright (room < 1) and stayed
+          // silent when it merely trimmed — so «did the cap ever act?» was unanswerable from the record, and a
+          // whole review round was spent unable to tell a working cap from a disabled one. Same lesson as the
+          // void counter: a guard that works silently cannot be distinguished from a guard that is off.
+          R.insertTradeLog(db, {
+            id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip",
+            text: `thesis_cap_clamp «${b.market_label}»: тезис «${thesisKey}» — запрос $${Math.round(proposed)} подрезан до $${Math.round(room)} (кэп $${thesisCapUsd(deps.env ?? process.env)}, уже открыто $${Math.round(thesisCapUsd(deps.env ?? process.env) - room)})`,
+            dedup_key: `thesis_clamp:${b.id}`, created_at: now,
+          });
           proposed = Math.round(room * 100) / 100; // clamp the fill request to the thesis' remaining room
         }
         // [M11] DAILY cross-match cluster cap: the same directional thesis stacked across the competition's
@@ -970,11 +1056,30 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       // offers) — leave the proposal untouched so the next cycle re-attempts it. A plain
       // skip is TERMINAL (phantom fill, edge gone, placeholder market) → mark not_filled.
       if (ex.skip) {
-        if (!ex.retry) R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, ex.note) });
+        if (!ex.retry) {
+          // [прод-разбор 29.07] ЕДИНСТВЕННЫЙ ГЕЙТ ВХОДА БЕЗ СЛЕДА В ЖУРНАЛЕ. Все соседние отказы пишут
+          // строку в trade_log; этот — только в `bets.rationale`, а когда исполнитель не дал текста, и
+          // там пусто. На проде это дало 80 ставок `not_filled: без_метки` — восемьдесят несостоявшихся
+          // входов, у которых НЕТ причины. Диагностика матча честно писала «чинить надо названную стадию»,
+          // но назвать стадию было нечем. Улика обязана быть машинной и обязана попадать туда, где её ищут.
+          const why = (ex.note && ex.note.trim()) || "исполнитель отказал без текста";
+          R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `entry_fill_reject: ${why}`) });
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `entry_fill_reject «${b.market_label}» @ ${quote}¢: ${why}`, dedup_key: `efr:${b.id}`, bet_id: b.id, created_at: now });
+        }
         continue;
       }
       // P0.2 MIN-DEPTH FLOOR: the book absorbed a CLAMPED fill below the floor — the depth to trade
       // meaningfully isn't there. Skip (don't open a dust position, Bohemian $80→$14). Feeds unfillable_edge.
+      // [W2] Пыль в ft_blind: Östers, третий вход $1 после урезаний. Общий depth-floor ниже ловит только
+      // КНИЖНЫЙ клэмп (ex.clamped) — а $1 может прийти и от тезисного/дневного кэпа, задолго до книги. Для
+      // позиции без живого руля минимальный размер — безусловный: доллар, который нельзя вести и невыгодно
+      // закрывать, это не позиция, а строка учёта.
+      const ftbMin = Math.max(0, Number((deps.env ?? process.env).FT_BLIND_MIN_STAKE_USD ?? 5));
+      if (ftBlind && ex.stake < ftbMin) {
+        R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `ft_blind_min_stake: филл $${ex.stake} < floor $${ftbMin} — пыль без руля не открываем (W2)`) });
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `ft_blind_min_stake «${b.market_label}»: $${ex.stake} < $${ftbMin} — вход отклонён`, dedup_key: `ftb_min:${b.id}`, created_at: now });
+        continue;
+      }
       const MIN_DEPTH = Math.max(1, Number((deps.env ?? process.env).FOOTBALL_MIN_DEPTH_USD ?? 50));
       if (ex.clamped && ex.stake < MIN_DEPTH) {
         R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `depth_floor_skip: книга дала лишь $${ex.stake} < floor $${MIN_DEPTH} — глубины нет`) });
@@ -987,6 +1092,9 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       const proposedC = b.proposed_price ?? quote;
       const drift = proposalDrift(proposedC, ex.priceCents);
       if (isStaleProposal(proposedC, ex.priceCents, deps.env ?? process.env)) {
+        // [W5] Каждый отказ по дрейфу замораживается would-be записью: выигрывали ли бы такие входы по цене
+        // ФИЛЛА — вопрос данных, не спора. Критерий и порог решения — в staleProposalShadow.
+        recordStaleProposalShadow(db, { matchId: m.id, strategyId: b.strategy_id, label: b.market_label, proposedCents: proposedC, fillCents: ex.priceCents, at: now });
         R.updateBet(db, b.id, { status: "not_filled", rationale: appendReason(b.rationale, `stale_proposal: филл ${ex.priceCents}¢ vs предложение ${proposedC}¢ (Δ${drift.toFixed(0)}¢)`) });
         R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "skip", text: `stale_proposal «${b.market_label}»: филл ${ex.priceCents}¢ vs предложение ${proposedC}¢ (Δ${drift.toFixed(0)}¢) — рынок ушёл, вход отклонён`, created_at: now });
         continue;
@@ -1159,17 +1267,33 @@ async function gapRepriceSweep(db: Database, deps: EngineDeps, poly: PolymarketC
     const minNum = m.minute != null ? m.minute : (isIsoTs(m.kickoff_at) ? Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at as string)) / 60_000)) : 0);
     const strat = R.getStrategy(db, b.strategy_id);
     const prof = b.risk_profile_id ?? "medium";
-    const fill = (reasonTag: string) => {
-      const pnl = closeBetEarly(db, b, sell.cents, reasonTag, minuteLabel(m), now);
-      if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: prof }, sell.cost, now);
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reasonTag}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+    // [четвёрка, п.2] ЧАСТИЧНЫЙ ФИЛЛ УЧИТЫВАЕТСЯ И ЗДЕСЬ. T3.3 ратифицировала правило «стоп, который бид принял
+    // лишь частично, закрывает ТОЛЬКО исполненную долю» — и основной цикл выходов его исполняет (closeBetPortion).
+    // Этот sweep, который идёт РАНЬШЕ основного цикла и владеет ставкой единолично (основной цикл её пропускает
+    // при открытом watch), закрывал closeBetEarly'ем ВЕСЬ стейк по тонкому VWAP — ровно то, что T3.3 чинила
+    // (Cienciano: «исполнено 42%», а $80 списаны целиком). Одно правило, две реализации — расходятся всегда.
+    // Ноль филла — закрывать нечего: не выдумываем исполнение, оставляем watch открытым, sweep повторит.
+    const fillFrac = sell.requestedShares > 0 ? Math.min(1, sell.filledShares / sell.requestedShares) : 1;
+    const fill = (reasonTag: string): boolean => {
+      if (fillFrac <= 1e-6) {
+        R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text: `gap-wake: защитный выход «${b.market_label}» не исполнен — бид не принял размер (0% филл); отложка НЕ снята, повторяем на следующем тике (gap_wake_partial_zero)`, dedup_key: `gwz:${b.id}`, created_at: now });
+        return false;
+      }
+      const { pnl, partial } = closeBetPortion(db, b, fillFrac, sell.cents, minuteLabel(m), now);
+      if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: prof }, fillFrac < 1 ? scaleCost(sell.cost, fillFrac) : sell.cost, now);
+      const fillTag = partial ? ` (частично ${Math.round(fillFrac * 100)}%)` : "";
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}»${fillTag} @ ${sell.cents}¢ · ${reasonTag}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, bet_id: b.id, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason: reasonTag, pnl });
       touched.add(b.strategy_id);
+      return true;
     };
     // (a) invalidator materialised during the wait → immediate unconditional exit.
     if (strat && gapWakeInvalidatorMet(db, m, strat.name, prof, b.market_label, minNum)) {
-      R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: sell.cents, deltaCents: round1(sell.cents - w.wake_price_cents), at: now });
-      fill(`gap-wake стоп: инвалидатор тезиса сработал за время ожидания — немедленный выход (gap_wake_invalidator)`); continue;
+      // Отложка снимается ТОЛЬКО если выход действительно исполнился: иначе замер записал бы исполнение,
+      // которого не было, а позиция осталась бы без владельца (основной цикл её пропускает по watch).
+      if (fill(`gap-wake стоп: инвалидатор тезиса сработал за время ожидания — немедленный выход (gap_wake_invalidator)`))
+        R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: sell.cents, deltaCents: round1(sell.cents - w.wake_price_cents), at: now });
+      continue;
     }
     // (b) the protective stop no longer fires on the fresh executable price → the dislocation eased; drop the
     //     deferral and keep the position under normal management (recovered).
@@ -1183,8 +1307,8 @@ async function gapRepriceSweep(db: Database, deps: EngineDeps, poly: PolymarketC
     // (c) window: count this tick; execute unconditionally once expired (≤repriceSec OR repriceTicks).
     const ticks = R.bumpGapRepriceTick(db, w.bet_id);
     if (nowMs >= Date.parse(w.deadline_at) || ticks >= repriceTicks) {
-      R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: sell.cents, deltaCents: round1(sell.cents - w.wake_price_cents), at: now });
-      fill(`gap-wake стоп: окно репрайса истекло (${ticks} тик(ов)), цена ${sell.cents}¢ не вернулась выше ${Math.round(w.floor_cents)}¢ — исполняю безусловно (gap_wake_expired)`);
+      if (fill(`gap-wake стоп: окно репрайса истекло (${ticks} тик(ов)), цена ${sell.cents}¢ не вернулась выше ${Math.round(w.floor_cents)}¢ — исполняю безусловно (gap_wake_expired)`))
+        R.resolveGapReprice(db, w.bet_id, { outcome: "expired", execCents: sell.cents, deltaCents: round1(sell.cents - w.wake_price_cents), at: now });
     }
   }
   for (const sid of touched) recomputeMetrics(db, sid, deps);
@@ -1264,7 +1388,15 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           // T3.3: book only the fraction the bid actually absorbed (planned × fillFrac), remainder re-offered.
           const tsFillFrac = sell.requestedShares > 0 ? Math.min(1, sell.filledShares / sell.requestedShares) : 1;
           const fraction = planned * tsFillFrac;
-          const reason = `плановый тайм-стоп: ${minNum}' ≥ ${ts.minute}', событие не наступило (рынок ${mk.price}¢) — ${ts.action === "close_half" ? "фиксирую половину" : "закрываю"} ${tsMarker}`;
+          // МАРКЕР ЗАПИРАЕТ ПОВТОР ТОЛЬКО ПРИ ИСПОЛНЕННОМ ПЛАНЕ. Раньше он ставился при ЛЮБОМ выходе, включая
+          // недоисполненный: книга приняла 30% от запрошенного — строка написана, `already` навсегда true, и
+          // остаток позиции доживал до сеттла вообще без тайм-стопа, хотя план требовал закрыть её целиком.
+          // Различать надо ПЛАН и ФИЛЛ: close_half закрывает половину ПО ЗАМЫСЛУ (план исполнен), а частичный
+          // филл — это недобор исполнения (план НЕ исполнен). Недобор помечается отдельным суффиксом, который
+          // не совпадает с `tsMarker` при .includes, поэтому следующий цикл честно дожимает хвост.
+          const planFulfilled = tsFillFrac >= 0.999;
+          const doneMarker = planFulfilled ? tsMarker : `(time_stop·${prof}·partial)`;
+          const reason = `плановый тайм-стоп: ${minNum}' ≥ ${ts.minute}', событие не наступило (рынок ${mk.price}¢) — ${ts.action === "close_half" ? "фиксирую половину" : "закрываю"}${planFulfilled ? "" : ` · бид принял лишь ${Math.round(tsFillFrac * 100)}% — остаток дожмём следующим циклом`} ${doneMarker}`;
           if (fraction <= 1e-6) { // book absorbed nothing — hold the whole leg, time_stop retries next cycle
             const tsKey = `«${b.market_label}»`;
             if (!R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === b.strategy_id).slice(-8).some((e) => e.type === "hold" && e.text.includes(tsKey) && e.text.includes("exit_partial_zero")))
@@ -1273,7 +1405,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           }
           const res = closeBetPortion(db, b, fraction, sell.cents, minuteLabel(m), now);
           if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: prof }, scaleCost(sell.cost, fraction), now);
-          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reason}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${res.pnl >= 0 ? "+" : ""}$${res.pnl.toFixed(2)}`, created_at: now });
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» @ ${sell.cents}¢ · ${reason}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${res.pnl >= 0 ? "+" : ""}$${res.pnl.toFixed(2)}`, bet_id: b.id, created_at: now });
           out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason, pnl: res.pnl });
           touched.add(b.strategy_id);
           continue;
@@ -1293,9 +1425,16 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // delimit the label so «Over 1.5» ≠ «Over 1.5 goals»; scan a recent window so two
       // alternating held markets don't each re-log every cycle).
       const holdKey = `«${b.market_label}»`;
-      const holdOnce = (text: string) => {
+      // [поправка по факту прода] ДРОБИЛКА ПОВТОРОВ КЛЮЧУЕТСЯ НА (РЫНОК + ПРИЧИНА), А НЕ НА ОДНОМ РЫНКЕ.
+      // Раньше достаточно было ЛЮБОЙ hold-строки по этому рынку среди последних восьми — и следующая
+      // причина по тому же рынку не писалась вовсе. То есть `score_race_worst_case` или `exit_phantom_block`
+      // молча съедали улику `quasi_locked_tail`, и её счётчик не мог отличить «путь не сработал» от
+      // «сработал, но строку проглотил чужой hold». Сторож ратифицированных фич читает ровно эти строки,
+      // поэтому глушилка по общему ключу превращала его ноль в неинформативный. Анти-шторм сохраняется:
+      // одна строка на причину на рынок, а не одна на рынок.
+      const holdOnce = (text: string, tag: string) => {
         const recent = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === b.strategy_id).slice(-8);
-        if (!recent.some((e) => e.type === "hold" && e.text.includes(holdKey))) {
+        if (!recent.some((e) => e.type === "hold" && e.text.includes(holdKey) && e.text.includes(tag))) {
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "hold", text, created_at: now });
         }
       };
@@ -1305,12 +1444,17 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // deterministic predicate over score+clock, same vocabulary as the resolved_price caps). Anything not
       // locked cashes out exactly as before — holding an UNLOCKED 95¢ mark to settlement is how it becomes 0¢
       // on a 94th-minute goal, which is why this policy exists at all.
-      if (d.reason === "take_profit") {
+      // ПОЛЕ, А НЕ ПРОЗА. Здесь стояло `d.reason === "take_profit"` — сравнение с ЧЕЛОВЕЧЕСКИМ текстом
+      // («тейк: +52% от позиции…»), которое не совпадало никогда, и весь R1-хвост два батча пролежал мёртвым
+      // при честном нуле в постдеплой-счётчике. Машинный дискриминатор — `kind` (thresholds.ts:261), им и
+      // ветвимся; ровно тот же урок, что в quasiLocked.ts:26-30 («Callers must branch on this, never on
+      // `reason`») — тот комментарий был написан, а эта строка его нарушала.
+      if (d.kind === "take_profit") {
         const lock = holdTailToSettle(
           { label: b.market_label, home: m.home, away: m.away, scoreHome: m.score_home, scoreAway: m.score_away, minute: m.minute },
           footballCore(db, m.id), deps.env ?? process.env,
         );
-        if (lock.locked) { holdOnce(`тейк подавлен по ${holdKey}: ${lock.reason} (quasi_locked_tail)`); continue; }
+        if (lock.locked) { holdOnce(`тейк подавлен по ${holdKey}: ${lock.reason} (quasi_locked_tail)`, "quasi_locked_tail"); continue; }
       }
 
       // OPTIONALITY GATE (audit: Argentina–Switzerland). For a market that WINS on a future
@@ -1325,7 +1469,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
         if (sell.cents <= EXIT_TIME_FLOOR_CENTS && minNum >= EXIT_TIME_FLOOR_MIN) {
           d = { exit: true, reason: `тайм-флор: ${sell.cents}¢ на ${minNum}' — опцион на событие истёк (time_decay_floor)`, pnlFrac: d.pnlFrac, kind: "stop" };
         } else {
-          holdOnce(`ценовой стоп подавлен по ${holdKey}: рынок выигрывает от наступления события — цена тает по времени, это не слом тезиса (price_stop_exempt); держим до стратег-выхода / тайм-флора / сеттла`);
+          holdOnce(`ценовой стоп подавлен по ${holdKey}: рынок выигрывает от наступления события — цена тает по времени, это не слом тезиса (price_stop_exempt); держим до стратег-выхода / тайм-флора / сеттла`, "price_stop_exempt");
           continue;
         }
       } else if (d.kind === "stop" && winsOnEventOccurrence(b.market_label) && degraded) {
@@ -1343,9 +1487,36 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // even through a strategist blackout. Only the STOP is gated (winsOnEventOccurrence already
       // handled Over, so this reaches Under/No totals). Take-profit unaffected.
       if (d.kind === "stop") {
-        const uMargin = underThesisMarginGoals(b.market_label, m.score_home ?? 0, m.score_away ?? 0, { home: m.home, away: m.away });
+        // [G2 / batch-11] The suppression is RE-COMPUTED from the live score every cycle — a goal narrowing the
+        // margin restores the stop by itself, exactly as the note above says. Brann did not fail because the
+        // suppression was open-ended; it failed because the score it re-read was STALE (the same G1 race: the
+        // feed knew about the 41' goal, the scoreboard did not). So the fix is not a re-arm timer, it is a
+        // refusal to DISARM a guard on a reading that cannot be verified.
+        //
+        // No deadline escape here, unlike the strategist path. Keeping a stop armed one cycle too long costs an
+        // exit the thesis may not have needed; disarming on a phantom margin costs Brann. The asymmetry is the
+        // reason the two consumers of the same fact fail in opposite directions.
+        //
+        // [четвёрка, п.4] РАСХОЖДЕНИЕ СЧЁТА С ФИДОМ БОЛЬШЕ НЕ ОТКЛЮЧАЕТ ПОДАВЛЕНИЕ НАВСЕГДА. Отменённый по VAR
+        // гол оставляет своё событие в фиде, а счёт откатывается — расхождение становится ПОСТОЯННЫМ, и отказ
+        // «на непроверяемом счёте не разоружаемся» переставал быть временным: под-тезисная защита выключалась
+        // на этом матче до финального свистка. Одним призраком отменялась ровно та защита, ради которой она и
+        // написана (Sarpsborg дампился на 21–26¢, Inter FK Sarajevo на 7–8¢ и рассчитался в 100¢).
+        // Доверие больше не требуется: голы считаются ПО ХУДШЕМУ ИЗ ДВУХ ИСТОЧНИКОВ — излишек фида прибавляется
+        // к счёту, и приписывается той стороне, о которой тезис (для матчевого тотала сторона не важна, для
+        // командного берём минимум из двух приписок). Призрак стоит нам одного гола запаса; настоящий гол,
+        // о котором табло ещё не знает, посчитан вовремя. Подавление живо, но опирается на защитимый запас.
+        const cons = scoreConsistency(db, m, Date.parse(now) || Date.now(), deps.env ?? process.env);
+        const surplus = pendingGoalSurplus(cons);
+        const sh = m.score_home ?? 0, sa = m.score_away ?? 0;
+        const uHome = underThesisMarginGoals(b.market_label, sh + surplus, sa, { home: m.home, away: m.away });
+        const uAway = underThesisMarginGoals(b.market_label, sh, sa + surplus, { home: m.home, away: m.away });
+        const uMargin = uHome == null || uAway == null ? null : Math.min(uHome, uAway);
+        if (surplus > 0) {
+          holdOnce(`запас Under посчитан ПО ХУДШЕМУ по ${holdKey}: фид знает о ${cons.goalEvents} голах против счёта ${sh}:${sa} — лишние ${surplus} засчитаны как забитые (score_race_worst_case)`, "score_race_worst_case");
+        }
         if (uMargin != null && uMargin >= UNDER_STOP_SUPPRESS_MARGIN) {
-          holdOnce(`ценовой стоп подавлен по ${holdKey}: Under-тезис в запасе — до линии ещё ${uMargin} гол(ов) при счёте ${m.score_home ?? 0}:${m.score_away ?? 0}; цена оторвана книгой, тезис не под ударом (under_thesis_safe); держим до стратег-выхода / сеттла`);
+          holdOnce(`ценовой стоп подавлен по ${holdKey}: Under-тезис в запасе — до линии ещё ${uMargin} гол(ов) при счёте ${m.score_home ?? 0}:${m.score_away ?? 0}; цена оторвана книгой, тезис не под ударом (under_thesis_safe); держим до стратег-выхода / сеттла`, "under_thesis_safe");
           continue;
         }
       }
@@ -1356,10 +1527,10 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // below, which weaken with it (Cienciano team-Under −$141 on a bet that settled +$212).
       if (d.kind === "stop") {
         const sc = stopContradictsGameState(b.market_label, m.score_home, m.score_away, { home: m.home, away: m.away }, b.entry_price, sell);
-        if (sc) { holdOnce(`выход отклонён по ${holdKey}: ${sc}`); continue; }
+        if (sc) { holdOnce(`выход отклонён по ${holdKey}: ${sc} (stop_contradicts_state)`, "stop_contradicts_state"); continue; }
         // T1.2: a terminal-phase winning position (or a melting model-fill) is held to settle, not stopped.
         const th = terminalProtectiveHold(b.market_label, m.score_home, m.score_away, minNum, { home: m.home, away: m.away }, sell.fromBook, true);
-        if (th) { holdOnce(`выход отклонён по ${holdKey}: ${th}`); continue; }
+        if (th) { holdOnce(`выход отклонён по ${holdKey}: ${th} (terminal_protective_hold)`, "terminal_protective_hold"); continue; }
       }
       // Phantom-bid guard: a stop firing on a degenerate bid (≤FLOOR¢) that sits far
       // below the mid is dumping into a momentarily-broken book, not managing risk —
@@ -1368,7 +1539,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // ONLY on a REAL book (fromBook) — a modelled parametric price this low is a
       // genuine illiquidity haircut, not a phantom, and a real stop must still fire.
       if (sell.fromBook && sell.cents <= EXIT_PHANTOM_FLOOR && (mk.price - sell.cents) >= EXIT_PHANTOM_GAP) {
-        holdOnce(`выход отклонён по ${holdKey}: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${d.reason}); держим до реального рынка/сеттла (exit_phantom_block)`);
+        holdOnce(`выход отклонён по ${holdKey}: бид ${sell.cents}¢ — фантом при марке ${mk.price}¢ (${d.reason}); держим до реального рынка/сеттла (exit_phantom_block)`, "exit_phantom_block");
         continue;
       }
       // Slippage guard: the best bid can pay far MORE than the full-stake dump realizes —
@@ -1377,7 +1548,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // / settlement, rather than book a depth artifact as a −70% loss. Only on a real
       // book; a genuine small-slip stop (0–1¢) still fires.
       if (sell.fromBook && sell.bestBidCents != null && (sell.bestBidCents - sell.cents) >= EXIT_SLIPPAGE_BLOCK) {
-        holdOnce(`выход отклонён по ${holdKey}: фулл-стейк VWAP ${sell.cents}¢ против бида ${sell.bestBidCents}¢ (слип −${Math.round((sell.bestBidCents - sell.cents) * 10) / 10}¢) — книга не держит размер (${d.reason}); держим до реального рынка/сеттла (exit_slippage_block)`);
+        holdOnce(`выход отклонён по ${holdKey}: фулл-стейк VWAP ${sell.cents}¢ против бида ${sell.bestBidCents}¢ (слип −${Math.round((sell.bestBidCents - sell.cents) * 10) / 10}¢) — книга не держит размер (${d.reason}); держим до реального рынка/сеттла (exit_slippage_block)`, "exit_slippage_block");
         continue;
       }
       // Illiquid-mark-gap guard (audit: 20-26¢ bids that slipped between the ≤5¢ phantom floor and
@@ -1386,7 +1557,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // stop would dump at a price the market doesn't bear. HOLD. Only for a STOP (a take-profit
       // needs a HIGH bid, never triggers here); conservative + logged for calibration.
       if (d.kind === "stop" && sell.fromBook && sell.bestBidCents != null && mk.price >= EXIT_ILLIQUID_MARK_MIN && (mk.price - sell.bestBidCents) >= EXIT_ILLIQUID_MARK_GAP) {
-        holdOnce(`выход отклонён по ${holdKey}: марк ${mk.price}¢, но лучший бид ${sell.bestBidCents}¢ (Δ−${Math.round((mk.price - sell.bestBidCents) * 10) / 10}¢) — книга неликвидна, цена оторвана от стоимости, не слом тезиса (${d.reason}); держим до реального рынка/сеттла (exit_illiquid_mark_gap)`);
+        holdOnce(`выход отклонён по ${holdKey}: марк ${mk.price}¢, но лучший бид ${sell.bestBidCents}¢ (Δ−${Math.round((mk.price - sell.bestBidCents) * 10) / 10}¢) — книга неликвидна, цена оторвана от стоимости, не слом тезиса (${d.reason}); держим до реального рынка/сеттла (exit_illiquid_mark_gap)`, "exit_illiquid_mark_gap");
         continue;
       }
       // P0.6 GAP-WAKE protective-exit invariant — ONLY a protective stop, ONLY right after a scheduler sleep
@@ -1403,7 +1574,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
           } else {
             const cfg = gapRepriceConfig(deps.env ?? process.env);
             R.openGapReprice(db, { bet_id: b.id, match_id: m.id, strategy_id: b.strategy_id, profile: b.risk_profile_id ?? "medium", gap_sec: gapWakeGapSec(db), wake_price_cents: sell.cents, floor_cents: sell.cents, deadline_at: new Date(nowMs + cfg.repriceSec * 1000).toISOString(), created_at: now });
-            holdOnce(`gap-wake: ценовой стоп по ${holdKey} отложен ≤${cfg.repriceSec}с/${cfg.repriceTicks} тика — даю книге разжаться после сна планировщика (gap_wake_reprice); стоп НЕ отменён`);
+            holdOnce(`gap-wake: ценовой стоп по ${holdKey} отложен ≤${cfg.repriceSec}с/${cfg.repriceTicks} тика — даю книге разжаться после сна планировщика (gap_wake_reprice); стоп НЕ отменён`, "gap_wake_reprice");
             continue;
           }
         }
@@ -1413,11 +1584,11 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // stop re-fires next cycle. Before this, closeBetEarly booked the WHOLE stake at the thin VWAP even on a
       // 42% fill (Cienciano: «исполнено 42%» yet the full $80 booked settled_lost), overstating the loss.
       const fillFrac = sell.requestedShares > 0 ? Math.min(1, sell.filledShares / sell.requestedShares) : 1;
-      if (fillFrac <= 1e-6) { holdOnce(`выход по ${holdKey} не исполнен: бид не принял размер (0% филл, ${d.reason}); держим до реального рынка/сеттла (exit_partial_zero)`); continue; }
+      if (fillFrac <= 1e-6) { holdOnce(`выход по ${holdKey} не исполнен: бид не принял размер (0% филл, ${d.reason}); держим до реального рынка/сеттла (exit_partial_zero)`, "exit_partial_zero"); continue; }
       const { pnl, partial } = closeBetPortion(db, b, fillFrac, sell.cents, minuteLabel(m), now);
       if (sell.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, fillFrac < 1 ? scaleCost(sell.cost, fillFrac) : sell.cost, now);
       const fillTag = partial ? ` (частично ${Math.round(fillFrac * 100)}%)` : "";
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}»${fillTag} @ ${sell.cents}¢ · ${d.reason}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}»${fillTag} @ ${sell.cents}¢ · ${d.reason}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, bet_id: b.id, created_at: now });
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, reason: d.reason, pnl });
       touched.add(b.strategy_id);
     }
@@ -1743,6 +1914,32 @@ export async function strategistReassess(
     if (!markets.length) continue;
     const opens = R.openOddsFor(db, m.id); // kickoff price per label → price_move direction/size
     const nowMs = Date.parse(now) || Date.now();
+    // [G1 / batch-11] ATOMICITY: never reason on a snapshot that lags its own event feed. enrichFromEspn
+    // commits the scoreboard score BEFORE fetching matchDetail, so the events that TRIGGER this call can be
+    // newer than the score it would be answered with — Brann's reassessment fired on the 41' goal and was
+    // handed 0:1. The strategist then held with a premise the goal had already destroyed, and that cost $263.
+    // A reasoned wrong decision is worse than a late one, so this waits (bounded — see scoreRace).
+    const consistency = scoreConsistency(db, m, nowMs, env);
+    // trade_log.strategy_id carries a FOREIGN KEY to strategies(id) — a synthetic "system" id throws, and this
+    // block sits in the reassessment loop, so the throw would take the whole live pass down with it. Use a real
+    // strategy of this sport (the same pattern the zombie log uses), and treat logging as best-effort: a
+    // diagnostic line must never be able to stop position management.
+    const sysSid = R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? null;
+    if (!consistency.ok) {
+      if (sysSid) try { R.insertTradeLog(db, {
+        id: R.uid(), match_id: m.id, strategy_id: sysSid, minute: minuteLabel(m), type: "skip",
+        text: `переоценка отложена: ${consistency.reason}`,
+        dedup_key: `score_race:${m.id}:${consistency.goalEvents}`, created_at: now,
+      }); } catch { /* observability only */ }
+      continue;
+    }
+    if (consistency.forced && sysSid) {
+      try { R.insertTradeLog(db, {
+        id: R.uid(), match_id: m.id, strategy_id: sysSid, minute: minuteLabel(m), type: "skip",
+        text: `переоценка ПРОДОЛЖЕНА на рассогласованном снимке: ${consistency.reason}`,
+        dedup_key: `score_race_forced:${m.id}:${consistency.goalEvents}`, created_at: now,
+      }); } catch { /* observability only */ }
+    }
     // A live minute for the strategist even when no provider drives one: the timer
     // estimate from kickoff (capped at the sport ceiling so it never reads absurd).
     const minuteApprox = m.minute == null && isIsoTs(m.kickoff_at)
@@ -1780,6 +1977,11 @@ export async function strategistReassess(
     // dropped from what the strategist SEES (context + entry candidates) so it never reasons on or opens into a
     // phantom price. Exits still use the full `markets` (an open position must always be manageable).
     const zombie = footballZombieMap(db, m, sport, markets, liveMinute, env, now);
+    // [G5 / batch-11] Observe what the Draw canon WOULD pick, from this same snapshot, and whether that book is
+    // simultaneously quarantined. Pure observation: gates nothing, moves nothing. It exists because the canon
+    // only ever runs at the fill choke, so a batch in which no Draw was proposed produces zero canon evidence —
+    // indistinguishable in the logs from a canon that is broken.
+    if (sport === "football") { try { probeDrawCanon(db, m.id, markets, zombie, now, env); } catch { /* never break a tick for a counter */ } }
     const liveMarkets = zombie.size ? markets.filter((mk) => !zombie.has(mk.label)) : markets;
 
     // PAIRS to run (LIVE branch of the unified engine — same (strategy, profile)
@@ -1870,7 +2072,22 @@ export async function strategistReassess(
               return { panicDropCents: drop, bookUsd: book > 0 ? book : null };
             } catch { return { panicDropCents: null, bookUsd: null }; }
           })();
-          const g = overreactionGate(battleSheet ?? null, { totalGoals: (m.score_home ?? 0) + (m.score_away ?? 0), minute: m.minute ?? minuteApprox, ...panicBook });
+          // [G3 / batch-11] Age of the most recent BUYBACK-CAPABLE event (goal / red card), in match minutes.
+          // Read from match_events, whose minutes are the provider's own — the same clock the live minute uses,
+          // so the subtraction is apples to apples. No such event, or no live minute → null → the gate fails
+          // OPEN exactly as it does for the other pre-filters.
+          const triggerAgeMin = (() => {
+            const lm = m.minute ?? minuteApprox;
+            if (lm == null) return null;
+            let latest: number | null = null;
+            for (const e of R.eventsForMatch(db, m.id)) {
+              if (e.type !== "goal" && e.type !== "red_card") continue;
+              if (e.minute == null || e.minute > lm) continue;   // future/unknown minute tells us nothing
+              if (latest == null || e.minute > latest) latest = e.minute;
+            }
+            return latest == null ? null : lm - latest;
+          })();
+          const g = overreactionGate(battleSheet ?? null, { totalGoals: (m.score_home ?? 0) + (m.score_away ?? 0), minute: m.minute ?? minuteApprox, triggerAgeMin, ...panicBook });
           if (!g.call) { skipReason = `Overreaction: ${g.reason} — детерминированный пропуск, без LLM`; skipTag = "det_gate_skip:ovr_dormant"; }
         }
         if (skipReason) {
@@ -2019,6 +2236,25 @@ export async function strategistReassess(
           const exBlob = `${ex.trigger ?? ""} ${ex.reason ?? ""}`.toLowerCase();
           const defensiveExit = /thesis_stop|counter_scenario|\bstop\b|стоп|слома|сломан|красн|удал|травм/.test(exBlob);
           const takeProfitExit = /take_price|take_profit|тейк|фикс|прибыл|edge (исчерп|закры)|цена (дош|дости)|на пике/.test(exBlob);
+          // [W3 / batch-12] ПРИОСТАНОВКА take_price-лесенки на живом тающем опционе — ЗА ФЛАГОМ, и флаг
+          // включается только по сработавшему F4-вердикту (hold-to-settle превосходит факт на ≥15% оборота
+          // при n≥30 — `npm run f4:report` читает его механически). Randers: система сама писала «не режу
+          // живую по тезису позицию — типовая ошибка среза тающего опциона» на 11' и всё равно срезала
+          // половину на 47'; куски ушли по 69.8/81.9/89.9¢ при финале 99.8¢, −$77 на матче. Правка узкая по
+          // ратификации: приостанавливается ТОЛЬКО частичный тейк, ТОЛЬКО пока вердикт стратега держит
+          // тезис живым (fav_clean / thesis-alive) и позиция в плюсе; защитные выходы и полные закрытия не
+          // трогаются, quasi-locked хвост остаётся своим механизмом. Каждый холд логируется melt_hold с
+          // ценой — из этих строк f4:report считает самоизмерение «взято при холде vs отдано на реверсах»
+          // (ревью 2 недели, откат-порог: отдано > взято → лесенку вернуть, флаг выключить).
+          if (((deps.env ?? process.env).TAKE_LADDER_SUSPEND ?? "").toLowerCase() === "true"
+              && ex.fraction < 1 && takeProfitExit && !defensiveExit
+              && /fav_clean|thesis[-_ ]?alive/i.test(dec.currentBranch ?? "")
+              && (mk.price ?? 0) > (b.entry_price ?? Infinity)) {
+            const holdKey = `«${b.market_label}» melt_hold`;
+            const recentHold = R.tradeLogForMatch(db, m.id).filter((e) => e.strategy_id === sid).slice(-8).some((e) => e.type === "hold" && e.text.includes(holdKey));
+            if (!recentHold) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "hold", text: `${holdKey}: тек ${mk.price}¢ vs вход ${b.entry_price}¢, ветка ${dec.currentBranch} — лесенка тейков приостановлена (TAKE_LADDER_SUSPEND по F4-вердикту), держим до тезис-события/сеттла`, created_at: now });
+            continue;
+          }
           if (PARTIAL_TP_THROTTLE_MIN > 0 && ex.fraction < 1 && takeProfitExit && !defensiveExit) {
             const prof = b.risk_profile_id ?? "medium";
             const lastPartialMs = R.betsForMatch(db, m.id, sid)
@@ -2154,7 +2390,7 @@ export async function strategistReassess(
           // F1: a defensive tag that reaches HERE is already condition-verified (unverified ones were blocked
           // above) — no more «discretionary» demotion, the category is gone. Just name the fired trigger.
           const trg = ex.trigger ? ` (${ex.trigger})` : "";
-          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag})${trg} @ ${sell.cents}¢ · стратег: ${ex.reason}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, created_at: now });
+          R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: sid, minute: minuteLabel(m), type: "exit", text: `выход «${b.market_label}» (${tag})${trg} @ ${sell.cents}¢ · стратег: ${ex.reason}${sell.note ? ` · ${sell.note}` : ""}${modelFillTag(sell.fromBook)} · P&L ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`, bet_id: b.id, created_at: now });
           out.exits.push({ matchId: m.id, strategyId: sid, market: b.market_label, reason: `стратег (${tag}): ${ex.reason}`, pnl });
           exitedMarkets.push(`${b.market_label} (${tag})`);
           touched.add(sid);
@@ -2233,7 +2469,9 @@ export async function strategistReassess(
             if (lostThisMarket) { unfilled.push(`«${mk.label}» — уже был убыточный выход в этом матче, доливка запрещена (martingale_block)`); continue; }
             const implied = impliedMap.get(mk.label)?.implied ?? mk.price / 100;
             const cKey = correlationKey(mk.label, m.home, m.away);
-            const r = sizePrematch({ ourProb, priceCents: mk.price, implied, calibration, liquidity: liqNum(mk.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg, allowLargeEdge: true });
+            // Same bankCeiling backstop as the prematch path: the LIVE entry sizes off the same competition
+            // budget row, so it needs the same absolute floor under it. 0 → undefined → inert.
+            const r = sizePrematch({ ourProb, priceCents: mk.price, implied, calibration, liquidity: liqNum(mk.liquidity), budget, matchExposure, compExposure: exposure, clusterExposure: cKey ? (clusterExp.get(cKey) ?? 0) : 0, cfg, allowLargeEdge: true, bankCeiling: bankUsd(env) || undefined });
             if (r.status !== "enter") { unfilled.push(`«${mk.label}» — ${r.reason}`); continue; }
             exposure += r.stake; matchExposure += r.stake;
             if (cKey) clusterExp.set(cKey, (clusterExp.get(cKey) ?? 0) + r.stake);
@@ -2371,6 +2609,25 @@ export async function runAutoCycle(
   // now-correct score so a Raków-class win becomes an honest record, not an eternal suspect. Unprovable ones
   // stay flagged for the PM-resolution settler below. Idempotent.
   stepSync("reSettleSuspects", () => reSettleSuspectBets(db, deps).regraded, 0);
+  // ПОДОЗРЕНИЕ ПО ФАКТУ, А НЕ ПО СПИСКУ И НЕ В МОМЕНТ РАСЧЁТА. Обе прежние маркировки пропустили самый грубый
+  // случай (Seattle–Portland, разрыв 16 дней, settle_suspect=0): одна метит по перечню двухматчевых турниров,
+  // а это MLS; вторая живёт в сеттл-пути, куда досрочно закрытая позиция не приходит вовсе. Этот проход метит
+  // по свойству САМОЙ строки — привязка дальше допуска от кикоффа — для любого турнира и любого способа
+  // закрытия. Ставится ПОСЛЕ backfill/re-settle, чтобы доказанно чистые успели сняться и не помечались зря.
+  // W1/Z2 (третья ратификация, блокирующая): метка досрочно закрытого куска = исход РЫНКА, судьба куска —
+  // piece_pnl. Идемпотентный проход = и живой конвейер, и ретро-миграция всей истории при первом запуске.
+  // Деньги (payout) не трогаются; win-rate/Brier/калибровка после этого читают предсказание, а не знак P&L.
+  stepSync("staleShadowResolve", () => resolveStaleProposalShadow(db, deps).resolved, 0);
+  stepSync("pieceRelabel", () => {
+    const r = relabelPiecesByMarket(db, deps);
+    if (r.flipped || r.unverifiable) console.warn(`[pieceRelabel] меток по рынку: ${r.relabeled} (перевёрнуто ${r.flipped}) · piece_pnl backfill: ${r.pnlBackfilled} · непроверяемых: ${r.unverifiable}`);
+    return r.relabeled;
+  }, 0);
+  stepSync("legGapSuspect", () => {
+    const r = markLegGapSuspect(db, deps.env ?? process.env);
+    if (r.betsTagged) console.warn(`[legGapSuspect] ${r.betsTagged} ставок на ${r.mismatched} матчах помечены settle_suspect — привязка к чужому кругу (макс. разрыв ${r.rows[0]?.gapDays ?? "?"}д)`);
+    return r.betsTagged;
+  }, 0);
   // R2(б): AFTER enrich — surface funded football matches that are past kickoff yet still
   // carry no provider bind (category_tier_mismatch / name-fold / dark board). Instead of a
   // silent «?:?», persist the flagged set + emit a loud warn so it can't hide. The R2(в)
@@ -2394,6 +2651,10 @@ export async function runAutoCycle(
   await step("pmResolution", async () => {
     const at = deps.now?.() ?? new Date().toISOString();
     try {
+      // [batch-11, условие 4] TARGETED backfill runs FIRST: positions already hanging toward a void timeout
+      // will not survive until the import path fills token_second on its own schedule. Only markets carrying
+      // open money are touched, and a stored pointer is never overwritten.
+      try { backfillComplementTokens(db, nowFn(deps)()); } catch { /* a backfill must never block settlement */ }
       const r = await settlePmResolutionBets(db, deps);
       try { R.metaSet(db, "pm_resolution_last", JSON.stringify({ ...r, at }), at); } catch { /* best-effort */ }
       return r;
@@ -2466,6 +2727,25 @@ export async function runAutoCycle(
   // P3/B2: persist the "blind pairs × league × day" coverage digest for the weekly report (the biggest
   // underearning lump is blind euro pairs — make it DATA, tracked against the ≥85% link-rate target).
   stepSync("noFeedCoverage", () => { persistNoFeedCoverage(db, nowFn(deps)(), { env: deps.env }); return 0; }, 0);
+  // [ratified #3] DAILY complement re-audit. The live settler only ever looks at OPEN bets, so a position that
+  // was already refunded is terminal to it — the backlog drains through this pass and nothing else. Leaving it
+  // as a command someone has to remember makes «is it burning?» a property of memory, and the last time that
+  // was true it cost 225 mis-booked rows. Rate-limited to once per day: the trickle is ~2 rows per 6 hours,
+  // so anything more frequent is spend without signal. Its result is persisted for the weekly report.
+  await step("complementAudit", async () => {
+    const nowIso = nowFn(deps)();
+    const day = nowIso.slice(0, 10);
+    if (R.metaGet(db, "complement_audit_day") === day) return 0;      // already run today
+    const r = await auditComplementVoids(db, deps, { apply: true });
+    try {
+      R.metaSet(db, "complement_audit_day", day, nowIso);
+      R.metaSet(db, "complement_audit_last", JSON.stringify({
+        at: nowIso, examined: r.examined, reSettled: r.reSettled, won: r.won, lost: r.lost,
+        deferred: r.deferred, bankDeltaUsd: r.bankDeltaUsd, note: r.note,
+      }), nowIso);
+    } catch { /* markers are best-effort */ }
+    return r.reSettled;
+  }, 0);
   // A match that passed kickoff but never went live (scout never saw the court / ESPN never delivered)
   // is stuck in upcoming/lineup — give it a terminal state so it leaves «Актуальные» within a tick
   // (voids its open bets, flags it «поломан» for the «Поломанные» bucket) instead of lingering 3 days.

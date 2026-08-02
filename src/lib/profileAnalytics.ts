@@ -13,7 +13,7 @@ import { winsOnEventOccurrence } from "./thresholds.js";
 import { canonicalProfileId } from "./riskProfiles.js";
 import { isResolutionSettle } from "./settlement.js";
 import { epochNum, crossEpoch } from "./codeEpoch.js";
-import { clvLeg, type ClvSource } from "./clv.js";
+import { clvLeg, clvCoverage, type ClvSource, type ClvCoverage } from "./clv.js";
 
 export interface ProfileFilter {
   fromMs?: number; toMs?: number;      // created_at window
@@ -50,8 +50,11 @@ export interface BetRec {
   status: string; settledBy: string | null; outcome: "won" | "lost" | "void" | "open";
   /** [пункт 6] Откуда взялась нога CLV: `closing_line` — посчитана по реальной линии; остальное — n/a с
    *  указанием ПРИЧИНЫ (снимка нет / снимок протух / у матча нет часов). n/a законен только там, где линии
-   *  физически нет в данных, и НЕ законен там, где линия есть и просто неудобна. */
+   *  физически нет в данных. */
   clvSource: ClvSource; closingLineCents: number | null;
+  /** [пункт 6] Выходы привязаны к этой ставке жребием (легаси-строка без bet_id, а кандидатов было
+   *  несколько) — деньги такой строки не входят в bookPnl. */
+  exitsAmbiguous: boolean;
   stake: number; payout: number | null; pnl: number | null; clvCents: number | null; finalScore: string | null;
   // bookPnl [Phase-0 H2]: the record's P&L ONLY when it was realized on a real book fill; null when the exit
   // rode a stale/modelled price (no live bid would have paid) — so the signal P&L verdict/bootstrap/
@@ -97,6 +100,14 @@ export function classifyExitTrigger(text: string, settledBy: string | null | und
 
 /** All bets as normalized analytic records (filtered). Exits parsed from the trade log. */
 export function betRecords(db: Database, filter: ProfileFilter = {}, env: Record<string, string | undefined> = process.env): BetRec[] {
+  // Сколько ставок ОДНОЙ стратегии стоят на одном рынке этого матча: если больше одной, легаси-строка
+  // выхода без bet_id принадлежит неизвестно какой из них.
+  const rivalCache = new Map<string, number>();
+  const betsOnSameMarket = (matchId: string, strategyId: string, label: string): number => {
+    const k = `${matchId}|${strategyId}|${label}`;
+    if (!rivalCache.has(k)) rivalCache.set(k, R.betsForMatch(db, matchId, strategyId).filter((x) => x.market_label === label && x.status !== "not_filled" && x.status !== "proposed").length);
+    return rivalCache.get(k)!;
+  };
   const comps = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
   const strats = new Map(R.listStrategies(db).map((s) => [s.id, s.name]));
   const matchCache = new Map<string, ReturnType<typeof R.getMatch>>();
@@ -143,9 +154,17 @@ export function betRecords(db: Database, filter: ProfileFilter = {}, env: Record
     // подставить что-нибудь похожее. Подробности и правило отсечки — в clv.ts.
     const clv = clvLeg(db, m, { market_label: b.market_label, entry_price: entryCents, entry_meta: b.entry_meta ?? null }, env);
     const clvCents = clv.clvCents;
-    // Exits for this position: same strategy + market label, matched loosely.
-    const exits: ExitRec[] = exitsFor(b.match_id)
-      .filter((e) => e.strategy_id === b.strategy_id && e.text.includes(`«${b.market_label}»`))
+    // [пункт 6] Выходы адресуются ПО СТАВКЕ. Сопоставление «стратегия + подстрока ярлыка» не адрес: два
+    // профиля одной стратегии держат тот же рынок и пишут неразличимые строки, поэтому каждая из двух
+    // ставок забирала ОБА выхода — удвоенный triggerMix, чужая метка model_fill (а через неё обнулённый
+    // bookPnl у чистой ставки), чужие «частично». Строки после фикса несут bet_id и сходятся точно;
+    // легаси-строки берутся по-старому, но ТОЛЬКО когда кандидат один — иначе это жребий, а не адрес.
+    const logged = exitsFor(b.match_id);
+    const exact = logged.filter((e) => (e as any).bet_id === b.id);
+    const loose = logged.filter((e) => (e as any).bet_id == null && e.strategy_id === b.strategy_id && e.text.includes(`«${b.market_label}»`));
+    const rivals = loose.length ? betsOnSameMarket(b.match_id, b.strategy_id, b.market_label) : 1;
+    const exitsAmbiguous = loose.length > 0 && rivals > 1;
+    const exits: ExitRec[] = [...exact, ...loose]
       .map((e) => {
         const pc = Number((e.text.match(/@ (\d+(?:\.\d+)?)¢/) ?? [])[1]);
         const pnlM = e.text.match(/P&L ([+-]?)\$?(-?\d+(?:\.\d+)?)/);
@@ -155,7 +174,16 @@ export function betRecords(db: Database, filter: ProfileFilter = {}, env: Record
       });
     // [H2] book P&L = the realized pnl UNLESS the exit rode a stale/modelled price (no live bid). Such a leg's
     // money is barred from the win-rate already (staleExit→void); this bars it from the P&L verdict too.
+    // `modelFilled` считается по ВСЕМ кандидатам — это уже консервативно: если хоть одна из строк-кандидатов
+    // модельная, ставка выводится из вердикта независимо от того, чья именно строка была её.
     const modelFilled = exits.some((e) => e.modelFill);
+    // [пункт 6, поправка по факту прода] Неоднозначность привязки САМА ПО СЕБЕ денег не портит. P&L ставки
+    // берётся из её собственного payout и от того, какая из строк выхода была её, не зависит; привязка важна
+    // только для решения «был ли выход модельным/по протухшей цене», а оно уже считается по всем кандидатам.
+    // Первая версия обнуляла bookPnl у любой неоднозначной строки — и на проде это выкосило 318 из 337
+    // записей prematch_value/prematch, то есть почти всю ногу P&L по футболу. Это была не осторожность, а
+    // потеря данных: строгость там, где неопределённость на результат не влияет. Флаг остаётся и должен
+    // исключать записи из ВЫХОДНЫХ срезов (triggerMix, тайминг выхода), где привязка действительно решает.
     const bookPnl = pnl != null && !staleExit && !modelFilled ? pnl : null;
     out.push({
       id: b.id, matchId: b.match_id, matchLabel: `${m.home} — ${m.away}`, competitionId: m.competition_id, category: comp?.name ?? m.competition_id,
@@ -170,7 +198,7 @@ export function betRecords(db: Database, filter: ProfileFilter = {}, env: Record
       sizeRequested: em?.sizeRequested ?? null, sizeFilled: em?.sizeFilled ?? (settled || b.status === "open" ? stake : null), entrySlipCents: em?.entrySlipCents ?? null,
       calibration: em?.calibration ?? null, branchWeightSum: em?.branchWeightSum ?? null, thinnessUsd: em?.marketThinnessUsd ?? null,
       winsOnEvent: em?.winsOnEvent ?? winsOnEventOccurrence(b.market_label), codeVersion: b.code_version ?? null,
-      status: b.status, settledBy: b.settled_by ?? null, outcome, clvSource: clv.source, closingLineCents: clv.closingLineCents,
+      status: b.status, settledBy: b.settled_by ?? null, outcome, clvSource: clv.source, closingLineCents: clv.closingLineCents, exitsAmbiguous,
       stake, payout: num(b.payout), pnl, bookPnl, clvCents, finalScore: m.final_score ?? null,
       decisionId: b.decision_id ?? null, createdAt: b.created_at ?? null, kickoffAt: m.kickoff_at ?? null, exitCodeVersion: b.exit_code_version ?? null, exits,
     });

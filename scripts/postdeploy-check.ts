@@ -17,9 +17,11 @@
 //
 //   node --experimental-sqlite --import tsx scripts/postdeploy-check.ts [--since=ISO]
 // ============================================================
-import { openDb, dbPath } from "../src/lib/db.js";
+import { openDbReadOnly, dbPath } from "../src/lib/db.js";
 import { CODE_VERSION } from "../src/lib/betMeta.js";
 import { pmvNetEvCents } from "../src/lib/tennisPmv.js";
+import { isFtBlindBet } from "../src/lib/betMeta.js";
+import { buildDrawCanonProbe } from "../src/lib/drawCanonProbe.js";
 
 const argSince = process.argv.find((a) => a.startsWith("--since="))?.slice(8);
 const since = argSince ?? new Date(Date.now() - 24 * 3600_000).toISOString();
@@ -30,7 +32,7 @@ const since = argSince ?? new Date(Date.now() - 24 * 3600_000).toISOString();
 const deployedAt = process.argv.find((a) => a.startsWith("--deployed="))?.slice(11);
 const fireSince = deployedAt && deployedAt > since ? deployedAt : since;
 const fireHours = Math.round(((Date.now() - Date.parse(fireSince)) / 3600_000) * 10) / 10;
-const db = openDb(dbPath());
+const db = openDbReadOnly(dbPath());
 const out: string[] = [];
 const P = (s = "") => out.push(s);
 
@@ -134,21 +136,82 @@ if (fireHours < 2) P(`⚠ Сборка живёт всего ${fireHours} ч. Н
 const line = (name: string, count: number, note: string) =>
   P(`- **${name}**: ${count === 0 ? `0 — ⚠ путь НЕ прошёл, починка НЕ подтверждена` : `${count}`} — ${note}`);
 
-line("ft_blind входы", n1(
-  `SELECT COUNT(*) n FROM bets WHERE created_at >= ? AND (rationale LIKE '%ft_blind%' OR strategy_id = 'ft_blind')`, fireSince),
+// Counts are NOT comparable across windows of different length, and the zombie baseline was taken over ~8
+// hours while this window is whatever the deploy marker makes it. Comparing 953 to a 20-hour number would
+// «prove» the hysteresis made things worse — the same units error this project keeps having to fix. So the
+// baseline is stored as a RATE, measured once and named here, and the report does the division itself
+// instead of trusting whoever reads it to remember.
+const BASE = { hours: 7.96, quarantine: 953, lifted: 745, at: "2026-07-25T18:00Z…2026-07-26T01:57Z (до гистерезиса)" };
+const rateLine = (name: string, count: number, baseCount: number, note: string) => {
+  const rate = fireHours > 0 ? Math.round((count / fireHours) * 10) / 10 : null;
+  const baseRate = Math.round((baseCount / BASE.hours) * 10) / 10;
+  // A LITERAL zero is not a win. Dropping from ~120/hour to exactly none is not what a hysteresis margin
+  // does — it is what an empty table, a stopped tick loop or a wrong DB path does. Read as «improvement» it
+  // would certify a dead system as a fixed one, which is the same fail-open the P5 panic gate had. So zero
+  // gets the suspicion, and a real improvement has to show a real, non-zero, smaller rate.
+  const verdict = rate == null ? ""
+    : count === 0 ? " → ⚠ РОВНО НОЛЬ — это не победа: так же выглядит остановленный тик или пустая база. Проверить, что цикл вообще работал"
+    : rate <= baseRate * 0.7 ? " → **ЗАМЕТНО МЕНЬШЕ**"
+    : rate >= baseRate * 1.3 ? " → **БОЛЬШЕ базы** (гистерезис не помог — разбираться)"
+    : " → в пределах базы (изменения не видно)";
+  P(`- **${name}**: ${count} за ${fireHours} ч = **${rate}/час** против базы **${baseRate}/час**${verdict}`);
+  P(`    ${note} · база: ${BASE.at}`);
+};
+
+// TWO INDEPENDENT READINGS, on purpose. The first version of this counter looked for the string "ft_blind"
+// in bets.rationale — a field the entry path never writes it to (the mark goes to entry_meta.ftBlind and to
+// a trade_log line). It would have reported 0 forever while the mode worked perfectly, which is exactly the
+// mistake already made once in PR #49: a diagnostic that guesses the wrong field is worse than none, because
+// it manufactures a false negative and sends the next investigation down a dead end.
+//
+// So the authoritative read now uses the SAME helper the money path and the cohort reports use, and the
+// trade_log line is kept alongside as an independent witness. If the two ever disagree, that disagreement is
+// itself the finding — one of the two writes is missing.
+const ftBlindBets = q<any>(`SELECT entry_meta FROM bets WHERE created_at >= ?`, fireSince).filter(isFtBlindBet).length;
+const ftBlindLogs = n1(`SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE '%ft_blind%'`, fireSince);
+line("ft_blind входы (entry_meta.ftBlind — источник истины)", ftBlindBets,
   `V0.1: до деплоя было ровно 0 из-за origin='live' на опоздавшем анализе`);
+P(`    свидетель из trade_log: ${ftBlindLogs} строк${ftBlindBets !== ftBlindLogs ? ` — ⚠ РАСХОЖДЕНИЕ с ${ftBlindBets}: одна из двух записей не делается, это отдельный баг` : ""}`);
+// A zero here is only informative once it can be ATTRIBUTED. "No blind fixture existed" and "blind fixtures
+// existed, were analysed in time, and still produced nothing" are opposite conclusions with the same count,
+// and treating them alike is how V0.1 stayed unexplained for a whole batch. So the funnel is printed.
+const blindFunnel = q<any>(
+  `SELECT m.id, m.home, m.away, m.kickoff_at,
+          (SELECT COUNT(*) FROM match_live ml WHERE ml.match_id = m.id)  AS live_rows,
+          (SELECT COUNT(*) FROM markets mk WHERE mk.match_id = m.id)      AS mkts,
+          (SELECT MIN(a.created_at) FROM assessments a WHERE a.match_id = m.id AND a.status='ok') AS first_ok
+     FROM matches m JOIN competitions c ON c.id = m.competition_id
+    WHERE c.budget > 0 AND m.kickoff_at >= ? AND c.sport_id = 'football'`, fireSince);
+// KICKOFF MUST HAVE HAPPENED. The query bounds kickoff_at from BELOW only, so it also collects every fixture
+// imported for next week. Those are unanalysed because their turn has not come — counting them as misses
+// turned a healthy funnel into «166 слепых → 10 проанализировано», i.e. a 94% loss that does not exist. The
+// number was about to send the next investigation into the scheduler. A fixture can only be judged on whether
+// it was analysed once its kickoff is in the past.
+const nowIso = new Date().toISOString();
+const blindAll = blindFunnel.filter((r) => r.live_rows === 0 && r.mkts > 0);
+const blind = blindAll.filter((r) => r.kickoff_at < nowIso);
+const upcoming = blindAll.length - blind.length;
+const blindAnalysed = blind.filter((r) => r.first_ok);
+const blindInTime = blindAnalysed.filter((r) => r.first_ok < r.kickoff_at);
+P(`    воронка слепых фикстур в окне: ${blind.length} слепых с котировками (кикофф уже был) → ${blindAnalysed.length} проанализировано → **${blindInTime.length} успело ДО свистка**`);
+if (upcoming) P(`    (+${upcoming} слепых с кикоффом ВПЕРЕДИ — их черёд ещё не настал, в воронку не идут)`);
+P(blind.length === 0
+  ? `    → слепых фикстур в окне просто НЕ БЫЛО: ноль выше ничего не говорит про режим, нужен слейт с ними`
+  : blindInTime.length === 0
+    ? `    → анализ по-прежнему не успевает к слепым: чинить дальше вход, а не режим`
+    : `    → анализ успевает, но входов нет: узкое место ПОСЛЕ анализа (стратег не предлагает, сайзинг режет, нет FT-рынка или упирается в кэп) — вот где копать`);
 line("net_ev_cut (теннис)", n1(
   `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'net_ev_cut%'`, fireSince),
   `гейт PR #46 режет кандидатов до денег`);
 line("flag_only (теннис)", n1(
   `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'flag_only%'`, fireSince),
   `R2: безопасная ветка — сигналы пишутся в калибровку, деньги не идут`);
-line("zombie_quarantine эпизоды", n1(
+rateLine("zombie_quarantine эпизоды", n1(
   `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'zombie_quarantine%'`, fireSince),
-  `R4: с гистерезисом их должно стать МЕНЬШЕ, а не больше — сравнивать с прошлой пачкой логов`);
-line("zombie_lifted", n1(
+  BASE.quarantine, `R4: с гистерезисом частота должна УПАСТЬ — рынок на пороге больше не мигает`);
+rateLine("zombie_lifted", n1(
   `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE 'zombie_lifted%'`, fireSince),
-  `снятие карантина требует 2 подряд чистых тика (dwell), а не одного`);
+  BASE.lifted, `снятие карантина требует 2 подряд чистых тика (dwell), а не одного`);
 line("quasi_locked_tail (хвост досижен)", n1(
   `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND text LIKE '%quasi_locked_tail%'`, fireSince),
   `R1: тейк подавлен, потому что счёт запер рынок`);
@@ -158,6 +221,16 @@ line("dust_floor", n1(
 line("refusal_shadow сигналы", n1(
   `SELECT COUNT(*) n FROM refusal_shadow_signals WHERE created_at >= ?`, fireSince),
   `R5: отказы стратега заморожены как would-be сигналы (нужно 25 решённых)`);
+
+// [G5 / batch-11] The Draw-canon counter, surfaced where the operator already looks. Reported as accumulation,
+// never as a verdict, until it matures — the whole point of building it was to stop deciding on a story.
+try {
+  const probe = buildDrawCanonProbe(db);
+  P(`- **Draw-канон (счётчик G5)**: ${probe.observations} наблюдений по ${probe.matches} матчам · ` +
+    `канон выбрал книгу ${probe.canonChosen}× · из них в карантине ${probe.canonQuarantined}` +
+    (probe.doubleLockPct == null ? "" : ` (${probe.doubleLockPct}%)`));
+  P(`    ${probe.note}`);
+} catch (e) { P(`- **Draw-канон (счётчик G5)**: недоступен — ${(e as Error).message}`); }
 
 const rs = q<{ status: string; n: number }>(`SELECT status, COUNT(*) n FROM refusal_shadow_signals GROUP BY status`);
 if (rs.length) P(`  refusal_shadow по статусам: ${rs.map((r) => `${r.status}=${r.n}`).join(", ")}`);

@@ -113,7 +113,7 @@ test("V0.1: the diagnostic names the parked 50¢ book and clears the preview bra
   const d = entryBlockerDiag(db, "m1", {});
   assert.ok(d.some((x) => /КНИГА НЕ РАЗМЕЧЕНА: 3\/3/.test(x)), "the parked book is named as the real blocker");
   assert.ok(d.some((x) => /превью-ветка НЕ активна/.test(x)), "the preview branch is explicitly cleared (lineups are out)");
-  assert.ok(d.some((x) => /НЕТ ПРЕДЛОЖЕНИЙ/.test(x)), "zero proposals is stated outright — the Varnamo case");
+  assert.ok(d.some((x) => /strategist_empty/.test(x)), "zero proposals is stated outright — the Varnamo case (W4: стадия названа явно)");
 });
 
 // ── P4: Draw canon enforced at the fill choke ────────────────────────────────────────────────────
@@ -200,22 +200,40 @@ test("Z2(а): two HELD legs of one contract disagreeing is a real defect (double
 // for a 09:00:00 kickoff. Refusing a live thesis on a blind fixture is CORRECT in general (we cannot see the
 // score, so a totals thesis at minute 60 bets into goals that may already have happened) — but right after
 // kickoff, «blind» and «pre-match» are the same information state.
-import { ftBlindOriginOk } from "../src/lib/lifecycle.js";
+import { ftBlindOriginOk, ftBlindLateFill } from "../src/lib/lifecycle.js";
 
 test("V0.1 (Samegrelo): a thesis formed 2m after kickoff on a blind fixture is admissible; 60m later is not", () => {
   const m = { kickoff_at: "2026-07-25T09:00:00Z" };
   const bet = (createdAt: string, origin = "live") => ({ origin, created_at: createdAt });
+  const atFill = "2026-07-25T09:02:00Z";   // филл внутри грейса — проверяем именно гейт ПРОИСХОЖДЕНИЯ
   // The real case: analysis at 09:01:33, i.e. ~1.5 minutes late — the fixture must not be lost to that slip.
-  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T09:01:33Z"), {}), true, "≈1.5m after kickoff → still a pre-match state");
-  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T09:05:00Z"), {}), true, "exactly at the 5m grace edge → admitted");
-  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T10:00:00Z"), {}), false, "60m in, blind to the score → refused");
-  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T08:50:00Z"), {}), false, "a 'live' stamp BEFORE kickoff is incoherent → fail closed");
-  // A genuine pre-match thesis is unconditionally fine; anything unmeasurable or unknown fails closed.
-  assert.equal(ftBlindOriginOk(m, { origin: "prematch", created_at: null }, {}), true);
-  assert.equal(ftBlindOriginOk({ kickoff_at: null }, bet("2026-07-25T09:01:00Z"), {}), false, "no kickoff → gap unmeasurable → refused");
-  assert.equal(ftBlindOriginOk(m, { origin: null, created_at: "2026-07-25T09:01:00Z" }, {}), false, "unknown origin → refused");
-  // The window is env-tunable, and 0 collapses it back to prematch-only.
-  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T09:01:33Z"), { FT_BLIND_LIVE_GRACE_MIN: "0" }), false, "grace 0 → strictly prematch-only, the old behaviour");
+  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T09:01:33Z"), {}, atFill), true, "≈1.5m after kickoff → still a pre-match state");
+  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T09:05:00Z"), {}, "2026-07-25T09:05:00Z"), true, "exactly at the 5m grace edge → admitted");
+  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T10:00:00Z"), {}, "2026-07-25T10:00:00Z"), false, "60m in, blind to the score → refused");
+  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T08:50:00Z"), {}, atFill), false, "a 'live' stamp BEFORE kickoff is incoherent → fail closed");
+  // A genuine pre-match thesis is fine — as long as the MONEY still leaves inside the window.
+  assert.equal(ftBlindOriginOk(m, { origin: "prematch", created_at: null }, {}, atFill), true);
+  assert.equal(ftBlindOriginOk({ kickoff_at: null }, bet("2026-07-25T09:01:00Z"), {}, atFill), false, "no kickoff → gap unmeasurable → refused");
+  assert.equal(ftBlindOriginOk(m, { origin: null, created_at: "2026-07-25T09:01:00Z" }, {}, atFill), false, "unknown origin → refused");
+  // The window is env-tunable, and 0 collapses it to «only before the whistle».
+  assert.equal(ftBlindOriginOk(m, bet("2026-07-25T09:01:33Z"), { FT_BLIND_LIVE_GRACE_MIN: "0" }, atFill), false, "grace 0 → фил после свистка запрещён");
+});
+
+// [batch-12, п.5] Грейс отсчитывается от ФИЛЛА. Прематч-тезис, пролежавший «предлагается» до 40-й минуты,
+// уходил в слепой вход безусловно: первая строка гейта возвращала true, ни разу не спросив, сколько матча
+// уже прошло к моменту, когда деньги реально уходят. Это ровно тот запрет, ради которого режим существует.
+test("ft_blind: грейс считается от ФИЛЛА, а не от создания предложения", () => {
+  const m = { kickoff_at: "2026-07-25T09:00:00Z" };
+  const prematch = { origin: "prematch", created_at: "2026-07-25T07:00:00Z" };
+  assert.equal(ftBlindOriginOk(m, prematch, {}, "2026-07-25T08:30:00Z"), true, "филл ДО свистка — слепоты нет вовсе");
+  assert.equal(ftBlindOriginOk(m, prematch, {}, "2026-07-25T09:04:00Z"), true, "филл на 4' — внутри грейса");
+  assert.equal(ftBlindOriginOk(m, prematch, {}, "2026-07-25T09:40:00Z"), false, "прематч-тезис, залитый на 40' — вслепую в идущий матч");
+  assert.equal(ftBlindOriginOk(m, prematch, {}, ""), false, "нет часов филла → fail closed");
+  // Цена нового гейта должна быть отличима от прочих отказов — иначе она невидима.
+  assert.equal(ftBlindLateFill(m, prematch, {}, "2026-07-25T09:40:00Z"), true, "отказ именно по позднему филлу");
+  assert.equal(ftBlindLateFill(m, prematch, {}, "2026-07-25T09:04:00Z"), false, "внутри грейса — не отказ");
+  assert.equal(ftBlindLateFill(m, { origin: "live", created_at: "2026-07-25T10:00:00Z" }, {}, "2026-07-25T10:01:00Z"), false,
+    "тезис РОДИЛСЯ на 60' — отказ не из-за филла, отдельный счётчик его не забирает");
 });
 
 // ── Provider plan-scope: escalating backoff + a verdict instead of a raw counter ──────────────────

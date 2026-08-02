@@ -107,7 +107,13 @@ export function correlationKey(label: string, home: string, away: string): strin
   //     leg 6¢ dearer). Penalties-No is IMPLIED by the same "decided" trajectory (conservative co-cap).
   //   • the "Yes" sides mirror it (a level/tie trajectory). A market with no clear Yes/No side → not clustered.
   // Extend this table as new special markets are met; do NOT auto-derive nesting from labels.
-  const koSide = /[—:]\s*(yes|no)\s*$/.exec(n)?.[1] ?? null;
+  // ОДИН РАСПОЗНАВАТЕЛЬ СТОРОНЫ НА ФАЙЛ. Здесь стоял отдельный, более УЗКИЙ регекс `[—:]` — только длинное
+  // тире или двоеточие. «Draw - No» (обычный дефис), «Extra Time No» (без разделителя) и голый «Draw»
+  // (implicit-yes, кейс Larne) давали koSide=null → кластер не определялся → clusterExposure=0, и тезисный
+  // кэп на филле тоже молчал (он весь под `if (thesisKey)`). Итог — некэпленный двойной вход на ОДИН исход,
+  // ровно France–Spain, ради которого таблица выше и написана. yesNoSide (строка 34) умеет всё это с самого
+  // начала; «Draw No Bet» он не ловит (кончается на «bet»), а isKoResult его и так исключает.
+  const koSide = yesNoSide(n);
   const isKoResult = (/\bdraw\b/.test(n) && !/no bet|dnb/.test(n)) || /extra[\s-]*time|over[\s-]*time|go to extra/.test(n) || /\bpenalt|shoot[\s-]*out\b/.test(n);
   if (isKoResult && koSide) return koSide === "no" ? "ko:decided" : "ko:level";
   const h = norm(home), a = norm(away);
