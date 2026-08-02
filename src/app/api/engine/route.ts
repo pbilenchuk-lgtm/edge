@@ -190,6 +190,25 @@ export async function POST(req: Request) {
         const md = buildMatchLog(db, hit.id);
         return NextResponse.json({ ok: true, matchId: hit.id, markdown: md });
       }
+      case "reSettleSuspects": {
+        // Прогон пере-сеттла карантина по разрешению владельца. Отчёт возвращает дельту книги, СНЯТУЮ ИЗ
+        // БАЗЫ до и после записи, а не выведенную из предиката: обещание и факт — разные вещи, и стандарт
+        // со времён бэкфиллов требует второго. Снятие подписано датой и версией classifySuspect.
+        const { reSettleSuspectBets } = await import("@/lib/engine");
+        const { buildSuspectBreakdown, CLASSIFY_VERSION } = await import("@/lib/suspectBreakdown");
+        const { isStateSuspect, suspectResolveOutcome, legGapMs } = await import("@/lib/engine");
+        const opts = { legGapMs: legGapMs(), isStateSuspect, resolveOutcome: suspectResolveOutcome };
+        const before = buildSuspectBreakdown(db, opts);
+        if (body.apply !== true) {
+          return NextResponse.json({ ok: true, mode: "dry", classifyVersion: CLASSIFY_VERSION, promised: before.releasableNow, breakdown: before });
+        }
+        const run = reSettleSuspectBets(db, {});
+        const after = buildSuspectBreakdown(db, opts);
+        return NextResponse.json({ ok: true, mode: "apply", ...run,
+          promised: before.releasableNow, delivered: run.regraded + run.confirmed,
+          promiseKept: before.releasableNow === run.regraded + run.confirmed,
+          quarantineBefore: before.total, quarantineAfter: after.total, breakdownAfter: after });
+      }
       case "futureFinished": {
         // Разовая починка данных «матч сыгран до собственного кикоффа» (futureFinished.ts) — доступная
         // на ПРОДЕ. Скрипт `npm run future:finished` работает только там, где есть файл БД; живая база

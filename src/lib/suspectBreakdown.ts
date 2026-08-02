@@ -28,6 +28,25 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { Bet, Match } from "./types.js";
 
+/** Версия решающего предиката. Пишется в `settle_verified_by` вместе с датой: через месяц вопрос «чем
+ *  именно снят этот флаг» обязан иметь ответ в самой строке, а не в чьей-то памяти. Поднимать при ЛЮБОМ
+ *  изменении условий классификации — иначе снятия разных эпох станут неразличимы. */
+export const CLASSIFY_VERSION = "classify-1.0";
+
+/** Итог массовой записи, СНЯТЫЙ ИЗ БАЗЫ ПОСЛЕ неё, а не выведенный из предиката. Предикат обещает нулевую
+ *  дельгу денег и покрыт тестом — но стандарт со времён бэкфиллов такой: после каждой массовой записи
+ *  дельта книги подтверждается ИЗМЕРЕНИЕМ. Обещание и факт — разные вещи, и вторая дешевле первой. */
+export interface BookTotals { settledBets: number; stakeSum: number; payoutSum: number; pnlSum: number }
+
+export function bookTotals(db: Database): BookTotals {
+  const r = db.prepare(
+    `SELECT COUNT(*) n, COALESCE(SUM(stake),0) st, COALESCE(SUM(payout),0) po
+       FROM bets WHERE status LIKE 'settled%'`,
+  ).get() as { n: number; st: number; po: number };
+  const round2 = (x: number) => Math.round(x * 100) / 100;
+  return { settledBets: r.n, stakeSum: round2(r.st), payoutSum: round2(r.po), pnlSum: round2(r.po - r.st) };
+}
+
 export type SuspectClass =
   | "ready_regrade"        // (б) доказуемо и статус изменится
   | "ready_confirm"        // (б) доказуемо, статус уже верный — снимется метка

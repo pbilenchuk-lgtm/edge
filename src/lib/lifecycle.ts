@@ -2608,7 +2608,7 @@ export async function runAutoCycle(
   // backfill (which proves bindings clean): a suspect on a proven-clean finished match is re-settled off the
   // now-correct score so a Raków-class win becomes an honest record, not an eternal suspect. Unprovable ones
   // stay flagged for the PM-resolution settler below. Idempotent.
-  stepSync("reSettleSuspects", () => reSettleSuspectBets(db, deps).regraded, 0);
+  stepSync("reSettleSuspects", () => { const r = reSettleSuspectBets(db, deps); return r.regraded + r.confirmed; }, 0);
   // ПОДОЗРЕНИЕ ПО ФАКТУ, А НЕ ПО СПИСКУ И НЕ В МОМЕНТ РАСЧЁТА. Обе прежние маркировки пропустили самый грубый
   // случай (Seattle–Portland, разрыв 16 дней, settle_suspect=0): одна метит по перечню двухматчевых турниров,
   // а это MLS; вторая живёт в сеттл-пути, куда досрочно закрытая позиция не приходит вовсе. Этот проход метит
@@ -2627,6 +2627,17 @@ export async function runAutoCycle(
     const r = markLegGapSuspect(db, deps.env ?? process.env);
     if (r.betsTagged) console.warn(`[legGapSuspect] ${r.betsTagged} ставок на ${r.mismatched} матчах помечены settle_suspect — привязка к чужому кругу (макс. разрыв ${r.rows[0]?.gapDays ?? "?"}д)`);
     return r.betsTagged;
+  }, 0);
+  // ОДИН ПРЕДИКАТ — И В МОМЕНТ РОЖДЕНИЯ ФЛАГА. Карантин ставится по ЧЛЕНСТВУ В ТУРНИРЕ (грубо и намеренно:
+  // когда правило писали, доказуема ли привязка, было неизвестно). Раскладка 02.08 показала цену этой
+  // грубости: 165 из 201 карантинных ставок имели ДОКАЗУЕМУЮ привязку и ВЕРНУЮ оценку — их держал не риск,
+  // а отсутствие проверки. Проход `reSettleSuspects` выше идёт ДО пометки, поэтому свежий флаг ждал целый
+  // тик. Второй проход — сразу после пометки: то, что подтверждается, подтверждается в тот же тик, а не
+  // копится до ручной раскладки. Идемпотентен: предикат чист, а действие — no-op, когда снимать нечего.
+  stepSync("reSettleSuspectsFresh", () => {
+    const r = reSettleSuspectBets(db, deps);
+    if (r.bookDeltaUsd !== 0) console.warn(`[reSettleSuspectsFresh] Δ книги ${r.bookDeltaUsd} — ${r.note}`);
+    return r.regraded + r.confirmed;
   }, 0);
   // R2(б): AFTER enrich — surface funded football matches that are past kickoff yet still
   // carry no provider bind (category_tier_mismatch / name-fold / dark board). Instead of a
