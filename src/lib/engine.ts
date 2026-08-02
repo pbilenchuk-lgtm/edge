@@ -17,7 +17,7 @@ import type { Bet, Competition, Match, MatchState } from "./types.js";
 import type { SportsMatchStatus } from "./sports.js";
 import { reassessNarrative, effectiveEnv } from "./llm.js";
 import { settleBet, resolveFootballMarket, matchPhase, isResolutionSettle } from "./settlement.js";
-import { classifySuspect } from "./suspectBreakdown.js";
+import { classifySuspect, bookTotals, CLASSIFY_VERSION, type BookTotals } from "./suspectBreakdown.js";
 import { isFtBlindBet } from "./betMeta.js";
 import { computeMetrics, type MetricSample } from "./metrics.js";
 import { loadPolymarketConfig, getQuotes, findMatchEvents, matchMarketSnapshots, discoverSportMatches, SPORT_LABELS, type PolymarketConfig, RESOLVED_RAIL_CENTS } from "./polymarket.js";
@@ -380,9 +380,20 @@ export function suspectResolveOutcome(bet: Bet, match: Match): boolean | null {
   return resolveOutcome(bet, match, {});
 }
 
-export function reSettleSuspectBets(db: Database, deps: EngineDeps = {}): { regraded: number; confirmed: number; deferred: number } {
+export interface ReSettleResult {
+  regraded: number; confirmed: number; deferred: number;
+  /** Дельта книги, СНЯТАЯ ИЗ БАЗЫ до и после прогона. `confirmed` по определению денег не двигает, но
+   *  стандарт со времён бэкфиллов — подтверждать нулевую дельту измерением, а не обещанием предиката. */
+  bookBefore: BookTotals; bookAfter: BookTotals; bookDeltaUsd: number;
+  /** Подпись прогона — попадает и в строки (`settle_verified_by`), и в отчёт. */
+  classifyVersion: string; at: string;
+  note: string;
+}
+
+export function reSettleSuspectBets(db: Database, deps: EngineDeps = {}): ReSettleResult {
   const now = nowFn(deps)();
-  const gap = Math.max(1, Number(deps.env?.FOOTBALL_LEG_GAP_HOURS ?? process.env.FOOTBALL_LEG_GAP_HOURS ?? 30)) * 3_600_000;
+  const gap = legGapMs(deps.env ?? process.env);
+  const bookBefore = bookTotals(db);
   const rows = db.prepare(`SELECT id FROM bets WHERE settle_suspect=1 AND status LIKE 'settled%'`).all() as { id: string }[];
   let regraded = 0, confirmed = 0, deferred = 0;
   const affected = new Set<string>();
@@ -399,10 +410,14 @@ export function reSettleSuspectBets(db: Database, deps: EngineDeps = {}): { regr
     const nextStatus = won ? "settled_won" : "settled_lost";
     // settle_verified=1 вместе со снятием: решение принято по доказанной привязке, и грубый карантин по
     // перечню турниров не должен вернуть метку при следующем же открытии базы.
-    if (bet.status === nextStatus) { db.prepare(`UPDATE bets SET settle_suspect=0, settle_verified=1 WHERE id=?`).run(id); confirmed++; continue; } // already honest
+    if (bet.status === nextStatus) {
+      db.prepare(`UPDATE bets SET settle_suspect=0, settle_verified=1, settle_verified_at=?, settle_verified_by=? WHERE id=?`)
+        .run(now, CLASSIFY_VERSION, id);
+      confirmed++; continue;                       // оценка была верна — снимается ТОЛЬКО метка, деньги не трогаются
+    }
     const patch = settleBet({ entry_price: bet.entry_price, stake: bet.stake }, won, bet.closing_price ?? null);
-    db.prepare(`UPDATE bets SET status=?, result=?, payout=?, settled_by='match_score', settled_at=?, settle_suspect=0, settle_verified=1 WHERE id=?`)
-      .run(patch.status, patch.result, patch.payout, now, id);
+    db.prepare(`UPDATE bets SET status=?, result=?, payout=?, settled_by='match_score', settled_at=?, settle_suspect=0, settle_verified=1, settle_verified_at=?, settle_verified_by=? WHERE id=?`)
+      .run(patch.status, patch.result, patch.payout, now, now, CLASSIFY_VERSION, id);
     R.insertTradeLog(db, {
       id: R.uid(), match_id: m.id, strategy_id: bet.strategy_id, minute: "пересчёт", type: "settle",
       text: `${bet.market_label}: ПЕРЕСЧЁТ по исправленной привязке (two-leg ${m.score_home}:${m.score_away}) — ${won ? "выигрыш" : "проигрыш"} → ${fmt(patch.payout)} (P&L ${fmt(patch.pnl)}; был ${bet.status})`,
@@ -411,7 +426,15 @@ export function reSettleSuspectBets(db: Database, deps: EngineDeps = {}): { regr
     regraded++; affected.add(bet.strategy_id);
   }
   for (const sid of affected) recomputeMetrics(db, sid, deps);
-  return { regraded, confirmed, deferred };
+  const bookAfter = bookTotals(db);
+  const bookDeltaUsd = Math.round((bookAfter.pnlSum - bookBefore.pnlSum) * 100) / 100;
+  const note = `снято флагов ${regraded + confirmed} (пересчитано ${regraded}, подтверждено без изменения статуса ${confirmed}), отложено ${deferred}. `
+    + `Δ книги = ${bookDeltaUsd >= 0 ? "+" : ""}$${bookDeltaUsd.toFixed(2)} `
+    + `(P&L решённых: было $${bookBefore.pnlSum.toFixed(2)} → стало $${bookAfter.pnlSum.toFixed(2)}; строк ${bookBefore.settledBets} → ${bookAfter.settledBets}) — `
+    + (bookDeltaUsd === 0
+      ? "измерено ИЗ БАЗЫ после записи, а не выведено из предиката."
+      : "НЕНУЛЕВАЯ дельта: прогон изменил деньги — это законно только для пересчитанных строк, сверить с regraded.");
+  return { regraded, confirmed, deferred, bookBefore, bookAfter, bookDeltaUsd, classifyVersion: CLASSIFY_VERSION, at: now, note };
 }
 
 function resolveOutcome(bet: Bet, match: Match, overrides: Record<string, boolean>): boolean | null {

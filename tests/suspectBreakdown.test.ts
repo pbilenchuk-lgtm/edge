@@ -13,7 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { buildSuspectBreakdown, classifySuspect } from "../src/lib/suspectBreakdown.js";
+import { buildSuspectBreakdown, classifySuspect, bookTotals, CLASSIFY_VERSION } from "../src/lib/suspectBreakdown.js";
 import { reSettleSuspectBets, isStateSuspect, suspectResolveOutcome, legGapMs } from "../src/lib/engine.js";
 
 const KO = "2026-07-20T18:00:00.000Z";
@@ -146,4 +146,55 @@ test("осиротевшая строка классифицируется, а �
   suspectBet(db, "b1", "m1", "Over 1.5", "settled_won");
   const c = classifySuspect(db, "нет-такой-ставки", OPTS);
   assert.equal(c.cls, "orphan");
+});
+
+// ── ПОСТФАКТУМ-ИЗМЕРЕНИЕ И ПОДПИСЬ СНЯТИЯ ───────────────────────────────────────────────────────
+// Стандарт со времён бэкфиллов: после КАЖДОЙ массовой записи нулевая дельта денег подтверждается
+// измерением из базы, а не выводится из предиката. Предикат уже покрыт тестом выше — но обещание и
+// факт это разные вещи, и второе дешевле первого.
+
+test("подтверждение без изменения статуса даёт Δ книги РОВНО $0.00, измеренную из базы", () => {
+  const db = seed();
+  match(db, "m1", { sh: 2, sa: 1 }); bind(db, "m1", KO); suspectBet(db, "b1", "m1", "Over 1.5", "settled_won");
+  match(db, "m2", { sh: 2, sa: 1 }); bind(db, "m2", KO); suspectBet(db, "b2", "m2", "Over 1.5", "settled_won");
+
+  const before = bookTotals(db);
+  const r = reSettleSuspectBets(db, {});
+  assert.equal(r.confirmed, 2);
+  assert.equal(r.regraded, 0);
+  assert.equal(r.bookDeltaUsd, 0);
+  assert.deepEqual(r.bookAfter, before, "ни одна цифра книги не сдвинулась");
+  assert.match(r.note, /Δ книги = \+?\$0\.00/);
+  assert.match(r.note, /измерено ИЗ БАЗЫ после записи/);
+});
+
+test("пересчёт статуса ДВИГАЕТ книгу — и отчёт это признаёт, а не прячет", () => {
+  const db = seed();
+  match(db, "m1", { sh: 0, sa: 0 }); bind(db, "m1", KO); suspectBet(db, "b1", "m1", "Over 1.5", "settled_won");
+  const r = reSettleSuspectBets(db, {});
+  assert.equal(r.regraded, 1);
+  assert.notEqual(r.bookDeltaUsd, 0, "выигрыш, переоценённый в проигрыш, обязан изменить книгу");
+  assert.match(r.note, /НЕНУЛЕВАЯ дельта/);
+});
+
+test("снятие ПОДПИСАНО: дата и версия предиката стоят в самой строке", () => {
+  const db = seed();
+  match(db, "m1", { sh: 2, sa: 1 }); bind(db, "m1", KO); suspectBet(db, "b1", "m1", "Over 1.5", "settled_won");
+  reSettleSuspectBets(db, {});
+  const row = db.prepare(`SELECT settle_suspect s, settle_verified v, settle_verified_at at, settle_verified_by by FROM bets WHERE id='b1'`).get() as any;
+  assert.equal(row.s, 0);
+  assert.equal(row.v, 1);
+  assert.equal(row.by, CLASSIFY_VERSION, "«чем снят флаг» отвечается строкой, а не памятью");
+  assert.ok(row.at && Date.parse(row.at), "и когда — тоже");
+});
+
+test("обещание отчёта = поставка прогона, число в число", () => {
+  const db = seed();
+  match(db, "ok", { sh: 2, sa: 1 }); bind(db, "ok", KO); suspectBet(db, "b1", "ok", "Over 1.5", "settled_won");
+  match(db, "st", { state: "upcoming" }); bind(db, "st", KO); suspectBet(db, "b2", "st", "Over 1.5", "settled_won");
+  const promised = buildSuspectBreakdown(db, OPTS).releasableNow;
+  const r = reSettleSuspectBets(db, {});
+  assert.equal(promised, 1);
+  assert.equal(r.regraded + r.confirmed, promised);
+  assert.equal(buildSuspectBreakdown(db, OPTS).total, 1, "остался ровно необещанный");
 });
