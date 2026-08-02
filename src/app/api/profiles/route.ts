@@ -98,6 +98,14 @@ export async function GET(req: Request) {
       const { buildSvSizingAudit } = await import("@/lib/svSizingAudit");
       return NextResponse.json({ ok: true, audit: buildSvSizingAudit(db) });
     }
+    // ?report=profile_drift → does the DECIDING RULE in the live DB still equal the one in code? Preset risk
+    // profiles are seeded only into an EMPTY database (`seedRiskProfiles` returns early if any profile exists),
+    // so a ratified threshold change in code never reaches prod. Names every differing field and which side is
+    // stricter. Read-only by design — an owner edit and a stale preset are indistinguishable in the DB.
+    if (new URL(req.url).searchParams.get("report") === "profile_drift") {
+      const { buildProfileDrift } = await import("@/lib/profileDrift");
+      return NextResponse.json({ ok: true, report: buildProfileDrift(db, new Date().toISOString()) });
+    }
     // ?report=unfillable_edge → P2 execution diagnostic: how many football edge signals fired, how many were
     // FILLABLE, and why the rest weren't (league × strategy × reason) + coverage-tier recommendation + the F3
     // model-vs-market side check on non-zombie fills. Optional &days=N window (default 14). Read-only.
@@ -178,6 +186,15 @@ export async function GET(req: Request) {
         dryFillWatch,
         blindFundedCount: listBlindFundedFootball(db, { nowMs: Date.parse(now) || Date.now() }).length,
         noFeedDigest: noFeed,
+        // Форензик 02.08: решающее правило в живой базе может тихо разойтись с кодом — пресеты профилей
+        // сеются только в ПУСТУЮ базу. Молчащее расхождение стоит канала входа, поэтому строка тут.
+        profileDrift: await (async () => {
+          try {
+            const { buildProfileDrift, profileDriftLine } = await import("@/lib/profileDrift");
+            const rep = buildProfileDrift(db, now);
+            return { line: profileDriftLine(rep), driftedFields: rep.driftedFields, profiles: rep.profiles.filter((p) => p.missing || p.fields.length > 0) };
+          } catch { return null; }
+        })(),
       });
     }
     // ?report=blind_funded → R2(б): funded football matches that ran past kickoff with NO provider bind

@@ -190,6 +190,21 @@ export async function POST(req: Request) {
         const md = buildMatchLog(db, hit.id);
         return NextResponse.json({ ok: true, matchId: hit.id, markdown: md });
       }
+      case "futureFinished": {
+        // Разовая починка данных «матч сыгран до собственного кикоффа» (futureFinished.ts) — доступная
+        // на ПРОДЕ. Скрипт `npm run future:finished` работает только там, где есть файл БД; живая база
+        // лежит на диске Render, и без этого хода к ней не подойти, а именно там химеры и сидят.
+        //
+        // СУХОЙ ПО УМОЛЧАНИЮ. `apply` меняет ТОЛЬКО состояние матча. `withSettled` — отдельный флаг,
+        // потому что «книгу не трогаем» решает владелец, а не эндпоинт; сама книга не меняется ни в одном
+        // режиме (позиции этих матчей закрыты досрочно по рыночной цене, их P&L от счёта не зависит).
+        const { repairFutureFinished } = await import("@/lib/futureFinished");
+        const rep = repairFutureFinished(db, {
+          apply: body.apply === true,
+          withSettled: body.withSettled === true,
+        });
+        return NextResponse.json({ ok: true, mode: body.apply === true ? "apply" : "dry", ...rep });
+      }
       default:
         return NextResponse.json({ ok: false, error: `неизвестное действие: ${body.action}` }, { status: 400 });
     }
