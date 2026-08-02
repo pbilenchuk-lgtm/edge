@@ -1258,7 +1258,16 @@ export async function enrichFromEspn(db: Database, provider: SportsProvider, dep
       // Stamp the Warsaw finish time HERE too: ESPN owns the live→finished transition for
       // covered matches, so enrich finishes them first and syncMatchStatus (guarded on
       // from!=="finished") then never stamps — the card would read a bare «финал».
-      R.updateMatch(db, m.id, { state: nextState, minute: s.minute, score_home: sh, score_away: sa, clock: s.clock ?? null, ...(s.final ? { final_score: `${sh ?? 0}:${sa ?? 0}` } : {}), ...(becameFinished && !m.end_time ? finishStamp(m.kickoff_at, now) : {}) });
+      // `final_score` ПИШЕТСЯ ПО ЗАВЕРШЁННОСТИ, А НЕ ПО ФЛАГУ `s.final`, И ТОЛЬКО КОГДА СЧЁТ ИЗВЕСТЕН.
+      // Здесь были два бага, и оба нашлись 02.08 при первом прогоне дожатия `bound_no_score`:
+      //  1. Условие стояло на `s.final`, а завершённость определяется шире (`s.final || state==="finished"`).
+      //     Матч, доехавший до finished через state без флага completed, получал ПОЛОВИНУ записи: счёт по
+      //     сторонам есть, строки нет. Это и есть весь класс `bound_no_score` — 3 матча MLS 23.07 с 14
+      //     ставками, которые выглядели как «счёт не добрался», хотя счёт лежал в соседней колонке.
+      //  2. `${sh ?? 0}:${sa ?? 0}` при неизвестном счёте писал «0:0» — то есть ЗАКРАШИВАЛ дыру нулём и
+      //     превращал «не знаем» в утверждение о безголевой ничьей. Нет счёта — нет строки.
+      const finishedNow = s.final || nextState === "finished";
+      R.updateMatch(db, m.id, { state: nextState, minute: s.minute, score_home: sh, score_away: sa, clock: s.clock ?? null, ...(finishedNow && sh != null && sa != null ? { final_score: `${sh}:${sa}` } : {}), ...(becameFinished && !m.end_time ? finishStamp(m.kickoff_at, now) : {}) });
       if (becameFinished) { const fresh = R.getMatch(db, m.id); if (fresh) settleMatch(db, fresh, deps); }
       const detail = await provider.matchDetail!(sport, league, s.externalRef);
       const homeLineup = detail ? (flip ? detail.lineups.away : detail.lineups.home) : null;

@@ -39,7 +39,8 @@ import { bookTotals, type BookTotals } from "./suspectBreakdown.js";
 
 /** Почему матч НЕ дожат. Закрытый список — «прочее» здесь означало бы, что дыра снова без имени. */
 export type ChaseVerdict =
-  | "filled"                 // счёт записан
+  | "filled"                 // счёт записан по ответу провайдера
+  | "local_repair"           // счёт УЖЕ был в базе, не хватало только строки final_score — источник не нужен
   | "no_bind"                // привязки нет (это `no_feed`, не наш класс)
   | "no_provider_answer"     // событие по id не отдалось
   | "not_final"              // событие ещё не завершено у провайдера
@@ -67,15 +68,21 @@ export interface ChaseResult {
   at: string; note: string;
 }
 
-/** Кандидаты класса: завершённый матч С привязкой и БЕЗ счёта. Тот же предикат, что рисует
- *  `bound_no_score` в архиве, — чтобы отчёт и проход не разошлись в том, кого они считают. */
+/**
+ * Кандидаты класса: завершённый матч С привязкой и БЕЗ счёта — ТОТ ЖЕ предикат, что рисует
+ * `bound_no_score` в архиве. Совпадение обязательно: первый прогон на проде вернул «просмотрено 0» при
+ * трёх строках в архиве, потому что здесь стояло лишнее условие `score_home IS NULL OR score_away IS NULL`.
+ * Отчёт и конвейер разошлись в том, КОГО они считают, — тот самый именной класс «два авторитета», и на
+ * этот раз я завёл его сам, в коде, который его же и лечит.
+ *
+ * Архив считает «счёта нет» по ПУСТОЙ строке `final_score` (в JS пусто и NULL, и ''), поэтому здесь так же.
+ */
 export function boundNoScoreCandidates(db: Database): { id: string; sport: string }[] {
   return db.prepare(
     `SELECT m.id AS id, c.sport_id AS sport
        FROM matches m JOIN competitions c ON c.id = m.competition_id
       WHERE m.state = 'finished'
-        AND m.final_score IS NULL
-        AND (m.score_home IS NULL OR m.score_away IS NULL)
+        AND COALESCE(m.final_score, '') = ''
         AND EXISTS(SELECT 1 FROM match_live ml WHERE ml.match_id = m.id)`,
   ).all() as { id: string; sport: string }[];
 }
@@ -123,6 +130,45 @@ export async function chaseBoundNoScore(
       espnEventId: live?.espn_event_id ?? null, eventDate: live?.espn_event_date ?? null,
       score: null as string | null, settledBets: settled.length, contradictions: [] as ChaseContradiction[],
     };
+    // (б) применяется на ОБОИХ путях — и к добранному счёту, и к локальному ремонту. Общий предикат,
+    // а не две копии: у вопроса «спорит ли счёт с состоявшейся меткой» один авторитет.
+    const contradictionsFor = (sh: number, sa: number): ChaseContradiction[] => {
+      const asIf = { ...m, score_home: sh, score_away: sa, final_score: `${sh}:${sa}` } as Match;
+      const out: ChaseContradiction[] = [];
+      for (const b of settled) {
+        if (b.result !== "won" && b.result !== "lost") continue;      // void/незакрытые исходом не спорят
+        const implied = suspectResolveOutcome(b, asIf);
+        if (implied == null) continue;                                 // резолвер не берётся судить — не противоречие
+        const impliedResult = implied ? "won" : "lost";
+        if (impliedResult !== b.result) out.push({ betId: b.id, market: b.market_label, storedResult: b.result, impliedResult });
+      }
+      return out;
+    };
+    const quarantineGroup = (score: string, contradictions: ChaseContradiction[]) => {
+      for (const b of settled) {
+        try { db.prepare(`UPDATE bets SET settle_suspect=1 WHERE id=?`).run(b.id); quarantinedBets++; } catch { /* строка не должна ронять проход */ }
+      }
+      quarantined++;
+      rows.push({
+        ...base, verdict: "contradicts_settled", score, contradictions,
+        note: `счёт ${score} спорит с ${contradictions.length} из ${settled.length} состоявшихся сеттлов — счёт НЕ записан, вся группа (${settled.length}) в settle_suspect`,
+      });
+    };
+
+    // ЛОКАЛЬНЫЙ РЕМОНТ ПЕРЕД ЛЮБЫМ ЗАПРОСОМ НАРУЖУ. Первый прогон на проде показал, что весь класс —
+    // это НЕ отсутствие счёта, а отсутствие СТРОКИ: score_home/score_away в базе лежат, а `final_score`
+    // пуст. Причина в enrich: счёт по сторонам он пишет всегда, а `final_score` — только при `s.final`.
+    // Матч, доехавший до finished через `state==="finished"` без флага completed, получает половину записи.
+    // Спрашивать провайдера о том, что уже лежит в базе, — лишний сетевой поход и лишний риск.
+    if (m.score_home != null && m.score_away != null) {
+      const score = `${m.score_home}:${m.score_away}`;
+      const contra = contradictionsFor(m.score_home, m.score_away);
+      if (contra.length) { quarantineGroup(score, contra); continue; }
+      R.updateMatch(db, m.id, { final_score: score });
+      filled++;
+      rows.push({ ...base, verdict: "local_repair", score, note: `счёт ${score} УЖЕ был в базе по сторонам — дописана только строка final_score, наружу не ходили` });
+      continue;
+    }
     if (!live?.espn_event_id || !live.league) {
       rows.push({ ...base, verdict: "no_bind", note: "match_live есть, но без event id/лиги — привязки как таковой нет" });
       continue;
@@ -152,29 +198,10 @@ export async function chaseBoundNoScore(
       continue;
     }
     const score = `${sh}:${sa}`;
-    // (б) СНАЧАЛА СВЕРКА С СОСТОЯВШИМИСЯ СЕТТЛАМИ, ПОТОМ ЗАПИСЬ. Исход считается тем же резолвером,
-    // которым его считает пере-сеттл, — иначе у одного вопроса опять два авторитета.
-    const asIf = { ...m, score_home: sh, score_away: sa, final_score: score } as Match;
-    const contradictions: ChaseContradiction[] = [];
-    for (const b of settled) {
-      if (b.result !== "won" && b.result !== "lost") continue; // void/незакрытые исходом не спорят
-      const implied = suspectResolveOutcome(b, asIf);
-      if (implied == null) continue; // резолвер не берётся судить — это не противоречие
-      const impliedResult = implied ? "won" : "lost";
-      if (impliedResult !== b.result) contradictions.push({ betId: b.id, market: b.market_label, storedResult: b.result, impliedResult });
-    }
-    if (contradictions.length) {
-      // Не перезаписываем ничего: ни счёт, ни исход. Вся группа — в карантин, разбирать человеку.
-      for (const b of settled) {
-        try { db.prepare(`UPDATE bets SET settle_suspect=1 WHERE id=?`).run(b.id); quarantinedBets++; } catch { /* строка не должна ронять проход */ }
-      }
-      quarantined++;
-      rows.push({
-        ...base, verdict: "contradicts_settled", score, contradictions,
-        note: `добранный счёт ${score} спорит с ${contradictions.length} из ${settled.length} состоявшихся сеттлов — счёт НЕ записан, вся группа (${settled.length}) в settle_suspect`,
-      });
-      continue;
-    }
+    // (б) СНАЧАЛА СВЕРКА С СОСТОЯВШИМИСЯ СЕТТЛАМИ, ПОТОМ ЗАПИСЬ. Не перезаписываем ничего: ни счёт,
+    // ни исход. Вся группа — в карантин, разбирать человеку.
+    const contradictions = contradictionsFor(sh, sa);
+    if (contradictions.length) { quarantineGroup(score, contradictions); continue; }
     R.updateMatch(db, m.id, { score_home: sh, score_away: sa, final_score: score });
     filled++;
     rows.push({ ...base, verdict: "filled", score, note: `счёт ${score} записан; ${settled.length} сеттл(ов) ему не противоречат` });
