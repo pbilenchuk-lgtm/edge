@@ -83,6 +83,50 @@ test("наведённые события матча стираются вмес
 });
 
 // ── Дыра пометки: подозрение по ФАКТУ разрыва, а не по списку турниров и не в момент расчёта ──────
+import { markLegGapSuspect, markUefaSettleSuspect } from "../src/lib/footballIntegrity.js";
+
+function bet(db: any, id: string, mid: string, status: string, settledBy: string | null) {
+  db.prepare(`INSERT INTO bets(id,match_id,strategy_id,risk_profile_id,market_label,status,entry_price,stake,settled_by,created_at)
+              VALUES(?,?,'prematch_value','medium','Under 2.5',?,50,40,?,'t')`).run(id, mid, status, settledBy);
+}
+
+test("legGap: матч с гэпом 16 дней и ТОЛЬКО досрочно закрытыми ставками получает suspect", () => {
+  // Точная форма Seattle–Portland: лига НЕ из перечня двухматчевых (MLS), все позиции закрыты early/partial,
+  // то есть до сеттл-пути, где жила маркировка, они не доходят вовсе. Прежние две проверки пропускали оба
+  // признака сразу — поэтому самый грубый разрыв из найденных оставался непомеченным.
+  const db = openDb(":memory:"); initSchema(db); seed(db);
+  R.upsertCompetition(db, { id: "mls", sport_id: "football", name: "MLS", budget: 8000, external_league: "usa.1", created_at: "t" } as any);
+  R.insertMatch(db, { id: "sea", competition_id: "mls", home: "Seattle", away: "Portland", state: "finished",
+    lineup_out: true, kickoff_at: "2026-08-02T02:30:00Z", minute: 90, score_home: 1, score_away: 5, final_score: "1:5",
+    kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "sea" } as any);
+  R.upsertMatchLive(db, { match_id: "sea", espn_event_id: "e-old", league: "usa.1",
+    espn_event_date: "2026-07-17T02:30:00Z", home_lineup: null, away_lineup: null, stats: null, updated_at: "2026-07-22T21:42:32Z" });
+  bet(db, "s1", "sea", "settled_lost", "early");
+  bet(db, "s2", "sea", "settled_lost", "partial");
+  bet(db, "s3", "sea", "open", null);
+
+  const dry = markLegGapSuspect(db, {}, { apply: false });
+  assert.equal(dry.mismatched, 1);
+  assert.equal(dry.rows[0].gapDays, 16, "разрыв ровно шестнадцать дней");
+  assert.equal((db.prepare(`SELECT COUNT(*) n FROM bets WHERE settle_suspect=1`).get() as any).n, 0, "сухой прогон не метит");
+
+  const r = markLegGapSuspect(db, {});
+  assert.equal(r.betsTagged, 3, "помечены ВСЕ ставки матча, включая открытую и закрытые досрочно");
+  assert.equal((db.prepare(`SELECT COUNT(*) n FROM bets WHERE settle_suspect=1`).get() as any).n, 3);
+});
+
+test("legGap: честная привязка в пределах допуска НЕ метится, и повтор ничего не добавляет", () => {
+  const db = openDb(":memory:"); initSchema(db); seed(db);
+  R.insertMatch(db, { id: "ok", competition_id: "c1", home: "A", away: "B", state: "finished", lineup_out: true,
+    kickoff_at: "2026-07-28T18:00:00Z", minute: 90, score_home: 1, score_away: 0, final_score: "1:0",
+    kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "ok" } as any);
+  R.upsertMatchLive(db, { match_id: "ok", espn_event_id: "e-same", league: "uefa.conf",
+    espn_event_date: "2026-07-28T18:00:00Z", home_lineup: null, away_lineup: null, stats: null, updated_at: "t" });
+  bet(db, "o1", "ok", "settled_won", "match_score");
+  assert.equal(markLegGapSuspect(db, {}).betsTagged, 0);
+  assert.equal(markLegGapSuspect(db, {}).betsTagged, 0, "идемпотентно: второй проход не метит заново");
+});
+
 test("--with-settled чинит состояние и НЕ трогает книгу", () => {
   const db = openDb(":memory:"); initSchema(db); seed(db);
   match(db, "m5", "2026-07-30T18:00:00Z", "finished", { minute: 90, score_home: 2, score_away: 1 });
@@ -101,24 +145,29 @@ test("--with-settled чинит состояние и НЕ трогает кни
   assert.match(r.note, /книга не изменена/);
 });
 
+test("маятник метки: осознанно снятую метку boot-миграция НЕ возвращает", () => {
+  // `guard:check` одним запуском вернул 135 меток — initSchema зовёт markUefaSettleSuspect при КАЖДОМ
+  // открытии базы, а тик до этого снял их по доказанной привязке. Флаг, которым вердиктные срезы
+  // выбрасывают строки, начинал зависеть от истории запусков, а не от данных.
+  //
+  // Различать надо не «привязка чистая» (тест Raków показал, почему: там она чистая СЕЙЧАС, а считали по
+  // грязной РАНЬШЕ), а «строку уже осмотрели и осознанно освободили».
+  const db = openDb(":memory:"); initSchema(db); seed(db);
+  R.upsertCompetition(db, { id: "ucl", sport_id: "football", name: "UCL", budget: 8000, external_league: "uefa.champions", created_at: "t" } as any);
+  R.insertMatch(db, { id: "m", competition_id: "ucl", home: "A", away: "B", state: "finished", lineup_out: true,
+    kickoff_at: "2026-07-28T18:00:00Z", minute: 90, score_home: 1, score_away: 0, final_score: "1:0",
+    kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "m" } as any);
+  bet(db, "b1", "m", "settled_won", "match_score");
 
-// ── F2 ПОДКЛЮЧЁН К ХИМЕРА-КЛАССУ ────────────────────────────────────────────────────────────────
-// Прод 02.08 держал две строки finished при кикоффе 08.08 — и НИ ОДНА не несла state_suspect.
-// Причина: finishSuspectReason судил только минуту («финиш раньше 80-й»), а «завершён раньше
-// собственного кикоффа» мимо этого порога проходил. Ветка добавлена и проверяется ПЕРВОЙ.
-import { finishSuspectReason } from "../src/lib/engine.js";
+  assert.equal(markUefaSettleSuspect(db, {}), 1, "непроверенная строка метится — грубый карантин на месте");
 
-test("F2: завершение раньше собственного кикоффа — state_suspect, даже при честных 90 минутах", () => {
-  const now = "2026-08-02T15:00:00Z";
-  const ok90 = { state: "finished", detail: "FT", clock: "90'", scoreHome: 1, scoreAway: 0 } as any;
-  // Химера: часы идеальные, но кикофф на неделю вперёд.
-  const chimera = finishSuspectReason(ok90, {}, "2026-08-08T14:00:00Z", now);
-  assert.ok(chimera && /РАНЬШЕ собственного кикоффа/.test(chimera), `ожидали подозрение, получили: ${chimera}`);
-  // Нормальный вчерашний матч на 90-й — подозрения нет.
-  assert.equal(finishSuspectReason(ok90, {}, "2026-08-01T14:00:00Z", now), null);
-  // Ветка минут не сломана: обрыв фида на 40-й по-прежнему ловится.
-  const early = { state: "finished", detail: "FT", clock: "40'", scoreHome: 0, scoreAway: 0 } as any;
-  assert.match(String(finishSuspectReason(early, {}, "2026-08-01T14:00:00Z", now)), /фид оборвался/);
-  // Без кикоффа/времени ветка молчит — судить нечем (fail-open на неоднозначности).
-  assert.equal(finishSuspectReason(ok90, {}, null, now), null);
+  // Проверка прошла и метку сняли осознанно (так делают backfill и re-settle).
+  db.prepare(`UPDATE bets SET settle_suspect=0, settle_verified=1 WHERE id='b1'`).run();
+
+  assert.equal(markUefaSettleSuspect(db, {}), 0, "повторное открытие базы метку НЕ возвращает");
+  assert.equal(markUefaSettleSuspect(db, {}), 0, "и на третьем тоже — маятник остановлен");
+
+  // А снятие БЕЗ проверки (settle_verified=0) — это «ещё не смотрели», карантин обязан вернуться.
+  db.prepare(`UPDATE bets SET settle_suspect=0, settle_verified=0 WHERE id='b1'`).run();
+  assert.equal(markUefaSettleSuspect(db, {}), 1, "неподтверждённое снятие карантин не отменяет");
 });

@@ -9,7 +9,8 @@
   },
   "scripts": {
     "dev": "NODE_OPTIONS=--experimental-sqlite next dev",
-    "build": "next build",
+    "build": "npm run manifest:check && next build",
+    "manifest:check": "node --import tsx scripts/manifest-check.ts",
     "start": "NODE_OPTIONS=--experimental-sqlite next start",
     "db:seed": "node --experimental-sqlite --import tsx scripts/seed.ts",
     "smoke": "node --experimental-sqlite --import tsx scripts/smoke.ts",

@@ -192,7 +192,7 @@ export function transact<T>(db: Database, fn: () => T): T {
 export function openDb(path: string): Database {
   const { DatabaseSync } = require("node:sqlite") as SqliteModule;
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA foreign_keys = ON;");
+  db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 10000;");
   initSchema(db);
   return db;
 }
@@ -269,6 +269,22 @@ export function initSchema(db: Database): void {
     // knows both sides. Before this the row kept only outcomes[0]'s token (external_ref); when the
     // favourite was the second-named player the engine held the WRONG token (the fourth orientation bug).
     "ALTER TABLE markets ADD COLUMN token_second TEXT",
+    "ALTER TABLE bets ADD COLUMN settled_via TEXT",
+    // Снятие карантина ОСОЗНАННЫМ решением (доказанная привязка / честный пере-сеттл). Отличается от
+    // settle_suspect=0 тем, что означает «проверено», а не «ещё не смотрели».
+    "ALTER TABLE bets ADD COLUMN settle_verified INTEGER NOT NULL DEFAULT 0",
+    // W1/Z2: судьба куска (payout−stake на закрытии) — ОТДЕЛЬНОЕ поле от исхода рынка, чтобы торговый
+    // P&L куска больше никогда не маскировался под предсказание (Over 1.5: lost@11.7 + won@54.8 на одном
+    // рынке — рынок «разрешился в обе стороны», потому что метка шла от знака P&L).
+    "ALTER TABLE bets ADD COLUMN piece_pnl REAL",
+    // 0 = метка куска ещё не сверена с рынком · 1 = выставлена по исходу рынка · 2 = accounting_unverifiable
+    // (проверить нечем — потребители калибровки обязаны отбрасывать, как settle_suspect).
+    "ALTER TABLE bets ADD COLUMN market_labeled INTEGER NOT NULL DEFAULT 0",
+    // [пункт 6] Выход адресуется ПО СТАВКЕ: два профиля одной стратегии держат тот же рынок и писали
+    // неразличимые строки, поэтому каждая из двух ставок забирала ОБА выхода.
+    "ALTER TABLE trade_log ADD COLUMN bet_id TEXT",
+    // Phase D: сухой прогон и живой ордер обязаны различаться ПОЛЕМ, а не догадкой по контексту.
+    "ALTER TABLE real_orders ADD COLUMN dry INTEGER NOT NULL DEFAULT 1",
     // origin phase as a FIELD with provenance (was read-time inferred in profileAnalytics). Backfilled
     // once by migrateBetOrigin below; new bets stamp it in insertBet.
     "ALTER TABLE bets ADD COLUMN origin TEXT",

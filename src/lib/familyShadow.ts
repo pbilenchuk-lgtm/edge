@@ -94,13 +94,13 @@ function shadowToBetRec(r: ShadowRow): BetRec {
   return {
     id: `fsh:${r.match_id}:${r.market_label}`, matchId: r.match_id, matchLabel: r.match_id, competitionId: "", category: "",
     strategyId: FAMILY_SHADOW_STRATEGY, strategy: FAMILY_SHADOW_STRATEGY, profileId: "medium", market: r.market_label,
+    // Теневая строка несёт СВОЮ снятую линию закрытия (closing_cents) — это и есть линия, а не цена выхода:
+    // теневая ставка никогда не выходит досрочно. Где её не сняли — n/a по той же причине, что и везде.
+    clvSource: r.closing_cents != null && entry != null ? "closing_line" : "no_snapshot", closingLineCents: r.closing_cents ?? null, exitsAmbiguous: false,
     phase: "prematch", minute: null, scoreHome: null, scoreAway: null, edge: null, aiProb: r.our_prob, derivedProb: null,
     impliedProb: entry != null ? entry / 100 : r.implied, marketPrice: null, liveProbAdjusted: null,
     entryCents: entry, closingCents: r.closing_cents, kelly: null, sizeRequested: null, sizeFilled: null, entrySlipCents: null,
     calibration: null, branchWeightSum: null, thinnessUsd: null, winsOnEvent: false, codeVersion: r.code_version,
-    // Would-be запись shadow-когорты несёт СВОЙ замороженный closing_cents (снят при записи), а не линию
-    // из `markets` — источник называется как есть, чтобы покрытие CLV не считало её измеренной по линии.
-    clvSource: "no_snapshot", closingLineCents: r.closing_cents ?? null,
     status: r.status, settledBy: null, outcome, stake, payout: null, pnl, bookPnl: pnl, clvCents: clv, finalScore: null,
     decisionId: null, createdAt: r.created_at, kickoffAt: r.kickoff_at, exitCodeVersion: null, exits: [],
   };
