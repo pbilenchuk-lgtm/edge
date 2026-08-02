@@ -136,3 +136,52 @@ test("ещё открытая позиция во вклад НЕ входит �
   assert.equal(r.weeks.length, 0);
   assert.match(r.note, /ОТСУТСТВИЕ ЗАМЕРА/);
 });
+
+// ── D2: ЗНАЧИМОСТЬ СЧИТАЕТСЯ ПО СИГНАЛАМ, А НЕ ПО СТРОКАМ ───────────────────────────────────────
+// 02.08 я посчитал «24 из 24» по СТРОКАМ и получил p=0.00004. За ними стояло ТРИ различных сигнала
+// (матч×рынок); строки — это профили и куски ОДНОГО события. По сигналам p=0.28, то есть обычная
+// тройка подряд. Ложная значимость едва не стала основанием для механизма D3.
+
+import { groupSignificance, GROUP_BASE_WIN, type ForensicRow } from "../src/lib/anomalyForensic.js";
+
+const row = (match: string, market: string, outcome: string): ForensicRow => ({
+  betId: `${match}-${market}-${outcome}-${Math.round(Math.random() * 1e9)}`, matchLabel: match, competitionId: "c",
+  group: "g", market, status: "settled_won", outcome, settledBy: "early", finalScore: "1:0",
+  impliedByScore: true, flags: ["clean"], note: "",
+});
+
+test("D2: восемь строк одного матч×рынка — это ОДИН сигнал, а не восемь испытаний", () => {
+  const rows = Array.from({ length: 8 }, () => row("A — B", "Under 3.5", "won"));
+  const s = groupSignificance(rows, GROUP_BASE_WIN, "ge");
+  assert.equal(s.rows, 8);
+  assert.equal(s.signals, 1, "профили и куски одного рынка схлопываются в одно событие");
+  assert.equal(s.signalsWon, 1);
+});
+
+test("D2: ложная значимость по строкам исчезает при честном схлопывании", () => {
+  // 24 строки, все выигравшие, но за ними ТРИ матч×рынка — ровно прод-случай 02.08.
+  const rows = [
+    ...Array.from({ length: 12 }, () => row("Nordsjælland — Randers", "Under 3.5", "won")),
+    ...Array.from({ length: 10 }, () => row("CS Cristal — ADC Juan", "Under 3.5", "won")),
+    ...Array.from({ length: 2 }, () => row("Cajamarca — Huancayo", "Under 2.5", "won")),
+  ];
+  const s = groupSignificance(rows, GROUP_BASE_WIN, "ge");
+  assert.equal(s.signals, 3);
+  assert.equal(s.signalsWon, 3);
+  assert.ok(s.p != null && s.p > 0.05, `p по сигналам обязан быть НЕзначим, получено ${s.p}`);
+  assert.equal(s.significant, false);
+  assert.match(s.note, /дисперсия НЕ отвергнута/);
+  // Для сравнения: по строкам это дало бы 0.657^24 ≈ 0.00004 — та самая ложная значимость.
+  assert.ok(Math.pow(GROUP_BASE_WIN, 24) < 0.0001, "именно так и выглядела ошибка");
+});
+
+test("D2: значимость НЕ исчезает там, где сигналов действительно много", () => {
+  const rows = [
+    ...Array.from({ length: 20 }, (_, i) => row(`M${i}`, "Under 2.5", "lost")),
+    ...Array.from({ length: 5 }, (_, i) => row(`W${i}`, "Under 2.5", "won")),
+  ];
+  const s = groupSignificance(rows, GROUP_BASE_WIN, "le");
+  assert.equal(s.signals, 25);
+  assert.ok(s.p != null && s.p < 0.05, "25 независимых сигналов при 5 победах — это значимо, и схлопывание этого не прячет");
+  assert.equal(s.significant, true);
+});
