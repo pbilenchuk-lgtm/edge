@@ -29,6 +29,8 @@ import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { findComplementMarket } from "./complementMarket.js";
 import { settleBet } from "./settlement.js";
+import { defaultResolveTokens } from "./pmResolution.js";
+import { bookTotals, type BookTotals } from "./suspectBreakdown.js";
 
 export interface BackfillResult { marketsScanned: number; tokensWritten: number; matches: number }
 
@@ -69,7 +71,17 @@ export interface RetroAuditResult {
   examined: number; complementFound: number; reSettled: number;
   /** Rows the DB refused to write right now (lock contention with the running app). Idempotent: re-run. */
   deferred: number;
-  won: number; lost: number; bankDeltaUsd: number; rows: RetroAuditRow[]; note: string;
+  won: number; lost: number;
+  /** Сумма, которую проход СОБИРАЛСЯ записать (предикат). */
+  bankDeltaUsd: number;
+  /** Книга ДО и ПОСЛЕ, снятая ИЗ БАЗЫ, и измеренная дельта — второй, независимый путь к тому же числу. */
+  bookBefore?: BookTotals; bookAfter?: BookTotals; bookMeasuredUsd?: number;
+  /** Сошлись ли обещание и факт. `false` — находка, а не помеха. */
+  deltaAgrees?: boolean;
+  /** Сколько токенов резолвер реально вернул с ценой. Ноль при непустом `complementFound` = источник не
+   *  ответил, и такой проход НЕ ИМЕЕТ ПРАВА считаться отработавшим за сутки. */
+  resolvedTokens?: number;
+  rows: RetroAuditRow[]; note: string;
 }
 
 type ResolveTokensFn = (tokens: string[]) => Promise<Record<string, { priceCents: number | null; closed: boolean }>>;
@@ -82,6 +94,7 @@ export async function auditComplementVoids(
   db: Database, deps: EngineDeps & { resolveTokens?: ResolveTokensFn } = {}, opts: { apply?: boolean } = {},
 ): Promise<RetroAuditResult> {
   const now = deps.now?.() ?? new Date().toISOString();
+  const bookBefore = bookTotals(db);
   const res: RetroAuditResult = { examined: 0, complementFound: 0, reSettled: 0, deferred: 0, won: 0, lost: 0, bankDeltaUsd: 0, rows: [], note: "" };
 
   // Sweep BOTH refund tags, and select on the reason — the single-token path tags 'void', not 'void_timeout'.
@@ -108,9 +121,19 @@ export async function auditComplementVoids(
     return res;
   }
 
-  const resolver = deps.resolveTokens;
-  if (!resolver) { res.note = `${res.complementFound} возвратов имеют комплемент, но резолвер токенов не передан — прогон только по данным БД невозможен.`; return res; }
+  // РЕЗОЛВЕР ПОДСТАВЛЯЕТСЯ ПО УМОЛЧАНИЮ — ТОЧНО КАК В pmResolution.
+  // Здесь стоял отказ «резолвер не передан», и он был честным: проход громко объявлял, что не может
+  // работать. Беда в том, что передавал его ТОЛЬКО скрипт (scripts/complement-audit.ts), а ежедневный вызов
+  // из цикла — нет. Прод 02.08: examined 43, complementFound 23, reSettled 0 — каждый день, с 01:41, с
+  // правильным диагнозом в поле `note`, которое до сегодня наружу не выводилось.
+  //
+  // Это именной класс проекта «скрипт умеет, код не умеет» — тот же, что был у CLV. Лечится не строкой на
+  // месте вызова (её забудут снова), а тем, что МОДУЛЬ САМ знает свою зависимость: ровно как pmResolution,
+  // где стоит `deps.resolveTokens ?? defaultResolveTokens(deps)`. Теперь два пути не могут разойтись,
+  // потому что путь один.
+  const resolver = deps.resolveTokens ?? defaultResolveTokens(deps);
   const map = await resolver([...tokens]);
+  res.resolvedTokens = Object.values(map).filter((v) => v && v.priceCents != null).length;
 
   const HI = 95, LO = 5;                                 // same resolving band the live settler uses
   for (const p of pending) {
@@ -147,6 +170,14 @@ export async function auditComplementVoids(
     }
   }
   res.bankDeltaUsd = Math.round(res.bankDeltaUsd * 100) / 100;
+  // Δ КНИГИ ИЗМЕРЯЕТСЯ ИЗ БАЗЫ, А НЕ СУММИРУЕТСЯ ПРЕДИКАТОМ. `bankDeltaUsd` выше — сумма того, что проход
+  // СОБИРАЛСЯ записать; `bookMeasuredUsd` — то, что в базе реально изменилось. Стандарт массовых записей с
+  // пере-сеттла: обещание и факт подтверждаются РАЗНЫМИ путями. Расхождение здесь означает, что часть строк
+  // не долетела (блокировка, исключение) при уже увеличенном счётчике, — то есть отчёт врёт в свою пользу.
+  res.bookBefore = bookBefore;
+  res.bookAfter = opts.apply ? bookTotals(db) : bookBefore;
+  res.bookMeasuredUsd = Math.round((res.bookAfter.pnlSum - bookBefore.pnlSum) * 100) / 100;
+  res.deltaAgrees = !opts.apply || Math.abs(res.bookMeasuredUsd - res.bankDeltaUsd) < 0.01;
   const deferNote = res.deferred ? ` ОТЛОЖЕНО ${res.deferred} строк(и) — БД была занята приложением; проход идемпотентен, просто запустите ещё раз.` : "";
   // Three distinct outcomes, and they must NOT share a sentence. "Nothing re-settled because the pairs were
   // not clean" and "nothing re-settled because the DB was busy" look identical in a count and mean opposite
@@ -159,5 +190,8 @@ export async function auditComplementVoids(
       ? `проверено ${res.examined}, комплемент нашёлся у ${res.complementFound}, но ни один не дал чистой разрешающей пары — история не переписана. Это хороший исход: дыра не съела прошлых денег.${deferNote}`
       : `${opts.apply ? "ПЕРЕ-СЕТТЛЕНО" : "БУДЕТ пере-сеттлено (сухой прогон)"}: ${res.reSettled} возвратов оказались реальными исходами ` +
         `(${res.won} выигрышей / ${res.lost} проигрышей), Δ банка $${res.bankDeltaUsd.toFixed(2)}. Это деньги, снятые со стола таймаутом из-за несохранённого указателя.${deferNote}`;
+  if (!res.deltaAgrees) {
+    res.note += ` ⚠ РАСХОЖДЕНИЕ: предикат обещал $${res.bankDeltaUsd.toFixed(2)}, база показывает $${res.bookMeasuredUsd.toFixed(2)} — счётчик врёт в свою пользу, разбирать, а не объяснять.`;
+  }
   return res;
 }
