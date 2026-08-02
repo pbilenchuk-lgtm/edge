@@ -1328,3 +1328,37 @@ test("завершённое событие БЕЗ счёта не получа�
   assert.equal(m.state, "finished");
   assert.equal(m.final_score, null, "нет счёта — нет строки; «0:0» было бы утверждением о безголевой ничьей");
 });
+
+// ── ВЫДУМАННЫЙ «0:0»: ОДНО ПРАВИЛО НА ВСЕХ ТРЁХ ПИСАТЕЛЕЙ СТРОКИ СЧЁТА ───────────────────────────
+// `final_score` пишут три места: enrichFromEspn, syncMatchStatus и создание матча из статуса. Все три
+// делали `${score ?? 0}:${score ?? 0}`, то есть завершённый матч с НЕИЗВЕСТНЫМ счётом получал «0:0» —
+// «не знаем» превращалось в утверждение о безголевой ничьей, а архив после этого читал клетку как
+// заполненную, и дыра пропадала с радаров. 02.08 я починил один экземпляр и нашёл ещё два.
+// Деньги это не двигало (resolveOutcome смотрит на стороны, а не на строку) — оно скрывало дыру.
+
+test("syncMatchStatus: финал БЕЗ счёта не пишет выдуманное «0:0»", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.updateMatch(db, "m-live", { external_ref: "NOSCORE1", score_home: null, score_away: null, final_score: null });
+  await syncMatchStatus(db, { externalRef: "NOSCORE1", home: "Бразилия", away: "Англия", state: "finished", minute: 90, scoreHome: null, scoreAway: null, final: true } as SportsMatchStatus, CFG);
+  const m = R.getMatch(db, "m-live")!;
+  assert.equal(m.state, "finished");
+  assert.equal(m.final_score, null, "нет счёта — нет строки");
+});
+
+test("syncMatchStatus: финал СО счётом строку пишет — запрет касается только неизвестного", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.updateMatch(db, "m-live", { external_ref: "SCORE1", score_home: null, score_away: null, final_score: null });
+  await syncMatchStatus(db, { externalRef: "SCORE1", home: "Бразилия", away: "Англия", state: "finished", minute: 90, scoreHome: 0, scoreAway: 2, final: true } as SportsMatchStatus, CFG);
+  assert.equal(R.getMatch(db, "m-live")!.final_score, "0:2");
+});
+
+test("создание матча из статуса: завершённый БЕЗ счёта тоже не получает «0:0»", () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const { match } = upsertImportedMatch(db, "wc2026", { externalRef: "NEW1", home: "Ghana", away: "Colombia", state: "finished", minute: 90, scoreHome: null, scoreAway: null, final: true } as SportsMatchStatus);
+  assert.equal(match.final_score, null);
+  const { match: scored } = upsertImportedMatch(db, "wc2026", { externalRef: "NEW2", home: "Kenya", away: "Peru", state: "finished", minute: 90, scoreHome: 1, scoreAway: 3, final: true } as SportsMatchStatus);
+  assert.equal(scored.final_score, "1:3");
+});
