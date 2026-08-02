@@ -13,6 +13,7 @@ import { winsOnEventOccurrence } from "./thresholds.js";
 import { canonicalProfileId } from "./riskProfiles.js";
 import { isResolutionSettle } from "./settlement.js";
 import { epochNum, crossEpoch } from "./codeEpoch.js";
+import { clvLeg, type ClvSource } from "./clv.js";
 
 export interface ProfileFilter {
   fromMs?: number; toMs?: number;      // created_at window
@@ -47,6 +48,10 @@ export interface BetRec {
   calibration: number | null; branchWeightSum: number | null; thinnessUsd: number | null;
   winsOnEvent: boolean; codeVersion: string | null;
   status: string; settledBy: string | null; outcome: "won" | "lost" | "void" | "open";
+  /** [пункт 6] Откуда взялась нога CLV: `closing_line` — посчитана по реальной линии; остальное — n/a с
+   *  указанием ПРИЧИНЫ (снимка нет / снимок протух / у матча нет часов). n/a законен только там, где линии
+   *  физически нет в данных, и НЕ законен там, где линия есть и просто неудобна. */
+  clvSource: ClvSource; closingLineCents: number | null;
   stake: number; payout: number | null; pnl: number | null; clvCents: number | null; finalScore: string | null;
   // bookPnl [Phase-0 H2]: the record's P&L ONLY when it was realized on a real book fill; null when the exit
   // rode a stale/modelled price (no live bid would have paid) — so the signal P&L verdict/bootstrap/
@@ -91,7 +96,7 @@ export function classifyExitTrigger(text: string, settledBy: string | null | und
 }
 
 /** All bets as normalized analytic records (filtered). Exits parsed from the trade log. */
-export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
+export function betRecords(db: Database, filter: ProfileFilter = {}, env: Record<string, string | undefined> = process.env): BetRec[] {
   const comps = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
   const strats = new Map(R.listStrategies(db).map((s) => [s.id, s.name]));
   const matchCache = new Map<string, ReturnType<typeof R.getMatch>>();
@@ -130,10 +135,14 @@ export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
     const stake = b.stake ?? 0;
     const pnl = settled && b.payout != null ? Math.round((b.payout - stake) * 100) / 100 : null;
     const entryCents = num(b.entry_price), closingCents = num(b.closing_price);
-    // CLV: how the closing (T-0) line moved vs our entry, in ¢, in the DIRECTION of the
-    // bet. We always hold the token we bought, so entry/closing are already same-side →
-    // clv = close − entry works for a Yes market and a No market alike.
-    const clvCents = entryCents != null && closingCents != null ? Math.round((closingCents - entryCents) * 10) / 10 : null;
+    // [пункт 6] CLV МЕРЯЕТСЯ ПО ЛИНИИ ЗАКРЫТИЯ. Раньше — по `bets.closing_price`, а это НЕ линия: при
+    // досрочном выходе туда пишется наша собственная цена выхода (тогда «CLV» = тот же P&L в центах, и
+    // всякая фиксация прибыли даёт положительный CLV по построению — две ноги вердикта переставали быть
+    // независимыми), а при расчёте по резолюции — цена разрешения (тогда «CLV» = исход). Настоящая линия
+    // берётся из снимков котировок до конца матча; где снимка нет — n/a, и это честный ответ, а не повод
+    // подставить что-нибудь похожее. Подробности и правило отсечки — в clv.ts.
+    const clv = clvLeg(db, m, { market_label: b.market_label, entry_price: entryCents, entry_meta: b.entry_meta ?? null }, env);
+    const clvCents = clv.clvCents;
     // Exits for this position: same strategy + market label, matched loosely.
     const exits: ExitRec[] = exitsFor(b.match_id)
       .filter((e) => e.strategy_id === b.strategy_id && e.text.includes(`«${b.market_label}»`))
@@ -161,7 +170,7 @@ export function betRecords(db: Database, filter: ProfileFilter = {}): BetRec[] {
       sizeRequested: em?.sizeRequested ?? null, sizeFilled: em?.sizeFilled ?? (settled || b.status === "open" ? stake : null), entrySlipCents: em?.entrySlipCents ?? null,
       calibration: em?.calibration ?? null, branchWeightSum: em?.branchWeightSum ?? null, thinnessUsd: em?.marketThinnessUsd ?? null,
       winsOnEvent: em?.winsOnEvent ?? winsOnEventOccurrence(b.market_label), codeVersion: b.code_version ?? null,
-      status: b.status, settledBy: b.settled_by ?? null, outcome,
+      status: b.status, settledBy: b.settled_by ?? null, outcome, clvSource: clv.source, closingLineCents: clv.closingLineCents,
       stake, payout: num(b.payout), pnl, bookPnl, clvCents, finalScore: m.final_score ?? null,
       decisionId: b.decision_id ?? null, createdAt: b.created_at ?? null, kickoffAt: m.kickoff_at ?? null, exitCodeVersion: b.exit_code_version ?? null, exits,
     });

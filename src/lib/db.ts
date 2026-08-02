@@ -36,7 +36,7 @@ export interface Database {
 }
 
 interface SqliteModule {
-  DatabaseSync: new (path: string) => Database;
+  DatabaseSync: new (path: string, opts?: { readOnly?: boolean }) => Database;
 }
 
 let _db: Database | null = null;
@@ -194,6 +194,26 @@ export function openDb(path: string): Database {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys = ON;");
   initSchema(db);
+  return db;
+}
+
+/**
+ * Открыть базу ТОЛЬКО ДЛЯ ЧТЕНИЯ — для скриптов-отчётов, которые обязаны ничего не менять.
+ *
+ * `openDb` вызывает `initSchema`, а тот прогоняет всю schema.sql, список ALTER-миграций И маркировку
+ * settle_suspect. То есть каждый «read-only отчёт», открытый через openDb, на самом деле писал в прод-базу:
+ * `npm run guard:check` одним запуском пометил 135 ставок. Измерение, меняющее измеряемое, хуже отсутствия
+ * измерения — оно выглядит как наблюдение.
+ *
+ * Здесь соединение открывается флагом SQLite: любая попытка записи не «пропускается тихо», а падает с
+ * ошибкой. Это и есть смысл — скрипт, который случайно попробует что-то изменить, обязан сломаться громко,
+ * а не молча испортить данные. Схема не создаётся: базы нет — отчёту нечего показывать, и притворяться
+ * незачем.
+ */
+export function openDbReadOnly(path: string): Database {
+  const { DatabaseSync } = require("node:sqlite") as SqliteModule;
+  const db = new DatabaseSync(path, { readOnly: true });
+  db.exec("PRAGMA busy_timeout = 10000;");   // приложение пишет параллельно — читателю положено ждать, а не падать
   return db;
 }
 

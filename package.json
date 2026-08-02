@@ -33,6 +33,7 @@
     "shadow:report": "node --experimental-sqlite --import tsx scripts/shadow-report.ts",
     "test": "node --experimental-sqlite --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
+    "clv:coverage": "node --experimental-sqlite --import tsx scripts/clv-coverage.ts",
     "future:finished": "tsx scripts/future-finished.ts"
   },
   "dependencies": {

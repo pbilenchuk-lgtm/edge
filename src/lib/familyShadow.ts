@@ -98,6 +98,9 @@ function shadowToBetRec(r: ShadowRow): BetRec {
     impliedProb: entry != null ? entry / 100 : r.implied, marketPrice: null, liveProbAdjusted: null,
     entryCents: entry, closingCents: r.closing_cents, kelly: null, sizeRequested: null, sizeFilled: null, entrySlipCents: null,
     calibration: null, branchWeightSum: null, thinnessUsd: null, winsOnEvent: false, codeVersion: r.code_version,
+    // Would-be запись shadow-когорты несёт СВОЙ замороженный closing_cents (снят при записи), а не линию
+    // из `markets` — источник называется как есть, чтобы покрытие CLV не считало её измеренной по линии.
+    clvSource: "no_snapshot", closingLineCents: r.closing_cents ?? null,
     status: r.status, settledBy: null, outcome, stake, payout: null, pnl, bookPnl: pnl, clvCents: clv, finalScore: null,
     decisionId: null, createdAt: r.created_at, kickoffAt: r.kickoff_at, exitCodeVersion: null, exits: [],
   };
