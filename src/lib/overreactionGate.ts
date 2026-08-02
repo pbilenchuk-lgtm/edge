@@ -19,6 +19,7 @@
 // Read-only; never writes. Exposed at GET /api/real?report=overreaction_gate.
 // ============================================================
 
+import { clvLeg, clvCoverage, type ClvLeg } from "./clv.js";
 import type { Database } from "./db.js";
 import { codeEpochOf, crossEpoch, epochNum } from "./codeEpoch.js";
 import { betRecords } from "./profileAnalytics.js";
@@ -26,9 +27,33 @@ import { cleanEpochRecords } from "./profileEpochCut.js";
 import { signalCohort } from "./signals.js";
 
 
+/** Состояние ноги CLV. Число без состояния — цифра с видом измерения, и на такой ноге вердикт читать нельзя.
+ *  `measured`   — посчитана кодом по РЕАЛЬНОЙ линии закрытия (clv.ts) на достаточной доле выборки;
+ *  `thin`       — посчитана так же, но покрытие ниже пола: читается как намёк, ногой вердикта не является;
+ *  `unverified` — числа нет вовсе (ни одной линии закрытия в когорте). Не путать с «CLV = 0». */
+export type ClvLegState = "measured" | "thin" | "unverified";
+
+/** Доля когорты, ниже которой средний CLV перестаёт быть статистикой когорты. */
+export const CLV_COVERAGE_FLOOR_PCT = 50;
+
 /** win% / P&L / CLV over a cohort — the SAME three verdict metrics, for the gate cohort and (diagnostically)
  *  the cash-out cohort side by side. */
-export interface CohortMetrics { n: number; won: number; lost: number; winPct: number | null; pnlUsd: number; clvCents: number | null }
+export interface CohortMetrics {
+  n: number; won: number; lost: number; winPct: number | null; pnlUsd: number;
+  clvCents: number | null;
+  /** Состояние ноги CLV и покрытие, по которому оно назначено. */
+  clvState: ClvLegState;
+  clvCoverage: { total: number; measured: number; naNoSnapshot: number; naStale: number; naNoClock: number; pctMeasured: number | null };
+}
+
+/** Как показывать ногу CLV в тексте: без состояния — никогда. */
+export function clvLegText(c: CohortMetrics): string {
+  if (c.clvState === "unverified") return "CLV не измерен (нет ни одной линии закрытия в когорте) — нога вердикта ОТСУТСТВУЕТ, а не равна нулю";
+  const cov = `покрытие ${c.clvCoverage.pctMeasured ?? 0}% (${c.clvCoverage.measured}/${c.clvCoverage.total})`;
+  return c.clvState === "thin"
+    ? `CLV ${c.clvCents}¢ ПРИ ТОНКОМ ПОКРЫТИИ — ${cov} < ${CLV_COVERAGE_FLOOR_PCT}%: намёк, не нога вердикта`
+    : `CLV ${c.clvCents}¢ по линии закрытия, ${cov}`;
+}
 
 export interface OverreactionGate {
   target: number;              // the pre-set sample gate (30)
@@ -62,24 +87,41 @@ export interface OverreactionGate {
 export function buildOverreactionGate(db: Database, target = 30, cleanEpochMin = 5): OverreactionGate {
   const rows = db.prepare(
     `SELECT b.status, b.settled_by, b.code_version, b.exit_code_version, b.settle_suspect,
-            b.payout, b.stake, b.entry_price, b.closing_price
+            b.payout, b.stake, b.entry_price, b.closing_price, b.market_label, b.entry_meta,
+            m.id AS match_id, m.kickoff_at, m.end_time
        FROM bets b JOIN matches m ON m.id = b.match_id JOIN competitions c ON c.id = m.competition_id
       WHERE c.sport_id = 'football' AND b.strategy_id = 'overreaction'
         AND b.status IN ('settled_won','settled_lost','settled_void')`,
-  ).all() as { status: string; settled_by: string | null; code_version: string | null; exit_code_version: string | null; settle_suspect: number | null; payout: number | null; stake: number | null; entry_price: number | null; closing_price: number | null }[];
+  ).all() as { status: string; settled_by: string | null; code_version: string | null; exit_code_version: string | null; settle_suspect: number | null; payout: number | null; stake: number | null; entry_price: number | null; closing_price: number | null; market_label: string; entry_meta: string | null; match_id: string; kickoff_at: string | null; end_time: string | null }[];
 
   // Accumulator for the three verdict metrics over a cohort.
-  const acc = () => ({ n: 0, won: 0, lost: 0, pnl: 0, clvSum: 0, clvN: 0 });
+  const acc = () => ({ n: 0, won: 0, lost: 0, pnl: 0, clvSum: 0, clvN: 0, legs: [] as ClvLeg[] });
   const settleAcc = acc(), cashOutAcc = acc();
   const tally = (a: ReturnType<typeof acc>, r: typeof rows[number], won1: boolean) => {
     a.n++; if (won1) a.won++; else a.lost++;
     a.pnl += (r.payout ?? 0) - (r.stake ?? 0);
-    if (r.closing_price != null && r.entry_price != null) { a.clvSum += r.closing_price - r.entry_price; a.clvN++; }
+    // [пункт 6] CLV — по ЛИНИИ ЗАКРЫТИЯ, а не по `closing_price`: там при досрочном выходе стоит НАША
+    // собственная цена выхода (тогда «CLV» = тот же P&L в центах, и нога вердикта перестаёт быть
+    // независимой), а при расчёте по резолюции — цена разрешения (тогда «CLV» = исход). См. clv.ts.
+    // Где линии нет — нога не считается, и покрытие честно показывает, на какой доле выборки есть число.
+    const leg = clvLeg(db, { id: r.match_id, kickoff_at: r.kickoff_at, end_time: r.end_time }, { market_label: r.market_label, entry_price: r.entry_price, entry_meta: r.entry_meta });
+    a.legs.push(leg);
+    if (leg.clvCents != null) { a.clvSum += leg.clvCents; a.clvN++; }
   };
-  const finalize = (a: ReturnType<typeof acc>): CohortMetrics => ({
-    n: a.n, won: a.won, lost: a.lost, winPct: (a.won + a.lost) ? Math.round((a.won / (a.won + a.lost)) * 1000) / 10 : null,
-    pnlUsd: Math.round(a.pnl * 100) / 100, clvCents: a.clvN ? Math.round((a.clvSum / a.clvN) * 10) / 10 : null,
-  });
+  const finalize = (a: ReturnType<typeof acc>): CohortMetrics => {
+    const cov = clvCoverage(a.legs);
+    // Состояние назначается ПОКРЫТИЕМ, а не наличием числа. Средний CLV по трети когорты — это среднее по
+    // трети когорты, и называть его ногой вердикта нельзя: именно так «цифра с видом измерения» и попадает
+    // в критерий. Порог зафиксирован до данных.
+    const clvState: ClvLegState = a.clvN === 0 ? "unverified"
+      : (cov.pctMeasured ?? 0) < CLV_COVERAGE_FLOOR_PCT ? "thin" : "measured";
+    return {
+      n: a.n, won: a.won, lost: a.lost, winPct: (a.won + a.lost) ? Math.round((a.won / (a.won + a.lost)) * 1000) / 10 : null,
+      pnlUsd: Math.round(a.pnl * 100) / 100,
+      clvCents: a.clvN ? Math.round((a.clvSum / a.clvN) * 10) / 10 : null,
+      clvState, clvCoverage: cov,
+    };
+  };
 
   let cleanCycles = 0, won = 0, lost = 0;
   const excluded = { void: 0, cashOut: 0, preEpoch: 0, crossEpoch: 0, settleSuspect: 0 };
@@ -115,7 +157,7 @@ export function buildOverreactionGate(db: Database, target = 30, cleanEpochMin =
     && Math.sign(settleCohort.pnlUsd) === Math.sign(cashOutCohort.pnlUsd)
     && Math.abs((settleCohort.winPct ?? 0) - (cashOutCohort.winPct ?? 0)) <= 15;
   const diag = cashOutCohort.n > 0
-    ? ` · ДИАГНОСТИКА кэш-аут-когорты (НЕ гейт, n=${cashOutCohort.n}): win ${cashOutCohort.winPct}%, P&L $${cashOutCohort.pnlUsd}, CLV ${cashOutCohort.clvCents ?? "n/a"}¢ vs сеттл win ${settleCohort.winPct ?? "n/a"}%, P&L $${settleCohort.pnlUsd}, CLV ${settleCohort.clvCents ?? "n/a"}¢ — ${agree ? "согласуется (усиливающее свидетельство к вердикту)" : "расходится (осторожно)"}; гейт остаётся ратифицированным resolution-only n≥30`
+    ? ` · ДИАГНОСТИКА кэш-аут-когорты (НЕ гейт, n=${cashOutCohort.n}): win ${cashOutCohort.winPct}%, P&L $${cashOutCohort.pnlUsd}, ${clvLegText(cashOutCohort)} vs сеттл win ${settleCohort.winPct ?? "n/a"}%, P&L $${settleCohort.pnlUsd}, ${clvLegText(settleCohort)} — ${agree ? "согласуется (усиливающее свидетельство к вердикту)" : "расходится (осторожно)"}; гейт остаётся ратифицированным resolution-only n≥30`
     : "";
   // ── [R1] THE REPAIRED GATE: closed signal cycles with realized P&L ──────────────────────────────
   // Every clean-epoch, same-epoch Overreaction position that CLOSED with money back — cash-out or resolution
@@ -132,7 +174,7 @@ export function buildOverreactionGate(db: Database, target = 30, cleanEpochMin =
     pnlUsd: cohort.pnl.totalUsd, bootP: cohort.pnl.bootP, pnlPositiveSignificant: cohort.pnl.positiveSignificant,
     tripleAgreement: cohort.tripleAgreement, verdict: cohort.verdict, legacyResolutionOnly: cleanCycles,
     note: `[R1] ЕДИНИЦА ИЗМЕРЕНИЯ ИСПРАВЛЕНА: гейт считает ЗАКРЫТЫЕ СИГНАЛЬНЫЕ ЦИКЛЫ с реализованным P&L (кэш-ауты входят) — resolution-only ворота для стратегии, кэш-аутящей ~100% позиций, неизмеримы по построению (тот же класс слепоты, что Brier у PMV). n=${cohort.nSignals} сигналов, решённых ${cohort.nDecided} (${cohort.matured}); старый resolution-only числитель был ${cleanCycles}. ` +
-      `ОГОВОРКА ОТКРЫТО: это ремонт ЛИНЕЙКИ, а не результата — текущее чтение против нас (кэш-аут-когорта win ${cashOutCohort.winPct ?? "n/a"}%, CLV ${cashOutCohort.clvCents ?? "n/a"}¢). Принимаем меру, которая сегодня спорит со стратегией: гейт, открывающийся только на удобной арифметике, был бы не критерием, а рекламой. ` + cohort.note,
+      `ОГОВОРКА ОТКРЫТО: это ремонт ЛИНЕЙКИ, а не результата — текущее чтение против нас (кэш-аут-когорта win ${cashOutCohort.winPct ?? "n/a"}%, ${clvLegText(cashOutCohort)}). Принимаем меру, которая сегодня спорит со стратегией: гейт, открывающийся только на удобной арифметике, был бы не критерием, а рекламой. ` + cohort.note,
   };
 
   const note = (verdict === "gate_open"
