@@ -76,6 +76,18 @@ export const RATIFICATIONS: Ratification[] = [
     status: "deployed", closedBy: "#113 (logLine + reasonsOutsideDictionary; старые строки не переписываются массово)", lateDays: 0,
   },
   {
+    id: "label-consumers-resnapshot", at: "2026-08-02", source: "чат, частичное снятие моратория",
+    statement: "потребители меток перечитываются одним проходом, каждый сдвиг подписан миграцией; теннис под мораторием с пометкой labels_unverified до появления проверяемой когорты",
+    status: "deployed", lateDays: 0,
+    closedBy: "#120 (labelEpochSnapshot: золотая ячейка → гейт e5 → Brier/калибровка + family_shadow → exit_honesty; «до» тем же кодом на домиграционном наборе, без записи в базу)",
+  },
+  {
+    id: "deploy-batching", at: "2026-08-02", source: "чат, ратификация операционного правила",
+    statement: "частота деплоев — переменная, влияющая на данные: некритичные правки едут пачками в 1–2 деплой-окна в день, цикл не рубится ради косметики",
+    status: "deployed", lateDays: 0,
+    closedBy: "#120 (правило соблюдено: пере-снимок, оба отчёта, манифест и реестр — одним деплоем)",
+  },
+  {
     id: "bound-no-score-chase", at: "2026-08-02", source: "чат, решение 1",
     statement: "счёт для bound_no_score добирается штатным score-sync через date-гейт; противоречие сеттлам → settle_suspect на группу, не тихая перезапись",
     status: "deployed", lateDays: 0,

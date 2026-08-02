@@ -113,7 +113,8 @@ export interface FamilyVerdict { strategyId: string; family: string; source: "re
 /** Per (strategy, family) governance: the matured signal cohort + kill/promote flags. Traded families are
  *  scored on REAL bets; demoted pmv families on SHADOW signals. `killed` = matured negative; `promotable` =
  *  matured positive on a demoted family (a candidate to trade for real, surfaced not auto-enabled). */
-export function familyVerdicts(db: Database): FamilyVerdict[] {
+/** `recsOverride` — только для пере-снимка меток: тот же код на ДОмиграционном наборе, не копия. */
+export function familyVerdicts(db: Database, recsOverride?: BetRec[]): FamilyVerdict[] {
   const out: FamilyVerdict[] = [];
   // demoted pmv families — from the shadow table
   const shadowRows = db.prepare(`SELECT match_id, market_label, family, our_prob, implied, entry_cents, closing_cents, would_be_stake, kickoff_at, created_at, code_version, status FROM family_shadow_signals`).all() as ShadowRow[];
@@ -124,7 +125,7 @@ export function familyVerdicts(db: Database): FamilyVerdict[] {
     out.push({ strategyId: FAMILY_SHADOW_STRATEGY, family, source: "shadow", cohort, killed: cohort.matured !== "none" && cohort.verdict === "negative", promotable: cohort.matured !== "none" && cohort.verdict === "positive" });
   }
   // traded families — from real bets, per strategy × family
-  const recs = betRecords(db, {});
+  const recs = recsOverride ?? betRecords(db, {});
   const byStratFam = new Map<string, BetRec[]>();
   for (const r of recs) {
     const fam = marketFamily(r.market);
@@ -156,8 +157,8 @@ export interface FamilyShadowReport {
 }
 
 /** GET-facing report: every family's shadow/real signal verdict + the kill/promote list. Read-only. */
-export function buildFamilyShadow(db: Database): FamilyShadowReport {
-  const vs = familyVerdicts(db);
+export function buildFamilyShadow(db: Database, recsOverride?: BetRec[]): FamilyShadowReport {
+  const vs = familyVerdicts(db, recsOverride);
   const verdicts = vs
     .sort((a, b) => (Number(b.source === "shadow") - Number(a.source === "shadow")) || a.strategyId.localeCompare(b.strategyId) || a.family.localeCompare(b.family))
     .map((v) => ({ strategyId: v.strategyId, family: v.family, source: v.source, nSignals: v.cohort.nSignals, nDecided: v.cohort.nDecided, verdict: v.cohort.verdict, matured: v.cohort.matured, killed: v.killed, promotable: v.promotable, note: v.cohort.note }));
