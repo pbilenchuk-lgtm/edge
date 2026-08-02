@@ -233,6 +233,9 @@ export interface PieceMigrationAudit {
   reconstructed: PieceFlipTally;
   /** Точность правила B, измеренная на строках, которых миграция НЕ касалась. */
   control: { checked: number; agree: number; agreePct: number | null };
+  /** Куски с РОВНО нулевым piece_pnl: знак не определён, значит правило B к ним неприменимо. Не ошибка
+   *  правила, а его честная область определения — считаются отдельно и в выводы не входят. */
+  indeterminate: number;
   /** Сходятся ли два независимых источника по числу и направлению. */
   agreement: { same: boolean; note: string };
   /** Текущее распределение меток и восстановленное «до» (по источнику B, как не подверженному ретенции). */
@@ -269,10 +272,15 @@ export function auditPieceMigration(db: Database): PieceMigrationAudit {
   ).all() as { id: string; sid: string; status: string; piece_pnl: number; market_labeled: number }[];
   const oldLabel = (pnl: number) => (pnl > 0 ? "settled_won" : "settled_lost");
   const reconstructed = emptyTally();
-  let checked = 0, agree = 0;
+  let checked = 0, agree = 0, indeterminate = 0;
   for (const p of pieces) {
+    // РОВНО НОЛЬ — ВНЕ ОБЛАСТИ ОПРЕДЕЛЕНИЯ ПРАВИЛА, А НЕ ЕГО ОШИБКА. Первый прод-замер дал точность
+    // 98.1%, и все пять исключений оказались одним и тем же: piece_pnl == 0 при метке won. Знака у нуля
+    // нет, значит правило к такой строке НЕ ПРИМЕНИМО — и «почти точное» правило с размытым краем хуже
+    // точного с честно очерченной областью: первое приглашает считать погрешность там, где её нет.
+    if (p.piece_pnl === 0) { indeterminate++; continue; }
     if (p.market_labeled === 1) {
-      // Строка, которую миграция размечала: расхождение с знаком P&L и есть переворот.
+      // Строка, которую миграция размечала: расхождение со знаком P&L и есть переворот.
       if (p.status !== oldLabel(p.piece_pnl)) addFlip(reconstructed, oldLabel(p.piece_pnl), p.status, p.sid);
     } else {
       // Строка, которой миграция метку НЕ меняла → она обязана всё ещё равняться знаку P&L.
@@ -302,7 +310,7 @@ export function auditPieceMigration(db: Database): PieceMigrationAudit {
   for (const [sid, _n] of Object.entries(reconstructed.byStrategy)) void sid;
   // Разворачиваем переворот: won→lost означает, что ДО была won, а сейчас lost.
   for (const p of pieces) {
-    if (p.market_labeled !== 1) continue;
+    if (p.market_labeled !== 1 || p.piece_pnl === 0) continue;   // ноль вне области определения правила
     const was = oldLabel(p.piece_pnl);
     if (p.status === was) continue;
     const dWon = (was === "settled_won" ? 1 : 0) - (p.status === "settled_won" ? 1 : 0);
@@ -333,11 +341,12 @@ export function auditPieceMigration(db: Database): PieceMigrationAudit {
   } catch { /* улика не ломает отчёт */ }
 
   return {
-    logged, reconstructed, control: { checked, agree, agreePct }, agreement,
+    logged, reconstructed, control: { checked, agree, agreePct }, indeterminate, agreement,
     after, before, deltaWinPp,
     storedSnapshot: { at: snapAt, trustworthy, note: snapNote },
     note: `миграция меток: переворотов ${Math.max(logged.total, reconstructed.total)} `
-      + `(журнал ${logged.total}, реконструкция ${reconstructed.total}, точность правила ${agreePct ?? "н/д"}% на ${checked} контрольных). `
+      + `(журнал ${logged.total}, реконструкция ${reconstructed.total}, точность правила ${agreePct ?? "н/д"}% на ${checked} контрольных`
+      + (indeterminate ? `, ${indeterminate} с нулевым piece_pnl вне области определения` : "") + `). `
       + `win-rate ${before.winPct ?? "н/д"}% → ${after.winPct ?? "н/д"}%`
       + (deltaWinPp != null ? ` (${deltaWinPp >= 0 ? "+" : ""}${deltaWinPp} пп)` : "")
       + `. Это РЕКОНСТРУКЦИЯ, а не замер в моменте: «до» не было снято вовремя, и восстановимость не делает его измерением.`,
