@@ -97,6 +97,8 @@ function shadowToBetRec(r: ShadowRow): BetRec {
     // Теневая строка несёт СВОЮ снятую линию закрытия (closing_cents) — это и есть линия, а не цена выхода:
     // теневая ставка никогда не выходит досрочно. Где её не сняли — n/a по той же причине, что и везде.
     clvSource: r.closing_cents != null && entry != null ? "closing_line" : "no_snapshot", closingLineCents: r.closing_cents ?? null, exitsAmbiguous: false,
+    // Shadow-запись не КУСОК позиции: досрочного выхода у неё нет, значит и судьбы куска тоже.
+    piecePnl: null, marketLabeled: 0,
     phase: "prematch", minute: null, scoreHome: null, scoreAway: null, edge: null, aiProb: r.our_prob, derivedProb: null,
     impliedProb: entry != null ? entry / 100 : r.implied, marketPrice: null, liveProbAdjusted: null,
     entryCents: entry, closingCents: r.closing_cents, kelly: null, sizeRequested: null, sizeFilled: null, entrySlipCents: null,

@@ -98,6 +98,26 @@ export async function GET(req: Request) {
       const { buildSvSizingAudit } = await import("@/lib/svSizingAudit");
       return NextResponse.json({ ok: true, audit: buildSvSizingAudit(db) });
     }
+    // ?report=piece_relabel → «до/после» миграции меток кусков, ИЗМЕРЕННОЕ, а не вспомненное. `before` —
+    // снимок, снятый ДО самого первого прохода и записанный один раз; `now` — текущее состояние; `last` —
+    // счётчики последнего прохода с Δ книги. Двусторонний критерий владельца читается прямо отсюда:
+    // win↓ при Δкниги=0 — снятие искажения; win↓ вместе с Δкниги≠0 — баг миграции. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "piece_relabel") {
+      const { labelDistribution, PIECE_RELABEL_BEFORE_KEY, PIECE_RELABEL_LAST_KEY } = await import("@/lib/pieceRelabel");
+      const { metaGet } = await import("@/lib/repo");
+      const j = (k: string) => { try { return JSON.parse(metaGet(db, k) ?? "null"); } catch { return null; } };
+      const before = j(PIECE_RELABEL_BEFORE_KEY), last = j(PIECE_RELABEL_LAST_KEY);
+      const now = labelDistribution(db);
+      const dWin = before?.labels?.winPct != null && now.winPct != null
+        ? Math.round((now.winPct - before.labels.winPct) * 10) / 10 : null;
+      const { bookTotals } = await import("@/lib/suspectBreakdown");
+      const dBook = before?.book?.pnlSum != null
+        ? Math.round((bookTotals(db).pnlSum - before.book.pnlSum) * 100) / 100 : null;
+      return NextResponse.json({ ok: true, before, now, last, deltaWinPp: dWin, deltaBookUsd: dBook,
+        verdict: before == null ? "миграция ещё не запускалась — «до» не зафиксировано"
+          : dBook === 0 ? "метки сдвинулись, деньги нет — СНЯТИЕ ИСКАЖЕНИЯ (двусторонний критерий, сторона 1)"
+          : "деньги сдвинулись вместе с метками — БАГ МИГРАЦИИ, payout она не трогает по определению (сторона 2)" });
+    }
     // ?report=settle_suspect → почему каждая карантинная ставка ВСЁ ЕЩЁ в карантине. Раскладка на три
     // класса: готова к снятию (прогон reSettleSuspectBets закроет) / привязка честно недоказуема (остаётся
     // навсегда — это правильный исход) / конвейер не берёт (единственный класс, который был бы работой).

@@ -34,6 +34,7 @@ import { resolveFootballMarket, matchPhase } from "./settlement.js";
 import { isStateSuspect } from "./engine.js";
 import { recomputeMetrics } from "./engine.js";
 import { tennisFinalResult } from "./tennisTrading.js";
+import { bookTotals, type BookTotals } from "./suspectBreakdown.js";
 
 const round2 = (x: number) => Math.round(x * 100) / 100;
 const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-zа-я0-9]+/g, " ").trim();
@@ -45,7 +46,47 @@ export interface PieceRelabelResult {
   flipped: number;             // ...и при этом сменила значение (won→lost или lost→won) — цена бага в строках
   unverifiable: number;        // market_labeled=2: проверить нечем, потребители обязаны отбрасывать
   deferred: number;            // матч не финишировал / под подозрением — вернёмся следующим проходом
+  /** Книга ДО и ПОСЛЕ прохода, снятая ИЗ БАЗЫ. payout не входит в UPDATE — но обещание и факт разные
+   *  вещи, и после массовой записи ноль подтверждается измерением. Двусторонний критерий владельца:
+   *  win↓ при неизменном P&L — снятие искажения; win↓ вместе с P&L — баг миграции. */
+  bookBefore: BookTotals; bookAfter: BookTotals; bookDeltaUsd: number;
+  /** Распределение меток до и после ЭТОГО прохода — чтобы сдвиг win-rate был подписан миграцией. */
+  labelsBefore: LabelDistribution; labelsAfter: LabelDistribution;
+  note: string;
 }
+
+/** Распределение исходов по решённым ставкам — то, чем питаются win-rate, Brier и калибровка. */
+export interface LabelDistribution {
+  won: number; lost: number; void: number; total: number;
+  winPct: number | null;
+  /** Та же разбивка по стратегиям: сдвиг может быть локальным, и усреднение его спрячет. */
+  byStrategy: Record<string, { won: number; lost: number; void: number; winPct: number | null }>;
+}
+
+export function labelDistribution(db: Database): LabelDistribution {
+  const rows = db.prepare(
+    `SELECT strategy_id sid, status FROM bets WHERE status LIKE 'settled%'`,
+  ).all() as { sid: string; status: string }[];
+  const pct = (w: number, l: number) => (w + l ? Math.round((1000 * w) / (w + l)) / 10 : null);
+  const out: LabelDistribution = { won: 0, lost: 0, void: 0, total: 0, winPct: null, byStrategy: {} };
+  for (const r of rows) {
+    out.total++;
+    const k = r.status === "settled_won" ? "won" : r.status === "settled_lost" ? "lost" : "void";
+    out[k]++;
+    const s = (out.byStrategy[r.sid] ??= { won: 0, lost: 0, void: 0, winPct: null });
+    s[k]++;
+  }
+  out.winPct = pct(out.won, out.lost);
+  for (const s of Object.values(out.byStrategy)) s.winPct = pct(s.won, s.lost);
+  return out;
+}
+
+/** Снимок состояния ДО САМОГО ПЕРВОГО прохода миграции — пишется один раз и живёт вечно. Старая метка
+ *  была детерминированной функцией знака P&L, то есть «до» формально восстановимо задним числом — но
+ *  восстановимость не заменяет измеримость в моменте, а «до/после» без измеренного «до» опирается на
+ *  чью-то память. Ключ ставится ДО первой записи, иначе он бы фиксировал уже сдвинутую картину. */
+export const PIECE_RELABEL_BEFORE_KEY = "piece_relabel_before";
+export const PIECE_RELABEL_LAST_KEY = "piece_relabel_last";
 
 /**
  * Один проход: судьба куска в piece_pnl, метка куска — по исходу рынка. Идемпотентен (только
@@ -53,7 +94,15 @@ export interface PieceRelabelResult {
  */
 export function relabelPiecesByMarket(db: Database, deps: EngineDeps = {}): PieceRelabelResult {
   const now = deps.now?.() ?? new Date().toISOString();
-  const res: PieceRelabelResult = { scanned: 0, pnlBackfilled: 0, relabeled: 0, flipped: 0, unverifiable: 0, deferred: 0 };
+  const bookBefore = bookTotals(db), labelsBefore = labelDistribution(db);
+  // «До» фиксируется ДО первой записи и только один раз — иначе снимок поймал бы уже сдвинутую картину.
+  if (!R.metaGet(db, PIECE_RELABEL_BEFORE_KEY)) {
+    try { R.metaSet(db, PIECE_RELABEL_BEFORE_KEY, JSON.stringify({ at: now, book: bookBefore, labels: labelsBefore }), now); } catch { /* снимок не имеет права ломать миграцию */ }
+  }
+  const res: PieceRelabelResult = {
+    scanned: 0, pnlBackfilled: 0, relabeled: 0, flipped: 0, unverifiable: 0, deferred: 0,
+    bookBefore, bookAfter: bookBefore, bookDeltaUsd: 0, labelsBefore, labelsAfter: labelsBefore, note: "",
+  };
   const sportByComp = new Map(R.listCompetitions(db).map((c) => [c.id, c.sport_id]));
   const touched = new Set<string>();
 
@@ -122,5 +171,20 @@ export function relabelPiecesByMarket(db: Database, deps: EngineDeps = {}): Piec
     }
   }
   for (const sid of touched) { try { recomputeMetrics(db, sid, deps); } catch { /* метрики догонят следующим проходом */ } }
+
+  res.bookAfter = bookTotals(db);
+  res.labelsAfter = labelDistribution(db);
+  res.bookDeltaUsd = round2(res.bookAfter.pnlSum - res.bookBefore.pnlSum);
+  const dWin = res.labelsAfter.winPct != null && res.labelsBefore.winPct != null
+    ? Math.round((res.labelsAfter.winPct - res.labelsBefore.winPct) * 10) / 10 : null;
+  res.note = `просмотрено ${res.scanned}, размечено по рынку ${res.relabeled} (ПЕРЕВЁРНУТО ${res.flipped}), `
+    + `piece_pnl проставлен ${res.pnlBackfilled}, непроверяемых ${res.unverifiable}, отложено ${res.deferred}. `
+    + `win-rate ${res.labelsBefore.winPct ?? "н/д"}% → ${res.labelsAfter.winPct ?? "н/д"}%`
+    + (dWin != null ? ` (${dWin >= 0 ? "+" : ""}${dWin} пп)` : "") + ". "
+    + `Δ книги = ${res.bookDeltaUsd >= 0 ? "+" : ""}$${res.bookDeltaUsd.toFixed(2)} — `
+    + (res.bookDeltaUsd === 0
+      ? "измерено ИЗ БАЗЫ: метка сменилась, деньги нет. Просадка win-rate здесь — СНЯТИЕ ИСКАЖЕНИЯ, а не регресс."
+      : "НЕНУЛЕВАЯ: payout в UPDATE не входит, значит это БАГ МИГРАЦИИ, а не снятие искажения. Разбирать, а не объяснять.");
+  try { R.metaSet(db, PIECE_RELABEL_LAST_KEY, JSON.stringify({ at: now, ...res }), now); } catch { /* улика не ломает проход */ }
   return res;
 }
