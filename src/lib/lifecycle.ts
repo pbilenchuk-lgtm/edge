@@ -2570,9 +2570,6 @@ export async function runAutoCycle(
   // Polymarket network blip) must NOT abort the whole cycle and skip the
   // downstream money-management steps (exits / entries / settlement). Failed
   // stages degrade to their empty result and the pass continues.
-  const step = async <T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
-    try { return await fn(); } catch (e) { console.error(`[autoCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
-  };
   // [O3] ГРОМКИЙ НОЛЬ КАК СТАНДАРТ — ЦЕНТРАЛЬНО, А НЕ ПО ОДНОЙ ДЖОБЕ. Каждый шаг оставляет ФАКТ запуска и
   // результат ДАННЫМИ (app_meta), даже когда результат нулевой: «не запускалось» перестаёт быть
   // неотличимым от «отработало впустую» — ровно тот дефект, что был у piece_relabel и у счётчика глубины.
@@ -2587,6 +2584,15 @@ export async function runAutoCycle(
   };
   const stepSync = <T>(label: string, fn: () => T, fallback: T): T => {
     try { const r = fn(); noteStep(label, r, true); return r; }
+    catch (e) { noteStep(label, null, false); console.error(`[autoCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
+  };
+  // АСИНХРОННЫЙ ШАГ ОТМЕЧАЕТСЯ ТАК ЖЕ, КАК СИНХРОННЫЙ. Здесь `noteStep` не вызывался вовсе, и пульс джоб
+  // (O3) был СТРУКТУРНО слеп ко всему асинхронному: enrich, odds, reassess, exits, autoEnter — ни один не
+  // оставлял следа. Поймано 02.08 на своём же новом шаге: `boundNoScoreChase` числился «НИ РАЗУ не
+  // запускался», хотя в тот же момент лежал его собственный отчёт с временем прогона. Сторож, который
+  // объявляет живую джобу мёртвой, — это ложная тревога, встроенная в конструкцию.
+  const step = async <T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
+    try { const r = await fn(); noteStep(label, r, true); return r; }
     catch (e) { noteStep(label, null, false); console.error(`[autoCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
   };
 

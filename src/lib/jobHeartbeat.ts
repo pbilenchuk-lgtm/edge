@@ -90,6 +90,14 @@ export function cycleSummaryLine(prefix: string, steps: { label: string; result:
  *  от «мы про него забыли». Интервал берётся из настройки тика, а не зашит числом. */
 export function expectedTickJobs(tickMin: number): { label: string; everyMin: number }[] {
   return [
+    // АСИНХРОННЫЕ ШАГИ — они тоже отмечаются с 02.08. До этого `step()` не звал `noteStep` вовсе, и пульс
+    // был СТРУКТУРНО слеп ко всему асинхронному: половина цикла (сеть, LLM, провайдер) следа не оставляла.
+    // В списке только БЕЗУСЛОВНЫЕ: `dryExitSweep` включается режимом торговли, а провайдер-зависимые
+    // (`enrich`, `fixtureDateBackfill`, `boundNoScoreChase`) на проде идут всегда — их отсутствие само по
+    // себе повод для тревоги, поэтому они здесь и стоят.
+    "discover", "sync", "odds", "enrich", "fixtureDateBackfill", "boundNoScoreChase", "snapshots",
+    "analyze", "runStrategists", "reassess", "exits", "autoEnter", "complementAudit", "pmResolution",
+    "tennisScout", "tennisPrematchScout", "tennisExit", "tennisFinalPoll",
     "aliasOverlay", "repairLeagueMap", "dedupe", "reSettleSuspects", "staleShadowResolve", "pieceRelabel",
     "legGapSuspect", "reSettleSuspectsFresh", "boundNoScoreChase", "blindFundedAudit", "advanceClocks", "stats", "settleStale",
     "captureLiveOpens", "tennisFinish", "tennisScoreBackfill", "tennisSettle", "tennisPmvSettle",

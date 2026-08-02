@@ -511,7 +511,12 @@ export async function syncMatchStatus(
     score_home: scoreHome, score_away: scoreAway,
   };
   if (nextState === "finished") {
-    patch.final_score = `${scoreHome ?? 0}:${scoreAway ?? 0}`;
+    // НЕТ СЧЁТА — НЕТ СТРОКИ. Здесь стояло `${scoreHome ?? 0}:${scoreAway ?? 0}`: завершённый матч с
+    // неизвестным счётом получал «0:0», то есть «мы не знаем» превращалось в утверждение о безголевой
+    // ничьей. Архив после этого читает клетку как заполненную и дыра пропадает с радаров — закрашивание
+    // нулём в чистом виде. Деньги это не двигало (resolveOutcome смотрит на стороны, а не на строку),
+    // но именно так дыра переставала быть видимой.
+    if (scoreHome != null && scoreAway != null) patch.final_score = `${scoreHome}:${scoreAway}`;
     // Stamp the FINISH time (Warsaw) once, on the first transition into finished, so
     // the card can show «завершён 18:07» / «20:00–22:01 · длительность 2 ч 01 мин»
     // instead of a bare «финал». Warsaw everywhere (kickoff too); duration off the ISO
@@ -611,7 +616,10 @@ export function upsertImportedMatch(
     // ISO-based gate (hoursUntil/justKickedOff/advanceClocks read it as "no kickoff").
     state: status.state, lineup_out: status.state !== "upcoming", kickoff_at: isIso(status.detail) ? status.detail : null,
     minute: status.minute, score_home: status.scoreHome, score_away: status.scoreAway,
-    final_score: status.state === "finished" ? `${status.scoreHome ?? 0}:${status.scoreAway ?? 0}` : null,
+    // Третий (и последний) писатель строки счёта — тот же запрет на выдуманный «0:0», что в
+    // syncMatchStatus и enrichFromEspn. Правило одно на все три места, а не заплатка в том, где заметили.
+    final_score: status.state === "finished" && status.scoreHome != null && status.scoreAway != null
+      ? `${status.scoreHome}:${status.scoreAway}` : null,
     kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: status.externalRef,
   };
   R.insertMatch(db, match);
