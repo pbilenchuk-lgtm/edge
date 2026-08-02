@@ -1275,3 +1275,56 @@ test("R2(б) listBlindFundedFootball: funded football past kickoff with no match
   assert.equal(blind.find((b) => b.id === "blindDen")?.reason, "unbound");
   assert.equal(blind.find((b) => b.id === "blindRou")?.reason, "no_league");
 });
+
+// ── ПОЛОВИНА ЗАПИСИ: КОРЕНЬ КЛАССА `bound_no_score` ──────────────────────────────────────────────
+// enrich всегда писал счёт по сторонам, а строку `final_score` — только при флаге `s.final`. Матч,
+// доехавший до finished через `state === "finished"` без `completed`, получал половину записи: счёт в
+// соседней колонке есть, строки нет. Это и был весь класс на проде — 3 матча MLS 23.07 с 14 ставками,
+// выглядевшие как «счёт не добрался». Вторым багом в той же строке было `${sh ?? 0}:${sa ?? 0}`:
+// неизвестный счёт превращался в утверждение «0:0», то есть дыра закрашивалась нулём.
+
+test("завершённость БЕЗ флага final всё равно даёт final_score — половина записи и есть корень bound_no_score", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertCompetition(db, { id: "pm-mls", sport_id: "football", name: "MLS 2025", budget: 8000, external_league: "usa.1", created_at: "t" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-mls", home: "Portland Timbers", away: "FC Dallas", state: "live", lineup_out: true, kickoff_at: "2026-07-23T02:30:00Z", minute: 80, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+
+  const provider: SportsProvider = {
+    name: "mock",
+    async scoreboard(_s: string, league: string) {
+      if (league !== "usa.1") return [];
+      // ИМЕННО ТАК приходил прод: состояние finished, но флаг completed НЕ выставлен.
+      return [{ externalRef: "E1", home: "Portland Timbers", away: "FC Dallas", state: "finished", minute: 90, scoreHome: 2, scoreAway: 1, final: false, date: "2026-07-23T02:30:00Z" }] as SportsMatchStatus[];
+    },
+    async matchDetail() { return { lineupOut: false, lineups: { home: null, away: null }, events: [] } as MatchDetail; },
+  };
+
+  await enrichFromEspn(db, provider, {});
+  const m = R.getMatch(db, mid)!;
+  assert.equal(m.state, "finished");
+  assert.equal(m.score_home, 2);
+  assert.equal(m.final_score, "2:1", "строка обязана появиться по ЗАВЕРШЁННОСТИ, а не по флагу final");
+});
+
+test("завершённое событие БЕЗ счёта не получает выдуманное «0:0» — дыра не закрашивается нулём", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.upsertCompetition(db, { id: "pm-mls", sport_id: "football", name: "MLS 2025", budget: 8000, external_league: "usa.1", created_at: "t" });
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: "pm-mls", home: "LA Galaxy", away: "St. Louis City SC", state: "live", lineup_out: true, kickoff_at: "2026-07-23T02:30:00Z", minute: 80, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+
+  const provider: SportsProvider = {
+    name: "mock",
+    async scoreboard(_s: string, league: string) {
+      if (league !== "usa.1") return [];
+      return [{ externalRef: "E2", home: "LA Galaxy", away: "St. Louis City SC", state: "finished", minute: 90, scoreHome: null, scoreAway: null, final: true, date: "2026-07-23T02:30:00Z" }] as SportsMatchStatus[];
+    },
+    async matchDetail() { return { lineupOut: false, lineups: { home: null, away: null }, events: [] } as MatchDetail; },
+  };
+
+  await enrichFromEspn(db, provider, {});
+  const m = R.getMatch(db, mid)!;
+  assert.equal(m.state, "finished");
+  assert.equal(m.final_score, null, "нет счёта — нет строки; «0:0» было бы утверждением о безголевой ничьей");
+});

@@ -63,6 +63,45 @@ function provider(byId: Record<string, SportsMatchStatus | null>): SportsProvide
   };
 }
 
+// ── НАСТОЯЩАЯ ПРИЧИНА КЛАССА, найденная первым прогоном на проде: счёт по сторонам В БАЗЕ ЕСТЬ, а строки
+// `final_score` нет. Провайдер здесь не нужен вовсе, и спрашивать его о том, что уже лежит рядом, — лишний
+// поход наружу. Плюс первая версия предиката кандидатов требовала `score_home IS NULL`, из-за чего проход
+// видел НОЛЬ там, где архив видел ТРИ: отчёт и конвейер разошлись в том, кого они считают.
+test("ПРИЧИНА КЛАССА: счёт уже в базе, нет только строки — чиним локально, наружу не ходим", async () => {
+  const db = world();
+  boundNoScoreMatch(db, "m1", "Portland Timbers", "FC Dallas", "e1");
+  R.updateMatch(db, "m1", { score_home: 2, score_away: 1 });   // как на проде: стороны есть, final_score пуст
+  assert.equal(boundNoScoreCandidates(db).length, 1, "предикат обязан совпадать с архивом, а не быть уже");
+
+  let asked = 0;
+  const p: SportsProvider = { name: "stub", async scoreboard() { return []; }, async eventStatus() { asked++; return ev({}); } };
+  const r = await chaseBoundNoScore(db, p, {});
+  assert.equal(asked, 0, "локальный ремонт не имеет права ходить к провайдеру");
+  assert.equal(r.rows[0].verdict, "local_repair");
+  assert.equal(R.getMatch(db, "m1")!.final_score, "2:1");
+  assert.equal(r.filled, 1);
+  assert.equal(boundNoScoreCandidates(db).length, 0);
+});
+
+test("локальный ремонт ТОЖЕ проходит сверку с сеттлами — путь другой, условие (б) то же", async () => {
+  const db = world();
+  boundNoScoreMatch(db, "m1", "Portland Timbers", "FC Dallas", "e1");
+  R.updateMatch(db, "m1", { score_home: 2, score_away: 1 });
+  settledBet(db, "b1", "m1", "Portland Timbers", "lost", 0);   // 2:1 говорит обратное
+  const r = await chaseBoundNoScore(db, null, {});
+  assert.equal(r.rows[0].verdict, "contradicts_settled");
+  assert.equal(r.filled, 0);
+  assert.equal(R.getMatch(db, "m1")!.final_score, null);
+  assert.equal((db.prepare(`SELECT COUNT(*) n FROM bets WHERE settle_suspect=1`).get() as any).n, 1);
+});
+
+test("пустая строка final_score считается отсутствием счёта — как её и читает архив", () => {
+  const db = world();
+  boundNoScoreMatch(db, "m1", "Portland Timbers", "FC Dallas", "e1");
+  R.updateMatch(db, "m1", { final_score: "" });
+  assert.equal(boundNoScoreCandidates(db).length, 1);
+});
+
 test("(а) счёт дожимается, когда хранимая привязка ПРОХОДИТ сегодняшние гейты", async () => {
   const db = world();
   boundNoScoreMatch(db, "m1", "Inter Miami CF", "FC Cincinnati", "e1");
