@@ -22,6 +22,8 @@ const BET_COLS = [
   "edge_at_entry", "ai_prob_at_entry", "derived_prob_at_entry", "implied_prob_at_entry", "live_prob_adjusted",
   "market_price_at_entry", "entry_price", "closing_price", "clv_cents",
   "kelly_fraction", "size_requested", "size_filled", "entry_slip_cents", "calibration", "branch_weight_sum", "market_thinness_usd",
+  // [W1/Z2] Без этих двух «до/после» миграции меток читается по памяти, а не по данным.
+  "piece_pnl", "market_labeled",
   "status", "settled_by", "outcome", "stake", "payout", "pnl_net",
   "exit_count", "exit_triggers", "exit_vwap_cents", "exit_pnl_sum",
 ];
@@ -38,6 +40,7 @@ function betRow(r: BetRec): unknown[] {
     r.edge, r.aiProb, r.derivedProb, r.impliedProb, r.liveProbAdjusted,
     r.marketPrice, r.entryCents, r.closingCents, r.clvCents,
     r.kelly, r.sizeRequested, r.sizeFilled, r.entrySlipCents, r.calibration, r.branchWeightSum, r.thinnessUsd,
+    r.piecePnl, r.marketLabeled,
     r.status, r.settledBy, r.outcome, r.stake, r.payout, r.pnl,
     r.exits.length, exTrig, exVwap, exPnl,
   ];

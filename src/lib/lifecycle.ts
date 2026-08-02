@@ -2620,7 +2620,11 @@ export async function runAutoCycle(
   stepSync("staleShadowResolve", () => resolveStaleProposalShadow(db, deps).resolved, 0);
   stepSync("pieceRelabel", () => {
     const r = relabelPiecesByMarket(db, deps);
-    if (r.flipped || r.unverifiable) console.warn(`[pieceRelabel] меток по рынку: ${r.relabeled} (перевёрнуто ${r.flipped}) · piece_pnl backfill: ${r.pnlBackfilled} · непроверяемых: ${r.unverifiable}`);
+    // БЕЗУСЛОВНО. Прежний лог печатался только при `flipped || unverifiable` — то есть «перевёрнуто 0»
+    // было НЕМЫМ, и отличить «миграция отработала и всё было верно» от «миграция не запускалась» снаружи
+    // было нельзя. Это тот же немой ноль, что счётчик глубины 30.07; здесь он стоил бы наблюдаемости
+    // самого важного чтения проекта.
+    console.log(`[pieceRelabel] ${r.note}`);
     return r.relabeled;
   }, 0);
   stepSync("legGapSuspect", () => {

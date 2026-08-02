@@ -8,7 +8,7 @@ const rec = (o: Partial<BetRec>): BetRec => ({
   strategyId: o.strategyId ?? "prematch_value", strategy: "PV", profileId: o.profileId ?? "max", market: o.market ?? "Over 2.5",
   phase: o.phase ?? "prematch", minute: null, scoreHome: null, scoreAway: null, edge: null, aiProb: null, derivedProb: null, impliedProb: o.impliedProb ?? 0.5,
   marketPrice: null, liveProbAdjusted: null, entryCents: null, closingCents: null, kelly: null, sizeRequested: null, sizeFilled: null, entrySlipCents: null,
-  calibration: null, branchWeightSum: null, thinnessUsd: null, winsOnEvent: false, codeVersion: o.codeVersion ?? null, status: "settled_won", settledBy: null, outcome: o.outcome ?? "won", clvSource: "closing_line", closingLineCents: null, exitsAmbiguous: false,
+  calibration: null, branchWeightSum: null, thinnessUsd: null, winsOnEvent: false, codeVersion: o.codeVersion ?? null, status: "settled_won", settledBy: null, outcome: o.outcome ?? "won", clvSource: "closing_line", closingLineCents: null, exitsAmbiguous: false, piecePnl: null, marketLabeled: 1,
   stake: o.stake ?? 100, payout: null, pnl: o.pnl ?? 50, bookPnl: "bookPnl" in o ? (o.bookPnl ?? null) : (o.pnl ?? 50), clvCents: o.clvCents ?? 5, finalScore: null, decisionId: o.decisionId ?? null, createdAt: o.createdAt ?? "2026-07-24T18:00:00Z", kickoffAt: o.kickoffAt ?? null, exitCodeVersion: o.exitCodeVersion ?? null, exits: [],
 });
 

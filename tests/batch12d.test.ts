@@ -198,7 +198,7 @@ test("пункт 6: нога CLV n/a только при НУЛЕВОМ покр
     ...base, id: `r${i}`, matchId: `m${i}`, strategyId: "prematch_value", market: "Over 2.5",
     phase: "prematch" as const, impliedProb: 0.5, outcome: (i % 3 ? "won" : "lost") as "won" | "lost",
     stake: 100, pnl: i % 3 ? 60 : -100, bookPnl: i % 3 ? 60 : -100,
-    clvCents: clv, clvSource: (clv == null ? "no_snapshot" : "closing_line") as any,
+    clvCents: clv, clvSource: (clv == null ? "no_snapshot" : "closing_line") as any, piecePnl: null, marketLabeled: 1,
     createdAt: `2026-07-${String(i % 27 + 1).padStart(2, "0")}T12:00:00Z`, kickoffAt: `2026-07-${String(i % 27 + 1).padStart(2, "0")}T18:00:00Z`,
   });
   const na = signalCohort(Array.from({ length: 30 }, (_, i) => rec(i, null)));

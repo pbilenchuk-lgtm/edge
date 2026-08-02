@@ -52,6 +52,12 @@ export interface BetRec {
    *  указанием ПРИЧИНЫ (снимка нет / снимок протух / у матча нет часов). n/a законен только там, где линии
    *  физически нет в данных. */
   clvSource: ClvSource; closingLineCents: number | null;
+  /** [W1/Z2] Судьба КУСКА (payout−stake на закрытии) — отдельно от исхода РЫНКА. Кусок, проданный в плюс
+   *  на рынке, который потом проиграл: pieceP nl>0 при outcome='lost', и обе цифры правдивы одновременно. */
+  piecePnl: number | null;
+  /** 0 = метка ещё не сверена с рынком (значит она из ЗНАКА P&L) · 1 = выставлена по исходу рынка ·
+   *  2 = accounting_unverifiable. Без этого поля «до/после» миграции опирается на память, а не на данные. */
+  marketLabeled: number;
   /** [пункт 6] Выходы привязаны к этой ставке жребием (легаси-строка без bet_id, а кандидатов было
    *  несколько) — деньги такой строки не входят в bookPnl. */
   exitsAmbiguous: boolean;
@@ -198,7 +204,8 @@ export function betRecords(db: Database, filter: ProfileFilter = {}, env: Record
       sizeRequested: em?.sizeRequested ?? null, sizeFilled: em?.sizeFilled ?? (settled || b.status === "open" ? stake : null), entrySlipCents: em?.entrySlipCents ?? null,
       calibration: em?.calibration ?? null, branchWeightSum: em?.branchWeightSum ?? null, thinnessUsd: em?.marketThinnessUsd ?? null,
       winsOnEvent: em?.winsOnEvent ?? winsOnEventOccurrence(b.market_label), codeVersion: b.code_version ?? null,
-      status: b.status, settledBy: b.settled_by ?? null, outcome, clvSource: clv.source, closingLineCents: clv.closingLineCents, exitsAmbiguous,
+      status: b.status, settledBy: b.settled_by ?? null, outcome, clvSource: clv.source, closingLineCents: clv.closingLineCents,
+      piecePnl: num((b as { piece_pnl?: number | null }).piece_pnl), marketLabeled: Number((b as { market_labeled?: number }).market_labeled ?? 0), exitsAmbiguous,
       stake, payout: num(b.payout), pnl, bookPnl, clvCents, finalScore: m.final_score ?? null,
       decisionId: b.decision_id ?? null, createdAt: b.created_at ?? null, kickoffAt: m.kickoff_at ?? null, exitCodeVersion: b.exit_code_version ?? null, exits,
     });
