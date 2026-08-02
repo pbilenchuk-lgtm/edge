@@ -34,8 +34,17 @@ test("каждая запись имеет источник — чтобы фо�
   for (const r of RATIFICATIONS) assert.ok(r.source.trim(), `${r.id}: нет источника`);
 });
 
+// ПОВЕДЕНИЕ СТОРОЖА ПРОВЕРЯЕТСЯ НА СВОЁМ СПИСКЕ, А НЕ НА ЖИВОМ ДОЛГЕ. Первая версия этих трёх тестов
+// читала RATIFICATIONS напрямую и упала 02.08 — в день, когда закрылась ПОСЛЕДНЯЯ pending-строка. То есть
+// сторож ломался от ХОРОШЕЙ новости: пустой backlog — это цель, а не поломка. Синтетический список держит
+// вопрос там, где он должен быть: «кричит ли сторож на зависшее и молчит ли на то, что в сроке».
+const SYNTH: Ratification[] = [
+  { id: "synth-pending", at: "2026-08-02", source: "тест", statement: "строка достаточной длины, чтобы её можно было прочесть через полгода", status: "pending", closedBy: null },
+  { id: "synth-closed", at: "2026-07-20", source: "тест", statement: "закрытая строка достаточной длины для той же проверки читаемости", status: "deployed", closedBy: "#0", lateDays: 3 },
+];
+
 test("pending старше срока → РАССЛЕДОВАТЬ, тем же тоном, что мёртвая фича", () => {
-  const reg = buildRatificationRegistry(db0(), AT("2026-08-20T00:00:00Z"));
+  const reg = buildRatificationRegistry(db0(), AT("2026-08-20T00:00:00Z"), process.env, SYNTH);
   assert.ok(reg.investigate.length > 0, "две недели без движения обязаны кричать");
   assert.match(reg.note, /ЗАВЕСТИ РАССЛЕДОВАНИЕ/);
   assert.match(ratificationLine(reg), /ЗАВИСЛИ/);
@@ -43,10 +52,16 @@ test("pending старше срока → РАССЛЕДОВАТЬ, тем же 
 });
 
 test("pending В СРОКЕ не кричит — сторож, воющий на всё, перестаёт быть сторожем", () => {
-  const reg = buildRatificationRegistry(db0(), AT("2026-08-03T00:00:00Z"));   // сутки после 02.08
+  const reg = buildRatificationRegistry(db0(), AT("2026-08-03T00:00:00Z"), process.env, SYNTH); // сутки после 02.08
   assert.equal(reg.investigate.length, 0);
   assert.doesNotMatch(ratificationLine(reg), /ЗАВИСЛИ/);
   assert.ok(reg.rows.some((r) => r.verdict === "в работе"));
+});
+
+test("ЖИВОЙ ДОЛГ: ни одна ратификация не висит дольше срока", () => {
+  // Тот же сторож, но уже НА РЕАЛЬНОМ списке — тест поведения выше не отменяет проверки состояния здесь.
+  const reg = buildRatificationRegistry(db0(), AT("2026-08-02T23:59:00Z"));
+  assert.deepEqual(reg.investigate.map((r) => r.id), [], reg.note);
 });
 
 test("закрытая ратификация не превращается в расследование, сколько бы ни прошло", () => {
@@ -68,7 +83,7 @@ test("цена класса измеряется в днях, а не в ощу�
 test("порог настраивается, но по умолчанию 7 дней", () => {
   assert.equal(RATIFICATION_PENDING_DAYS({}), 7);
   assert.equal(RATIFICATION_PENDING_DAYS({ RATIFICATION_PENDING_DAYS: "3" }), 3);
-  const reg = buildRatificationRegistry(db0(), AT("2026-08-06T00:00:00Z"), { RATIFICATION_PENDING_DAYS: "2" });
+  const reg = buildRatificationRegistry(db0(), AT("2026-08-06T00:00:00Z"), { RATIFICATION_PENDING_DAYS: "2" }, SYNTH);
   assert.ok(reg.investigate.length > 0, "с порогом 2д четырёхдневное молчание уже расследование");
 });
 

@@ -78,7 +78,8 @@ export const RATIFICATIONS: Ratification[] = [
   {
     id: "bound-no-score-chase", at: "2026-08-02", source: "чат, решение 1",
     statement: "счёт для bound_no_score добирается штатным score-sync через date-гейт; противоречие сеттлам → settle_suspect на группу, не тихая перезапись",
-    status: "pending", closedBy: null,
+    status: "deployed", lateDays: 0,
+    closedBy: "#114 (boundNoScoreChase: хранимая привязка ПЕРЕПРОВЕРЯЕТСЯ сегодняшними гейтами — sameTeams/date/ориентация теми же функциями, что и живой enrich; противоречие сеттлу → карантин на группу и НИ ОДНОЙ записи счёта; bound_no_score — код словаря)",
   },
   {
     id: "observability-o2-funnel", at: "2026-08-02", source: "ТЗ наблюдаемости, O2",
@@ -116,11 +117,18 @@ export interface RatificationRegistry {
   note: string;
 }
 
+/**
+ * `list` подставляется ТОЛЬКО тестами сторожа и по одной причине: пустой backlog — это ХОРОШЕЕ состояние,
+ * и оно не имеет права ломать проверку самого сторожа. Когда 02.08 закрылась последняя pending-строка,
+ * три теста «зависшее обязано кричать» упали — не потому что сторож сломался, а потому что были написаны
+ * против ЖИВОГО списка. Сторож проверяется на своём поведении, а не на текущем содержимом долга.
+ */
 export function buildRatificationRegistry(
   _db: Database, nowMs = Date.now(), env: Record<string, string | undefined> = process.env,
+  list: readonly Ratification[] = RATIFICATIONS,
 ): RatificationRegistry {
   const limit = RATIFICATION_PENDING_DAYS(env);
-  const rows: RatificationRow[] = RATIFICATIONS.map((r) => {
+  const rows: RatificationRow[] = list.map((r) => {
     const ageDays = Math.floor((nowMs - Date.parse(r.at)) / 86_400_000);
     const verdict: RatificationRow["verdict"] = r.status === "deployed" ? "закрыта"
       : ageDays >= limit ? "РАССЛЕДОВАТЬ" : "в работе";

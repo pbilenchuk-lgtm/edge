@@ -55,6 +55,11 @@ export interface SportsProvider {
   /** The ISO kickoff date of one event by id — used by the P0.1 fixture-date backfill to re-fetch and
    *  freeze the identity key for historical bindings. Optional per provider (ESPN summary carries it). */
   eventDate?(sport: string, league: string, eventId: string): Promise<string | null>;
+  /** ПОЛНЫЙ статус ОДНОГО события по его id — тот же тип, что отдаёт scoreboard.
+   *  Зачем отдельно от scoreboard: доска отдаёт СЕГОДНЯШНИЙ день, а `bound_no_score` — это матчи, которым
+   *  уже неделя; на доске их нет и не будет. Ответ несёт и дату, и составы, и счёт, то есть РОВНО те улики,
+   *  по которым судят биндинг-гейты, — поэтому дожатие через него не обходит гейт, а кормит его. */
+  eventStatus?(sport: string, league: string, eventId: string): Promise<SportsMatchStatus | null>;
   /** The leagues/feeds to poll for a sport (e.g. ESPN: ["nba","wnba"]). Lets the
    *  enrichment loop stay provider-agnostic — a unified paid provider can return
    *  a single "" feed per sport instead of ESPN's per-league slugs. */
@@ -171,8 +176,9 @@ export class EspnSportsProvider implements SportsProvider {
     }
   }
 
-  /** Real lineups + key events from ESPN's summary endpoint. Degrades to null. */
-  async matchDetail(sport: string, league: string, eventId: string): Promise<MatchDetail | null> {
+  /** Один запрос к summary на все три его потребителя (детали, статус, дата). Раньше каждый нёс свою
+   *  копию fetch+timeout; три копии одного запроса — три места, где он может незаметно разойтись. */
+  private async summary(sport: string, league: string, eventId: string): Promise<any | null> {
     const espnSport = ESPN_SPORT[sport];
     if (!espnSport) return null;
     const url = `${this.cfg.espnBase}/${espnSport}/${league}/summary?event=${encodeURIComponent(eventId)}`;
@@ -181,8 +187,7 @@ export class EspnSportsProvider implements SportsProvider {
     try {
       const res = await this.fetchImpl(url, { signal: ctrl.signal });
       if (!res.ok) return null;
-      const s = (await res.json()) as any;
-      return parseEspnSummary(s);
+      return (await res.json()) as any;
     } catch {
       return null;
     } finally {
@@ -190,24 +195,32 @@ export class EspnSportsProvider implements SportsProvider {
     }
   }
 
+  /** Real lineups + key events from ESPN's summary endpoint. Degrades to null. */
+  async matchDetail(sport: string, league: string, eventId: string): Promise<MatchDetail | null> {
+    const s = await this.summary(sport, league, eventId);
+    return s ? parseEspnSummary(s) : null;
+  }
+
+  /** Полный статус события по id из ESPN summary. Разбор — ТЕМ ЖЕ parseEspnEvent, что и доска: у формата
+   *  события один парсер, иначе доска и точечный запрос начнут расходиться в мелочах ровно там, где на них
+   *  опирается гейт. Summary кладёт то же самое под `header`, поэтому его хватает переложить в форму события. */
+  async eventStatus(sport: string, league: string, eventId: string): Promise<SportsMatchStatus | null> {
+    const s = await this.summary(sport, league, eventId);
+    const h = s?.header, c0 = h?.competitions?.[0];
+    if (!c0) return null;
+    return parseEspnEvent({
+      id: h?.id ?? eventId,
+      date: c0.date ?? c0.startDate ?? null,
+      competitions: [c0],
+      status: c0.status ?? h?.status ?? null,
+    });
+  }
+
   /** ISO kickoff date of one event (P0.1 backfill). ESPN summary carries it under header.competitions[0]. */
   async eventDate(sport: string, league: string, eventId: string): Promise<string | null> {
-    const espnSport = ESPN_SPORT[sport];
-    if (!espnSport) return null;
-    const url = `${this.cfg.espnBase}/${espnSport}/${league}/summary?event=${encodeURIComponent(eventId)}`;
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs);
-    try {
-      const res = await this.fetchImpl(url, { signal: ctrl.signal });
-      if (!res.ok) return null;
-      const s = (await res.json()) as any;
-      const d = s?.header?.competitions?.[0]?.date ?? s?.header?.competitions?.[0]?.startDate ?? null;
-      return typeof d === "string" ? d : null;
-    } catch {
-      return null;
-    } finally {
-      clearTimeout(timer);
-    }
+    const s = await this.summary(sport, league, eventId);
+    const d = s?.header?.competitions?.[0]?.date ?? s?.header?.competitions?.[0]?.startDate ?? null;
+    return typeof d === "string" ? d : null;
   }
 }
 
@@ -417,6 +430,10 @@ export class CompositeSportsProvider implements SportsProvider {
   eventDate(sport: string, league: string, eventId: string): Promise<string | null> {
     if (league.startsWith(SP_TAG)) return Promise.resolve(null); // StatPal path — no ESPN summary
     return this.espn.eventDate ? this.espn.eventDate(sport, league, eventId) : Promise.resolve(null);
+  }
+  eventStatus(sport: string, league: string, eventId: string): Promise<SportsMatchStatus | null> {
+    if (league.startsWith(SP_TAG)) return Promise.resolve(null); // StatPal не отдаёт событие по id — молчим честно
+    return this.espn.eventStatus ? this.espn.eventStatus(sport, league, eventId) : Promise.resolve(null);
   }
 }
 

@@ -91,7 +91,7 @@ export function cycleSummaryLine(prefix: string, steps: { label: string; result:
 export function expectedTickJobs(tickMin: number): { label: string; everyMin: number }[] {
   return [
     "aliasOverlay", "repairLeagueMap", "dedupe", "reSettleSuspects", "staleShadowResolve", "pieceRelabel",
-    "legGapSuspect", "reSettleSuspectsFresh", "blindFundedAudit", "advanceClocks", "stats", "settleStale",
+    "legGapSuspect", "reSettleSuspectsFresh", "boundNoScoreChase", "blindFundedAudit", "advanceClocks", "stats", "settleStale",
     "captureLiveOpens", "tennisFinish", "tennisScoreBackfill", "tennisSettle", "tennisPmvSettle",
     "pmvShadowResolve", "familyShadowResolve", "refusalShadowResolve", "svShadowResolve",
     "prune", "pruneProviderSnapshots", "noFeedCoverage", "sweepAbandoned", "pruneMatches", "capLogArchive",
