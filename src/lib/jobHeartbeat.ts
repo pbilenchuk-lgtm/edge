@@ -115,3 +115,109 @@ export function expectedTickJobs(tickMin: number): { label: string; everyMin: nu
 export const UNWATCHED_STEPS: Record<string, string> = {
   dryExitSweep: "включается режимом торговли (readTradingMode ≠ off); при выключенном режиме «НИ РАЗУ» было бы ложной тревогой",
 };
+
+// ── ЖИВОЙ ТИК: ВТОРАЯ ПОЛОВИНА ТОЙ ЖЕ СЛЕПОТЫ ───────────────────────────────────────────────────
+// 02.08 я починил `step()` полного цикла и объявил класс закрытым. Живой тик остался ровно с тем же
+// дефектом: `stepLive`/`stepSyncLive` не звали `noteStep` вовсе. А в живом тике живут шаги, которых в
+// полном цикле НЕТ ни одного экземпляра: `tennisTrade`, `tennisSetValue`, `tennisPmv`, `bookDepth`,
+// `liveBackfillAnalyze` — то есть теннисные входы, съём глубины и добор анализа. Пульс показывал 49/49
+// зелёных и при этом не знал об этих пяти ничего.
+//
+// ПОЧЕМУ ОТДЕЛЬНАЯ СЕКЦИЯ, А НЕ ДОБАВЛЕНИЕ В `expectedTickJobs`. Живой тик идёт ТОЛЬКО пока есть матч в
+// игре. Ночью живых матчей нет — и все его шаги «устарели» бы по стенным часам. Это ровно та ложная
+// тревога, которую уже лечили у `dryExitSweep` и у `resettle_suspect`: сторож обязан молчать там, где
+// он ничего не измеряет. Поэтому свежесть живого шага меряется НЕ стенными часами, а ЯКОРЕМ —
+// отметкой последнего полного живого прохода. Отстал от якоря → проводка мертва. Якоря нет → замера
+// нет, и отчёт говорит это словами, а не выдаёт «всё в порядке».
+//
+// Метки живут в своём пространстве имён (`live:`), потому что половина имён совпадает с полным циклом
+// (`odds`, `enrich`, `tennisScout`…), и общая запись стирала бы разницу между «шаг ходит в медленном
+// цикле» и «шаг ходит в живом».
+
+export const LIVE_JOB_PREFIX = "live:";
+/** Якорь: положительная отметка «полный живой проход дошёл до конца». Ставится последней строкой прохода. */
+export const LIVE_PASS_LABEL = "live:pass";
+/** Насколько шаг может отстать от якоря, прежде чем это мёртвая проводка, а не разница в тиках. */
+export const LIVE_LAG_TOLERANCE_MIN = 10;
+/** Старше этого якорь означает «живых матчей давно нет» — то есть ОТСУТСТВИЕ замера, а не здоровье. */
+export const LIVE_ANCHOR_FRESH_MIN = 30;
+
+export const liveJobKey = (label: string) => `${LIVE_JOB_PREFIX}${label}`;
+
+/**
+ * Шаги ПОЛНОГО живого прохода. Перечень явный по той же причине, что и у медленного цикла.
+ * `enrich` зависит от провайдера (на проде он всегда есть — его отсутствие само по себе тревога),
+ * остальные безусловны внутри прохода.
+ */
+export function expectedLiveJobs(): string[] {
+  return [
+    "odds", "advanceClocks", "enrich", "settleStale", "stats", "captureLiveOpens", "snapshots",
+    "bookDepth", "tennisScout", "tennisBreakMarks", "tennisTrade", "tennisSetValue", "tennisPmv",
+    "tennisPmvSettle", "tennisExit", "tennisFinish", "tennisSettle",
+    "liveBackfillAnalyze", "exits", "reassess", "autoEnter",
+  ];
+}
+
+/** Живые шаги, сознательно вне наблюдения, и почему. Пустой список — тоже решение, а не забывчивость. */
+export const UNWATCHED_LIVE_STEPS: Record<string, string> = {};
+
+export type LiveJobVerdict = "свежий" | "ОТСТАЛ" | "НИ РАЗУ" | "тика не было";
+export interface LiveJobRow {
+  label: string; lastAt: string | null; lagMin: number | null;
+  result: number | null; ok: boolean; verdict: LiveJobVerdict; note: string;
+}
+export interface LiveJobHeartbeatReport {
+  /** Явное «замер был / замера не было» — вместо того чтобы кодировать это пустым списком тревог. */
+  measured: boolean;
+  anchorAt: string | null; anchorAgeMin: number | null;
+  rows: LiveJobRow[]; lagging: LiveJobRow[]; neverRan: LiveJobRow[];
+  note: string;
+}
+
+export function buildLiveJobHeartbeat(
+  db: Database, expected: string[] = expectedLiveJobs(), nowMs = Date.now(),
+): LiveJobHeartbeatReport {
+  const anchor = readJobRun(db, LIVE_PASS_LABEL);
+  const anchorMs = anchor ? Date.parse(anchor.at) || 0 : 0;
+  const anchorAgeMin = anchor ? Math.round((nowMs - anchorMs) / 60_000) : null;
+  // Якоря нет или он стар — живых матчей не было. Это ОТСУТСТВИЕ ЗАМЕРА: молчание сторожа здесь не
+  // утверждает ничего, и отчёт обязан сказать это буквально.
+  const measured = !!anchor && (anchorAgeMin as number) <= LIVE_ANCHOR_FRESH_MIN;
+
+  const rows: LiveJobRow[] = expected.map((label) => {
+    const run = readJobRun(db, liveJobKey(label));
+    const lagMin = run && anchorMs ? Math.round((anchorMs - (Date.parse(run.at) || 0)) / 60_000) : null;
+    let verdict: LiveJobVerdict;
+    if (!measured) verdict = "тика не было";
+    else if (!run) verdict = "НИ РАЗУ";
+    else verdict = (lagMin ?? 0) > LIVE_LAG_TOLERANCE_MIN ? "ОТСТАЛ" : "свежий";
+    return {
+      label, lastAt: run?.at ?? null, lagMin, result: run?.result ?? null, ok: run?.ok ?? false, verdict,
+      note: verdict === "тика не было"
+          ? `живого прохода ${anchor ? `${anchorAgeMin}мин назад (порог ${LIVE_ANCHOR_FRESH_MIN})` : "не было ни разу"} — живой тик идёт только пока есть матч в игре, поэтому это ОТСУТСТВИЕ ЗАМЕРА, а не «шаг здоров»`
+        : verdict === "НИ РАЗУ" ? `полный живой проход дошёл до конца, а этот шаг следа не оставил — проводка мертва`
+        : verdict === "ОТСТАЛ" ? `отстал от последнего живого прохода на ${lagMin}мин (порог ${LIVE_LAG_TOLERANCE_MIN}) — шаг перестал вызываться внутри тика`
+        : `в такт с проходом (отставание ${lagMin ?? 0}мин), результат ${run?.result ?? "—"}${run?.ok === false ? " (ОШИБКА)" : ""}`,
+    };
+  });
+
+  const lagging = rows.filter((r) => r.verdict === "ОТСТАЛ");
+  const neverRan = rows.filter((r) => r.verdict === "НИ РАЗУ");
+  return {
+    measured, anchorAt: anchor?.at ?? null, anchorAgeMin, rows, lagging, neverRan,
+    note: !measured
+      ? `живой тик не измеряется: последний полный проход ${anchor ? `${anchorAgeMin}мин назад` : "отсутствует"}. Это отсутствие замера, а не здоровье`
+      : lagging.length || neverRan.length
+        ? `⚠ живые шаги требуют внимания: отстали ${lagging.length} (${lagging.map((r) => r.label).join(", ") || "—"}), `
+          + `ни разу ${neverRan.length} (${neverRan.map((r) => r.label).join(", ") || "—"})`
+        : `все ${rows.length} шагов живого тика в такт с проходом (якорь ${anchorAgeMin}мин назад)`,
+  };
+}
+
+/** Строка для еженедельника/здоровья. «Не измеряется» здесь — отдельный исход, а не тихое «ок». */
+export function liveJobLine(r: LiveJobHeartbeatReport): string {
+  if (!r.measured) return `live_jobs: НЕ ИЗМЕРЯЕТСЯ — живого прохода ${r.anchorAt ? `${r.anchorAgeMin}мин назад` : "не было"}`;
+  return `live_jobs: ${r.rows.length - r.lagging.length - r.neverRan.length}/${r.rows.length} в такт`
+    + (r.lagging.length ? ` · ⚠ отстали: ${r.lagging.map((x) => x.label).join(", ")}` : "")
+    + (r.neverRan.length ? ` · ⚠ НИ РАЗУ: ${r.neverRan.map((x) => x.label).join(", ")}` : "");
+}

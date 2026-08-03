@@ -14,7 +14,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
-import { recordJobRun, readJobRun, buildJobHeartbeat, cycleSummaryLine, expectedTickJobs, JOB_STALE_FACTOR, UNWATCHED_STEPS } from "../src/lib/jobHeartbeat.js";
+import {
+  recordJobRun, readJobRun, buildJobHeartbeat, cycleSummaryLine, expectedTickJobs, JOB_STALE_FACTOR, UNWATCHED_STEPS,
+  buildLiveJobHeartbeat, expectedLiveJobs, liveJobKey, liveJobLine, LIVE_PASS_LABEL, LIVE_LAG_TOLERANCE_MIN,
+  LIVE_ANCHOR_FRESH_MIN, UNWATCHED_LIVE_STEPS,
+} from "../src/lib/jobHeartbeat.js";
 
 const NOW = Date.parse("2026-08-02T12:00:00Z");
 const at = (minAgo: number) => new Date(NOW - minAgo * 60_000).toISOString();
@@ -139,3 +143,95 @@ async function cycleSteps(): Promise<Set<string>> {
   for (const m of src.matchAll(/\bstep(?:Sync)?\(\s*"([A-Za-z][A-Za-z0-9_]*)"/g)) out.add(m[1]);
   return out;
 }
+/** Метки шагов ЖИВОГО тика. Отдельный экстрактор — потому что и пространство имён у них отдельное. */
+async function liveSteps(): Promise<Set<string>> {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/lib/lifecycle.ts", import.meta.url), "utf8");
+  const out = new Set<string>();
+  for (const m of src.matchAll(/\bstep(?:Sync)?Live\(\s*"([A-Za-z][A-Za-z0-9_]*)"/g)) out.add(m[1]);
+  return out;
+}
+
+// ── ЖИВОЙ ТИК: ВТОРАЯ ПОЛОВИНА ТОЙ ЖЕ СЛЕПОТЫ ───────────────────────────────────────────────────
+// 02.08 я починил `step()` полного цикла и объявил класс закрытым. `stepLive` остался без `noteStep`,
+// и пять шагов, которых в медленном цикле НЕТ вовсе (bookDepth, tennisTrade, tennisSetValue, tennisPmv,
+// liveBackfillAnalyze), не оставляли следа при зелёном пульсе 49/49. Здесь держится главное свойство
+// починки: живой сторож НЕ воет ночью, когда живых матчей нет, и при этом его молчание НЕ читается как
+// «всё в порядке» — у «не измеряется» отдельный исход.
+
+test("живые шаги пишутся в СВОЁ пространство имён — иначе «ходит в медленном» неотличимо от «ходит в живом»", () => {
+  const db = db0();
+  recordJobRun(db, "odds", { at: at(1), result: 5, ms: 1, ok: true });                 // медленный цикл
+  recordJobRun(db, liveJobKey("odds"), { at: at(1), result: 9, ms: 1, ok: true });     // живой тик
+  assert.equal(readJobRun(db, "odds")!.result, 5);
+  assert.equal(readJobRun(db, liveJobKey("odds"))!.result, 9, "записи не затирают друг друга");
+});
+
+test("якоря нет → «НЕ ИЗМЕРЯЕТСЯ», а не «все живые шаги мертвы»", () => {
+  const r = buildLiveJobHeartbeat(db0(), expectedLiveJobs(), NOW);
+  assert.equal(r.measured, false);
+  assert.equal(r.neverRan.length, 0, "без якоря тревоги быть не может — сторож ничего не измерял");
+  assert.equal(r.lagging.length, 0);
+  assert.ok(r.rows.every((x) => x.verdict === "тика не было"));
+  assert.match(r.rows[0].note, /ОТСУТСТВИЕ ЗАМЕРА, а не «шаг здоров»/);
+  assert.match(liveJobLine(r), /НЕ ИЗМЕРЯЕТСЯ/);
+});
+
+test("ночь без живых матчей — не тревога: старый якорь гасит весь раздел", () => {
+  const db = db0();
+  recordJobRun(db, LIVE_PASS_LABEL, { at: at(LIVE_ANCHOR_FRESH_MIN + 60), result: 0, ms: 1, ok: true });
+  for (const l of expectedLiveJobs()) recordJobRun(db, liveJobKey(l), { at: at(LIVE_ANCHOR_FRESH_MIN + 60), result: 0, ms: 1, ok: true });
+  const r = buildLiveJobHeartbeat(db, expectedLiveJobs(), NOW);
+  assert.equal(r.measured, false, "живой тик идёт только пока есть матч в игре");
+  assert.equal(r.lagging.length + r.neverRan.length, 0, "по стенным часам это была бы ложная тревога на весь список");
+  assert.match(r.note, /отсутствие замера, а не здоровье/);
+});
+
+test("свежий якорь: шаг, переставший вызываться ВНУТРИ тика, ловится по отставанию от якоря", () => {
+  const db = db0();
+  recordJobRun(db, LIVE_PASS_LABEL, { at: at(1), result: 2, ms: 1, ok: true });
+  for (const l of expectedLiveJobs()) recordJobRun(db, liveJobKey(l), { at: at(1), result: 0, ms: 1, ok: true });
+  recordJobRun(db, liveJobKey("tennisSetValue"), { at: at(1 + LIVE_LAG_TOLERANCE_MIN + 5), result: 0, ms: 1, ok: true });
+  const r = buildLiveJobHeartbeat(db, expectedLiveJobs(), NOW);
+  assert.equal(r.measured, true);
+  assert.deepEqual(r.lagging.map((x) => x.label), ["tennisSetValue"]);
+  assert.match(r.lagging[0].note, /перестал вызываться внутри тика/);
+  assert.match(liveJobLine(r), /отстали: tennisSetValue/);
+});
+
+test("проход дошёл до конца, а шаг следа не оставил — это мёртвая проводка, и она названа", () => {
+  const db = db0();
+  recordJobRun(db, LIVE_PASS_LABEL, { at: at(1), result: 2, ms: 1, ok: true });
+  for (const l of expectedLiveJobs()) if (l !== "bookDepth") recordJobRun(db, liveJobKey(l), { at: at(1), result: 0, ms: 1, ok: true });
+  const r = buildLiveJobHeartbeat(db, expectedLiveJobs(), NOW);
+  assert.deepEqual(r.neverRan.map((x) => x.label), ["bookDepth"]);
+  assert.match(r.neverRan[0].note, /проводка мертва/);
+});
+
+test("нулевой результат живого шага — тоже результат, и он в такт", () => {
+  const db = db0();
+  recordJobRun(db, LIVE_PASS_LABEL, { at: at(1), result: 1, ms: 1, ok: true });
+  for (const l of expectedLiveJobs()) recordJobRun(db, liveJobKey(l), { at: at(1), result: 0, ms: 1, ok: true });
+  const r = buildLiveJobHeartbeat(db, expectedLiveJobs(), NOW);
+  assert.ok(r.rows.every((x) => x.verdict === "свежий"));
+  assert.equal(r.rows.find((x) => x.label === "tennisTrade")!.result, 0);
+  assert.match(r.note, /в такт с проходом/);
+});
+
+test("перечень живых шагов сверяется с ИСХОДНИКОМ в обе стороны — как у медленного цикла", async () => {
+  const declared = await liveSteps();
+  const expected = expectedLiveJobs();
+  assert.deepEqual(expected.filter((l, i) => expected.indexOf(l) !== i), [], "дублей в перечне нет");
+  const ghost = expected.filter((l) => !declared.has(l));
+  assert.deepEqual(ghost, [], `метки без реального живого шага (вечное «НИ РАЗУ»): ${ghost.join(", ")}`);
+  const blind = [...declared].filter((l) => !expected.includes(l) && !(l in UNWATCHED_LIVE_STEPS));
+  assert.deepEqual(blind, [], `живые шаги вне пульса и вне списка исключений: ${blind.join(", ")}`);
+});
+
+test("шаги, живущие ТОЛЬКО в живом тике, обязаны быть под наблюдением — ради них всё и делалось", async () => {
+  const slow = await cycleSteps();
+  const liveOnly = expectedLiveJobs().filter((l) => !slow.has(l));
+  for (const need of ["bookDepth", "tennisTrade", "tennisSetValue", "tennisPmv", "liveBackfillAnalyze"]) {
+    assert.ok(liveOnly.includes(need), `${need} существует только в живом тике и обязан быть в живом перечне`);
+  }
+});

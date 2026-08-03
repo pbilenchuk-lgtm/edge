@@ -124,6 +124,15 @@ export async function GET(req: Request) {
       const tickMin = Math.max(1, Number(process.env.TICK_INTERVAL_MIN ?? 30));
       return NextResponse.json({ ok: true, tickMin, report: buildJobHeartbeat(db, expectedTickJobs(tickMin)) });
     }
+    // ?report=live_job_heartbeat → [O3] пульс ЖИВОГО тика — вторая половина той же слепоты: пять шагов
+    // (bookDepth, tennisTrade, tennisSetValue, tennisPmv, liveBackfillAnalyze) живут только там и следа
+    // не оставляли. Свежесть меряется от ЯКОРЯ (последний полный живой проход), а не от стенных часов:
+    // живой тик идёт только пока есть матч в игре, и ночная тишина — это отсутствие замера. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "live_job_heartbeat") {
+      const { buildLiveJobHeartbeat, liveJobLine } = await import("@/lib/jobHeartbeat");
+      const r = buildLiveJobHeartbeat(db);
+      return NextResponse.json({ ok: true, report: r, line: liveJobLine(r) });
+    }
     // ?report=entry_funnel → [O2] воронка входа за окно: разобрано → отказы по причинам словаря → входы,
     // с НЕВЯЗКОЙ (отказы, которых словарь не знает — сам по себе алерт) и базлайнами против медианы 7 дней.
     // Ответ на «входов нет — где проблема?» одной строкой вместо дней поисков. Read-only.
@@ -337,6 +346,15 @@ export async function GET(req: Request) {
             const tickMin = Math.max(1, Number(process.env.TICK_INTERVAL_MIN ?? 30));
             const h = buildJobHeartbeat(db, expectedTickJobs(tickMin), Date.parse(now) || Date.now());
             return { note: h.note, stale: h.stale.map((r) => r.label), neverRan: h.neverRan.map((r) => r.label) };
+          } catch { return null; }
+        })(),
+        // [O3] Пульс ЖИВОГО тика — отдельной строкой, потому что его тишина не значит того же, что тишина
+        // медленного цикла: живой тик идёт только пока есть матч в игре.
+        liveJobHeartbeat: await (async () => {
+          try {
+            const { buildLiveJobHeartbeat, liveJobLine } = await import("@/lib/jobHeartbeat");
+            const l = buildLiveJobHeartbeat(db, undefined, Date.parse(now) || Date.now());
+            return { line: liveJobLine(l), measured: l.measured, lagging: l.lagging.map((r) => r.label), neverRan: l.neverRan.map((r) => r.label) };
           } catch { return null; }
         })(),
         // [O2] Воронка входа: «анализ N · входы 0 · причина X» — то, чего не хватило 29.07 и в инциденте пресета.
