@@ -30,6 +30,23 @@
 //   • хоть одно расхождение теста → ОПРОВЕРГНУТА, блок остаётся;
 //   • недобор → «НЕ СОЗРЕЛО»: это отсутствие замера, а не разрешение.
 //
+// РЕЗУЛЬТАТ ПЕРВОГО СОЗРЕВШЕГО ЗАМЕРА (03.08): гипотеза «фаворит несёт −1.5» ОПРОВЕРГНУТА — 1 расхождение
+// на 12 матчах при чистом контроле 27/27. Различающий случай ровно один и он показателен: Parry — Day,
+// счёт первого в подписи 1:2, первый НЕ фаворит. Правило ждало покрытия (+1.5 держится при разнице в
+// один сет), рынок закрылся на 4.1¢. Все прочие одиннадцать матчей обе гипотезы предсказывают одинаково.
+//
+// ЧТО ДАННЫЕ ГОВОРЯТ ВМЕСТО. Альтернатива «−1.5 ВСЕГДА у первого в подписи (outcomes[0])» согласована со
+// всеми одиннадцатью завершёнными матчами. Но она РОЖДЕНА ЭТИМИ ЖЕ ДАННЫМИ, и подтверждать её на них —
+// подгонка в чистом виде. Поэтому она считается параллельно, с собственной пре-регистрацией: засчитываются
+// только РАЗЛИЧАЮЩИЕ матчи (те, где две гипотезы предсказывают РАЗНОЕ: первый в подписи не фаворит И
+// разница в сетах ровно один) и только сыгранные ПОСЛЕ даты фиксации. Ретроспективный счёт печатается
+// отдельно и явно помечен как «на данных, породивших гипотезу».
+//
+// НЕЗАВЕРШЁННЫЕ МАТЧИ ИСКЛЮЧЕНЫ, И ЭТО НЕ ПОДГОНКА ПОД РЕЗУЛЬТАТ. Проект уже знает (Gate 0.2, tennisPmv):
+// «Set Handicap VOID on any mid-match retire». Матч, где никто не набрал победных сетов, судить конвенцию
+// не может — контракт там void. Я это знание при построении выборки упустил, и в неё попал Mackenzie —
+// Rodionov со счётом 1:0. Правило исключения независимо от гипотез и применяется ко всем строкам сразу.
+//
 // Модуль ТОЛЬКО читает. Флага он не касается: снятие блока — отдельное решение владельца по этим числам.
 // ============================================================
 
@@ -37,11 +54,16 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { parseProp, propFirstIsP1 } from "./tennisPmv.js";
 import { tennisMoneyline } from "./tennisScout.js";
+import { isBestOfFive } from "./tennisSetValue.js";
 import { pWithUnit } from "./signals.js";
 
 /** Пороги — ДО данных. Меняются решением, а не результатом. */
 export const SHC_CONTROL_MIN = 8;
 export const SHC_TEST_MIN_MATCHES = 8;
+/** Альтернатива подтверждается только на РАЗЛИЧАЮЩИХ матчах — тех, где гипотезы спорят. */
+export const SHC_ALT_MIN_DISCRIMINATING = 5;
+/** Дата фиксации альтернативы. Матчи ДО неё её породили и подтверждать её не могут. */
+export const SHC_ALT_REGISTERED_AT = "2026-08-03";
 /** Цена, ниже/выше которой рынок считается разрешившимся. Между — исхода НЕТ, а не «наверное да». */
 export const SHC_RESOLVED_HI = 90;
 export const SHC_RESOLVED_LO = 10;
@@ -60,6 +82,12 @@ export interface ShcRow {
   /** Насколько цена СТАРШЕ последнего снимка скаута. Замороженная задолго до конца цена не может
    *  дойти до резолюции — и «нет исхода» тогда означает не «рынок не решился», а «мы не смотрели». */
   priceLagMin: number | null;
+  /** Матч сыгран до конца (кто-то набрал победные сеты)? Ретайр ⇒ ±1.5 void ⇒ судить нельзя. */
+  completed: boolean;
+  /** Предсказание АЛЬТЕРНАТИВЫ («−1.5 всегда у первого») и её исход. */
+  altPredictedFirstWins: boolean; altOutcome: ShcOutcome;
+  /** Гипотезы предсказывают РАЗНОЕ — только такие матчи что-то доказывают об их различии. */
+  discriminating: boolean;
   observedFirstWins: boolean | null; outcome: ShcOutcome; note: string;
 }
 export type ShcVerdict = "МЕТОД НЕВЕРЕН" | "ОПРОВЕРГНУТА" | "ПОДТВЕРЖДЕНА" | "НЕ СОЗРЕЛО";
@@ -72,6 +100,16 @@ export interface ShcReport {
   /** ПОЧЕМУ тест не набирается: из нерешённых гандикапов — сколько без токена и сколько с ценой,
    *  замороженной ДО конца матча. Без этих двух чисел «НЕ СОЗРЕЛО» неотличимо от «не дозреет никогда». */
   undecidedNoToken: number; undecidedStalePrice: number; undecidedMedianLagMin: number | null;
+  /** Незавершённые (ретайр) исключены из суждения — ±1.5 там void. Число печатается, а не прячется. */
+  droppedIncomplete: number;
+  /** АЛЬТЕРНАТИВА, порождённая данными: считается только на РАЗЛИЧАЮЩИХ матчах ПОСЛЕ фиксации. */
+  alt: {
+    registeredAt: string; minDiscriminating: number;
+    discriminatingSince: number; mismatchSince: number;
+    /** Ретроспектива — явно помечена: эти матчи гипотезу ПОРОДИЛИ и подтвердить её не могут. */
+    discriminatingRetro: number; mismatchRetro: number;
+    verdict: ShcVerdict; note: string;
+  };
   verdict: ShcVerdict; note: string;
 }
 
@@ -92,7 +130,8 @@ function resolvedFirstWins(price: number | null): boolean | null {
 
 export function buildSetHandicapConvention(db: Database): ShcReport {
   const rows: ShcRow[] = [];
-  let ambiguousProps = 0, explicitProps = 0;
+  let ambiguousProps = 0, explicitProps = 0, droppedIncomplete = 0;
+  const matchDay = new Map<string, string>();      // матч → день старта: им отделяются НОВЫЕ наблюдения
 
   for (const c of R.listCompetitions(db)) {
     if (c.sport_id !== "tennis") continue;
@@ -100,12 +139,17 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
       if (m.state !== "finished") continue;
       // Финальный счёт по сетам — у скаута, того же источника, что и вся теннисная ветка.
       const last = db.prepare(
-        `SELECT p1,p2,sets_p1,sets_p2 FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`,
-      ).get(m.id) as { p1: string | null; p2: string | null; sets_p1: number | null; sets_p2: number | null } | undefined;
+        `SELECT p1,p2,sets_p1,sets_p2,event_type,tournament FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`,
+      ).get(m.id) as { p1: string | null; p2: string | null; sets_p1: number | null; sets_p2: number | null; event_type: string | null; tournament: string | null } | undefined;
       if (!last || last.sets_p1 == null || last.sets_p2 == null || last.sets_p1 === last.sets_p2) continue;
       const lastSeenMs = Date.parse(
         (db.prepare(`SELECT MAX(batch_at) b FROM tennis_snapshots WHERE pm_match_id=?`).get(m.id) as { b: string | null }).b ?? "",
       ) || 0;
+      // ЗАВЕРШЁН ЛИ МАТЧ. Ретайр ⇒ ±1.5 VOID (Gate 0.2, уже ратифицировано в tennisPmv) ⇒ этот матч о
+      // конвенции не говорит НИЧЕГО. Правило не зависит ни от одной из гипотез и применяется ко всем сразу.
+      const needSets = isBestOfFive(last.event_type, last.tournament) ? 3 : 2;
+      const completed = Math.max(last.sets_p1, last.sets_p2) >= needSets;
+      matchDay.set(m.id, (m.kickoff_at ?? "").slice(0, 10));
       const players = { p1: last.p1 ?? "", p2: last.p2 ?? "" };
       // ФАВОРИТ — по ПЕРВОЙ проценённой записи скаута. Текущая цена после матча уже равна исходу и
       // сделала бы правило тавтологией: оно предсказывало бы то, из чего построено.
@@ -129,6 +173,8 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
           setsFirst: firstSets, setsSecond: secondSets, favIsLabelFirst: ml.firstIsP1 === favIsScoutP1,
           predictedFirstWins: predicted, lastPriceCents: price,
           hasToken: !!mlMarket?.external_ref, priceLagMin: priceLag(mlMarket?.snapshot_at, lastSeenMs),
+          completed, altPredictedFirstWins: predicted, altOutcome: observed == null ? "нет исхода" : observed === predicted ? "совпало" : "РАСХОЖДЕНИЕ",
+          discriminating: false,
           observedFirstWins: observed,
           outcome: observed == null ? "нет исхода" : observed === predicted ? "совпало" : "РАСХОЖДЕНИЕ",
           note: observed == null
@@ -145,20 +191,27 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
         if (explicit) explicitProps++; else ambiguousProps++;
         const first = propFirstIsP1(mk.label, players);
         if (first == null) continue;                                    // стороны не сопоставлены — не судим
+        if (!completed) { droppedIncomplete++; continue; }               // ретайр ⇒ ±1.5 void ⇒ судить нечем
         const favIsLabelFirst = first === favIsScoutP1;
         // Явная подпись читает сторону из ЛИТЕРАЛА (её проверять нечем и незачем), неоднозначная — из правила.
         const minusOnFirst = explicit ? parsed.handicapOnFirst : favIsLabelFirst;
         const firstSets = first === true ? last.sets_p1 : last.sets_p2;
         const secondSets = first === true ? last.sets_p2 : last.sets_p1;
         // −1.5 покрыт, если его носитель выиграл с разницей ≥2 сетов; +1.5 покрыт, если соперник НЕ смог.
-        const predicted = minusOnFirst ? firstSets - secondSets >= 2 : !(secondSets - firstSets >= 2);
+        const covers = (minusFirst: boolean) => (minusFirst ? firstSets - secondSets >= 2 : !(secondSets - firstSets >= 2));
+        const predicted = covers(minusOnFirst);
+        // АЛЬТЕРНАТИВА: −1.5 всегда у первого в подписи (outcomes[0]), независимо от того, кто фаворит.
+        const altPredicted = covers(true);
         const price = mk.price == null ? null : Number(mk.price);
         const observed = resolvedFirstWins(price);
+        const altOutcome: ShcOutcome = observed == null ? "нет исхода" : observed === altPredicted ? "совпало" : "РАСХОЖДЕНИЕ";
         rows.push({
           matchId: m.id, players: `${m.home} — ${m.away}`, label: mk.label, group: "тест",
           setsFirst: firstSets, setsSecond: secondSets, favIsLabelFirst,
           predictedFirstWins: predicted, lastPriceCents: price,
           hasToken: !!mk.external_ref, priceLagMin: priceLag(mk.snapshot_at, lastSeenMs),
+          completed, altPredictedFirstWins: altPredicted, altOutcome,
+          discriminating: predicted !== altPredicted,
           observedFirstWins: observed,
           outcome: observed == null ? "нет исхода" : observed === predicted ? "совпало" : "РАСХОЖДЕНИЕ",
           note: observed == null
@@ -190,6 +243,34 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
     ? ` Из ${undecided.length} нерешённых гандикапов: без токена ${undecidedNoToken}, с ценой старше 30мин до конца матча ${undecidedStalePrice} (медиана отставания ${undecidedMedianLagMin ?? "—"}мин).`
     : "";
 
+  // ── АЛЬТЕРНАТИВА, ПОРОЖДЁННАЯ ДАННЫМИ, СУДИТСЯ ПО СОБСТВЕННОЙ ПРЕ-РЕГИСТРАЦИИ ────────────────
+  // Считаются только РАЗЛИЧАЮЩИЕ матчи: там, где обе гипотезы предсказывают одно и то же, совпадение
+  // ничего не говорит об их различии, и складывать такие «подтверждения» — самообман. И только матчи
+  // ПОСЛЕ даты фиксации: те, что были до, гипотезу породили. Ретроспектива печатается отдельно и
+  // помечена — она читается как «столько согласовано», а НЕ как «столько подтверждено».
+  const discr = rows.filter((r) => r.group === "тест" && r.discriminating && r.altOutcome !== "нет исхода");
+  const byMatch = (list: typeof discr) => {
+    const seen = new Map<string, boolean>();                             // матч → был ли хоть один промах
+    for (const r of list) seen.set(r.matchId, (seen.get(r.matchId) ?? false) || r.altOutcome === "РАСХОЖДЕНИЕ");
+    return { n: seen.size, bad: [...seen.values()].filter(Boolean).length };
+  };
+  const since = byMatch(discr.filter((r) => (matchDay.get(r.matchId) ?? "") > SHC_ALT_REGISTERED_AT));
+  const retro = byMatch(discr.filter((r) => (matchDay.get(r.matchId) ?? "") <= SHC_ALT_REGISTERED_AT));
+  const altVerdict: ShcVerdict = since.bad > 0 ? "ОПРОВЕРГНУТА"
+    : since.n >= SHC_ALT_MIN_DISCRIMINATING ? "ПОДТВЕРЖДЕНА" : "НЕ СОЗРЕЛО";
+  const alt = {
+    registeredAt: SHC_ALT_REGISTERED_AT, minDiscriminating: SHC_ALT_MIN_DISCRIMINATING,
+    discriminatingSince: since.n, mismatchSince: since.bad,
+    discriminatingRetro: retro.n, mismatchRetro: retro.bad,
+    verdict: altVerdict,
+    note: altVerdict === "ОПРОВЕРГНУТА"
+      ? `альтернатива «−1.5 всегда у первого» ОПРОВЕРГНУТА: ${since.bad} расхождений на ${since.n} различающих матчах после ${SHC_ALT_REGISTERED_AT}`
+      : altVerdict === "ПОДТВЕРЖДЕНА"
+        ? `альтернатива ПОДТВЕРЖДЕНА на НОВЫХ данных: ${since.n} различающих матчей после ${SHC_ALT_REGISTERED_AT}, ноль расхождений — ${pWithUnit(Math.pow(0.5, since.n), since.n, "матчах")}. Флаг поднимает ВЛАДЕЛЕЦ`
+        : `альтернатива НЕ СОЗРЕЛА: различающих матчей после ${SHC_ALT_REGISTERED_AT} ${since.n} при нужных ${SHC_ALT_MIN_DISCRIMINATING}`
+          + ` (ретроспективно согласована с ${retro.n - retro.bad}/${retro.n} различающими — но ЭТИ матчи гипотезу ПОРОДИЛИ и подтвердить её не могут)`,
+  };
+
   let verdict: ShcVerdict, note: string;
   if (control.length < SHC_CONTROL_MIN) {
     verdict = "НЕ СОЗРЕЛО";
@@ -213,7 +294,7 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
     testMatches, testChecked: test.length, testMismatch,
     ambiguousProps, explicitProps,
     undecidedNoToken, undecidedStalePrice, undecidedMedianLagMin,
-    verdict, note,
+    droppedIncomplete, alt, verdict, note,
   };
 }
 
@@ -222,5 +303,6 @@ export function setHandicapConventionLine(r: ShcReport): string {
   return `set_handicap: подписей неоднозначных ${r.ambiguousProps} / явных ${r.explicitProps}`
     + ` · контроль ${r.controlChecked - r.controlMismatch}/${r.controlChecked}`
     + ` · тест ${r.testChecked - r.testMismatch}/${r.testChecked} на ${r.testMatches} матчах`
-    + ` · ${r.verdict}`;
+    + ` · ${r.verdict}`
+    + ` · альт «−1.5 у первого»: ${r.alt.discriminatingSince}/${r.alt.minDiscriminating} различающих после ${r.alt.registeredAt} → ${r.alt.verdict}`;
 }

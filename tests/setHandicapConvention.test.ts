@@ -178,3 +178,43 @@ test("незрелость объясняется числами: сколько
   assert.equal(r.undecidedMedianLagMin, 180);
   assert.match(r.note, /без токена 1, с ценой старше 30мин до конца матча 1/);
 });
+
+// ── АЛЬТЕРНАТИВА, ПОРОЖДЁННАЯ ДАННЫМИ, СУДИТСЯ ПО СОБСТВЕННОЙ ПРЕ-РЕГИСТРАЦИИ ────────────────────
+// Созревший замер 03.08 опроверг «фаворит несёт −1.5» одним расхождением на 12 матчах при чистом
+// контроле 27/27 — и те же данные оказались согласованы с «−1.5 ВСЕГДА у первого в подписи». Соблазн
+// объявить вторую гипотезу подтверждённой на них же — ровно подгонка. Поэтому здесь держатся два
+// свойства: считаются только РАЗЛИЧАЮЩИЕ матчи, и только те, что сыграны ПОСЛЕ фиксации.
+test("совпадения там, где гипотезы предсказывают ОДНО И ТО ЖЕ, альтернативу не подтверждают", () => {
+  const db = world();
+  // Фаворит первый, 2:0 — обе гипотезы говорят «покрыл». Таких сколько угодно, доказывают они ноль.
+  for (let i = 400; i < 412; i++) played(db, i, { favP1: true, setsP1: 2, setsP2: 0, mlPrice: 99, hcapPrice: 97 });
+  const r = buildSetHandicapConvention(db);
+  assert.equal(r.rows.filter((x) => x.group === "тест" && x.discriminating).length, 0, "различающих нет");
+  assert.equal(r.alt.discriminatingSince, 0);
+  assert.equal(r.alt.verdict, "НЕ СОЗРЕЛО");
+  assert.match(r.alt.note, /различающих матчей после/);
+});
+
+test("ретроспектива названа ретроспективой: породившие гипотезу матчи её не подтверждают", () => {
+  const db = world();
+  // Различающий случай: первый НЕ фаворит и разница ровно в один сет (как Parry — Day).
+  // Даты этих матчей — ДО регистрации альтернативы.
+  for (let i = 0; i < 6; i++) played(db, i, { favP1: false, setsP1: 1, setsP2: 2, mlPrice: 4, hcapPrice: 4 });
+  const r = buildSetHandicapConvention(db);
+  assert.equal(r.alt.discriminatingRetro, 6, "шесть различающих — но все ДО фиксации");
+  assert.equal(r.alt.mismatchRetro, 0, "и все согласованы с альтернативой");
+  assert.equal(r.alt.discriminatingSince, 0, "после фиксации — ни одного");
+  assert.equal(r.alt.verdict, "НЕ СОЗРЕЛО", "согласие ретроспективы вердикта НЕ даёт");
+  assert.match(r.alt.note, /гипотезу ПОРОДИЛИ и подтвердить её не могут/);
+  // И исходная гипотеза на этих же матчах опровергнута — ровно случай Parry — Day.
+  assert.equal(r.testMismatch, 6);
+});
+
+test("незавершённый матч (ретайр) в суждение о конвенции НЕ идёт — ±1.5 там void", () => {
+  const db = world();
+  played(db, 500, { favP1: false, setsP1: 1, setsP2: 0, mlPrice: 99, hcapPrice: 99 }); // никто не набрал 2
+  const r = buildSetHandicapConvention(db);
+  assert.equal(r.rows.filter((x) => x.group === "тест").length, 0, "гандикап такого матча не судится");
+  assert.equal(r.droppedIncomplete, 1, "и число выброшенных НАПЕЧАТАНО, а не спрятано");
+  assert.equal(r.rows.filter((x) => x.group === "контроль").length, 1, "манилайн при ретайре разрешается нормально — контроль остаётся");
+});
