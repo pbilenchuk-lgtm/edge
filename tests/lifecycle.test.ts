@@ -1672,6 +1672,41 @@ test("runLiveCycle reacts to a live goal, and quiet re-runs don't re-fire the st
   assert.equal(r2.triggers, 0, "known event doesn't re-trigger");
 });
 
+// [O3, вторая половина] Живой тик оставляет след — и ровно тогда, когда он был ЖИВЫМ ТИКОМ.
+// Полный проход ставит якорь; проход без матчей в игре и защитный exits-only проход — НЕ ставят: иначе
+// якорь врал бы «полный проход был», и отставшие шаги считались бы свежими. Это тот же класс, что и
+// «сторож молчит там, где не измеряет», только с другого конца.
+test("runLiveCycle пишет след каждого шага, и якорь ставит ТОЛЬКО полный проход", async () => {
+  const { readJobRun, liveJobKey, LIVE_PASS_LABEL, buildLiveJobHeartbeat } = await import("../src/lib/jobHeartbeat.js");
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football" && c.budget > 0 && c.external_league === "fifa.world")!;
+  const mid = R.uid();
+  R.insertMatch(db, { id: mid, competition_id: comp.id, home: "Japan", away: "Peru", state: "live", lineup_out: true, kickoff_at: null, minute: 55, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: mid });
+  R.insertMarket(db, { id: R.uid(), match_id: mid, label: "Under 2.5", price: 40, ai_prob: 0.5, liquidity: null, external_ref: null, snapshot_at: "t", is_closing: false });
+  const provider: SportsProvider = {
+    name: "mock",
+    async scoreboard() { return []; },
+    async matchDetail() { return { lineupOut: true, lineups: { home: null, away: null }, events: [] }; },
+  };
+  const mock = (async () => ({ ok: true, status: 200, json: async () => ({ content: [{ text: JSON.stringify({ picks: [], exits: [] }) }] }) }) as any);
+
+  // 1) Защитный exits-only проход: следы шагов есть, ЯКОРЯ НЕТ — это не полный проход.
+  await runLiveCycle(db, provider, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } }, { exitsOnly: true });
+  assert.ok(readJobRun(db, liveJobKey("tennisExit")), "exits-only проход тоже оставляет след своих шагов");
+  assert.equal(readJobRun(db, LIVE_PASS_LABEL), null, "exits-only НЕ выдаёт себя за полный проход");
+
+  // 2) Полный проход: якорь встал, и шаги, которых нет в медленном цикле, наконец видны.
+  await runLiveCycle(db, provider, { fetchImpl: mock, env: { ANTHROPIC_API_KEY: "k" } });
+  assert.ok(readJobRun(db, LIVE_PASS_LABEL), "полный проход ставит якорь последней строкой");
+  for (const l of ["bookDepth", "tennisTrade", "tennisSetValue", "tennisPmv", "liveBackfillAnalyze"]) {
+    assert.ok(readJobRun(db, liveJobKey(l)), `${l} живёт только в живом тике — до этой починки следа не оставлял`);
+  }
+  const h = buildLiveJobHeartbeat(db);
+  assert.equal(h.measured, true, "якорь свежий — раздел измеряется");
+  assert.deepEqual([...h.lagging, ...h.neverRan].map((r) => r.label), [], h.note);
+});
+
 test("runLiveCycle reassesses on the periodic heartbeat with no on-pitch event", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);

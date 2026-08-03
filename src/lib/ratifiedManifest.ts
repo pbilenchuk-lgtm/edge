@@ -124,9 +124,9 @@ export const RATIFIED_MANIFEST: RatifiedEntry[] = [
   {
     module: "src/lib/jobHeartbeat.ts",
     ratification: "O3 — громкий ноль как стандарт для ВСЕХ джоб",
-    guards: "«не запускалось» отличимо от «отработало впустую»: факт запуска пишется данными, ноль виден наравне с двумястами",
+    guards: "«не запускалось» отличимо от «отработало впустую»: факт запуска пишется данными, ноль виден наравне с двумястами. С 03.08 ЖИВОЙ тик тоже: своё пространство имён `live:`, свежесть от ЯКОРЯ полного прохода, а не от стенных часов — ночью сторож молчит, и его молчание названо «не измеряется»",
     callers: ["src/lib/lifecycle.ts", "src/app/api/profiles/route.ts"],
-    namedCase: "piece_relabel и счётчик глубины 30.07 — молчание кодировало два разных факта",
+    namedCase: "piece_relabel и счётчик глубины 30.07 — молчание кодировало два разных факта; 03.08 — та же слепота во второй половине: пульс 49/49 зелёных не знал о bookDepth/tennisTrade/tennisSetValue/tennisPmv/liveBackfillAnalyze, живущих только в живом тике",
   },
   {
     module: "src/lib/defensiveCutGate.ts",
@@ -134,6 +134,13 @@ export const RATIFIED_MANIFEST: RatifiedEntry[] = [
     guards: "тающий опцион не режется на падении цены (недобор 12.6¢ = 37.6% на n=1128); time_decay_floor приостановлен как класс; counter_scenario не тронут",
     callers: ["src/lib/lifecycle.ts", "src/app/api/profiles/route.ts"],
     namedCase: "time_decay_floor: недобор 27.2¢ = 1035% цены среза при n=58 — защита отдавала 27¢ с доллара",
+  },
+  {
+    module: "src/lib/scoutCoverage.ts",
+    ratification: "«нет свежего счёта» обязано называть ПРИЧИНУ, а не возраст",
+    guards: "шесть причин разделены, и три из них не дефект; в знаменатель покрытия входят только матчи, где данные ДОЛЖНЫ быть; порог свежести один и тот же у отказа Set-Value и у отчёта",
+    callers: ["src/lib/tennisTrading.ts", "src/app/api/profiles/route.ts"],
+    namedCase: "no_score_data_skip «(15м > 15м)» в 64% логов: пятнадцать стоит там ПО КОНСТРУКЦИИ (throttle пропускает только первое пересечение) — я прочитал тавтологию как замер и вывел несуществующий дедлок каденции",
   },
   {
     module: "src/lib/groupBiasDetector.ts",

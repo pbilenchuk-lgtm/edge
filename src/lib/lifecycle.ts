@@ -56,7 +56,7 @@ import { resolvePmvShadowSignals } from "./tennisPmvShadow.js";
 import { resolveFamilyShadowSignals } from "./familyShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
-import { recordJobRun, cycleSummaryLine } from "./jobHeartbeat.js";
+import { recordJobRun, cycleSummaryLine, liveJobKey, LIVE_PASS_LABEL } from "./jobHeartbeat.js";
 import { recordGatePulse } from "./gateHeartbeat.js";
 import { defensiveCutAllowed, recordHoldMark } from "./defensiveCutGate.js";
 import { chaseBoundNoScore, chaseLine } from "./boundNoScoreChase.js";
@@ -3044,11 +3044,25 @@ export interface LiveCycleResult { live: number; oddsUpdated: number; enriched: 
 export async function runLiveCycle(
   db: Database, provider: SportsProvider | null, deps: EngineDeps = {}, opts: { exitsOnly?: boolean } = {},
 ): Promise<LiveCycleResult> {
+  // [O3, вторая половина] ЖИВОЙ ТИК ТОЖЕ ОСТАВЛЯЕТ СЛЕД. Починив 02.08 `step()` полного цикла, я объявил
+  // класс закрытым — а здесь `noteStep` не звался вовсе. И это не симметричная копия: пять шагов живут
+  // ТОЛЬКО тут (`bookDepth`, `tennisTrade`, `tennisSetValue`, `tennisPmv`, `liveBackfillAnalyze`) — теннисные
+  // входы и съём глубины. Пульс показывал 49/49 зелёных, ничего о них не зная.
+  // Метки пишутся в своё пространство имён (`live:`), потому что половина имён совпадает с медленным
+  // циклом, и общая запись стирала бы разницу между «ходит там» и «ходит здесь».
+  // СТРОКИ В ЛОГ НЕТ СОЗНАТЕЛЬНО: тик идёт раз в ~20с, сводная строка дала бы ~4 300 строк в сутки — тот
+  // самый потоп, который ТЗ прямо запрещает. Факт запуска пишется ДАННЫМИ; пульс спрашивают, а не листают.
+  const _liveT0 = Date.now();
+  const noteLiveStep = (label: string, result: unknown, ok: boolean) => {
+    recordJobRun(db, liveJobKey(label), { at: nowFn(deps)(), result: typeof result === "number" ? result : null, ms: 0, ok });
+  };
   const stepLive = async <T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
-    try { return await fn(); } catch (e) { console.error(`[liveCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
+    try { const r = await fn(); noteLiveStep(label, r, true); return r; }
+    catch (e) { noteLiveStep(label, null, false); console.error(`[liveCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
   };
   const stepSyncLive = <T>(label: string, fn: () => T, fallback: T): T => {
-    try { return fn(); } catch (e) { console.error(`[liveCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
+    try { const r = fn(); noteLiveStep(label, r, true); return r; }
+    catch (e) { noteLiveStep(label, null, false); console.error(`[liveCycle:${label}]`, e instanceof Error ? e.message : e); return fallback; }
   };
   const inPlay = activeMatches(db).filter(({ match: m }) => m.state === "live" || m.state === "lineup" || m.lineup_out);
   if (!inPlay.length) { stepSyncLive("settleStale", () => settleStaleOpenBets(db, deps), 0); return { live: 0, oddsUpdated: 0, enriched: 0, triggers: 0, exits: 0, entries: 0, llmCalls: 0, llmFail: 0 }; }
@@ -3113,6 +3127,12 @@ export async function runLiveCycle(
   // (dry-exit sweep runs ONLY in the slow auto cycle — see runAutoCycle. Fetching a book per open dry
   //  position every fast tick, in BOTH cycles, was the OOM that downed the box; once/slow-tick is enough:
   //  a settled twin's position isn't going anywhere.)
+
+  // ЯКОРЬ ЖИВОГО ПУЛЬСА — ставится ТОЛЬКО здесь, последней строкой ПОЛНОГО прохода (ни ранний выход без
+  // живых матчей, ни защитный exits-only проход якорем не считаются). Свежесть живого шага меряется от
+  // него, а не от стенных часов: ночью живых матчей нет, и по часам «устарели» бы все — ложная тревога
+  // того же вида, что уже чинили у dryExitSweep.
+  recordJobRun(db, LIVE_PASS_LABEL, { at: nowFn(deps)(), result: inPlay.length, ms: Date.now() - _liveT0, ok: true });
 
   return {
     live: inPlay.length, oddsUpdated: odds.reduce((n, r) => n + r.updated, 0),

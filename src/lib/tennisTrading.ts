@@ -34,6 +34,7 @@ import { getProfileConfig, RISK_PROFILE_DEFS } from "./riskConfig.js";
 import { shadowOnEntries, type ShadowEntryRequest } from "./shadow.js";
 import { getStrategy } from "./repo.js";
 import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
+import { classifyScoutCoverage, SV_SNAP_STALE_MIN } from "./scoutCoverage.js";
 
 const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
@@ -1319,7 +1320,7 @@ const SV_WAIT = "tennis_sv_wait:";   // one-shot "waiting for the cross-strategy
 // P0.3/P0.4 gate thresholds (env-tunable). SNAP_STALE: fail-closed if the scout's newest snapshot is older
 // than this — the set score is unverified. PREMATCH_MIN: the frozen prematch favourite must be ≥ this (a
 // real favourite); 55-60¢ is a sensitivity band recorded but quarantined by the report (<60 bin).
-const SV_SNAP_STALE_MIN = (() => { const n = Number(process.env.TENNIS_SV_SNAP_STALE_MIN); return Number.isFinite(n) && n > 0 ? n : 15; })();
+// SV_SNAP_STALE_MIN живёт в scoutCoverage.ts: один порог на отказ и на отчёт о покрытии.
 const SV_PREMATCH_MIN = (() => { const n = Number(process.env.TENNIS_SV_PREMATCH_MIN); return Number.isFinite(n) && n > 0 ? n : 55; })();
 
 /** Both sides' winner price at the START of the match (first priced snapshot) — the CLEAN pre-match
@@ -1410,8 +1411,16 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
     // not be in the state we read (scout unbound / lagging), so do NOT arm. Loud + counted.
     const snapAgeMin = (svNowMs - (Date.parse(last.batch_at) || 0)) / 60000;
     if (snapAgeMin > SV_SNAP_STALE_MIN) {
-      const warned = R.tradeLogForMatch(db, m.id).some((l) => l.strategy_id === SET_VALUE_STRATEGY && (l.text ?? "").includes("no_score_data_skip"));
-      if (!warned) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `no_score_data_skip: снапшот скаута устарел (${Math.round(snapAgeMin)}м > ${SV_SNAP_STALE_MIN}м) — счёт не подтверждён, триггер НЕ армится (fail-closed, диагностика привязки скаута)`, created_at: now });
+      // ДИАГНОСТИКА НАЗЫВАЕТ ПРИЧИНУ, А НЕ ВОЗРАСТ. Прежняя строка печатала «(15м > 15м)» — и всегда
+      // будет печатать именно 15, потому что throttle пропускает ТОЛЬКО первое пересечение порога.
+      // Число, которое не может быть другим, ничего не измеряет: я сам прочитал его как «отставание
+      // на 15 минут» и вывел из этого несуществующий дедлок каденции. Теперь причина берётся у общего
+      // классификатора покрытия (тот же порог, тот же авторитет), и throttle держится ПО ПРИЧИНЕ:
+      // смена причины — новый факт, и он обязан быть слышен.
+      const cov = classifyScoutCoverage(db, m, now);
+      const mark = `no_score_data_skip[${cov.verdict}]`;
+      const warned = R.tradeLogForMatch(db, m.id).some((l) => l.strategy_id === SET_VALUE_STRATEGY && (l.text ?? "").includes(mark));
+      if (!warned) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `${mark}: счёт не подтверждён, триггер НЕ армится (fail-closed). ${cov.note}`, created_at: now });
       continue; // do NOT mark acted — a fresh snapshot may arrive next tick
     }
     const players = { p1: last.p1 ?? "", p2: last.p2 ?? "" };
