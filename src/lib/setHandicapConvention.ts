@@ -55,6 +55,11 @@ export interface ShcRow {
   /** Первый в подписи — фаворит по СТАРТОВОЙ цене? (для теста это и есть носитель −1.5 по правилу) */
   favIsLabelFirst: boolean;
   predictedFirstWins: boolean; lastPriceCents: number | null;
+  /** Есть ли у рынка токен (external_ref): без него цену переопрашивать НЕЧЕМ. */
+  hasToken: boolean;
+  /** Насколько цена СТАРШЕ последнего снимка скаута. Замороженная задолго до конца цена не может
+   *  дойти до резолюции — и «нет исхода» тогда означает не «рынок не решился», а «мы не смотрели». */
+  priceLagMin: number | null;
   observedFirstWins: boolean | null; outcome: ShcOutcome; note: string;
 }
 export type ShcVerdict = "МЕТОД НЕВЕРЕН" | "ОПРОВЕРГНУТА" | "ПОДТВЕРЖДЕНА" | "НЕ СОЗРЕЛО";
@@ -64,7 +69,17 @@ export interface ShcReport {
   testMatches: number; testChecked: number; testMismatch: number;
   /** Перепись подписей — цена блока в штуках и проверка, что «явные» вообще существуют. */
   ambiguousProps: number; explicitProps: number;
+  /** ПОЧЕМУ тест не набирается: из нерешённых гандикапов — сколько без токена и сколько с ценой,
+   *  замороженной ДО конца матча. Без этих двух чисел «НЕ СОЗРЕЛО» неотличимо от «не дозреет никогда». */
+  undecidedNoToken: number; undecidedStalePrice: number; undecidedMedianLagMin: number | null;
   verdict: ShcVerdict; note: string;
+}
+
+/** Насколько цена рынка старше последнего, что мы знаем о матче. Отрицательных не бывает — только 0. */
+function priceLag(snapshotAt: string | null | undefined, lastSeenMs: number): number | null {
+  const t = Date.parse(snapshotAt ?? "");
+  if (!Number.isFinite(t) || !lastSeenMs) return null;
+  return Math.max(0, Math.round((lastSeenMs - t) / 60_000));
 }
 
 /** Разрешился ли рынок и в какую сторону. Середина — ЧЕСТНОЕ «нет исхода», а не округление к ближнему. */
@@ -88,6 +103,9 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
         `SELECT p1,p2,sets_p1,sets_p2 FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`,
       ).get(m.id) as { p1: string | null; p2: string | null; sets_p1: number | null; sets_p2: number | null } | undefined;
       if (!last || last.sets_p1 == null || last.sets_p2 == null || last.sets_p1 === last.sets_p2) continue;
+      const lastSeenMs = Date.parse(
+        (db.prepare(`SELECT MAX(batch_at) b FROM tennis_snapshots WHERE pm_match_id=?`).get(m.id) as { b: string | null }).b ?? "",
+      ) || 0;
       const players = { p1: last.p1 ?? "", p2: last.p2 ?? "" };
       // ФАВОРИТ — по ПЕРВОЙ проценённой записи скаута. Текущая цена после матча уже равна исходу и
       // сделала бы правило тавтологией: оно предсказывало бы то, из чего построено.
@@ -109,7 +127,9 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
         rows.push({
           matchId: m.id, players: `${m.home} — ${m.away}`, label: ml.label, group: "контроль",
           setsFirst: firstSets, setsSecond: secondSets, favIsLabelFirst: ml.firstIsP1 === favIsScoutP1,
-          predictedFirstWins: predicted, lastPriceCents: price, observedFirstWins: observed,
+          predictedFirstWins: predicted, lastPriceCents: price,
+          hasToken: !!mlMarket?.external_ref, priceLagMin: priceLag(mlMarket?.snapshot_at, lastSeenMs),
+          observedFirstWins: observed,
           outcome: observed == null ? "нет исхода" : observed === predicted ? "совпало" : "РАСХОЖДЕНИЕ",
           note: observed == null
             ? `цена ${price ?? "—"}¢ между ${SHC_RESOLVED_LO} и ${SHC_RESOLVED_HI} — исход не прочитан`
@@ -137,7 +157,9 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
         rows.push({
           matchId: m.id, players: `${m.home} — ${m.away}`, label: mk.label, group: "тест",
           setsFirst: firstSets, setsSecond: secondSets, favIsLabelFirst,
-          predictedFirstWins: predicted, lastPriceCents: price, observedFirstWins: observed,
+          predictedFirstWins: predicted, lastPriceCents: price,
+          hasToken: !!mk.external_ref, priceLagMin: priceLag(mk.snapshot_at, lastSeenMs),
+          observedFirstWins: observed,
           outcome: observed == null ? "нет исхода" : observed === predicted ? "совпало" : "РАСХОЖДЕНИЕ",
           note: observed == null
             ? `цена ${price ?? "—"}¢ между ${SHC_RESOLVED_LO} и ${SHC_RESOLVED_HI} — исход НЕ прочитан (не судим, а не «наверное да»)`
@@ -154,10 +176,24 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
   // ЕДИНИЦА — МАТЧ, А НЕ РЫНОК: два гандикап-пропа одного матча решаются одним счётом.
   const testMatches = new Set(test.map((r) => r.matchId)).size;
 
+  // ПОЧЕМУ ТЕСТ НЕ НАБИРАЕТСЯ — ЭТО ТОЖЕ ФАКТ, И ОН ОБЯЗАН БЫТЬ ИЗМЕРЕН. Первый прогон дал 13 из 15
+  // гандикапов в «нет исхода» с подозрительно круглыми ценами (25 и 50). Объяснять это догадкой я не
+  // стал: «не дозрело» и «не дозреет никогда» — разные вещи, и лечатся они противоположно. Без токена
+  // цену переопрашивать НЕЧЕМ; замороженная задолго до конца цена не может дойти до резолюции, и тогда
+  // «нет исхода» означает «мы не смотрели», а не «рынок не решился».
+  const undecided = rows.filter((r) => r.group === "тест" && r.outcome === "нет исхода");
+  const undecidedNoToken = undecided.filter((r) => !r.hasToken).length;
+  const lags = undecided.map((r) => r.priceLagMin).filter((x): x is number => x != null).sort((a, b) => a - b);
+  const undecidedStalePrice = lags.filter((x) => x > 30).length;
+  const undecidedMedianLagMin = lags.length ? lags[lags.length >> 1] : null;
+  const whyStuck = undecided.length
+    ? ` Из ${undecided.length} нерешённых гандикапов: без токена ${undecidedNoToken}, с ценой старше 30мин до конца матча ${undecidedStalePrice} (медиана отставания ${undecidedMedianLagMin ?? "—"}мин).`
+    : "";
+
   let verdict: ShcVerdict, note: string;
   if (control.length < SHC_CONTROL_MIN) {
     verdict = "НЕ СОЗРЕЛО";
-    note = `контроль не набран: манилайнов с прочитанным исходом ${control.length} при нужных ${SHC_CONTROL_MIN} — инструмент не проверен, значит и гипотезу проверять НЕЧЕМ`;
+    note = `контроль не набран: манилайнов с прочитанным исходом ${control.length} при нужных ${SHC_CONTROL_MIN} — инструмент не проверен, значит и гипотезу проверять НЕЧЕМ.${whyStuck}`;
   } else if (controlMismatch > 0) {
     verdict = "МЕТОД НЕВЕРЕН";
     note = `контроль РАЗОШЁЛСЯ: ${controlMismatch} из ${control.length} манилайнов противоречат собственному счёту. Сломано одно из двух звеньев самой проверки — цена→исход или ориентация подписи. Вердикта о конвенции НЕТ, блок остаётся`;
@@ -166,7 +202,7 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
     note = `конвенция ОПРОВЕРГНУТА: ${testMismatch} расхождений на ${testMatches} матчах при чистом контроле (${control.length}/${control.length}). Правило «фаворит несёт −1.5» неверно — блок остаётся, флаг НЕ поднимается`;
   } else if (testMatches < SHC_TEST_MIN_MATCHES) {
     verdict = "НЕ СОЗРЕЛО";
-    note = `контроль чист (${control.length}/${control.length}), расхождений нет, но матчей теста ${testMatches} при нужных ${SHC_TEST_MIN_MATCHES} — это ОТСУТСТВИЕ ЗАМЕРА, а не разрешение`;
+    note = `контроль чист (${control.length}/${control.length}), расхождений нет, но матчей теста ${testMatches} при нужных ${SHC_TEST_MIN_MATCHES} — это ОТСУТСТВИЕ ЗАМЕРА, а не разрешение.${whyStuck}`;
   } else {
     verdict = "ПОДТВЕРЖДЕНА";
     note = `контроль чист (${control.length}/${control.length}), тест чист: ${test.length} рынков на ${testMatches} матчах, ноль расхождений — ${pWithUnit(Math.pow(0.5, testMatches), testMatches, "матчах")} при нулевой «сторона — монетка». Основание для снятия блока есть; флаг поднимает ВЛАДЕЛЕЦ, не отчёт`;
@@ -175,7 +211,9 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
   return {
     rows, controlChecked: control.length, controlMismatch,
     testMatches, testChecked: test.length, testMismatch,
-    ambiguousProps, explicitProps, verdict, note,
+    ambiguousProps, explicitProps,
+    undecidedNoToken, undecidedStalePrice, undecidedMedianLagMin,
+    verdict, note,
   };
 }
 
