@@ -124,6 +124,14 @@ export async function GET(req: Request) {
       const tickMin = Math.max(1, Number(process.env.TICK_INTERVAL_MIN ?? 30));
       return NextResponse.json({ ok: true, tickMin, report: buildJobHeartbeat(db, expectedTickJobs(tickMin)) });
     }
+    // ?report=set_handicap_convention → T3: проверка конвенции ±1.5 по РАЗРЕШИВШИМСЯ рынкам против
+    // фактического счёта. Контроль — манилайн (проверяет инструмент: цену→исход и ориентацию подписи),
+    // тест — гандикапы. Флага не касается: снятие блока — решение владельца по этим числам. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "set_handicap_convention") {
+      const { buildSetHandicapConvention, setHandicapConventionLine } = await import("@/lib/setHandicapConvention");
+      const r = buildSetHandicapConvention(db);
+      return NextResponse.json({ ok: true, report: r, line: setHandicapConventionLine(r) });
+    }
     // ?report=scout_coverage → почему у теннисного матча нет свежего счёта, ПОИМЁННО: не связан /
     // не в фиде / устарел / просрочен / завершён у провайдера / до начала. Прежняя диагностика
     // (`no_score_data_skip (15м > 15м)`) печатала возраст на первом же пересечении порога — число,

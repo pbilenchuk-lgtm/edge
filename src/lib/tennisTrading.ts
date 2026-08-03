@@ -228,7 +228,14 @@ export async function pollTennisFinals(db: Database, deps: EngineDeps = {}): Pro
       const liveTooLong = liveMin > TENNIS_LIVE_CEILING_MIN;
       if (!stale && !liveTooLong) continue;
       const hasOpen = R.betsForMatch(db, m.id).some((b) => TENNIS_ALL_STRATEGIES.has(b.strategy_id) && b.status === "open");
-      if (!hasOpen && m.state !== "live") continue; // no open position and not live → no reason to chase
+      // `lineup` ЗАСТРЕВАЕТ ТАК ЖЕ, КАК `live` — и раньше выпадал из погони. Первый же замер покрытия
+      // скаута (03.08) показал ШЕСТЬ теннисных матчей в `lineup` со следом из 2-4 снимков «Scheduled»,
+      // после которых провайдер их бросил: возраст 48-291 минута, открытых позиций нет — и по прежнему
+      // условию их не чинил никто. Они не финишируют никогда, вечно печатают no_score_data_skip и держат
+      // живой тик разбуженным (activeMatches считает `lineup` игровым состоянием). Признак «застрял» —
+      // это не имя состояния, а связанный со скаутом нефинишированный матч с протухшим фидом.
+      const stranded = m.state === "live" || m.state === "lineup";
+      if (!hasOpen && !stranded) continue; // ни открытой позиции, ни игрового состояния → гнаться не за чем
       if (tennisFinalResult(db, m.id)?.finished) continue; // a terminal snapshot already exists → settle handles it
       const start = (m.kickoff_at ?? last.batch_at ?? now).slice(0, 10);
       (byStart.get(start) ?? byStart.set(start, []).get(start)!).push({ matchId: m.id, eventKey: last.event_key });
