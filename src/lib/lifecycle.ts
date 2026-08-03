@@ -2841,10 +2841,14 @@ export async function runAutoCycle(
     if (!usable) { console.warn(`[complementAudit] источник не вернул ни одной цены — суточный слот НЕ сжигаем, повторим следующим тиком`); return 0; }
     try {
       R.metaSet(db, "complement_audit_day", day, nowIso);
-      R.metaSet(db, "complement_audit_last", JSON.stringify({
-        at: nowIso, examined: r.examined, reSettled: r.reSettled, won: r.won, lost: r.lost,
-        deferred: r.deferred, bankDeltaUsd: r.bankDeltaUsd, note: r.note,
-      }), nowIso);
+      // ПРОВЕРОЧНЫЕ ПОЛЯ ВЫБРАСЫВАЛИСЬ ПЕРЕД САМОЙ ЗАПИСЬЮ. Здесь стоял РУЧНОЙ список полей, и в него не
+      // попали ровно те, ради которых стандарт массовой записи и заведён: `bookMeasuredUsd` (сколько в базе
+      // РЕАЛЬНО изменилось) и `deltaAgrees` (сошлось ли обещание предиката с замером). Модуль их считает —
+      // и они умирали на строке персиста, так что читатель отчёта видел только обещание.
+      // Прогон 03.08 00:17 показал цену: +$157.86 движения книги, предъявленные СУММОЙ ПРЕДИКАТА, без
+      // независимого подтверждения, которое лежало рядом посчитанным. Пишем результат целиком: ручной
+      // список полей — это место, где проверка отваливается молча.
+      R.metaSet(db, "complement_audit_last", JSON.stringify({ at: nowIso, ...r, rows: (r.rows ?? []).slice(0, 40) }), nowIso);
     } catch { /* markers are best-effort */ }
     return r.reSettled;
   }, 0);

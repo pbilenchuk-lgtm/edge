@@ -158,6 +158,14 @@ export async function GET(req: Request) {
       const rep = buildNetHoldBenefit(db);
       return NextResponse.json({ ok: true, report: rep, line: holdBenefitLine(rep) });
     }
+    // ?report=group_bias → [D3(а)] ДЕТЕКТОР лигового слома: скользящее окно последних 30 СИГНАЛОВ группы
+    // против её собственной истории, порог p<0.01 зафиксирован ДО включения. ТОЛЬКО измерение — режим не
+    // включает и ставок не двигает; интервенция остаётся pending до созревшего критерия И слова владельца.
+    if (new URL(req.url).searchParams.get("report") === "group_bias") {
+      const { buildGroupBiasDetector, groupBiasLine } = await import("@/lib/groupBiasDetector");
+      const rep = buildGroupBiasDetector(db);
+      return NextResponse.json({ ok: true, report: rep, line: groupBiasLine(rep) });
+    }
     // ?report=label_forensic_24 → [D2] ручная сверка августовской аномалии 24/24: наш сеттл и метка против
     // ФАКТИЧЕСКОГО счёта матча, плюс отдельная колонка «не Varbergs-класс ли это» (PM-резолюция / воид,
     // ставший победой / early-метка). Read-only: проход НИЧЕГО не чинит, он предъявляет улики.
@@ -337,6 +345,14 @@ export async function GET(req: Request) {
             const { buildEntryFunnel, funnelLine } = await import("@/lib/entryFunnel");
             const f = buildEntryFunnel(db, { nowMs: Date.parse(now) || Date.now() });
             return { line: funnelLine(f), today: f.days[0] ?? null, baselines: f.baselines, investigate: f.investigate };
+          } catch { return null; }
+        })(),
+        // [D3(а)] Лиговый детектор — измерение в еженедельнике. Режим НЕ армирован.
+        groupBias: await (async () => {
+          try {
+            const { buildGroupBiasDetector, groupBiasLine } = await import("@/lib/groupBiasDetector");
+            const g = buildGroupBiasDetector(db, now);
+            return { line: groupBiasLine(g), flagged: g.flagged, intervention: g.intervention };
           } catch { return null; }
         })(),
         // [D1] Вклад удержания — с порогом отката: если правило отдаёт деньги две недели подряд, это
