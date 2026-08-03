@@ -155,3 +155,26 @@ test("модуль read-only и флага не касается", async () => {
     assert.ok(!src.includes(forbidden), `проверка обязана только мерить, найдено «${forbidden}»`);
   }
 });
+
+// ── ПОЧЕМУ ТЕСТ НЕ НАБИРАЕТСЯ — ТОЖЕ ФАКТ ───────────────────────────────────────────────────────
+// Первый прогон на проде: 13 из 15 гандикапов в «нет исхода», цены подозрительно круглые (25 и 50).
+// «Не дозрело» и «не дозреет никогда» лечатся противоположно, поэтому причина МЕРЯЕТСЯ, а не
+// объясняется догадкой: без токена цену переопрашивать нечем, а замороженная задолго до конца цена не
+// может дойти до резолюции — тогда «нет исхода» значит «мы не смотрели», а не «рынок не решился».
+test("незрелость объясняется числами: сколько без токена и насколько устарела цена", () => {
+  const db = world();
+  const i = 300;
+  const day = new Date(Date.UTC(2026, 6, 1) + i * 86_400_000).toISOString().slice(0, 10);
+  played(db, i, { favP1: true, setsP1: 2, setsP2: 0, mlPrice: 99 });
+  // Гандикап с ценой, снятой за 3 часа ДО последнего снимка скаута, и без токена.
+  R.insertMarket(db, { id: `mk${i}old`, match_id: `m${i}`, label: HCAP, price: 25, ai_prob: null, liquidity: 3000, external_ref: null, snapshot_at: `${day}T10:00:00Z`, is_closing: false } as never);
+  const r = buildSetHandicapConvention(db);
+  const row = r.rows.find((x) => x.group === "тест")!;
+  assert.equal(row.outcome, "нет исхода");
+  assert.equal(row.hasToken, false, "без токена цену переопрашивать нечем");
+  assert.equal(row.priceLagMin, 180, "цена старше последнего снимка на 3 часа");
+  assert.equal(r.undecidedNoToken, 1);
+  assert.equal(r.undecidedStalePrice, 1);
+  assert.equal(r.undecidedMedianLagMin, 180);
+  assert.match(r.note, /без токена 1, с ценой старше 30мин до конца матча 1/);
+});
