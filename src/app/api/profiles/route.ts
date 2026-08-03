@@ -124,6 +124,15 @@ export async function GET(req: Request) {
       const tickMin = Math.max(1, Number(process.env.TICK_INTERVAL_MIN ?? 30));
       return NextResponse.json({ ok: true, tickMin, report: buildJobHeartbeat(db, expectedTickJobs(tickMin)) });
     }
+    // ?report=scout_coverage → почему у теннисного матча нет свежего счёта, ПОИМЁННО: не связан /
+    // не в фиде / устарел / просрочен / завершён у провайдера / до начала. Прежняя диагностика
+    // (`no_score_data_skip (15м > 15м)`) печатала возраст на первом же пересечении порога — число,
+    // которое не могло быть другим, и из которого я вывел несуществующий дедлок каденции. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "scout_coverage") {
+      const { buildScoutCoverage, scoutCoverageLine } = await import("@/lib/scoutCoverage");
+      const r = buildScoutCoverage(db);
+      return NextResponse.json({ ok: true, report: r, line: scoutCoverageLine(r) });
+    }
     // ?report=live_job_heartbeat → [O3] пульс ЖИВОГО тика — вторая половина той же слепоты: пять шагов
     // (bookDepth, tennisTrade, tennisSetValue, tennisPmv, liveBackfillAnalyze) живут только там и следа
     // не оставляли. Свежесть меряется от ЯКОРЯ (последний полный живой проход), а не от стенных часов:
@@ -363,6 +372,15 @@ export async function GET(req: Request) {
             const { buildEntryFunnel, funnelLine } = await import("@/lib/entryFunnel");
             const f = buildEntryFunnel(db, { nowMs: Date.parse(now) || Date.now() });
             return { line: funnelLine(f), today: f.days[0] ?? null, baselines: f.baselines, investigate: f.investigate };
+          } catch { return null; }
+        })(),
+        // Покрытие скаута: «нет счёта» с НАЗВАННОЙ причиной — единственная из них, что чинится алиасом,
+        // видна отдельно от тех, где данных нет законно.
+        scoutCoverage: await (async () => {
+          try {
+            const { buildScoutCoverage, scoutCoverageLine } = await import("@/lib/scoutCoverage");
+            const s = buildScoutCoverage(db, now);
+            return { line: scoutCoverageLine(s), covered: s.covered, measured: s.measured, actionable: s.actionable.map((r) => ({ players: r.players, verdict: r.verdict, mapScore: r.mapScore })) };
           } catch { return null; }
         })(),
         // [D3(а)] Лиговый детектор — измерение в еженедельнике. Режим НЕ армирован.
