@@ -103,7 +103,7 @@ export function expectedTickJobs(tickMin: number): { label: string; everyMin: nu
     "captureLiveOpens", "tennisFinish", "tennisScoreBackfill", "tennisSettle", "tennisPmvSettle",
     "pmvShadowResolve", "familyShadowResolve", "refusalShadowResolve", "svShadowResolve",
     "prune", "pruneProviderSnapshots", "noFeedCoverage", "sweepAbandoned", "pruneMatches", "capLogArchive",
-    "tennisScoutWatchdog", "tennisBreakMarks", "reconcileFootball", "pruneCategories",
+    "tennisScoutWatchdog", "tennisBreakMarks", "reconcileFootball", "pruneCategories", "shcObserve",
   ].map((label) => ({ label, everyMin: tickMin }));
 }
 

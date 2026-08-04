@@ -57,6 +57,7 @@ import { resolveFamilyShadowSignals } from "./familyShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
 import { recordJobRun, cycleSummaryLine, liveJobKey, LIVE_PASS_LABEL } from "./jobHeartbeat.js";
+import { recordShcObservations } from "./shcJournal.js";
 import { recordGatePulse } from "./gateHeartbeat.js";
 import { defensiveCutAllowed, recordHoldMark } from "./defensiveCutGate.js";
 import { chaseBoundNoScore, chaseLine } from "./boundNoScoreChase.js";
@@ -2797,6 +2798,10 @@ export async function runAutoCycle(
   // Разовое окно: у теннисных финалов МОЛОЖЕ срока хранения снимков счёт ещё достижим — спасаем его
   // сейчас, потом будет нечего. Идемпотентен (берёт только матчи с пустым final_score), поэтому просто
   // живёт в тике и с каждым проходом делает всё меньше, пока не станет полным no-op.
+  // ЖУРНАЛ КОНВЕНЦИИ ±1.5 — материализация вердикт-релевантных фактов В МОМЕНТ СОБЫТИЯ. Снимки живут под
+  // 20k-кэпом и вычерпываются за часы (04.08: 11 из 12 наблюдений исчезли между двумя прогонами), поэтому
+  // наблюдение замораживается строкой, а вердикт читается из журнала. Идемпотентно, только чтение мира.
+  stepSync("shcObserve", () => { const r = recordShcObservations(db, nowFn(deps)()); return r.written; }, 0);
   stepSync("tennisScoreBackfill", () => {
     const r = backfillTennisScores(db, deps);
     console.log(`[tennisScoreBackfill] ${r.note}`);      // [O3] безусловно: ноль так же громко, как двести

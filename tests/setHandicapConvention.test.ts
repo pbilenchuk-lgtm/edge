@@ -17,7 +17,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { buildSetHandicapConvention, setHandicapConventionLine, SHC_CONTROL_MIN, SHC_TEST_MIN_MATCHES } from "../src/lib/setHandicapConvention.js";
+import { buildSetHandicapConvention as verdictOf, observeFromSnapshots, setHandicapConventionLine, SHC_CONTROL_MIN, SHC_TEST_MIN_MATCHES } from "../src/lib/setHandicapConvention.js";
+import { recordShcObservations } from "../src/lib/shcJournal.js";
+
+// ВЕРДИКТ ЧИТАЕТСЯ ИЗ ЖУРНАЛА (O8): наблюдение сначала замораживается, потом судится. Тесты идут тем же
+// путём, что и прод, — иначе они проверяли бы конструкцию, которой в проде нет.
+function buildSetHandicapConvention(db: ReturnType<typeof world>) {
+  recordShcObservations(db, "2026-08-04T12:00:00Z");
+  return verdictOf(db);
+}
 
 function world() {
   const db = openDb(":memory:"); initSchema(db);
@@ -125,9 +133,10 @@ test("цена в середине — «нет исхода», а не окру
   const db = world();
   for (let i = 100; i < 110; i++) played(db, i, { favP1: true, setsP1: 2, setsP2: 0, mlPrice: 99, hcapPrice: 55 });
   const r = buildSetHandicapConvention(db);
-  assert.equal(r.testChecked, 0, "неразрешившиеся рынки в счёт не идут");
+  assert.equal(r.testChecked, 0, "неразрешившиеся рынки в журнал НЕ попадают, значит и в счёт не идут");
   assert.equal(r.verdict, "НЕ СОЗРЕЛО");
-  assert.match(r.rows.find((x) => x.group === "тест")!.note, /не судим, а не «наверное да»/);
+  // Наблюдение из снимков всё равно объясняет, почему строки нет — «не судим», а не «наверное да».
+  assert.match(observeFromSnapshots(db).rows.find((x) => x.group === "тест")!.note, /не судим, а не «наверное да»/);
 });
 
 test("ЕДИНИЦА — МАТЧ: два гандикап-пропа одного матча это ОДНО испытание", () => {
@@ -169,7 +178,7 @@ test("незрелость объясняется числами: сколько
   // Гандикап с ценой, снятой за 3 часа ДО последнего снимка скаута, и без токена.
   R.insertMarket(db, { id: `mk${i}old`, match_id: `m${i}`, label: HCAP, price: 25, ai_prob: null, liquidity: 3000, external_ref: null, snapshot_at: `${day}T10:00:00Z`, is_closing: false } as never);
   const r = buildSetHandicapConvention(db);
-  const row = r.rows.find((x) => x.group === "тест")!;
+  const row = observeFromSnapshots(db).rows.find((x) => x.group === "тест")!;
   assert.equal(row.outcome, "нет исхода");
   assert.equal(row.hasToken, false, "без токена цену переопрашивать нечем");
   assert.equal(row.priceLagMin, 180, "цена старше последнего снимка на 3 часа");
@@ -177,4 +186,44 @@ test("незрелость объясняется числами: сколько
   assert.equal(r.undecidedStalePrice, 1);
   assert.equal(r.undecidedMedianLagMin, 180);
   assert.match(r.note, /без токена 1, с ценой старше 30мин до конца матча 1/);
+});
+
+// ── АЛЬТЕРНАТИВА, ПОРОЖДЁННАЯ ДАННЫМИ, СУДИТСЯ ПО СОБСТВЕННОЙ ПРЕ-РЕГИСТРАЦИИ ────────────────────
+// Созревший замер 03.08 опроверг «фаворит несёт −1.5» одним расхождением на 12 матчах при чистом
+// контроле 27/27 — и те же данные оказались согласованы с «−1.5 ВСЕГДА у первого в подписи». Соблазн
+// объявить вторую гипотезу подтверждённой на них же — ровно подгонка. Поэтому здесь держатся два
+// свойства: считаются только РАЗЛИЧАЮЩИЕ матчи, и только те, что сыграны ПОСЛЕ фиксации.
+test("совпадения там, где гипотезы предсказывают ОДНО И ТО ЖЕ, альтернативу не подтверждают", () => {
+  const db = world();
+  // Фаворит первый, 2:0 — обе гипотезы говорят «покрыл». Таких сколько угодно, доказывают они ноль.
+  for (let i = 400; i < 412; i++) played(db, i, { favP1: true, setsP1: 2, setsP2: 0, mlPrice: 99, hcapPrice: 97 });
+  const r = buildSetHandicapConvention(db);
+  assert.equal(r.rows.filter((x) => x.group === "тест" && x.discriminating).length, 0, "различающих нет");
+  assert.equal(r.alt.discriminatingSince, 0);
+  assert.equal(r.alt.verdict, "НЕ СОЗРЕЛО");
+  assert.match(r.alt.note, /различающих матчей после/);
+});
+
+test("ретроспектива названа ретроспективой: породившие гипотезу матчи её не подтверждают", () => {
+  const db = world();
+  // Различающий случай: первый НЕ фаворит и разница ровно в один сет (как Parry — Day).
+  // Даты этих матчей — ДО регистрации альтернативы.
+  for (let i = 0; i < 6; i++) played(db, i, { favP1: false, setsP1: 1, setsP2: 2, mlPrice: 4, hcapPrice: 4 });
+  const r = buildSetHandicapConvention(db);
+  assert.equal(r.alt.discriminatingRetro, 6, "шесть различающих — но все ДО фиксации");
+  assert.equal(r.alt.mismatchRetro, 0, "и все согласованы с альтернативой");
+  assert.equal(r.alt.discriminatingSince, 0, "после фиксации — ни одного");
+  assert.equal(r.alt.verdict, "НЕ СОЗРЕЛО", "согласие ретроспективы вердикта НЕ даёт");
+  assert.match(r.alt.note, /гипотезу ПОРОДИЛИ и подтвердить её не могут/);
+  // И исходная гипотеза на этих же матчах опровергнута — ровно случай Parry — Day.
+  assert.equal(r.testMismatch, 6);
+});
+
+test("незавершённый матч (ретайр) в суждение о конвенции НЕ идёт — ±1.5 там void", () => {
+  const db = world();
+  played(db, 500, { favP1: false, setsP1: 1, setsP2: 0, mlPrice: 99, hcapPrice: 99 }); // никто не набрал 2
+  const r = buildSetHandicapConvention(db);
+  assert.equal(r.rows.filter((x) => x.group === "тест").length, 0, "гандикап такого матча не судится");
+  assert.equal(r.droppedIncomplete, 1, "и число выброшенных НАПЕЧАТАНО, а не спрятано");
+  assert.equal(r.rows.filter((x) => x.group === "контроль").length, 1, "манилайн при ретайре разрешается нормально — контроль остаётся");
 });

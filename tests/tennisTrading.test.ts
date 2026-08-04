@@ -938,13 +938,28 @@ test("pollTennisFinals: матч в `lineup` с протухшим фидом и
   assert.equal(tennisFinalResult(db, mid)!.finished, true);
 });
 
-test("pollTennisFinals: `upcoming` без позиций НЕ догоняется — расширение не превратилось в «гнаться за всем»", async () => {
+// ПРИЗНАК ПЕРЕПИСАН НА ФАКТ ПРОСРОЧКИ (04.08). Замер показал, что имя состояния — не тот признак:
+// висят и 17 матчей в `lineup`, и ВОСЕМЬ в `upcoming`, все со стартом 6+ часов назад. Один предикат
+// «старт прошёл давно И не завершён» ловит оба ведра. Прежний кейс остаётся ниже как РЕГРЕССИЯ:
+// граница с химера-классом — матчи, стартующие в БУДУЩЕМ, погоня не трогает никогда.
+test("pollTennisFinals: ПРОСРОЧЕННЫЙ `upcoming` (старт 6ч+ назад) догоняется — признак это факт, а не имя состояния", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" }); // kickoff 09:00
+  R.updateMatch(db, mid, { state: "upcoming" });
+  R.insertTennisSnapshot(db, { event_key: "EVO", provider: "apitennis", batch_at: "2026-07-14T09:30:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "Scheduled", sets_p1: 0, sets_p2: 0, set_num: 1, games_p1: 0, games_p2: 0, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: 60, pm_p1_cents: 60, pm_p2_cents: 40, raw: "{}" });
+  const body = { result: [{ event_key: "EVO", event_first_player: "A. Vukic", event_second_player: "L. Broady", tournament_name: "Granby", event_type_type: "ATP Singles", event_live: "0", event_status: "Finished", event_final_result: "2 - 0", event_winner: "First Player", scores: [{ score_set: 1, score_first: 6, score_second: 4 }, { score_set: 2, score_first: 6, score_second: 3 }], event_serve: null, event_game_result: null }] };
+  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) })) as unknown as typeof fetch;
+  const written = await pollTennisFinals(db, { now: () => "2026-07-14T17:00:00Z", env: { API_TENNIS_KEY: "k" }, fetchImpl }); // 8ч после старта
+  assert.equal(written, 1, "просроченная запись расчищается, а не висит вечно");
+});
+
+test("РЕГРЕССИЯ: матч, стартующий в БУДУЩЕМ, погоня не трогает — граница с химера-классом", async () => {
   const db = openDb(":memory:");
   const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
-  R.updateMatch(db, mid, { state: "upcoming" });
+  R.updateMatch(db, mid, { state: "upcoming", kickoff_at: "2026-07-15T09:00:00Z" }); // завтра
   R.insertTennisSnapshot(db, { event_key: "EVU", provider: "apitennis", batch_at: "2026-07-14T10:00:00Z", p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "Scheduled", sets_p1: 0, sets_p2: 0, set_num: 1, games_p1: 0, games_p2: 0, game_points: null, server: null, pm_match_id: mid, pm_mid_cents: 60, pm_p1_cents: 60, pm_p2_cents: 40, raw: "{}" });
   let called = 0;
   const fetchImpl = (async () => { called++; return { ok: true, status: 200, json: async () => ({ result: [] }) }; }) as unknown as typeof fetch;
   assert.equal(await pollTennisFinals(db, { now: () => "2026-07-14T12:00:00Z", env: { API_TENNIS_KEY: "k" }, fetchImpl }), 0);
-  assert.equal(called, 0, "ни одной лишней выборки фикстур");
+  assert.equal(called, 0, "ни одной лишней выборки фикстур: у матча впереди отсутствие данных ЗАКОННО");
 });

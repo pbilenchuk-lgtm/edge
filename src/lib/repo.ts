@@ -1532,3 +1532,33 @@ export function setProviderRef(db: Database, matchId: string, provider: string, 
      ON CONFLICT(match_id,provider) DO UPDATE SET provider_ref=excluded.provider_ref, resolved_at=excluded.resolved_at`,
   ).run(matchId, provider, ref, nowIso());
 }
+
+// ── ЖУРНАЛ НАБЛЮДЕНИЙ КОНВЕНЦИИ ±1.5 (append-only) ─────────────────────────────────────────────
+// Материализация вердикт-релевантных фактов в момент события — см. правило класса в schema.sql.
+export interface ShcObservationRow {
+  id?: string; kind: "control" | "test"; match_id: string; label: string; players: string | null;
+  kickoff_at: string | null;
+  sets_first: number; sets_second: number; completed: number; fav_is_label_first: number;
+  price_cents: number; observed_first_covers: number;
+  pred_favourite: number; pred_label_first: number; discriminating: number; hypo_version: string;
+  score_src: string; price_src: string; fav_src: string; created_at?: string;
+}
+/** Идемпотентна: повторное наблюдение того же рынка НЕ плодит строк (UNIQUE match_id+label). */
+export function insertShcObservation(db: Database, r: ShcObservationRow): boolean {
+  const res = db.prepare(
+    `INSERT OR IGNORE INTO shc_observations(id,kind,match_id,label,players,kickoff_at,
+       sets_first,sets_second,completed,fav_is_label_first,price_cents,observed_first_covers,
+       pred_favourite,pred_label_first,discriminating,hypo_version,score_src,price_src,fav_src,created_at)
+     VALUES(?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?,?,?,?)`,
+  ).run(r.id ?? uid(), r.kind, r.match_id, r.label, r.players, r.kickoff_at,
+    r.sets_first, r.sets_second, r.completed, r.fav_is_label_first, r.price_cents, r.observed_first_covers,
+    r.pred_favourite, r.pred_label_first, r.discriminating, r.hypo_version,
+    r.score_src, r.price_src, r.fav_src, r.created_at ?? nowIso());
+  return (res.changes ?? 0) > 0;
+}
+export function shcObservations(db: Database): ShcObservationRow[] {
+  return db.prepare(`SELECT * FROM shc_observations ORDER BY kickoff_at, created_at`).all() as ShcObservationRow[];
+}
+export function shcObservationCount(db: Database): number {
+  return (db.prepare(`SELECT COUNT(*) n FROM shc_observations`).get() as { n: number }).n;
+}

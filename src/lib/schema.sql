@@ -963,3 +963,46 @@ CREATE TABLE IF NOT EXISTS system_events (
   detail TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_system_events_at ON system_events(at);
+
+-- shc_observations — ЖУРНАЛ НАБЛЮДЕНИЙ КОНВЕНЦИИ ±1.5 (append-only). [ратифицировано 04.08]
+--
+-- ЗАЧЕМ ОТДЕЛЬНАЯ ТАБЛИЦА, А НЕ ЗАПРОС ПО СНИМКАМ. Вердикт T3 строился из `tennis_snapshots`, а те
+-- живут под жёстким row-cap (20 000 строк при ~20 записях/20с) — сверка двух прогонов 04.08 показала,
+-- что 11 из 12 наблюдений исчезли за часы: не изменились, а пропали целиком. Критерий «набрать N
+-- различающих матчей» на таком источнике недостижим ПО ПОСТРОЕНИЮ.
+--
+-- ПРАВИЛО КЛАССА (ратифицировано): ЛЮБОЙ вердикт, читающий из кэпнутого источника, обязан
+-- МАТЕРИАЛИЗОВАТЬ вердикт-релевантные факты В МОМЕНТ СОБЫТИЯ. «Источник живёт короче архива»
+-- закрывается КОНСТРУКЦИЕЙ, а не увеличением кэпа: кэп существует, потому что база уже однажды
+-- раздулась до 1.2 ГБ и заморозила загрузку, и поднимать его — менять одну поломку на другую.
+--
+-- Строка замораживает ВСЁ, что нужно вердикту, включая ПРЕДСКАЗАНИЯ ОБЕИХ ГИПОТЕЗ: пере-считывать их
+-- позже значило бы судить старое наблюдение сегодняшним кодом. Провенанс назван полями: откуда счёт,
+-- откуда цена, откуда фаворит — каждый со своим временем.
+CREATE TABLE IF NOT EXISTS shc_observations (
+  id              TEXT PRIMARY KEY,
+  kind            TEXT NOT NULL CHECK (kind IN ('control','test')),  -- манилайн проверяет ИНСТРУМЕНТ, гандикап — гипотезу
+  match_id        TEXT NOT NULL,
+  label           TEXT NOT NULL,
+  players         TEXT,
+  kickoff_at      TEXT,              -- делит наблюдения ПОСЛЕ фиксации гипотезы от породивших её
+  -- факты мира, замороженные в момент разрешения
+  sets_first      INTEGER NOT NULL,  -- сеты ПЕРВОГО В ПОДПИСИ (той стороны, чью вероятность несёт цена)
+  sets_second     INTEGER NOT NULL,
+  completed       INTEGER NOT NULL,  -- матч доигран; ретайр ⇒ ±1.5 void ⇒ судить нечем (Gate 0.2)
+  fav_is_label_first INTEGER NOT NULL,
+  price_cents     REAL NOT NULL,
+  observed_first_covers INTEGER NOT NULL,
+  -- предсказания ОБЕИХ гипотез, замороженные строкой
+  pred_favourite  INTEGER NOT NULL,  -- «−1.5 несёт манилайн-фаворит»
+  pred_label_first INTEGER NOT NULL, -- «−1.5 ВСЕГДА у первого в подписи (outcomes[0])»
+  discriminating  INTEGER NOT NULL,  -- гипотезы предсказывают РАЗНОЕ — только такие строки их различают
+  hypo_version    TEXT NOT NULL,     -- версия набора гипотез: старые строки судятся своей версией
+  -- провенанс: у каждого факта свой источник и своё время
+  score_src       TEXT NOT NULL,
+  price_src       TEXT NOT NULL,
+  fav_src         TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  UNIQUE(match_id, label)            -- одно наблюдение на рынок; повтор НЕ плодит строк
+);
+CREATE INDEX IF NOT EXISTS idx_shc_obs_kind ON shc_observations(kind, kickoff_at);
