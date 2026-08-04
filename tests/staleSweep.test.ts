@@ -52,15 +52,30 @@ test("sweep: within threshold is UNTOUCHED (tennis 2h past, football 3h past)", 
   assert.equal(R.getMatch(db, "fut")!.state, "upcoming");
 });
 
-test("sweep: open bet on an abandoned match is VOIDED (P&L 0)", () => {
+// [N1в] ПОВЕДЕНИЕ ИЗМЕНЕНО НАМЕРЕННО. Раньше свип воидил открытые ставки через 5-6 часов после кикоффа —
+// и на Breiðablik (04.08) обогнал 72-часовую очередь PM-резолюции на 67 часов, убив пять ft_blind-ставок
+// с ПУСТЫМ settled_via. Для ft_blind это было фатально по построению: его нормальное состояние («кикофф
+// прошёл, live-данных нет и не будет») для свипа выглядело поломкой. Теперь деньги ждут резолюцию.
+test("sweep: открытая ставка НЕ воидится, пока терпение PM-резолюции не истекло", () => {
   const db = db0();
   mk(db, { id: "m1", comp: "atp", state: "lineup", kickoff: iso(-10) });
+  const bid = bet(db, "m1", "open");
+  const r = sweepAbandonedMatches(db, NOW);
+  assert.equal(r.voided, 0, "10 часов — очередь резолюции ещё работает");
+  assert.equal(r.deferredBets, 1, "отсрочка НАЗВАНА числом, а не молчанием");
+  assert.equal(R.getBet(db, bid)!.status, "open");
+});
+
+test("sweep: после 72ч открытая ставка ВОИДИТСЯ (P&L 0) и называет свой провенанс", () => {
+  const db = db0();
+  mk(db, { id: "m1", comp: "atp", state: "lineup", kickoff: iso(-80) });
   const bid = bet(db, "m1", "open");
   const r = sweepAbandonedMatches(db, NOW);
   assert.equal(r.abandoned, 1); assert.equal(r.voided, 1);
   const b = R.getBet(db, bid)!;
   assert.equal(b.status, "settled_void");
   assert.equal(b.payout, b.stake, "voided → payout=stake → P&L 0");
+  assert.equal(b.settled_via, "abandoned_sweep", "путь возврата обязан быть назван");
   assert.equal(R.getMatch(db, "m1")!.end_note, BROKEN_NOTE);
 });
 

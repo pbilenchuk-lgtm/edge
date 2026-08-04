@@ -59,8 +59,10 @@ export type ResolveTokensFn = (tokenIds: string[]) => Promise<Record<string, Tok
 
 /** Машинная причина возврата — пишется в `bets.settled_via` и ЕСТЬ то, по чему voidWatch делит возвраты.
  *  `no_complement` — НАША неспособность сверить (одиночный токен); `market_void` — решение биржи;
- *  `timeout_not_closed` — рынок так и не закрылся за отведённый срок. Разные факты, не один статус. */
-export type VoidVia = "no_complement" | "market_void" | "timeout_not_closed";
+ *  `timeout_not_closed` — рынок так и не закрылся за отведённый срок; `abandoned_sweep` — свип заброшенных
+ *  матчей ПОСЛЕ истечения терпения резолюции. Разные факты, не один статус — и пустой `settled_via` больше
+ *  не может значить «неизвестно кто»: именно он выдал, что свип обгонял резолюцию на 67 часов. */
+export type VoidVia = "no_complement" | "market_void" | "timeout_not_closed" | "abandoned_sweep";
 
 export interface PmResolutionResult {
   /** [batch-11] Which source supplied the cross-check complement. A rising match_complement share is the

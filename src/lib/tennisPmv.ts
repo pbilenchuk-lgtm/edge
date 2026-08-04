@@ -264,7 +264,7 @@ export function scanMatchProps(db: Database, matchId: string, players: { p1: str
     // the moneyline favourite carries −1.5, so label-first carries −1.5 iff label-first IS the favourite.
     if (parsed.family === "set_handicap" && !/\(\s*[-−]\s*1\.5\s*\)/.test(mk.label)) {
       const unblock = setHandicapUnblocked();
-      if (!unblock || first == null) { push("provenance_review", `сторона гандикапа неоднозначна (нет явного «(-1.5)»)${unblock ? ", стороны не сопоставлены" : ""} — провенанс, не торгуем`); continue; }
+      if (!unblock || first == null) { push("provenance_review", `сторона гандикапа неоднозначна (нет явного «(-1.5)»)${unblock ? ", стороны не сопоставлены" : ""} — провенанс, не торгуем · mid ${mid}¢`); continue; }
       const favIsP1 = ml.p1Cents >= 50;          // moneyline favourite (P(scout-p1) ≥ 50¢) is the −1.5 carrier
       parsed.handicapOnFirst = first === favIsP1; // label-first carries −1.5 iff it is the favourite
     }
@@ -279,7 +279,11 @@ export function scanMatchProps(db: Database, matchId: string, players: { p1: str
     const dev = Math.round((theoCents - mid) * 10) / 10;
     if (book < PMV_BOOK_MIN) push("skip", `книга $${Math.round(book)} < $${PMV_BOOK_MIN}`, theoCents, dev);
     else if (mid < PMV_PRICE_MIN || mid > PMV_PRICE_MAX) push("skip", `цена ${mid}¢ вне полосы ${PMV_PRICE_MIN}-${PMV_PRICE_MAX}¢`, theoCents, dev);
-    else if (Math.abs(dev) >= PMV_DEV_PROVENANCE) push("provenance_review", `|dev| ${Math.abs(dev)}¢ ≥ ${PMV_DEV_PROVENANCE}¢ — анти-Draw: сторона/семантика контракта под вопросом (вкл. set_winner: риск void/ретайра), блок до ручного разбора`, theoCents, dev);
+    // [N6] MID ЕДЕТ В СТРОКЕ. Без него «|dev| 27.7¢» — число без своего знаменателя: 13 из 27 блоков в
+    // логах 03-04.08 стояли против цены РОВНО 50.0¢ (плейсхолдер), хотя фильтр плейсхолдера стоит ВЫШЕ по
+    // коду и должен был снять их раньше. Отличить «модель против реальной цены» от «модель против
+    // неторгованного дефолта» по прежней строке было НЕЛЬЗЯ — теперь можно, и разбор станет замером.
+    else if (Math.abs(dev) >= PMV_DEV_PROVENANCE) push("provenance_review", `|dev| ${Math.abs(dev)}¢ ≥ ${PMV_DEV_PROVENANCE}¢ (theo ${theoCents}¢ vs mid ${mid}¢, книга $${Math.round(book)}) — анти-Draw: сторона/семантика контракта под вопросом (вкл. set_winner: риск void/ретайра), блок до ручного разбора`, theoCents, dev);
     else if (dev >= PMV_DEV_ENTER) push("enter", `theo ${theoCents}¢ vs mid ${mid}¢ (dev +${dev}¢) — рынок недооценил, покупаем`, theoCents, dev);
     else push("skip", `dev ${dev}¢ < порога ${PMV_DEV_ENTER}¢`, theoCents, dev);
   }
