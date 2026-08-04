@@ -17,7 +17,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { buildSetHandicapConvention, setHandicapConventionLine, SHC_CONTROL_MIN, SHC_TEST_MIN_MATCHES } from "../src/lib/setHandicapConvention.js";
+import { buildSetHandicapConvention as verdictOf, observeFromSnapshots, setHandicapConventionLine, SHC_CONTROL_MIN, SHC_TEST_MIN_MATCHES } from "../src/lib/setHandicapConvention.js";
+import { recordShcObservations } from "../src/lib/shcJournal.js";
+
+// ВЕРДИКТ ЧИТАЕТСЯ ИЗ ЖУРНАЛА (O8): наблюдение сначала замораживается, потом судится. Тесты идут тем же
+// путём, что и прод, — иначе они проверяли бы конструкцию, которой в проде нет.
+function buildSetHandicapConvention(db: ReturnType<typeof world>) {
+  recordShcObservations(db, "2026-08-04T12:00:00Z");
+  return verdictOf(db);
+}
 
 function world() {
   const db = openDb(":memory:"); initSchema(db);
@@ -125,9 +133,10 @@ test("цена в середине — «нет исхода», а не окру
   const db = world();
   for (let i = 100; i < 110; i++) played(db, i, { favP1: true, setsP1: 2, setsP2: 0, mlPrice: 99, hcapPrice: 55 });
   const r = buildSetHandicapConvention(db);
-  assert.equal(r.testChecked, 0, "неразрешившиеся рынки в счёт не идут");
+  assert.equal(r.testChecked, 0, "неразрешившиеся рынки в журнал НЕ попадают, значит и в счёт не идут");
   assert.equal(r.verdict, "НЕ СОЗРЕЛО");
-  assert.match(r.rows.find((x) => x.group === "тест")!.note, /не судим, а не «наверное да»/);
+  // Наблюдение из снимков всё равно объясняет, почему строки нет — «не судим», а не «наверное да».
+  assert.match(observeFromSnapshots(db).rows.find((x) => x.group === "тест")!.note, /не судим, а не «наверное да»/);
 });
 
 test("ЕДИНИЦА — МАТЧ: два гандикап-пропа одного матча это ОДНО испытание", () => {
@@ -169,7 +178,7 @@ test("незрелость объясняется числами: сколько
   // Гандикап с ценой, снятой за 3 часа ДО последнего снимка скаута, и без токена.
   R.insertMarket(db, { id: `mk${i}old`, match_id: `m${i}`, label: HCAP, price: 25, ai_prob: null, liquidity: 3000, external_ref: null, snapshot_at: `${day}T10:00:00Z`, is_closing: false } as never);
   const r = buildSetHandicapConvention(db);
-  const row = r.rows.find((x) => x.group === "тест")!;
+  const row = observeFromSnapshots(db).rows.find((x) => x.group === "тест")!;
   assert.equal(row.outcome, "нет исхода");
   assert.equal(row.hasToken, false, "без токена цену переопрашивать нечем");
   assert.equal(row.priceLagMin, 180, "цена старше последнего снимка на 3 часа");

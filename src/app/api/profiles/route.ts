@@ -130,7 +130,9 @@ export async function GET(req: Request) {
     if (new URL(req.url).searchParams.get("report") === "set_handicap_convention") {
       const { buildSetHandicapConvention, setHandicapConventionLine } = await import("@/lib/setHandicapConvention");
       const r = buildSetHandicapConvention(db);
-      return NextResponse.json({ ok: true, report: r, line: setHandicapConventionLine(r) });
+      // Прежний вердикт отдаётся ОТДЕЛЬНЫМ полем с пометкой `unverified`: история не стирается, но и
+      // не выдаётся за действующий вывод (ратифицировано 04.08).
+      return NextResponse.json({ ok: true, report: r, line: setHandicapConventionLine(r), prior: r.prior });
     }
     // ?report=scout_coverage → почему у теннисного матча нет свежего счёта, ПОИМЁННО: не связан /
     // не в фиде / устарел / просрочен / завершён у провайдера / до начала. Прежняя диагностика

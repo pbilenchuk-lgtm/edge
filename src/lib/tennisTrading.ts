@@ -34,7 +34,7 @@ import { getProfileConfig, RISK_PROFILE_DEFS } from "./riskConfig.js";
 import { shadowOnEntries, type ShadowEntryRequest } from "./shadow.js";
 import { getStrategy } from "./repo.js";
 import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
-import { classifyScoutCoverage, SV_SNAP_STALE_MIN } from "./scoutCoverage.js";
+import { classifyScoutCoverage, SV_SNAP_STALE_MIN, OVERDUE_H } from "./scoutCoverage.js";
 
 const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
@@ -228,14 +228,18 @@ export async function pollTennisFinals(db: Database, deps: EngineDeps = {}): Pro
       const liveTooLong = liveMin > TENNIS_LIVE_CEILING_MIN;
       if (!stale && !liveTooLong) continue;
       const hasOpen = R.betsForMatch(db, m.id).some((b) => TENNIS_ALL_STRATEGIES.has(b.strategy_id) && b.status === "open");
-      // `lineup` ЗАСТРЕВАЕТ ТАК ЖЕ, КАК `live` — и раньше выпадал из погони. Первый же замер покрытия
-      // скаута (03.08) показал ШЕСТЬ теннисных матчей в `lineup` со следом из 2-4 снимков «Scheduled»,
-      // после которых провайдер их бросил: возраст 48-291 минута, открытых позиций нет — и по прежнему
-      // условию их не чинил никто. Они не финишируют никогда, вечно печатают no_score_data_skip и держат
-      // живой тик разбуженным (activeMatches считает `lineup` игровым состоянием). Признак «застрял» —
-      // это не имя состояния, а связанный со скаутом нефинишированный матч с протухшим фидом.
-      const stranded = m.state === "live" || m.state === "lineup";
-      if (!hasOpen && !stranded) continue; // ни открытой позиции, ни игрового состояния → гнаться не за чем
+      // ПРИЗНАК «ЗАСТРЯЛ» — ФАКТ ПРОСРОЧКИ, А НЕ ИМЯ СОСТОЯНИЯ. Сначала я расширил погоню с `live` на
+      // `lineup`, потому что замер 03.08 нашёл там шесть брошенных провайдером матчей. Следующий замер
+      // (04.08) показал, что признак выбран не тот: висят 17 в `lineup` И ВОСЕМЬ в `upcoming` — со
+      // стартом 6+ часов назад, нефинишированные, без открытых позиций. Их не чинил никто, они не
+      // финишируют никогда, вечно печатают no_score_data_skip и держат живой тик разбуженным.
+      // Один предикат ловит оба ведра: связанный со скаутом матч, чей старт ПРОШЁЛ давно и который не
+      // завершён. ГРАНИЦА С ХИМЕРА-КЛАССОМ: матчи, стартующие в БУДУЩЕМ, погоня не трогает никогда —
+      // у них отсутствие данных законно, и это закреплено отдельным тестом-регрессией.
+      const koMs = Date.parse(m.kickoff_at ?? "");
+      const overdue = Number.isFinite(koMs) && nowMs - koMs > TENNIS_OVERDUE_CHASE_MIN * 60_000;
+      const stranded = m.state === "live" || m.state === "lineup" || overdue;
+      if (!hasOpen && !stranded) continue; // ни открытой позиции, ни признака застревания → гнаться не за чем
       if (tennisFinalResult(db, m.id)?.finished) continue; // a terminal snapshot already exists → settle handles it
       const start = (m.kickoff_at ?? last.batch_at ?? now).slice(0, 10);
       (byStart.get(start) ?? byStart.set(start, []).get(start)!).push({ matchId: m.id, eventKey: last.event_key });
@@ -1328,6 +1332,9 @@ const SV_WAIT = "tennis_sv_wait:";   // one-shot "waiting for the cross-strategy
 // than this — the set score is unverified. PREMATCH_MIN: the frozen prematch favourite must be ≥ this (a
 // real favourite); 55-60¢ is a sensitivity band recorded but quarantined by the report (<60 bin).
 // SV_SNAP_STALE_MIN живёт в scoutCoverage.ts: один порог на отказ и на отчёт о покрытии.
+/** Насколько старт должен уйти в прошлое, чтобы нефинишированный матч считался ЗАСТРЯВШИМ (а не идущим).
+ *  Тот же порог, которым `scoutCoverage` называет запись ПРОСРОЧЕННОЙ — один авторитет на одно решение. */
+const TENNIS_OVERDUE_CHASE_MIN = OVERDUE_H * 60;
 const SV_PREMATCH_MIN = (() => { const n = Number(process.env.TENNIS_SV_PREMATCH_MIN); return Number.isFinite(n) && n > 0 ? n : 55; })();
 
 /** Both sides' winner price at the START of the match (first priced snapshot) — the CLEAN pre-match
