@@ -30,6 +30,7 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { Match } from "./types.js";
+import { snapshotWitness } from "./snapshotWitness.js";
 import { MAP_AUTO, MAP_REVIEW } from "./tennisMatch.js";
 
 /**
@@ -95,6 +96,9 @@ function mapDecisionFor(db: Database, matchId: string, sinceMs: number): R.Tenni
 export function classifyScoutCoverage(db: Database, m: Match, nowIso = new Date().toISOString()): CoverageRow {
   const nowMs = Date.parse(nowIso) || Date.now();
   const agg = snapAgg(db, m.id);
+  // [N7] Свидетель снимков переживает ретеншн. Без него ветка «НЕ В ФИДЕ» утверждала «провайдер этого
+  // матча не видел вовсе» — утверждение о ПРОШЛОМ, выведенное из счёта в НАСТОЯЩЕМ по кэпнутой таблице.
+  const w = snapshotWitness(db, m.id, agg.n, m.kickoff_at ?? null);
   const ageMin = agg.lastAt ? Math.round((nowMs - (Date.parse(agg.lastAt) || 0)) / 60_000) : null;
   const koMs = m.kickoff_at ? Date.parse(m.kickoff_at) : NaN;
   const started = Number.isFinite(koMs) ? koMs <= nowMs : m.state === "live";
@@ -114,7 +118,19 @@ export function classifyScoutCoverage(db: Database, m: Match, nowIso = new Date(
   if (overdueH != null && overdueH > OVERDUE_H) return mk("ПРОСРОЧЕН", `старт ${Math.round(overdueH)}ч назад, а запись всё ещё «${m.state}» — такой матч генерит no_score_data_skip бесконечно; это мусор в записях, а не пробел покрытия`);
   if (dec && dec.verdict !== "auto") return mk("НЕ СВЯЗАН", `провайдер матч ВИДИТ («${dec.players ?? "?"}»), но привязка ${dec.verdict} со счётом ${dec.score ?? "?"} при пороге ${MAP_AUTO} (зазор ${dec.score != null ? Math.round((MAP_AUTO - dec.score) * 100) / 100 : "?"}, порог review ${MAP_REVIEW}) — чинится алиасом имён, а не порогом свежести`);
   if (agg.n) return mk("УСТАРЕЛ", `привязка была (снимков ${agg.n}), но свежих строк нет ${ageMin}м — провайдер перестал отдавать матч, а он у нас всё ещё «${m.state}»`);
-  return mk("НЕ В ФИДЕ", `старт прошёл${overdueH != null ? ` ${Math.round(overdueH * 10) / 10}ч назад` : ""}, снимков НЕТ и решения привязки за ${MAP_LOOKBACK_H}ч тоже нет — провайдер этого матча не видел вовсе`);
+  // Живых строк нет — но свидетель помнит, что они БЫЛИ. Это тот же «УСТАРЕЛ», просто окно ретеншна
+  // короче возраста матча; называть это «не видел вовсе» значило бы обвинить фид в работе кэпа.
+  if (w.verdict === "wiped") {
+    return mk("УСТАРЕЛ", `привязка была (за жизнь матча записано ${w.seenTotal} снимков${w.lastAt ? `, последний ${w.lastAt}` : ""}),`
+      + ` но живых строк не осталось — их стёр ретеншн, а не провал маппинга`);
+  }
+  // `unknown` — матч старше счётчика-свидетеля. Утверждать про него «провайдер не видел вовсе» значило бы
+  // выдать незнание за факт ровно тем способом, который эта задача и чинит.
+  if (w.verdict === "unknown") {
+    return mk("НЕ СВЯЗАН", `живых снимков нет, и ответить «были ли они» нельзя: ${w.note}`);
+  }
+  return mk("НЕ В ФИДЕ", `старт прошёл${overdueH != null ? ` ${Math.round(overdueH * 10) / 10}ч назад` : ""}, снимков НЕТ ни живых, ни за всю жизнь матча (счётчик-свидетель 0),`
+    + ` и решения привязки за ${MAP_LOOKBACK_H}ч тоже нет — провайдер этого матча не видел вовсе`);
 }
 
 export function buildScoutCoverage(db: Database, nowIso = new Date().toISOString()): ScoutCoverageReport {

@@ -200,10 +200,38 @@ const SCENARIO_LABELS: Record<OutcomeScenario["id"], string> = {
 const WINNER_SIDE: Record<OutcomeScenario["id"], "fav" | "draw" | "dog"> = {
   fav_clean: "fav", fav_concedes: "fav", draw_0_0: "draw", draw_scoring: "draw", dog_clean: "dog", dog_concedes: "dog",
 };
-const BRANCH_BTTS: Record<OutcomeScenario["id"], "no" | "yes"> = {
+/** Ветка ОДНОРОДНА по BTTS по построению (см. scenarioFor) — это структурный факт дерева, а не оценка.
+ *  Экспортируется, потому что проверка «пик против собственного списка веток» обязана читать ЕГО, а не
+ *  свою копию таблицы: расхождение двух таблиц молча превратило бы гейт в генератор ложных обвинений. */
+export const BRANCH_BTTS: Record<OutcomeScenario["id"], "no" | "yes"> = {
   fav_clean: "no", fav_concedes: "yes", draw_0_0: "no", draw_scoring: "yes", dog_clean: "no", dog_concedes: "yes",
 };
-const SCENARIO_IDS: OutcomeScenario["id"][] = ["fav_clean", "fav_concedes", "draw_0_0", "draw_scoring", "dog_clean", "dog_concedes"];
+
+/**
+ * Что ветка ГАРАНТИРУЕТ про суммарный тотал — только то, что следует из её определения, без оценок:
+ *   • draw_0_0 — ровно 0 голов (i===j===0), это ТОЧНОЕ значение;
+ *   • fav_clean / dog_clean — победа всухую ⇒ победитель забил ≥1, соперник 0 ⇒ тотал ≥ 1;
+ *   • draw_scoring — ничья i===j≥1 ⇒ тотал ≥ 2;
+ *   • fav_concedes / dog_concedes — победа при забивших ОБЕИХ ⇒ минимум 2:1 ⇒ тотал ≥ 3.
+ *
+ * ВЕРХНЕЙ границы нет ни у одной ветки, кроме draw_0_0: 5:0 — это fav_clean с тоталом 5. Поэтому минимум
+ * умеет доказывать только «эта ветка ТОЧНО выше линии»; доказать «ниже линии» он не может никогда, и
+ * потребитель обязан это уважать (асимметричная гарантия вместо симметричной лжи).
+ *
+ * `score_cluster` для таких доказательств НЕПРИГОДЕН: это САМЫЕ ТЯЖЁЛЫЕ счета ветки, то есть выборка для
+ * читаемости, а не её носитель. Судить по нему значило бы блокировать законный «Over 3.5», сославшийся на
+ * fav_concedes, из-за того что в кластере оказались 2:1 и 1:1.
+ */
+export const BRANCH_TOTAL_BOUNDS: Record<OutcomeScenario["id"], { min: number; exact: number | null }> = {
+  fav_clean: { min: 1, exact: null },
+  fav_concedes: { min: 3, exact: null },
+  draw_0_0: { min: 0, exact: 0 },
+  draw_scoring: { min: 2, exact: null },
+  dog_clean: { min: 1, exact: null },
+  dog_concedes: { min: 3, exact: null },
+};
+
+export const SCENARIO_IDS: OutcomeScenario["id"][] = ["fav_clean", "fav_concedes", "draw_0_0", "draw_scoring", "dog_clean", "dog_concedes"];
 
 /** MECE classification by (winner × BTTS): exactly one branch per final score, no
  *  priority order. winner is fav/draw/dog (fav/dog by xG); BTTS = both teams scored.

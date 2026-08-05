@@ -29,6 +29,9 @@ import { effectiveCodeVersion } from "./codeEpoch.js";
 import { loadAnalysisDuel, pickAnalysisModel, analysisModelTag } from "./analysisDuel.js";
 import { canonicalizeDrawForMatch, drawCanonEnabled } from "./drawCanon.js";
 import { captureShadowDepth } from "./bookDepthCapture.js";
+import { sameMarketLabel, tokenSet, numTokens, extraAllFiller } from "./marketLabel.js";
+import { blockedByCoherence, blocksLabel } from "./sideCoherence.js";
+import { checkPickBranches, branchContradictionNote } from "./pickBranchCoherence.js";
 
 export interface AnalyzeDeps {
   fetchImpl?: typeof fetch;
@@ -413,6 +416,18 @@ export async function runStrategists(
     // Копим цели по ходу разбора рынков и снимаем их ОДНИМ проходом после — по рынку за раз это
     // был бы запрос на каждый демоутнутый рынок внутри горячего цикла.
     const shadowDepthTargets: { matchId: string; token: string; label: string }[] = [];
+    // [N1(а)→N1(б)] КОГЕРЕНТНОСТЬ СТОРОН НА ПРЕДМАТЧЕВОМ ПУТИ. Инвариант ставился в батче-14 только в
+    // живой вход (lifecycle) — а именной кейс Breiðablik пришёл СЮДА: решение стадии post_lineup, ставка
+    // ушла отсюда. Гейт, не покрывающий собственную регрессию, — это гейт, чей тест зелёный на модуле и
+    // мимо денег. Считается ДО цикла: смотрит на решение ЦЕЛИКОМ, а цикл идёт по рынкам.
+    const coh = blockedByCoherence((picksArr ?? []).map((p) => ({ label: p.label, prob: p.prob ?? null })));
+    for (const c of coh.conflicts) {
+      console.warn(`[sideCoherence] ${match.home}—${match.away}: ${c.note}`);
+      try {
+        R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null,
+          type: "skip", text: `provenance_review [side_incoherent] ${c.note}`, created_at: now() });
+      } catch { /* журнал не роняет торговый путь */ }
+    }
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
       .map((m) => { const implied = impliedMap.get(m.label)?.implied ?? m.price / 100; return { m, implied, edge: (m.ai_prob as number) - implied }; })
       .sort((x, y) => y.edge - x.edge);
@@ -424,6 +439,31 @@ export async function runStrategists(
         ?? picksArr?.find((p) => !p.marketId && sameMarketLabel(p.label, m.label));
       if (picksArr && !pick) { skipped++; continue; }
       if (pick?.hold) { skipped++; continue; } // T2.2: a hold ticket never opens — no-op prematch too
+      // Обе стороны одного контракта с суммой > 100% — блокируются ОБЕ. Сверяем и по подписи пика, и по
+      // подписи РЫНКА: пик мог прийти в перифразе, которую исполнение принимает, а точное сравнение — нет.
+      if (pick && (blocksLabel(coh.blocked, pick.label) || blocksLabel(coh.blocked, m.label))) {
+        skipped++;
+        battle.push({ market: m.label, status: "skip", reason: "некогерентные стороны — обе заблокированы (side_incoherent)" });
+        continue;
+      }
+      // [N1(б)] ПИК ПРОТИВ СОБСТВЕННОГО СПИСКА ВЕТОК — корень, который парный инвариант не видит.
+      // `livesInBranches` — машинное утверждение стратега о том, где ставка выигрывает; оно собиралось в
+      // battle-sheet и entry_meta и никогда не читалось. Блокирует ТОЛЬКО единогласие допустимых улик
+      // против названной стороны; «улик мало» и «картина смешана» не обвиняют (см. pickBranchCoherence).
+      if (pick) {
+        const bc = checkPickBranches(m.label, pick.livesInBranches);
+        if (bc.verdict === "contradicts") {
+          const note = branchContradictionNote(m.label, bc);
+          console.warn(`[pickBranch] ${match.home}—${match.away}: ${note}`);
+          try {
+            R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: strat.id, minute: null,
+              type: "skip", text: `provenance_review [pick_branch_contradiction] ${note}`, created_at: now() });
+          } catch { /* журнал не роняет торговый путь */ }
+          skipped++;
+          battle.push({ market: m.label, status: "skip", reason: `pick_branch_contradiction: ${bc.note}` });
+          continue;
+        }
+      }
       if (rejectedSet.has(norm(m.label))) { skipped++; battle.push({ market: m.label, status: "skip", reason: "в rejected — вход заблокирован (rejected_market_block)" }); continue; } // T3.2
       if (held.has(norm(m.label))) { skipped++; continue; }
       // Duplicate-outcome price conflict → never enter, even if the strategist picked
@@ -507,6 +547,7 @@ export async function runStrategists(
         calibration: calibration != null ? round3(calibration) : null,
         branchWeightSum: pick?.branchWeightSum != null ? round3(pick.branchWeightSum) : null,
         phantomCheck: pick?.phantomCheck ?? null, marketThinnessUsd: parseLiq(m.liquidity),
+        pickMarketId: pick?.marketId ?? null, pickLabel: pick?.label ?? null,   // [N1(б)] личность пика в записи
         winsOnEvent: winsOnEventOccurrence(m.label), exitPlan: pick?.exitPlan ?? null,
         models: { analysis: model, strategist: stratModel }, // ground truth for the A/B
       };
@@ -818,28 +859,10 @@ export function distributionContext(db: Database, matchId: string): string | und
 export function strategistContext(db: Database, matchId: string): string | undefined {
   return [matchContext(db, matchId), distributionContext(db, matchId)].filter(Boolean).join("\n\n") || undefined;
 }
-const tokenSet = (s: string) => new Set(norm(s).split(" ").filter(Boolean));
-// Numbers a label carries (e.g. "over 2.5 goals" → "2.5"). Two labels can only
-// fuzzy-match if their numbers are identical.
-const numTokens = (s: string) => (s.match(/\d+(?:\.\d+)?/g) ?? []).sort().join(",");
-// Non-numeric words safe to differ between a market label and the model's
-// paraphrase of it. Anything OUTSIDE this set changes the market's meaning.
-const LABEL_FILLER = new Set(["goals", "goal", "total", "points", "point", "match", "result", "the", "full", "time", "of"]);
-/** True iff every token present in exactly one of the two sets is pure filler. */
-const extraAllFiller = (a: Set<string>, b: Set<string>): boolean => {
-  for (const t of a) if (!b.has(t) && !LABEL_FILLER.has(t) && !/^\d/.test(t)) return false;
-  for (const t of b) if (!a.has(t) && !LABEL_FILLER.has(t) && !/^\d/.test(t)) return false;
-  return true;
-};
-/** Do two market labels refer to the same market? Exact (normalized) match, or a
- *  SAFE fuzzy match where the numbers line up and the only differing tokens are
- *  filler ("Over 2.5" ↔ "Over 2.5 goals") — never "Draw" ↔ "Draw no bet". Used
- *  to resolve the strategist's paraphrased pick/exit labels back to real markets. */
-export function sameMarketLabel(a: string, b: string): boolean {
-  const na = norm(a), nb = norm(b);
-  if (na === nb) return true;
-  return numTokens(na) === numTokens(nb) && extraAllFiller(tokenSet(a), tokenSet(b));
-}
+// «Тот же ли это рынок?» — единственный авторитет живёт в marketLabel.ts (реэкспорт ради прежних
+// импортов). Вынесен туда, чтобы гейт когерентности сторон мог спросить ТУ ЖЕ функцию, что исполнитель,
+// не замыкая цикл analysis → sideCoherence → analysis.
+export { sameMarketLabel } from "./marketLabel.js";
 
 /** Open + still-proposed stake ($) a (strategy, profile) PAIR has committed across
  *  the WHOLE competition. The §9.3 budget cap is per-COMPETITION and per-pair —

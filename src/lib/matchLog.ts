@@ -9,6 +9,9 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { summarizeFillCosts } from "./fillCosts.js";
+import { snapshotWitness, witnessLine } from "./snapshotWitness.js";
+import { classifyScoutCoverage } from "./scoutCoverage.js";
+import type { Match } from "./types.js";
 import { loadShadowConfig } from "./shadow.js";
 import { loadAnalysisDuel } from "./analysisDuel.js";
 
@@ -54,7 +57,12 @@ function liveDataStatus(db: Database, matchId: string): { ok: boolean; via: stri
   if (sportId === "tennis") {
     const snap = db.prepare(`SELECT live, batch_at, set_num, games_p1, games_p2 FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(matchId) as { live?: number; batch_at?: string; set_num?: number; games_p1?: number; games_p2?: number } | undefined;
     const total = (db.prepare(`SELECT COUNT(*) n FROM tennis_snapshots WHERE pm_match_id=?`).get(matchId) as { n?: number } | undefined)?.n ?? 0;
-    if (!snap) return { ok: false, via: "теннис: скаут не привязал матч (0 снапшотов tennis_snapshots) — маппинг имён не сошёлся или скаут не видит матч live" };
+    // [N7] Прежняя строка утверждала «маппинг имён не сошёлся» по предикату COUNT(*)=0 на КЭПНУТОЙ
+    // таблице — то есть обвиняла привязку в том, что мог сделать ретеншн. Причину называет свидетель.
+    if (!snap) {
+      const w = snapshotWitness(db, matchId, total, m?.kickoff_at ?? null);
+      return { ok: false, via: `теннис-скаут: живых снапшотов нет — ${w.note}` };
+    }
     const ageMin = Math.round((Date.now() - (Date.parse(snap.batch_at ?? "") || 0)) / 60000);
     // T6: env-tunable staleness (was hardcoded 15), mirrors TENNIS_SCOUT_STALE_MIN so the two never drift.
     const staleMin = (() => { const n = Number(process.env.TENNIS_SCOUT_STALE_MIN); return Number.isFinite(n) && n > 0 ? n : 15; })();
@@ -91,6 +99,36 @@ function liveDataStatus(db: Database, matchId: string): { ok: boolean; via: stri
 // at 50¢ → placeholder_mid quarantine, and in Varnamo's case not a single proposal was ever produced).
 // This walks autoEnter's ACTUAL gate order and names the first gate that would stop each proposal, so the log
 // answers «на каком условии умирает вход» directly. Read-only, best-effort, never throws.
+/**
+ * [N7] Причинная ветка ТЕННИСА. Тик тенниса не проходит футбольные стадии, поэтому и объясняется своими
+ * фактами: есть ли живые снапшоты (и если нет — почему, по свидетелю), что сказало покрытие скаута, и
+ * какие отказы напечатала сама теннисная стратегия. Никаких «стратег вернул 0 picks»: футбольный стратег
+ * теннисного матча не видит.
+ */
+function tennisBlockerDiag(db: Database, m: Match, out: string[]): string[] {
+  const bets = R.betsForMatch(db, m.id);
+  const open = bets.filter((b) => b.status === "open" || R.isSettled(b.status));
+  if (open.length) out.push(`вход БЫЛ: ${open.length} позиц. (теннис пишет ставку сразу как open — стадий proposed/not_filled в его пути нет)`);
+  const liveRows = (db.prepare(`SELECT COUNT(*) n FROM tennis_snapshots WHERE pm_match_id=?`).get(m.id) as { n?: number } | undefined)?.n ?? 0;
+  const w = snapshotWitness(db, m.id, liveRows, m.kickoff_at ?? null);
+  out.push(`СНАПШОТЫ: ${witnessLine(w)}`);
+  if (w.verdict === "never" || w.verdict === "wiped") {
+    out.push("тик работает по привязанным снапшотам скаута — без них теннисная стратегия до гейтов не доходит вовсе");
+  }
+  try {
+    const cov = classifyScoutCoverage(db, m);
+    out.push(`ПОКРЫТИЕ СКАУТА: ${cov.verdict} — ${cov.note}`);
+  } catch { /* покрытие не обязано быть доступным, диагноз не падает */ }
+  const skips = R.tradeLogForMatch(db, m.id).filter((l) => l.type === "skip");
+  if (skips.length) {
+    const tail = skips.slice(-4).map((l) => l.text.slice(0, 160));
+    out.push(`ОТКАЗЫ ТЕННИСНОЙ СТРАТЕГИИ (последние ${tail.length} из ${skips.length}): ${tail.join(" | ")}`);
+  } else if (!open.length) {
+    out.push("отказов теннисная стратегия не печатала — сетап не совпал ни разу (это не гейт, а отсутствие срабатывания)");
+  }
+  return out;
+}
+
 const FT_SETTLED_RE = /\b(over|under|btts|both teams|draw|ничья|тотал)\b|[—-]\s*(yes|no|да|нет)\s*$/i;
 export function entryBlockerDiag(db: Database, matchId: string, env: Record<string, string | undefined> = process.env): string[] {
   const out: string[] = [];
@@ -98,6 +136,15 @@ export function entryBlockerDiag(db: Database, matchId: string, env: Record<stri
     const m = R.getMatch(db, matchId);
     if (!m) return ["матч не найден"];
     const sportId = R.listCompetitions(db).find((c) => c.id === m.competition_id)?.sport_id ?? "football";
+    // [N7] ВОРОНКА СПОРТ-СПЕЦИФИЧНА. Заголовок над этими строками говорит «по порядку гейтов autoEnter» —
+    // это ФУТБОЛЬНЫЙ конвейер. Теннис в него не входит по построению: он не зовёт футбольного стратега,
+    // не имеет стадий proposed/not_filled (пишет ставку сразу как `open`, tennisTrading/tennisPmv) и
+    // держит собственный словарь причин (no_moneyline, frozen_favourite, thin_real_book, …).
+    // Следствие прежнего кода: КАЖДЫЙ теннисный матч без позиции — то есть подавляющее большинство —
+    // получал «strategist_empty: стратег не выдал ни одной ставки», обвиняя компонент, который этого матча
+    // не касался. Ровно тот же класс, что «0 снапшотов»: диагноз, ведущий следующий раунд расследования
+    // в здоровый компонент. Теннис печатает свою причинную ветку и НЕ ходит по футбольным стадиям.
+    if (sportId === "tennis") return tennisBlockerDiag(db, m, out);
     const markets = R.latestMarkets(db, m.id);
     const bets = R.betsForMatch(db, m.id);
     const proposed = bets.filter((b) => b.status === "proposed");
@@ -403,12 +450,14 @@ export function buildMatchLog(db: Database, matchId: string): string {
   // the scout's raw so a tennis match doesn't read "0 снапшотов" while the scout drove the trades.
   if (isTennis) {
     const tCount = (db.prepare(`SELECT COUNT(*) n FROM tennis_snapshots WHERE pm_match_id=?`).get(m.id) as { n?: number } | undefined)?.n ?? 0;
-    h(`Снимки скаута тенниса (${tCount} шт — tennis_snapshots · api-tennis + Polymarket)`);
+    // Живых строк и записанных за жизнь — два РАЗНЫХ числа; печатать одно без другого значит выдавать
+    // окно ретеншна за историю матча (см. snapshotWitness).
+    h(`Снимки скаута тенниса (живых ${tCount}, записано за жизнь ${R.snapshotWitnessFor(db, m.id).seenTotal} — tennis_snapshots · api-tennis + Polymarket)`);
     const tSnaps = db.prepare(`SELECT batch_at, live, status, set_num, games_p1, games_p2, sets_p1, sets_p2, pm_p1_cents, pm_p2_cents FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 24`).all(m.id) as Array<{ batch_at: string; live?: number; status?: string; set_num?: number; games_p1?: number; games_p2?: number; sets_p1?: number; sets_p2?: number; pm_p1_cents?: number; pm_p2_cents?: number }>;
-    if (!tSnaps.length) L.push("- нет снапшотов скаута (матч не привязан / скаут не видит live)");
+    if (!tSnaps.length) L.push(`- ${witnessLine(snapshotWitness(db, m.id, tCount, m.kickoff_at ?? null))}`);   // [N7] причина, а не догадка
     for (const s of tSnaps) L.push(`- ${s.batch_at} · live=${s.live ?? "?"}${s.status ? ` ${s.status}` : ""} · сеты ${s.sets_p1 ?? "?"}-${s.sets_p2 ?? "?"} · сет ${s.set_num ?? "?"} геймы ${s.games_p1 ?? "?"}-${s.games_p2 ?? "?"} · PM ${s.pm_p1_cents ?? "—"}¢/${s.pm_p2_cents ?? "—"}¢`);
   } else {
-    h(`Снимки провайдеров (${R.snapshotCount(db, m.id)} шт — сырьё StatPal/Sportmonks/TheStatsAPI/Polymarket)`);
+    h(`Снимки провайдеров (живых ${R.snapshotCount(db, m.id)}, записано за жизнь ${R.snapshotWitnessFor(db, m.id).seenTotal} — сырьё StatPal/Sportmonks/TheStatsAPI/Polymarket)`);
     const snaps = R.snapshotMetaForMatch(db, m.id, 60);
     const byProv: Record<string, number> = {};
     for (const s of snaps) byProv[s.provider] = (byProv[s.provider] ?? 0) + 1;

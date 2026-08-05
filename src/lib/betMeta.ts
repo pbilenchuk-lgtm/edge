@@ -77,6 +77,13 @@ export interface BetEntryMeta {
   // Celtic 03.08 — пересечение обеих: анализ через 66с ПОСЛЕ кикоффа, вход по ровно 50.0¢.
   catchUp?: boolean;
   unmarkedBook?: boolean;
+  // [N1(б)] ЛИЧНОСТЬ ПИКА, ПОРОДИВШЕГО СТРОКУ. До этого на ставке хранилась только `market_label` —
+  // подпись РЫНКА, к которому пик привязали. Разбор Breiðablik пришлось вести по тексту рационале,
+  // потому что доказать «какой именно пик стал этой ставкой» из записи было НЕЛЬЗЯ: ни id из каталога,
+  // ни подпись самого пика не сохранялись. Провенанс входа обязан отвечать на этот вопрос из записи,
+  // а не из археологии по прозе — расхождение pickLabel и market_label само по себе улика.
+  pickMarketId?: string | null;
+  pickLabel?: string | null;
   exitPlan: unknown | null;         // the pre-written exit plan (take_price/thesis/counter/time_stop)
   // T6: data provenance FROZEN at the decision — which feed the entry was decided on and how stale that
   // snapshot was (seconds) at decision time. Makes «на какой цене/данных решали» auditable per bet.

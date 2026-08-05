@@ -93,6 +93,10 @@ export interface EntryFunnelReport {
   days: FunnelDay[];
   baselines: FunnelBaseline[];
   investigate: string[];
+  /** [N7] Область воронки названа полем, а не подразумевается: её стадии описывают ФУТБОЛЬНЫЙ конвейер. */
+  sport: "football";
+  /** Сколько отказов других видов спорта отброшено фильтром — сужение области не должно быть молчаливым. */
+  offSportSkips: number;
   note: string;
 }
 
@@ -120,18 +124,32 @@ export function buildEntryFunnel(db: Database, opts: { days?: number; nowMs?: nu
   const nowMs = opts.nowMs ?? Date.now();
   const fromIso = new Date(nowMs - days * 86_400_000).toISOString();
 
+  // [N7] ВОРОНКА — ФУТБОЛЬНАЯ, И ЭТО СКАЗАНО ВСЛУХ. Её стадии (analysed→picked→proposed→entered) и весь
+  // словарь причин описывают футбольный конвейер. Теннис в него не входит по построению: пишет ставку
+  // сразу как `open` (стадий proposed/not_filled нет), футбольного стратега не зовёт, отказы печатает
+  // своим словарём. Без фильтра каждый здоровый теннисный skip падал в НЕВЯЗКУ — то есть предохранитель,
+  // созданный ловить незнакомую причину, срабатывал на ЧУЖОМ спорте и обесценивал себя шумом; а входы
+  // тенниса надували числитель, разбор — знаменатель.
+  // Сужение области НЕ молчаливое: отфильтрованное считается и печатается (см. offSport ниже) — иначе
+  // это была бы ровно та подмена, которую воронка и должна ловить.
+  const FOOTBALL_ONLY = `IN (SELECT m.id FROM matches m JOIN competitions c ON c.id = m.competition_id WHERE c.sport_id = 'football')`;
+
   const logs = db.prepare(
     `SELECT t.created_at AS at, t.text AS text, t.match_id AS mid, t.type AS type
-       FROM trade_log t WHERE t.created_at >= ? AND t.type IN ('skip','flag')`,
+       FROM trade_log t WHERE t.created_at >= ? AND t.type IN ('skip','flag') AND t.match_id ${FOOTBALL_ONLY}`,
   ).all(fromIso) as { at: string; text: string; mid: string; type: string }[];
 
   const analysedRows = db.prepare(
-    `SELECT DISTINCT substr(created_at,1,10) AS d, match_id AS mid FROM trade_log WHERE created_at >= ?`,
+    `SELECT DISTINCT substr(created_at,1,10) AS d, match_id AS mid FROM trade_log WHERE created_at >= ? AND match_id ${FOOTBALL_ONLY}`,
   ).all(fromIso) as { d: string; mid: string }[];
 
   const bets = db.prepare(
-    `SELECT substr(created_at,1,10) AS d, COUNT(*) n FROM bets WHERE created_at >= ? GROUP BY d`,
+    `SELECT substr(created_at,1,10) AS d, COUNT(*) n FROM bets WHERE created_at >= ? AND match_id ${FOOTBALL_ONLY} GROUP BY d`,
   ).all(fromIso) as { d: string; n: number }[];
+
+  const offSport = (db.prepare(
+    `SELECT COUNT(*) n FROM trade_log WHERE created_at >= ? AND type IN ('skip','flag') AND match_id NOT ${FOOTBALL_ONLY}`,
+  ).get(fromIso) as { n?: number } | undefined)?.n ?? 0;
 
   const byDay = new Map<string, FunnelDay>();
   const dayRec = (d: string): FunnelDay => {
@@ -194,12 +212,13 @@ export function buildEntryFunnel(db: Database, opts: { days?: number; nowMs?: nu
   }
 
   return {
-    days: out, baselines, investigate,
-    note: investigate.length
+    days: out, baselines, investigate, sport: "football", offSportSkips: offSport,
+    note: (offSport ? `[воронка футбольная; ${offSport} отказ(ов) других видов спорта не учтены — у тенниса свой путь и свой словарь] ` : "[воронка футбольная] ")
+      + (investigate.length
       ? `⚠ воронка требует расследования (${investigate.length}): ` + investigate.join(" || ")
       : today
         ? `сегодня: разобрано ${today.analysed} · входов ${today.entered}` + (today.top.length ? ` · топ отказов: ${today.top.map((t) => `${t.code}×${t.n}`).join(", ")}` : " · отказов нет")
-        : "данных за окно нет",
+        : "данных за окно нет"),
   };
 }
 
@@ -207,7 +226,7 @@ export function buildEntryFunnel(db: Database, opts: { days?: number; nowMs?: nu
 export function funnelLine(rep: EntryFunnelReport): string {
   const t = rep.days[0];
   if (!t) return "funnel: данных нет";
-  return `funnel: разобрано ${t.analysed} · входов ${t.entered}`
+  return `funnel (футбол): разобрано ${t.analysed} · входов ${t.entered}`
     + (t.top.length ? ` · топ-3 отказа: ${t.top.map((x) => `${x.code}×${x.n}`).join(", ")}` : "")
     + (t.unattributed ? ` · НЕВЯЗКА ${t.unattributed}` : "")
     + (rep.investigate.length ? ` · ⚠ РАССЛЕДОВАТЬ (${rep.investigate.length})` : "");

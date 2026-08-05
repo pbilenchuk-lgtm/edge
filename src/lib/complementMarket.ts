@@ -57,6 +57,43 @@ export function complementKey(label: string): string | null {
   return null;
 }
 
+/** Side words that invert, at WORD level on the raw label (not on the folded key). */
+const SIDE_WORD_SWAPS: [RegExp, string][] = [
+  [/\bunder\b/gi, "Over"], [/\bover\b/gi, "Under"],
+  [/\bменьше\b/gi, "Больше"], [/\bбольше\b/gi, "Меньше"],
+  [/\bтм\b/gi, "ТБ"], [/\bтб\b/gi, "ТМ"],
+  [/\byes\b/gi, "No"], [/\bno\b/gi, "Yes"],
+  [/\bда\b/gi, "Нет"], [/\bнет\b/gi, "Да"],
+];
+
+/**
+ * Комплементарная ПОДПИСЬ (не ключ): «Under 3.5 goals» → «Over 3.5 goals».
+ *
+ * ЗАЧЕМ ОТДЕЛЬНО ОТ complementKey. Тот меняет сторону только когда она ЗАМЫКАЕТ свёрнутый ключ — это
+ * намеренная строгость сеттла, и её трогать нельзя. Но для гейта когерентности сторон она оборачивается
+ * дырой: «Under 3.5 goals» сворачивается в "under35goals", ни один end-anchored свап не подходит, ключ
+ * равен null — конфликт не найден, обе стороны входят. При этом sameMarketLabel считает «Under 3.5 goals»
+ * и «Under 3.5» ОДНИМ рынком (goals — филлер), то есть исполнение обе строки принимает.
+ *
+ * Здесь свап делается по СЛОВУ на исходной подписи, а сравнение потом идёт через sameMarketLabel — тот же
+ * авторитет, которым исполнитель привязывает пик к рынку. Побочно закрывается и ложный ключ у
+ * complementKey: слово-границы не позволяют «Torino» превратиться в «Toriyes».
+ *
+ * Ровно ОДНА сторона свапается за вызов (первое совпавшее правило) — «Over 2.5 — Yes» не должен
+ * инвертироваться дважды и вернуться к себе.
+ */
+export function complementLabel(label: string): string | null {
+  const s = String(label ?? "");
+  for (const [re, to] of SIDE_WORD_SWAPS) {
+    re.lastIndex = 0;
+    if (!re.test(s)) continue;
+    re.lastIndex = 0;
+    const swapped = s.replace(re, to);
+    return swapped.toLowerCase() === s.toLowerCase() ? null : swapped;
+  }
+  return null;
+}
+
 /**
  * Find the complementary market for `label` among this match's own markets.
  *
