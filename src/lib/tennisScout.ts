@@ -19,6 +19,7 @@ import { mapTennisMatch, logMapDecision, normName, MAP_AUTO, MAP_REVIEW } from "
 import { parseEntryMeta } from "./betMeta.js";
 import { computeWindowMetrics, polymarketSeries } from "./overreactionLatency.js";
 import { effectiveCodeVersion } from "./codeEpoch.js";
+import { captureTerminalBook } from "./terminalBook.js";
 
 const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 
@@ -456,6 +457,11 @@ export async function collectTennisSnapshots(db: Database, deps: EngineDeps = {}
       game_points: m.gamePoints, server: m.server, pm_match_id: pmMatchId, pm_mid_cents: pmMid, pm_p1_cents: p1c, pm_p2_cents: p2c,
       raw: trimRaw(m.raw),
     });
+    // [O12] Живой фид тоже иногда доносит терминальный статус первым — снимаем книгу и здесь. Повтор
+    // отсекается самой записью (terminalBookTaken), поэтому два входа в один класс не мешают друг другу.
+    if (isTerminal && pmMatchId) {
+      try { await captureTerminalBook(db, pmMatchId, deps, batchAt); } catch { /* измерение не роняет сбор */ }
+    }
     written++;
   }
   // (a) OWN liveness signal — stamped on EVERY completed run, independent of match.state (which is

@@ -36,6 +36,7 @@ import { getStrategy } from "./repo.js";
 import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
 import { classifyScoutCoverage, SV_SNAP_STALE_MIN, OVERDUE_H } from "./scoutCoverage.js";
 import { snapshotWitness } from "./snapshotWitness.js";
+import { captureTerminalBook } from "./terminalBook.js";
 
 const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
@@ -274,6 +275,10 @@ export async function pollTennisFinals(db: Database, deps: EngineDeps = {}): Pro
         raw: trimRaw(fx.raw),
       });
       R.insertTradeLog(db, { id: R.uid(), match_id: cand.matchId, strategy_id: TENNIS_STRATEGY, minute: "финал", type: "settle", text: `ре-сеттл: терминальный результат из fixtures (${fx.status ?? "Finished"}, сеты ${fx.setsP1 ?? "?"}-${fx.setsP2 ?? "?"}) — расчёт на след. шаге`, created_at: now });
+      // [O12] КНИГА СНИМАЕТСЯ СОБЫТИЕМ. Это ПОСЛЕДНИЙ момент, когда цену вообще можно взять: со
+      // следующего тика матч станет `finished`, а refreshActiveOdds такие пропускает по построению.
+      // Терминальный снимок кормит допуск журнала ±1.5 напрямую и торгового пути не касается.
+      await captureTerminalBook(db, cand.matchId, deps, now);
       written++;
     }
   }
