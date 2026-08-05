@@ -72,3 +72,26 @@ test("модуль флага НЕ касается — включает реж�
     assert.ok(!src.includes(forbidden), `наблюдатель гейта не должен трогать «${forbidden}»`);
   }
 });
+
+// ── ФИКС 05.08: прибор обязан пережить включение того, что он измеряет ──────────────────────────────
+test("живой путь считается ОТДЕЛЬНО — «замерла тень» не читается как «замер гейт»", () => {
+  const db = db0();
+  // Тень: два кандидата, один срезан — условие R2 выполнено ещё до снятия флага.
+  recordNetEvShadow(db, { at: "2026-08-05T18:00:00Z", label: "A", family: "total_games", side: "under", grossCents: 8, haircutCents: 15, feeCents: 2, driftCents: 0, marginCents: 2, netCents: -9, pass: false });
+  recordNetEvShadow(db, { at: "2026-08-05T18:00:01Z", label: "B", family: "total_games", side: "over", grossCents: 14, haircutCents: 0, feeCents: 2, driftCents: 0, marginCents: 2, netCents: 12, pass: true });
+  const before = buildNetEvShadow(db);
+  assert.equal(before.r2ConditionMet, true);
+  assert.equal(before.liveEvaluated, 0);
+  assert.match(before.note, /живой путь: гейт на нём ещё не звался/);
+
+  // Флаг снят: те же вычисления идут по реальной ветке — прибор обязан продолжить считать.
+  recordNetEvShadow(db, { at: "2026-08-05T20:00:00Z", label: "C", family: "total_games", side: "under", grossCents: 7, haircutCents: 15, feeCents: 2, driftCents: 0, marginCents: 2, netCents: -10, pass: false, live: true });
+  const after = buildNetEvShadow(db);
+  assert.equal(after.liveEvaluated, 1);
+  assert.equal(after.liveCut, 1);
+  assert.equal(after.liveLastAt, "2026-08-05T20:00:00Z");
+  assert.match(after.note, /ЖИВОЙ ПУТЬ: гейт оценил 1, срезал 1/);
+  // Общие счётчики продолжают расти — живой путь не заводит вторую бухгалтерию на тот же факт.
+  assert.equal(after.evaluated, 3);
+  assert.equal(after.wouldCut, 2);
+});
