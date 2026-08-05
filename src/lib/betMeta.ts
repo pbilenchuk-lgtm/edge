@@ -71,6 +71,12 @@ export interface BetEntryMeta {
   // telemetry), so it is HOLD-TO-SETTLE — the live-exit machinery must skip it (no rudder), it settles from
   // PM resolution, and it lives in a SEPARATE verdict cohort (a different risk class: zero in-flight mgmt).
   ftBlind?: boolean;
+  // [N4] ДВЕ ПОПУЛЯЦИИ «ПРЕДМАТЧА». `catchUp` — решение принято ПОСЛЕ кикоффа (опоздал конвейер);
+  // `unmarkedBook` — вход по цене в плейсхолдер-полосе (опоздал рынок). Не синонимы, и складывать их с
+  // настоящим предматчем в один win-rate значит мерить среднюю температуру двух разных болезней.
+  // Celtic 03.08 — пересечение обеих: анализ через 66с ПОСЛЕ кикоффа, вход по ровно 50.0¢.
+  catchUp?: boolean;
+  unmarkedBook?: boolean;
   exitPlan: unknown | null;         // the pre-written exit plan (take_price/thesis/counter/time_stop)
   // T6: data provenance FROZEN at the decision — which feed the entry was decided on and how stale that
   // snapshot was (seconds) at decision time. Makes «на какой цене/данных решали» auditable per bet.

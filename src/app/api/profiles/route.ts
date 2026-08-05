@@ -124,6 +124,15 @@ export async function GET(req: Request) {
       const tickMin = Math.max(1, Number(process.env.TICK_INTERVAL_MIN ?? 30));
       return NextResponse.json({ ok: true, tickMin, report: buildJobHeartbeat(db, expectedTickJobs(tickMin)) });
     }
+    // ?report=take_counterfactual → [N5] симметричный дозамер тейк-стороны: не фиксируем ли прибыль
+    // слишком рано на тающем опционе с ЖИВЫМ тезисом. Проигравшие рынки входят со своим знаком — там
+    // ранний тейк деньги спас. Критерий F4 (n≥30, недобор ≥15% оборота) зафиксирован до данных. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "take_counterfactual") {
+      const { buildTakeCounterfactual, takeCfLine } = await import("@/lib/takeCounterfactual");
+      const q = new URL(req.url).searchParams;
+      const r = buildTakeCounterfactual(db, { strategyId: q.get("strategyId") || undefined, competitionId: q.get("competitionId") || undefined });
+      return NextResponse.json({ ok: true, report: r, line: takeCfLine(r) });
+    }
     // ?report=pmv_net_ev → [N3(1)] условие R2-стоп-крана: подтверждён ли net_ev_cut ЖИВЫМ срабатыванием.
     // Гейт теперь считается и в тени (иначе условие было невыполнимо: он стоит ниже ветки flag_only и при
     // включённом флаге не вызывался вовсе). Отчёт различает «не звался» / «звался, но не срезал» / «живой».
@@ -546,7 +555,29 @@ export async function GET(req: Request) {
         phaseSplitInScope: { prematch: famFilter(recsAll).filter((r) => r.phase === "prematch").length, live: famFilter(recsAll).filter((r) => r.phase === "live").length },
         note: `пусто в этом срезе. phaseSplitInScope — как та же стратегия/семья делится по origin (prematch/live); excluded — сколько ставок отброшено гейтами (epoch_unknown, pre_clean_epoch, cross_epoch и т.п.).${includeAllEpochs ? " includeAllEpochs=1 — грязные эпохи включены." : " Чистая эпоха (e5+) по умолчанию; &includeAllEpochs=1 чтобы включить всё."}`,
       } : undefined;
-      return NextResponse.json({ ok: true, cleanEpochFloor: includeAllEpochs ? null : CLEAN_EPOCH_FLOOR, cohort, ...(diagnostic ? { diagnostic } : {}) });
+      // [N4] РАЗРЕЗ ПО ПОПУЛЯЦИЯМ ВХОДА. Золотая ячейка — СТРОГО настоящий предматч; catch-up и вход по
+      // неразмеченной книге копят свои вердикты отдельно. Складывать их в один win-rate значит мерить
+      // среднюю температуру двух разных болезней (Celtic 03.08: анализ через 66с ПОСЛЕ кикоффа, вход по
+      // ровно 50.0¢ — и это дало +$142, но не потому, что модель была права про размеченный рынок).
+      const populations = await (async () => {
+        try {
+          const { populationOf } = await import("@/lib/entryPopulation");
+          const by = new Map<string, ReturnType<typeof betRecords>>();
+          for (const r of recs) {
+            const k = populationOf({ catchUp: r.catchUp, unmarkedBook: r.unmarkedBook });
+            (by.get(k) ?? by.set(k, []).get(k)!).push(r);
+          }
+          return [...by.entries()].map(([population, rs]) => {
+            const c = signalCohort(rs);
+            return {
+              population, signals: c.nSignals, decided: c.nDecided, bets: rs.length,
+              winPct: c.winVsImplied.winPct, meanImpliedPct: c.winVsImplied.meanImpliedPct,
+              pnlUsd: Math.round(c.pnl.totalUsd * 100) / 100, verdict: c.verdict,
+            };
+          }).sort((a, b) => b.signals - a.signals);
+        } catch { return null; }
+      })();
+      return NextResponse.json({ ok: true, cleanEpochFloor: includeAllEpochs ? null : CLEAN_EPOCH_FLOOR, cohort, populations, ...(diagnostic ? { diagnostic } : {}) });
     }
     // ?report=provider_scope → [batch-9] what each (provider × league) pair is ACTUALLY delivering, with a
     // verdict instead of a raw counter. Prod evidence that motivated it: Sportmonks on a World-Cup plan

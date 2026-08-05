@@ -62,6 +62,9 @@ export interface BetRec {
    *  несколько) — деньги такой строки не входят в bookPnl. */
   exitsAmbiguous: boolean;
   stake: number; payout: number | null; pnl: number | null; clvCents: number | null; finalScore: string | null;
+  /** [N4] Популяция входа: `catchUp` — решение ПОСЛЕ кикоффа, `unmarkedBook` — цена в плейсхолдер-полосе.
+   *  Золотая ячейка — строго те, у кого обе false: иначе один win-rate складывает разные популяции. */
+  catchUp: boolean; unmarkedBook: boolean;
   // bookPnl [Phase-0 H2]: the record's P&L ONLY when it was realized on a real book fill; null when the exit
   // rode a stale/modelled price (no live bid would have paid) — so the signal P&L verdict/bootstrap/
   // concentration never lean on a price that couldn't have transacted. Distinct from `pnl` (gross, incl. those).
@@ -203,6 +206,7 @@ export function betRecords(db: Database, filter: ProfileFilter = {}, env: Record
       entryCents, closingCents, kelly: em?.kellyFraction ?? null,
       sizeRequested: em?.sizeRequested ?? null, sizeFilled: em?.sizeFilled ?? (settled || b.status === "open" ? stake : null), entrySlipCents: em?.entrySlipCents ?? null,
       calibration: em?.calibration ?? null, branchWeightSum: em?.branchWeightSum ?? null, thinnessUsd: em?.marketThinnessUsd ?? null,
+      catchUp: em?.catchUp === true, unmarkedBook: em?.unmarkedBook === true,
       winsOnEvent: em?.winsOnEvent ?? winsOnEventOccurrence(b.market_label), codeVersion: b.code_version ?? null,
       status: b.status, settledBy: b.settled_by ?? null, outcome, clvSource: clv.source, closingLineCents: clv.closingLineCents,
       piecePnl: num((b as { piece_pnl?: number | null }).piece_pnl), marketLabeled: Number((b as { market_labeled?: number }).market_labeled ?? 0), exitsAmbiguous,

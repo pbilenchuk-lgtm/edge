@@ -9,7 +9,7 @@ const rec = (o: Partial<BetRec>): BetRec => ({
   phase: o.phase ?? "prematch", minute: null, scoreHome: null, scoreAway: null, edge: null, aiProb: null, derivedProb: null, impliedProb: o.impliedProb ?? 0.5,
   marketPrice: null, liveProbAdjusted: null, entryCents: null, closingCents: null, kelly: null, sizeRequested: null, sizeFilled: null, entrySlipCents: null,
   calibration: null, branchWeightSum: null, thinnessUsd: null, winsOnEvent: false, codeVersion: "codeVersion" in o ? (o.codeVersion ?? null) : "e7·m1", status: "settled_won", settledBy: null, outcome: o.outcome ?? "won", clvSource: "closing_line", closingLineCents: null, exitsAmbiguous: false, piecePnl: null, marketLabeled: 1,
-  stake: o.stake ?? 100, payout: null, pnl: o.pnl ?? 50, bookPnl: "bookPnl" in o ? (o.bookPnl ?? null) : (o.pnl ?? 50), clvCents: o.clvCents ?? 5, finalScore: null, decisionId: null, createdAt: o.createdAt ?? "2026-07-24T18:00:00Z", kickoffAt: o.kickoffAt ?? null, exitCodeVersion: o.exitCodeVersion ?? null, exits: [],
+  stake: o.stake ?? 100, payout: null, pnl: o.pnl ?? 50, bookPnl: "bookPnl" in o ? (o.bookPnl ?? null) : (o.pnl ?? 50), clvCents: o.clvCents ?? 5, finalScore: null, decisionId: null, createdAt: o.createdAt ?? "2026-07-24T18:00:00Z", kickoffAt: o.kickoffAt ?? null, exitCodeVersion: o.exitCodeVersion ?? null, exits: [], catchUp: false, unmarkedBook: false,
 });
 
 test("cleanEpochRecords: pre-e5 entry code-epoch and null code_version are dropped; e5+ kept", () => {
