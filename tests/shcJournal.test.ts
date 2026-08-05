@@ -101,7 +101,10 @@ test("не разрешившееся и не доигранное в журна
   played(db, 1, { favP1: true, setsP1: 1, setsP2: 0, mlPrice: 99, hcapPrice: 97 });  // никто не набрал 2
   const rec = recordShcObservations(db, "2026-08-04T12:00:00Z");
   assert.equal(rec.skippedUndecided, 1, "цена 55¢ — исхода нет");
-  assert.equal(rec.skippedIncomplete, 1, "1:0 — ретайр, ±1.5 void");
+  // [T3-фикс 05.08] Недоигранный матч теперь выбрасывается из ОБЕИХ групп: замер прода показал, что
+  // манилайн при ретайре разрешается НЕ нормально — двое из четырёх контрольных расхождений были ровно
+  // такими. Поэтому у матча 1:0 не пишется ни гандикап, ни манилайн — отсюда 2, а не 1.
+  assert.equal(rec.skippedIncomplete, 2, "1:0 — ретайр: ни ±1.5, ни манилайн не судятся");
   assert.equal(R.shcObservations(db).filter((x) => x.kind === "test").length, 0);
   assert.match(rec.note, /заморожено новых/);
 });

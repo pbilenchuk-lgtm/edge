@@ -142,7 +142,10 @@ test("цена в середине — «нет исхода», а не окру
 test("ЕДИНИЦА — МАТЧ: два гандикап-пропа одного матча это ОДНО испытание", () => {
   const db = world();
   played(db, 100, { favP1: true, setsP1: 2, setsP2: 0, mlPrice: 99, hcapPrice: 99 });
-  R.insertMarket(db, { id: "mk100b", match_id: "m100", label: `Canadian Open: ${P1} vs ${P2} Set Handicap 1.5`, price: 99, ai_prob: null, liquidity: 3000, external_ref: null, snapshot_at: "2026-07-01T15:00:00Z", is_closing: false } as never);
+  // Снимок цены — ДНЯ ЭТОГО МАТЧА. Прежняя фикстура ставила 01.07 матчу сотого дня, то есть цену
+  // столетней давности; допуск разрыва «цена старше счёта» её теперь законно отсеивает.
+  const day100 = new Date(Date.UTC(2026, 6, 1) + 100 * 86_400_000).toISOString().slice(0, 10);
+  R.insertMarket(db, { id: "mk100b", match_id: "m100", label: `Canadian Open: ${P1} vs ${P2} Set Handicap 1.5`, price: 99, ai_prob: null, liquidity: 3000, external_ref: null, snapshot_at: `${day100}T14:00:00Z`, is_closing: false } as never);
   const r = buildSetHandicapConvention(db);
   assert.equal(r.testChecked, 2, "рынков два");
   assert.equal(r.testMatches, 1, "а испытание одно — счёт у них общий");
@@ -219,11 +222,66 @@ test("ретроспектива названа ретроспективой: п
   assert.equal(r.testMismatch, 6);
 });
 
-test("незавершённый матч (ретайр) в суждение о конвенции НЕ идёт — ±1.5 там void", () => {
+test("незавершённый матч не судится НИ В ОДНОЙ группе — включая контроль", () => {
+  // [T3-фикс 05.08] Прежняя версия этого теста утверждала обратное: «манилайн при ретайре разрешается
+  // нормально — контроль остаётся». Прод опроверг: из четырёх контрольных расхождений замера 05.08 ДВА
+  // были ровно `completed:false`. Матч, где никто не набрал победных сетов, не отвечает на вопрос «кто
+  // выиграл» — ни для гандикапа, ни для манилайна. Кейс оставлен как регрессия к прежнему дефекту.
   const db = world();
   played(db, 500, { favP1: false, setsP1: 1, setsP2: 0, mlPrice: 99, hcapPrice: 99 }); // никто не набрал 2
   const r = buildSetHandicapConvention(db);
   assert.equal(r.rows.filter((x) => x.group === "тест").length, 0, "гандикап такого матча не судится");
   assert.equal(r.droppedIncomplete, 1, "и число выброшенных НАПЕЧАТАНО, а не спрятано");
-  assert.equal(r.rows.filter((x) => x.group === "контроль").length, 1, "манилайн при ретайре разрешается нормально — контроль остаётся");
+  assert.equal(r.rows.filter((x) => x.group === "контроль").length, 0, "манилайн недоигранного матча тоже не судится");
+});
+
+test("[T3-фикс] цена СТАРШЕ счёта больше чем на тик — наблюдение к вердикту не допускается", () => {
+  const db = world();
+  cleanControl(db, 9);
+  const clean = buildSetHandicapConvention(db);
+  assert.ok(clean.controlChecked >= 8, "чистая выборка набирается");
+  assert.equal(clean.refusedStalePrice, 0);
+
+  // Тот же матч, но цена снята на шесть часов раньше счёта — ровно профиль четырёх расхождений прода
+  // (медиана разрыва у согласных 5 минут, у расхождений 164).
+  const db2 = world();
+  cleanControl(db2, 9);
+  const day = new Date(Date.UTC(2026, 6, 1) + 20 * 86_400_000).toISOString().slice(0, 10);
+  R.insertMatch(db2, { id: "m20", competition_id: "atp", home: P1, away: P2, state: "finished", lineup_out: false, kickoff_at: `${day}T10:00:00Z`, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "m20" } as never);
+  const snap = (at: string, p1c: number | null, s1: number, s2: number) => R.insertTennisSnapshot(db2, {
+    event_key: `ek20-${at}`, provider: "apitennis", batch_at: at, p1: P1, p2: P2,
+    tournament: "ATP", event_type: "ATP Singles", live: 1, status: "Set 1", sets_p1: s1, sets_p2: s2,
+    set_num: 1, games_p1: 0, games_p2: 0, game_points: null, server: null, pm_match_id: "m20",
+    pm_mid_cents: p1c, pm_p1_cents: p1c, pm_p2_cents: p1c == null ? null : 100 - p1c, raw: null,
+  });
+  snap(`${day}T10:00:00Z`, 70, 0, 0);
+  snap(`${day}T19:00:00Z`, null, 2, 0);                       // счёт — 19:00
+  R.insertMarket(db2, { id: "mk20ml", match_id: "m20", label: ML, price: 99, ai_prob: null, liquidity: 3000, external_ref: null, snapshot_at: `${day}T13:00:00Z`, is_closing: false } as never); // цена — 13:00
+  // Отказ происходит НА ЗАПИСИ: журнал append-only, и не заморозить плохую строку — единственный способ
+  // её не иметь. Поэтому счётчик отказа приходит из шага журнала, а не из вердикта.
+  const rec = recordShcObservations(db2, "2026-08-04T12:00:00Z");
+  assert.ok(rec.skippedStalePrice >= 1, "несинхронное наблюдение не заморожено");
+  assert.match(rec.note, /цена старше счёта/, "отказ НАПЕЧАТАН, а не спрятан");
+  const r2 = verdictOf(db2);
+  assert.equal(r2.controlChecked, clean.controlChecked, "и в контроль оно не попало");
+});
+
+test("[T3-фикс] строка с НЕИЗМЕРИМЫМ разрывом к вердикту не допускается — NULL это отказ, а не «свежо»", () => {
+  const db = world();
+  cleanControl(db, 9);
+  const clean = buildSetHandicapConvention(db);
+  // Прежняя строка журнала, чей провенанс не разбирается ⇒ разрыв восстановить нечем. Ровно такими были
+  // все 173 строки замера 05.08: поле существовало, но не хранилось, и NULL читался как «свежо».
+  R.insertShcObservation(db, {
+    kind: "control", match_id: "m-legacy", label: ML, players: `${P1} — ${P2}`, kickoff_at: "2026-07-20T10:00:00Z",
+    sets_first: 0, sets_second: 2, completed: 1, fav_is_label_first: 1, price_cents: 99,
+    price_lag_min: null, observed_first_covers: 1, pred_favourite: 0, pred_label_first: 0,
+    discriminating: 0, hypo_version: "shc-h1", score_src: "legacy", price_src: "legacy", fav_src: "legacy",
+    created_at: "2026-07-20T12:00:00Z",
+  });
+  const r = verdictOf(db);
+  assert.equal(r.controlChecked, clean.controlChecked, "недопущенная строка контроль не двигает");
+  assert.equal(r.controlMismatch, 0, "и вердикт «метод неверен» ею не вызывается");
+  assert.equal(r.refusedLegacyNoLag, 1);
+  assert.match(r.note, /к вердикту НЕ допущено/, "сужение выборки названо числом");
 });

@@ -28,10 +28,11 @@
 
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
-import { observeFromSnapshots, SHC_HYPO_VERSION } from "./setHandicapConvention.js";
+import { observeFromSnapshots, SHC_HYPO_VERSION, SHC_MAX_PRICE_LAG_MIN } from "./setHandicapConvention.js";
 
 export interface ShcJournalResult {
   seen: number; written: number; skippedUndecided: number; skippedIncomplete: number;
+  skippedStalePrice: number; skippedLagUnknown: number; backfilled: number;
   total: number; note: string;
 }
 
@@ -41,19 +42,32 @@ export interface ShcJournalResult {
  * и «шаг не отработал» — разные факты.
  */
 export function recordShcObservations(db: Database, nowIso = new Date().toISOString()): ShcJournalResult {
+  // Разрыв для строк, записанных до появления колонки, ВЫЧИСЛЯЕТСЯ из их же провенанса (score_src /
+  // price_src несут метки времени). Идемпотентно и дёшево; в boot-путь не выносится намеренно —
+  // initSchema уже однажды уронил деплой дорогой работой на старте.
+  const backfilled = R.backfillShcPriceLag(db);
+  if (backfilled) console.log(`[shcJournal] восстановлен разрыв цена/счёт у ${backfilled} строк из их провенанса`);
   const live = observeFromSnapshots(db);
-  let written = 0, skippedUndecided = 0, skippedIncomplete = 0;
+  let written = 0, skippedUndecided = 0, skippedIncomplete = 0, skippedStalePrice = 0, skippedLagUnknown = 0;
   for (const r of live.rows) {
-    // Недоигранный матч выбрасывается ТОЛЬКО из теста: ±1.5 при ретайре void (Gate 0.2). Манилайн же
-    // при ретайре разрешается нормально — контроль от этого не худеет, и терять его нет причин.
-    if (!r.completed && r.group === "тест") { skippedIncomplete++; continue; }
+    // [T3-фикс 05.08] НЕДОИГРАННЫЙ МАТЧ НЕ ПИШЕТСЯ НИ В ОДНУ ГРУППУ. Раньше это правило применялось
+    // только к тесту («манилайн при ретайре разрешается нормально»), и замер 05.08 его опроверг: двое
+    // из четырёх контрольных расхождений были ровно `completed:false`. Контроль от этого худеет, но
+    // перестаёт врать; журнал append-only, поэтому НЕ записать плохую строку — единственный способ её
+    // не иметь.
+    if (!r.completed) { skippedIncomplete++; continue; }
     if (r.observedFirstWins == null) { skippedUndecided++; continue; } // цена в середине ⇒ исхода нет
+    // [T3-фикс] СЧЁТ И ЦЕНА ОБЯЗАНЫ БЫТЬ ИЗ ОДНОГО МОМЕНТА. Медиана разрыва у согласных наблюдений
+    // 5 минут, у всех четырёх контрольных расхождений — 164. Не измерили разрыв ⇒ не можем утверждать
+    // одновременность ⇒ строку не морозим: NULL это отказ, а не «свежо».
+    if (r.priceLagMin == null) { skippedLagUnknown++; continue; }
+    if (r.priceLagMin > SHC_MAX_PRICE_LAG_MIN) { skippedStalePrice++; continue; }
     const ok = R.insertShcObservation(db, {
       kind: r.group === "контроль" ? "control" : "test",
       match_id: r.matchId, label: r.label, players: r.players, kickoff_at: r.kickoffAt,
       sets_first: r.setsFirst, sets_second: r.setsSecond, completed: r.completed ? 1 : 0,
       fav_is_label_first: r.favIsLabelFirst ? 1 : 0,
-      price_cents: r.lastPriceCents ?? 0,
+      price_cents: r.lastPriceCents ?? 0, price_lag_min: r.priceLagMin,
       observed_first_covers: r.observedFirstWins ? 1 : 0,
       pred_favourite: r.predictedFirstWins ? 1 : 0,
       pred_label_first: r.altPredictedFirstWins ? 1 : 0,
@@ -66,8 +80,10 @@ export function recordShcObservations(db: Database, nowIso = new Date().toISOStr
   }
   const total = R.shcObservationCount(db);
   return {
-    seen: live.rows.length, written, skippedUndecided, skippedIncomplete, total,
+    seen: live.rows.length, written, skippedUndecided, skippedIncomplete, skippedStalePrice, skippedLagUnknown, backfilled, total,
     note: `журнал ±1.5: осмотрено ${live.rows.length}, заморожено новых ${written} (в журнале ${total})`
-      + ` · пропущено: не разрешилось ${skippedUndecided}, не доиграно ${skippedIncomplete}`,
+      + ` · пропущено: не разрешилось ${skippedUndecided}, не доиграно ${skippedIncomplete},`
+      + ` цена старше счёта >${SHC_MAX_PRICE_LAG_MIN}мин ${skippedStalePrice}, разрыв не измерен ${skippedLagUnknown}`
+      + (backfilled ? ` · восстановлен разрыв из провенанса у ${backfilled} прежних строк` : ""),
   };
 }
