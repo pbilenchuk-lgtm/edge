@@ -58,6 +58,7 @@ import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
 import { recordJobRun, cycleSummaryLine, liveJobKey, LIVE_PASS_LABEL } from "./jobHeartbeat.js";
 import { recordShcObservations } from "./shcJournal.js";
+import { blockedByCoherence } from "./sideCoherence.js";
 import { recordGatePulse } from "./gateHeartbeat.js";
 import { defensiveCutAllowed, recordHoldMark } from "./defensiveCutGate.js";
 import { chaseBoundNoScore, chaseLine } from "./boundNoScoreChase.js";
@@ -2462,7 +2463,20 @@ export async function strategistReassess(
           // opened, even if it also (contradictorily) appears in picks/actions (Hammarby BTTS-Yes: rejected
           // by every profile, still entered live). The execution gate reads the rejected set and hard-blocks.
           const rejectedSet = new Set((dec.rejected ?? []).map((r) => norm(r.market)));
+          // [N1а] КОГЕРЕНТНОСТЬ СТОРОН — считается ДО цикла, потому что смотрит на решение ЦЕЛИКОМ.
+          // Breiðablik 04.08: «Under 3.5» 64% и «Over 3.5» 64% в одном решении — сумма 128% при том, что
+          // события взаимоисключающи. Обе получили «edge», $125 ушло на сторону, ПРОТИВОПОЛОЖНУЮ тезису
+          // собственного рационале. Ни один прежний гейт этого не видел: они смотрят пик по одному.
+          const coh = blockedByCoherence(dec.picks.map((p) => ({ label: p.label, prob: p.prob ?? null })));
+          for (const c of coh.conflicts) {
+            console.warn(`[sideCoherence] ${m.home}—${m.away}: ${c.note}`);
+            try {
+              R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: strat.id, minute: `${m.minute ?? "?"}'`,
+                type: "skip", text: `provenance_review [side_incoherent] ${c.note}`, created_at: now });
+            } catch { /* журнал не роняет торговый путь */ }
+          }
           for (const pick of dec.picks) {
+            if (coh.blocked.has(pick.label)) { unfilled.push(`«${pick.label}» — некогерентные стороны, обе заблокированы (side_incoherent)`); continue; }
             // T2.2: a HOLD ticket never opens. If the pair already holds this market, holding is the default
             // (nothing to do); if it holds NOTHING, a hold pick is a NO-OP — it must not manufacture a new
             // position (the Cruz Azul/Göteborg/Hammarby «hold, не новый вход» → phantom «вошёл» bug).
@@ -2860,7 +2874,13 @@ export async function runAutoCycle(
   // A match that passed kickoff but never went live (scout never saw the court / ESPN never delivered)
   // is stuck in upcoming/lineup — give it a terminal state so it leaves «Актуальные» within a tick
   // (voids its open bets, flags it «поломан» for the «Поломанные» bucket) instead of lingering 3 days.
-  stepSync("sweepAbandoned", () => { const r = sweepAbandonedMatches(db, Date.parse(nowFn(deps)()) || Date.now()); return r.abandoned + r.fixed; }, 0);
+  stepSync("sweepAbandoned", () => {
+    const r = sweepAbandonedMatches(db, Date.parse(nowFn(deps)()) || Date.now());
+    // ОТЛОЖЕННЫЕ СТАВКИ ПЕЧАТАЮТСЯ: «свип ничего не тронул» и «свип отступил, потому что деньги ещё в
+    // очереди резолюции» — разные факты, и второй обязан быть слышен (иначе тишина снова скроет путь).
+    if (r.deferredBets) console.log(`[sweepAbandoned] отложено ${r.deferredBets} открытых ставок — терпение PM-резолюции ещё не истекло`);
+    return r.abandoned + r.fixed;
+  }, 0);
   // Bound the matches table: drop finished/stale matches that carry NO bets (the
   // Polymarket discovery flood). Never touches a match with betting history, so
   // metrics/P&L are preserved. Keeps buildAppData's per-poll scan bounded (§502).
