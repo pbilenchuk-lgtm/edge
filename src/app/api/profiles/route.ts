@@ -124,6 +124,14 @@ export async function GET(req: Request) {
       const tickMin = Math.max(1, Number(process.env.TICK_INTERVAL_MIN ?? 30));
       return NextResponse.json({ ok: true, tickMin, report: buildJobHeartbeat(db, expectedTickJobs(tickMin)) });
     }
+    // ?report=pmv_net_ev → [N3(1)] условие R2-стоп-крана: подтверждён ли net_ev_cut ЖИВЫМ срабатыванием.
+    // Гейт теперь считается и в тени (иначе условие было невыполнимо: он стоит ниже ветки flag_only и при
+    // включённом флаге не вызывался вовсе). Отчёт различает «не звался» / «звался, но не срезал» / «живой».
+    if (new URL(req.url).searchParams.get("report") === "pmv_net_ev") {
+      const { buildNetEvShadow, netEvShadowLine } = await import("@/lib/pmvNetEvWatch");
+      const r = buildNetEvShadow(db);
+      return NextResponse.json({ ok: true, report: r, line: netEvShadowLine(r) });
+    }
     // ?report=set_handicap_convention → T3: проверка конвенции ±1.5 по РАЗРЕШИВШИМСЯ рынкам против
     // фактического счёта. Контроль — манилайн (проверяет инструмент: цену→исход и ориентацию подписи),
     // тест — гандикапы. Флага не касается: снятие блока — решение владельца по этим числам. Read-only.
@@ -391,6 +399,14 @@ export async function GET(req: Request) {
             const { buildScoutCoverage, scoutCoverageLine } = await import("@/lib/scoutCoverage");
             const s = buildScoutCoverage(db, now);
             return { line: scoutCoverageLine(s), covered: s.covered, measured: s.measured, actionable: s.actionable.map((r) => ({ players: r.players, verdict: r.verdict, mapScore: r.mapScore })) };
+          } catch { return null; }
+        })(),
+        // [N3(1)] Строка пульса для условия R2 — ровно то, чего требовал стоп-кран.
+        pmvNetEv: await (async () => {
+          try {
+            const { buildNetEvShadow, netEvShadowLine } = await import("@/lib/pmvNetEvWatch");
+            const n = buildNetEvShadow(db);
+            return { line: netEvShadowLine(n), r2ConditionMet: n.r2ConditionMet, evaluated: n.evaluated, wouldCut: n.wouldCut };
           } catch { return null; }
         })(),
         // [D3(а)] Лиговый детектор — измерение в еженедельнике. Режим НЕ армирован.

@@ -963,3 +963,20 @@ test("РЕГРЕССИЯ: матч, стартующий в БУДУЩЕМ, по
   assert.equal(await pollTennisFinals(db, { now: () => "2026-07-14T12:00:00Z", env: { API_TENNIS_KEY: "k" }, fetchImpl }), 0);
   assert.equal(called, 0, "ни одной лишней выборки фикстур: у матча впереди отсутствие данных ЗАКОННО");
 });
+
+// [N7] ШУМ, КОТОРЫЙ МАСКИРОВАЛ СИГНАЛ. Set-Value срабатывает на событии «фаворит проиграл первый сет»;
+// до конца первого сета этого события НЕ СУЩЕСТВУЕТ. Прежде такие матчи всё равно доходили до проверки
+// свежести снимка и печатали отказ — 112 строк `no_score_data_skip[ДО НАЧАЛА]` в пачке 03-04.08 против
+// 68 настоящих `[УСТАРЕЛ]`. Отказ по несуществующему событию — не диагностика, а помеха ей.
+test("Set-Value НЕ оценивает матч, пока первый сет не завершён — и не печатает отказ", async () => {
+  const db = openDb(":memory:");
+  const mid = seedTennisMatch(db, { p1: "Aleksandar Vukic", p2: "Liam Broady" });
+  const now = () => "2026-07-14T10:10:00Z";
+  // Два СВЕЖИХ снимка, счёт по сетам 0:0 — первый сет ещё идёт.
+  for (const at of ["2026-07-14T10:05:00Z", "2026-07-14T10:09:00Z"]) {
+    R.insertTennisSnapshot(db, { event_key: "EV0", provider: "apitennis", batch_at: at, p1: "A. Vukic", p2: "L. Broady", tournament: "Granby", event_type: "ATP Singles", live: 1, status: "Set 1", sets_p1: 0, sets_p2: 0, set_num: 1, games_p1: 3, games_p2: 2, game_points: null, server: "first", pm_match_id: mid, pm_mid_cents: 70, pm_p1_cents: 70, pm_p2_cents: 30, raw: "{}" });
+  }
+  assert.equal(await tennisSetValueTick(db, { now, env: { API_TENNIS_KEY: "k" } }), 0, "входов нет — событие не наступило");
+  const skips = R.tradeLogForMatch(db, mid).filter((l) => (l.text ?? "").includes("no_score_data_skip"));
+  assert.equal(skips.length, 0, "и НИ ОДНОЙ строки отказа: отказывать по несуществующему событию нечего");
+});
