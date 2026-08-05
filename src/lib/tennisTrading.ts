@@ -35,6 +35,7 @@ import { shadowOnEntries, type ShadowEntryRequest } from "./shadow.js";
 import { getStrategy } from "./repo.js";
 import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
 import { classifyScoutCoverage, SV_SNAP_STALE_MIN, OVERDUE_H } from "./scoutCoverage.js";
+import { snapshotWitness } from "./snapshotWitness.js";
 
 const nowFn = (d: EngineDeps) => d.now ?? (() => new Date().toISOString());
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
@@ -836,7 +837,14 @@ export function buildTennisFunnel(db: Database): TennisFunnel {
     // The tick joins scout snapshots by pm_match_id; a live app match the scout hasn't LINKED
     // (fuzzy map didn't reach "auto", or the scout isn't seeing it in-play) is invisible to the
     // tick — surface it here instead of dropping it silently. This is the true coverage blocker.
-    if (snaps.length < 2) { f.perMatch.push({ match: label, comp, stage: "no_scout_link", note: "нет привязанных снапшотов скаута — маппинг не сошёлся или скаут не видит матч live" }); continue; }
+    if (snaps.length < 2) {
+      // [N7] Причину называет свидетель снимков, а не счёт живых строк: «густо снятый вчера» и «не было
+      // никогда» дают одинаковый ноль на кэпнутой таблице, и прежняя строка обвиняла маппинг за ретеншн.
+      const w = snapshotWitness(db, m.id, snaps.length, m.kickoff_at ?? null);
+      const stage = w.verdict === "wiped" ? "snapshots_wiped" : "no_scout_link";
+      f.perMatch.push({ match: label, comp, stage, note: w.note });
+      continue;
+    }
     f.linked++;
     const row = (stage: string, note = ""): void => { f.perMatch.push({ match: label, comp, stage, note }); };
     const last = snaps[snaps.length - 1];
@@ -874,7 +882,7 @@ export function buildTennisFunnel(db: Database): TennisFunnel {
   f.note = f.entriesAllTime > 0
     ? `${f.entriesAllTime} входов всего (${f.openPositions} открыто); live ${f.liveApp} (привязано ${f.linked}), на взводе ${f.gatePass}`
     : unlinked > 0 && f.linked === 0
-      ? `live ${f.liveApp}, но НИ ОДИН не привязан к скауту (${unlinked} no_scout_link) — маппинг/скаут не покрывает текущие live-матчи, поэтому тик их не видит`
+      ? `live ${f.liveApp}, но ни у одного нет живых снапшотов (${unlinked}: ${[...new Set(f.perMatch.filter((r) => r.stage === "no_scout_link" || r.stage === "snapshots_wiped").map((r) => r.stage))].join("/") || "no_scout_link"}) — тик их не видит; «стёрты ретеншном» и «не привязаны» лечатся РАЗНЫМ, поэтому и названы по-разному`
       : f.gatePass > 0
         ? `${f.gatePass}/${f.linked} привязанных live-матчей на взводе — вход на следующем тике (или уже acted)`
         : `live ${f.liveApp} (привязано ${f.linked}), 0 на взводе — воронка жива, сетап ещё не совпал (см. perMatch)`;

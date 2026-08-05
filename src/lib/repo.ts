@@ -1338,7 +1338,40 @@ export function insertProviderSnapshot(db: Database, s: SnapshotInput): void {
      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).run(uid(), s.match_id, s.batch_at, s.provider, s.phase, s.ok ? 1 : 0, s.http_status, s.provider_ref, s.minute,
         s.latency_ms, s.extracted == null ? null : JSON.stringify(s.extracted), s.raw, nowIso());
+  noteSnapshotWitness(db, s.match_id, s.batch_at);
 }
+
+/**
+ * [N7] СВИДЕТЕЛЬ СНИМКА — инкремент В МОМЕНТ ЗАПИСИ, переживающий ретеншн.
+ *
+ * Пишется отсюда, а не из вызывающих: это ЕДИНСТВЕННАЯ точка, где снимок реально ложится в таблицу,
+ * и свидетель обязан стоять ровно на ней. Поставь его выше по коду — и он начнёт считать попытки, а не
+ * записи; поставь ниже — он не переживёт ни одного prune.
+ *
+ * Счётчик НЕ УМЕНЬШАЕТСЯ никогда. `snapshots_first_at` фиксирует момент, с которого счётчик достоверен:
+ * колонка добавлена вперёд, без бэкфилла (прошлые записи не восстановить), и различать «0, потому что
+ * снимков не было» от «0, потому что колонка моложе матча» умеет snapshotWitness.
+ *
+ * Матч без строки (или снимок без привязки) не создаёт записи — UPDATE по несуществующему id это no-op.
+ */
+export function noteSnapshotWitness(db: Database, matchId: string | null | undefined, atIso: string): void {
+  if (!matchId) return;
+  try {
+    db.prepare(
+      `UPDATE matches SET snapshots_seen_total = snapshots_seen_total + 1,
+         snapshots_first_at = COALESCE(snapshots_first_at, ?), snapshots_last_at = ?
+       WHERE id = ?`,
+    ).run(atIso, atIso, matchId);
+  } catch { /* свидетель никогда не роняет сбор данных */ }
+}
+
+export interface SnapshotWitnessRow { seenTotal: number; firstAt: string | null; lastAt: string | null }
+export function snapshotWitnessFor(db: Database, matchId: string): SnapshotWitnessRow {
+  const r = db.prepare(`SELECT snapshots_seen_total t, snapshots_first_at f, snapshots_last_at l FROM matches WHERE id=?`).get(matchId) as
+    { t?: number; f?: string | null; l?: string | null } | undefined;
+  return { seenTotal: r?.t ?? 0, firstAt: r?.f ?? null, lastAt: r?.l ?? null };
+}
+
 /** Snapshot metadata for a match (NO raw payload — keeps the view light), newest first. */
 export function snapshotMetaForMatch(db: Database, matchId: string, limit = 400): Omit<ProviderSnapshotRow, "raw">[] {
   return db.prepare(
@@ -1446,6 +1479,7 @@ export function insertTennisSnapshot(db: Database, r: Omit<TennisSnapshotRow, "i
      VALUES(?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?,?, ?,?)`,
   ).run(r.id ?? uid(), r.event_key, r.provider, r.batch_at, r.p1, r.p2, r.tournament, r.event_type, r.live, r.status,
     r.sets_p1, r.sets_p2, r.set_num, r.games_p1, r.games_p2, r.game_points, r.server, r.pm_match_id, r.pm_mid_cents, r.pm_p1_cents ?? null, r.pm_p2_cents ?? null, r.raw, r.created_at ?? nowIso());
+  noteSnapshotWitness(db, r.pm_match_id, r.batch_at);
 }
 export function tennisSnapshotsForEvent(db: Database, eventKey: string): TennisSnapshotRow[] {
   return db.prepare(`SELECT * FROM tennis_snapshots WHERE event_key=? ORDER BY batch_at`).all(eventKey) as TennisSnapshotRow[];

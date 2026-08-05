@@ -317,6 +317,12 @@ export function initSchema(db: Database): void {
     // commission tolerance (a decimal shift like the Kansas «payout ≈ тек/10»). Caught at birth, not a week later.
     "ALTER TABLE bets ADD COLUMN accounting_suspect INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE bets ADD COLUMN accounting_unverifiable INTEGER NOT NULL DEFAULT 0",
+    // [N7] Свидетель снимков, переживающий ретеншн — см. комментарий в schema.sql. Бэкфилла НЕТ и быть
+    // не может: прошлые записи не восстановить, поэтому счётчик честно начинается с нуля и растёт вперёд.
+    // Отличать «0, потому что не было» от «0, потому что колонка молода» умеет snapshotWitness.
+    "ALTER TABLE matches ADD COLUMN snapshots_seen_total INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE matches ADD COLUMN snapshots_first_at TEXT",
+    "ALTER TABLE matches ADD COLUMN snapshots_last_at TEXT",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }
