@@ -133,6 +133,14 @@ export async function GET(req: Request) {
       const r = buildTakeCounterfactual(db, { strategyId: q.get("strategyId") || undefined, competitionId: q.get("competitionId") || undefined });
       return NextResponse.json({ ok: true, report: r, line: takeCfLine(r) });
     }
+    // ?report=unmarked_book → [N6-часть-2] доля неразмеченной книги со своим знаменателем + TAM ft_blind
+    // по ТОРГОВАННЫМ книгам. Read-only: блокировкой занят zombie placeholder_mid, полоса берётся у
+    // entryPopulation — один авторитет на определение «книга не размечена».
+    if (new URL(req.url).searchParams.get("report") === "unmarked_book") {
+      const { buildUnmarkedBook, unmarkedBookLine } = await import("@/lib/unmarkedBook");
+      const r = buildUnmarkedBook(db);
+      return NextResponse.json({ ok: true, report: r, line: unmarkedBookLine(r) });
+    }
     // ?report=pmv_net_ev → [N3(1)] условие R2-стоп-крана: подтверждён ли net_ev_cut ЖИВЫМ срабатыванием.
     // Гейт теперь считается и в тени (иначе условие было невыполнимо: он стоит ниже ветки flag_only и при
     // включённом флаге не вызывался вовсе). Отчёт различает «не звался» / «звался, но не срезал» / «живой».
@@ -408,6 +416,15 @@ export async function GET(req: Request) {
             const { buildScoutCoverage, scoutCoverageLine } = await import("@/lib/scoutCoverage");
             const s = buildScoutCoverage(db, now);
             return { line: scoutCoverageLine(s), covered: s.covered, measured: s.measured, actionable: s.actionable.map((r) => ({ players: r.players, verdict: r.verdict, mapScore: r.mapScore })) };
+          } catch { return null; }
+        })(),
+        // [N6-часть-2] Доля неразмеченной книги — со своим знаменателем, и TAM ft_blind по ТОРГОВАННЫМ
+        // книгам: фикстура, вся книга которой стоит у планки, это не доступная сделка, а её изображение.
+        unmarkedBook: await (async () => {
+          try {
+            const { buildUnmarkedBook, unmarkedBookLine } = await import("@/lib/unmarkedBook");
+            const u = buildUnmarkedBook(db, Date.parse(now) || Date.now());
+            return { line: unmarkedBookLine(u), pct: u.pct, markets: u.markets, unmarked: u.unmarked, byState: u.byState, ftBlind: u.ftBlind };
           } catch { return null; }
         })(),
         // [N3(1)] Строка пульса для условия R2 — ровно то, чего требовал стоп-кран.
