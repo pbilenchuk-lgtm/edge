@@ -27,7 +27,8 @@ import { mirrorPaperEntryToReal, dryVirtualFreeUsd, sweepDryExits } from "./exec
 import { readTradingMode } from "./executor/safety.js";
 import type { Bet, Market, Strategy } from "./types.js";
 import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized } from "./analysis.js";
-import { sameMarketLabel } from "./marketLabel.js";
+import { sameMarketLabel, normLabel } from "./marketLabel.js";
+import { exitCluster, sliceOfCluster, type ExitClusterCtx } from "./exitCluster.js";
 import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
 import { classifyZombie, zombieClearWithMargin, notationSpreads, loadZombieConfig, outcomeKey, type ZombieReason } from "./zombieMarket.js";
 import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
@@ -777,16 +778,44 @@ async function sellVwapCents(
   mk: Market | undefined, entryCents: number, basisUsd: number,
   poly: PolymarketConfig, deps: EngineDeps, quoteCents: number,
   bookCache?: Map<string, OrderBookFetch>,
+  cluster?: ExitClusterCtx,
 ): Promise<SellFillResult> {
   if (!poly.enabled) return { cents: quoteCents, fromBook: false, filledShares: 0, requestedShares: 0 };
   const token = mk?.external_ref ?? null;
   const shares = entryCents > 0 ? basisUsd / (entryCents / 100) : 0;
+  // [N5-агрегация] ПАРАЛЛЕЛЬНЫЕ ВЫХОДЫ ОДНОГО РЫНКА — ОДИН ОРДЕР.
+  //
+  // ИМЕННОЙ КЕЙС: Celtic FC — Dundee FC, 03.08, 41'. Два близнеца одного рынка вышли отдельными
+  // заявками против ОДНОЙ книги: бид стоял 78¢, а VWAP получились 68.4¢ и 66.1¢ — $16.00 из $16.01
+  // всего слиппеджа матча пришлись на эти два выхода. Близнецы съели книгу друг у друга.
+  //
+  // Порт теннисного T3-батчинга (tennisTrading.resolveTennisSell): кластер открытых близнецов этого
+  // рынка оценивается КАК ОДИН ордер, один раз за тик на токен, и blended-цена с долей филла отдаётся
+  // каждому близнецу. Поздний близнец больше не получает худший фил, чем первый, — а размер, который
+  // книга видит, наконец равен тому, что мы реально пытаемся продать.
+  //
+  // ГРАНИЦА ЕДИНИЦЫ — РЫНОК, А НЕ СТРАТЕГИЯ. Теннисная версия ключуется ещё и стратегией, потому что
+  // там на рынок приходится одна. В футболе на одном рынке стоят близнецы РАЗНЫХ стратегий и профилей,
+  // и книге всё равно, как мы их назвали: она одна на токен. Ключ — (матч × подпись рынка).
+  //
+  // ИЗВЕСТНОЕ СВОЙСТВО, НАЗВАННОЕ ЧЕСТНО: кластер — это ВСЕ открытые близнецы, а выйти в этом тике
+  // может не каждый. Значит модель оценивает размер СВЕРХУ и цену выхода снизу. Смещение
+  // консервативное и то же самое, что уже стоит в теннисе (одно поведение, один авторитет); менять
+  // его отдельно от тенниса значило бы завести два разных ответа на один вопрос.
+  const key = cluster ? `${cluster.matchId}|${normLabel(cluster.marketLabel)}` : null;
+  const cached = key ? cluster!.cache.get(key) : undefined;
+  if (cached) return sliceOfCluster(cached, shares);
+  const aggShares = cluster ? Math.max(shares, cluster.clusterShares) : shares;
+  const aggBasis = cluster ? Math.max(basisUsd, cluster.clusterBasisUsd) : basisUsd;
   // SAME single-source classification as the entry gate, so "no real book" is decided
   // identically on both sides of a position (the book is per-TOKEN — cache shared).
-  const bookRes: OrderBookFetch = shares > 0 ? await classifyOrderBook(token, poly, deps, bookCache) : { status: "empty" };
+  const bookRes: OrderBookFetch = aggShares > 0 ? await classifyOrderBook(token, poly, deps, bookCache) : { status: "empty" };
   const liq = Number(mk?.liquidity ?? 0) || 0;
-  return paperSellFill(bookRes, shares, basisUsd, quoteCents, liq, poly.exec);
+  const agg = paperSellFill(bookRes, aggShares, aggBasis, quoteCents, liq, poly.exec);
+  if (key) cluster!.cache.set(key, agg);
+  return sliceOfCluster(agg, shares);
 }
+
 
 // ── FT-mode (Decision-1): blind entries on Polymarket-only fixtures ─────────────────────────────────────
 // A fixture ESPN/StatPal never linked has NO live telemetry, so today it takes 0 entries (the coverage
@@ -1265,7 +1294,7 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
  * the gap-bottom wake price so the window self-measures its own verdict. B8 preserved: no slippage cap on the
  * protective fill — we give the book ONE short chance to unclench, we don't cap the price.
  */
-async function gapRepriceSweep(db: Database, deps: EngineDeps, poly: PolymarketConfig, bookCache: Map<string, OrderBookFetch>, nowMs: number, now: string): Promise<ExitItem[]> {
+async function gapRepriceSweep(db: Database, deps: EngineDeps, poly: PolymarketConfig, bookCache: Map<string, OrderBookFetch>, exitCache: Map<string, SellFillResult>, nowMs: number, now: string): Promise<ExitItem[]> {
   const out: ExitItem[] = [];
   const watches = R.openGapReprices(db);
   if (!watches.length) return out;
@@ -1280,7 +1309,7 @@ async function gapRepriceSweep(db: Database, deps: EngineDeps, poly: PolymarketC
     if (!m) continue;
     const mk = R.latestMarkets(db, m.id).find((x) => x.label === b.market_label);
     if (!mk || mk.price == null || b.entry_price == null) continue;
-    const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price, bookCache);
+    const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price, bookCache, exitCluster(db, b, exitCache));
     const minNum = m.minute != null ? m.minute : (isIsoTs(m.kickoff_at) ? Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at as string)) / 60_000)) : 0);
     const strat = R.getStrategy(db, b.strategy_id);
     const prof = b.risk_profile_id ?? "medium";
@@ -1339,9 +1368,12 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
   const touched = new Set<string>();
   // One order-book fetch per TOKEN per cycle — shared by the gap-wake sweep and the main loop.
   const bookCacheShared = new Map<string, OrderBookFetch>();
+  // [N5-агрегация] Кэш ордера кластера — ОДИН на весь тик, общий со свипом: близнецы одного рынка
+  // выходят одним ордером независимо от того, каким циклом их принесло.
+  const exitCacheShared = new Map<string, SellFillResult>();
   // P0.6: resolve any gap-wake deferrals FIRST (execute expired / clear recovered), so a position the sweep
   // just closed is skipped by the main loop below.
-  out.push(...await gapRepriceSweep(db, deps, poly, bookCacheShared, Date.parse(now) || Date.now(), now));
+  out.push(...await gapRepriceSweep(db, deps, poly, bookCacheShared, exitCacheShared, Date.parse(now) || Date.now(), now));
   // Degraded-mode: when the strategist layer is in an active outage, the price-stop exemption
   // for melting-option markets is UNSAFE (nothing else manages those positions) — restore the
   // stop for this pass. Computed once per cycle. See strategistDegraded / the OPTIONALITY GATE.
@@ -1376,7 +1408,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // strategist re-entered and it churned). Deciding on the same value we then fill
       // at removes the phantom trigger at the source. Fetch ONCE, reuse for the fill.
       // (poly off → sellVwapCents returns the quote, so the decision falls back to mid.)
-      const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price, bookCache);
+      const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price, bookCache, exitCluster(db, b, exitCacheShared));
       // The live match minute (provider, else the timer estimate) — a deterministic FACT,
       // shared by the time_stop and the optionality-gate floor below.
       const minNum = m.minute != null ? m.minute
@@ -1927,6 +1959,9 @@ export async function strategistReassess(
   const comps = new Map(R.listCompetitions(db).map((c) => [c.id, c]));
   const out: ReassessResult = { exits: [], entries: [], llmCalls: 0, llmFail: 0, gateSkips: 0 };
   const touched = new Set<string>();
+  // [N5-агрегация] Кэш ордера кластера на этот проход: стратег-выходы близнецов одного рынка тоже идут
+  // одним ордером, а не серией заявок, съедающих книгу друг у друга.
+  const exitCacheReassess = new Map<string, SellFillResult>();
   let calls = 0;
   // Process on-pitch event triggers (goal / red card — anything NOT labelled
   // "time") BEFORE the periodic heartbeat matches, so an urgent reaction to a
@@ -2340,7 +2375,7 @@ export async function strategistReassess(
           }
           // Fill the (partial) close against the real bid book — exit slippage into P&L.
           const basis = (b.stake ?? 0) * Math.min(ex.fraction, 1);
-          const sell = await sellVwapCents(mk, b.entry_price, basis, poly, deps, mk.price);
+          const sell = await sellVwapCents(mk, b.entry_price, basis, poly, deps, mk.price, undefined, exitCluster(db, b, exitCacheReassess));
           // T1.1 STATE↔PRICE contradiction, SYMMETRIC with evaluateExits: a strategist DEFENSIVE exit must
           // not dump a position that is currently WINNING by the score into a phantom-low bid far below its
           // entry (or an already-won melting option) — the book is a zombie, not a broken thesis. Only for a
