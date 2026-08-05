@@ -18,15 +18,26 @@
 //
 // ЧТО ЗДЕСЬ ЕСТЬ И ЧЕГО НЕТ. Есть чистая функция: она НАЗЫВАЕТ конфликт и обе его стороны. Нет
 // «умного» выбора победившей стороны — при сумме 128% неизвестно, какая из двух оценок сломана, и
-// угадывать значит лечить симптом наугад. Блокируются ОБЕ, громко, в provenance_review: корень
-// (как пик со стороны Under получил исполнение в Over) чинится отдельно и по своим уликам.
+// угадывать значит лечить симптом наугад. Блокируются ОБЕ, громко, в provenance_review.
 //
-// Комплемент определяется ПРОИЗВОДСТВЕННЫМ `complementKey` — тем же, которым сеттл ищет вторую ногу.
-// Своя копия правила инверсии сторон была бы вторым авторитетом на одно решение.
+// ЭТОТ ГЕЙТ ПАРНЫЙ — И ЭТО ЕГО ГРАНИЦА. Он видит конфликт, только когда в решении лежат ОБЕ стороны.
+// Один пик «Over 3.5» с рационале про Under не даёт суммы, которую можно сравнить со 100%, и проходит
+// молча. Тот случай ловит `pickBranchCoherence` (N1(б)) — по списку веток самого пика. Два разных
+// вопроса: здесь «не купили ли мы обе стороны», там «о той ли стороне этот пик вообще».
+//
+// Комплемент строится ПРОИЗВОДСТВЕННОЙ инверсией стороны, а сравнение идёт ПРОИЗВОДСТВЕННЫМ
+// `sameMarketLabel` — тем же, которым исполнитель привязывает пик к рынку. Своя копия любого из двух
+// правил была бы вторым авторитетом на одно решение.
+//
+// [N1(б)] ПОЧЕМУ НЕ `complementKey`, КАК БЫЛО СНАЧАЛА. Тот меняет сторону только когда она ЗАМЫКАЕТ
+// свёрнутый ключ (намеренная строгость сеттла). «Under 3.5 goals» сворачивается в "under35goals" — ни
+// один свап не подходит, ключ null, конфликт НЕ находится, и обе стороны входят. При этом исполнение
+// такую подпись принимает: `sameMarketLabel` считает «Under 3.5 goals» и «Under 3.5» одним рынком. Гейт,
+// который считает одинаковыми не то же, что исполнитель, — это гейт с дырой ровно в один филлер.
 // ============================================================
 
-import { complementKey } from "./complementMarket.js";
-import { outcomeKey } from "./zombieMarket.js";
+import { complementLabel } from "./complementMarket.js";
+import { sameMarketLabel } from "./marketLabel.js";
 
 /** Допуск на округления оценок. 2пп — это разумная погрешность модели, 28пп — сломанная сторона. */
 export const SIDE_COHERENCE_TOLERANCE = 0.02;
@@ -46,8 +57,8 @@ export function findSideConflicts(picks: CoherencePick[]): CoherenceConflict[] {
   for (let i = 0; i < usable.length; i++) {
     for (let j = i + 1; j < usable.length; j++) {
       const a = usable[i], b = usable[j];
-      const want = complementKey(a.label);
-      if (!want || want !== outcomeKey(b.label)) continue;      // не комплемент — не наш случай
+      const want = complementLabel(a.label);
+      if (!want || !sameMarketLabel(want, b.label)) continue;    // не комплемент — не наш случай
       const sum = (a.prob as number) + (b.prob as number);
       if (sum <= 1 + SIDE_COHERENCE_TOLERANCE) continue;         // когерентно (или в пределах округлений)
       out.push({
@@ -68,4 +79,16 @@ export function blockedByCoherence(picks: CoherencePick[]): { blocked: Set<strin
   const blocked = new Set<string>();
   for (const c of conflicts) { blocked.add(c.labelA); blocked.add(c.labelB); }
   return { blocked, conflicts };
+}
+
+/**
+ * Попадает ли подпись под блок. [N1(б)] Спрашивать `blocked.has(label)` строкой НЕЛЬЗЯ: блок-лист набран
+ * из подписей ПИКОВ, а исполнение работает с подписью РЫНКА, и между ними разрешён филлер («Over 2.5» ↔
+ * «Over 2.5 goals»). Точное сравнение промахивалось бы мимо той самой строки, которую запрещает, — при
+ * этом молча, потому что промах блокировщика выглядит как «конфликта не было».
+ */
+export function blocksLabel(blocked: Set<string>, label: string): boolean {
+  if (blocked.has(label)) return true;
+  for (const b of blocked) if (sameMarketLabel(b, label)) return true;
+  return false;
 }

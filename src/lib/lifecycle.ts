@@ -26,7 +26,8 @@ import { classifyOrderBook, paperBuyFill, paperSellFill, scaleCost, ENTRY_PHANTO
 import { mirrorPaperEntryToReal, dryVirtualFreeUsd, sweepDryExits } from "./executor/whitelist.js";
 import { readTradingMode } from "./executor/safety.js";
 import type { Bet, Market, Strategy } from "./types.js";
-import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized, sameMarketLabel } from "./analysis.js";
+import { analyzeMatch, runStrategists, jobActive, strategistContext, footballCore, strategyCompExposure, strategyCompRealized } from "./analysis.js";
+import { sameMarketLabel } from "./marketLabel.js";
 import { loadLiveProbConfig, liveAdjustedProb } from "./liveProb.js";
 import { classifyZombie, zombieClearWithMargin, notationSpreads, loadZombieConfig, outcomeKey, type ZombieReason } from "./zombieMarket.js";
 import { gapWakeActive, gapWakeGapSec, gapRepriceConfig } from "./scheduleGap.js";
@@ -58,7 +59,8 @@ import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
 import { recordJobRun, cycleSummaryLine, liveJobKey, LIVE_PASS_LABEL } from "./jobHeartbeat.js";
 import { recordShcObservations } from "./shcJournal.js";
-import { blockedByCoherence } from "./sideCoherence.js";
+import { blockedByCoherence, blocksLabel } from "./sideCoherence.js";
+import { checkPickBranches, branchContradictionNote } from "./pickBranchCoherence.js";
 import { populationTags, CATCH_UP_CAP_FRAC } from "./entryPopulation.js";
 import { recordGatePulse } from "./gateHeartbeat.js";
 import { defensiveCutAllowed, recordHoldMark } from "./defensiveCutGate.js";
@@ -2485,7 +2487,10 @@ export async function strategistReassess(
             } catch { /* журнал не роняет торговый путь */ }
           }
           for (const pick of dec.picks) {
-            if (coh.blocked.has(pick.label)) { unfilled.push(`«${pick.label}» — некогерентные стороны, обе заблокированы (side_incoherent)`); continue; }
+            // [N1(б)] Сверка через `blocksLabel`, а не `Set.has`: блок-лист набран из подписей ПИКОВ, а
+            // исполнение работает с подписью РЫНКА, и между ними разрешён филлер («Over 2.5» ↔ «Over 2.5
+            // goals»). Точное сравнение промахивалось бы мимо той самой строки, которую запрещает.
+            if (blocksLabel(coh.blocked, pick.label)) { unfilled.push(`«${pick.label}» — некогерентные стороны, обе заблокированы (side_incoherent)`); continue; }
             // T2.2: a HOLD ticket never opens. If the pair already holds this market, holding is the default
             // (nothing to do); if it holds NOTHING, a hold pick is a NO-OP — it must not manufacture a new
             // position (the Cruz Azul/Göteborg/Hammarby «hold, не новый вход» → phantom «вошёл» bug).
@@ -2493,6 +2498,20 @@ export async function strategistReassess(
             if (rejectedSet.has(norm(pick.label))) { unfilled.push(`«${pick.label}» — в rejected того же решения, вход заблокирован (rejected_market_block)`); continue; }
             const mk = markets.find((x) => norm(x.label) === norm(pick.label)) ?? markets.find((x) => sameMarketLabel(x.label, pick.label));
             if (!mk || mk.price == null) { unfilled.push(`«${pick.label}» — нет рынка`); continue; }
+            if (blocksLabel(coh.blocked, mk.label)) { unfilled.push(`«${mk.label}» — некогерентные стороны, обе заблокированы (side_incoherent)`); continue; }
+            // [N1(б)] Пик против собственного списка веток — единственная улика, видящая ОДИНОЧНЫЙ пик
+            // с перепутанной стороной (парный инвариант выше на нём молчит: суммы не с чем сравнивать).
+            const bc = checkPickBranches(mk.label, pick.livesInBranches);
+            if (bc.verdict === "contradicts") {
+              const bnote = branchContradictionNote(mk.label, bc);
+              console.warn(`[pickBranch] ${m.home}—${m.away}: ${bnote}`);
+              try {
+                R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: strat.id, minute: `${m.minute ?? "?"}'`,
+                  type: "skip", text: `provenance_review [pick_branch_contradiction] ${bnote}`, created_at: now });
+              } catch { /* журнал не роняет торговый путь */ }
+              unfilled.push(`«${mk.label}» — пик против собственного списка веток (pick_branch_contradiction)`);
+              continue;
+            }
             // P1: never open into a quarantined book (the strategist shouldn't even see it, but a cached
             // plan / battle-sheet trigger could still name it) — belt behind the context filter.
             const zr = zombie.get(mk.label);
@@ -2544,6 +2563,7 @@ export async function strategistReassess(
               calibration: calibration != null ? round2(calibration) : null,
               branchWeightSum: pick.branchWeightSum != null ? round2(pick.branchWeightSum) : null,
               phantomCheck: pick.phantomCheck ?? null, marketThinnessUsd: liqNum(mk.liquidity),
+              pickMarketId: pick.marketId ?? null, pickLabel: pick.label ?? null,   // [N1(б)] личность пика в записи
               winsOnEvent: winsOnEventOccurrence(mk.label), exitPlan: pick.exitPlan ?? null,
               // Live entries run the live-reassess tier (model_live→model→Opus); analysis = the
               // model that analysed the match (duel arm), so the bet is fully attributable.

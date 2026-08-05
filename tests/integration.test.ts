@@ -127,6 +127,47 @@ test("P4: a strategist pick selected by market_id resolves even when its label i
   assert.match(bets[0].market_label, /Over 2\.5/, "resolved to the real catalog market by id, not the paraphrase");
 });
 
+// [N1(а)/N1(б)] Именной кейс Breiðablik пришёл ПРЕДМАТЧЕВЫМ путём (стадия post_lineup), а инвариант
+// когерентности сторон в батче-14 встал только в живой вход. Эти два теста стоят на денежном пути.
+test("N1(а) предматч: обе стороны одного тотала с суммой 128% — блокируются ОБЕ", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.clearShares(db, "wc2026");
+  R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", risk_profile_id: "medium", pct: 60 });
+  const analysis = {
+    match_type: "group", match_type_reason: "t", core: { xg_home: 2.4, xg_away: 1.6, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 },
+    overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.7, scenario_confidence: 0.6, sample_size: 12, notes: "" }, unknowns: [],
+    picks: [
+      { label: "Over 2.5", conviction: "высокая", reason: "value", prob: 0.64 },
+      { label: "Under 2.5", conviction: "высокая", reason: "value", prob: 0.64 },
+    ], exits: [],
+  };
+  await analyzeMatch(db, "m-lineup", { fetchImpl: mockLLM(analysis), env: { ANTHROPIC_API_KEY: "k" } });
+  const bets = R.betsForMatch(db, "m-lineup", "edge").filter((b) => b.status === "proposed");
+  assert.equal(bets.length, 0, "ни одна сторона не вошла — какая из двух оценок сломана, неизвестно");
+  const logs = R.tradeLogForMatch(db, "m-lineup").filter((l) => /side_incoherent/.test(l.text));
+  assert.ok(logs.length >= 1, "конфликт назван в provenance_review, а не проглочен");
+});
+
+test("N1(б) предматч: ОДИНОЧНЫЙ пик против собственного списка веток — вход блокируется", async () => {
+  const db = openDb(":memory:");
+  seedDatabase(db);
+  R.clearShares(db, "wc2026");
+  R.setShare(db, { competition_id: "wc2026", strategy_id: "edge", risk_profile_id: "medium", pct: 60 });
+  // Один пик — парный инвариант тут молчит по построению (суммы не с чем сравнивать). Ловит только
+  // сверка со списком веток: draw_0_0 = 0 голов, draw_scoring[1:1] = 2 гола, оба НИЖЕ линии 2.5.
+  const analysis = {
+    match_type: "group", match_type_reason: "t", core: { xg_home: 2.4, xg_away: 1.6, home_share_1h: 0.44, away_share_1h: 0.44, poisson_correction: 0 },
+    overrides: [], drivers: [], scenarios: [], calibration: { xg_confidence: 0.7, scenario_confidence: 0.6, sample_size: 12, notes: "" }, unknowns: [],
+    picks: [{ label: "Over 2.5", conviction: "высокая", reason: "Ставлю Under 2.5", prob: 0.7, lives_in_branches: ["draw_0_0", "draw_scoring[1:1]"] }], exits: [],
+  };
+  await analyzeMatch(db, "m-lineup", { fetchImpl: mockLLM(analysis), env: { ANTHROPIC_API_KEY: "k" } });
+  const bets = R.betsForMatch(db, "m-lineup", "edge").filter((b) => b.status === "proposed");
+  assert.equal(bets.length, 0, "деньги не ушли на сторону, противоположную собственному тезису пика");
+  const logs = R.tradeLogForMatch(db, "m-lineup").filter((l) => /pick_branch_contradiction/.test(l.text));
+  assert.ok(logs.length >= 1, "причина названа отдельным кодом, а не общим «не прошёл вход»");
+});
+
 test("analysis duel (ANALYSIS_DUEL=on): a match is analysed by one arm and its bets carry that arm's code_version tag", async () => {
   const db = openDb(":memory:");
   seedDatabase(db);
