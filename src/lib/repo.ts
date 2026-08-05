@@ -1573,7 +1573,7 @@ export interface ShcObservationRow {
   id?: string; kind: "control" | "test"; match_id: string; label: string; players: string | null;
   kickoff_at: string | null;
   sets_first: number; sets_second: number; completed: number; fav_is_label_first: number;
-  price_cents: number; observed_first_covers: number;
+  price_cents: number; price_lag_min?: number | null; observed_first_covers: number;
   pred_favourite: number; pred_label_first: number; discriminating: number; hypo_version: string;
   score_src: string; price_src: string; fav_src: string; created_at?: string;
 }
@@ -1581,17 +1581,43 @@ export interface ShcObservationRow {
 export function insertShcObservation(db: Database, r: ShcObservationRow): boolean {
   const res = db.prepare(
     `INSERT OR IGNORE INTO shc_observations(id,kind,match_id,label,players,kickoff_at,
-       sets_first,sets_second,completed,fav_is_label_first,price_cents,observed_first_covers,
+       sets_first,sets_second,completed,fav_is_label_first,price_cents,price_lag_min,observed_first_covers,
        pred_favourite,pred_label_first,discriminating,hypo_version,score_src,price_src,fav_src,created_at)
-     VALUES(?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?,?,?,?)`,
+     VALUES(?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?)`,
   ).run(r.id ?? uid(), r.kind, r.match_id, r.label, r.players, r.kickoff_at,
-    r.sets_first, r.sets_second, r.completed, r.fav_is_label_first, r.price_cents, r.observed_first_covers,
+    r.sets_first, r.sets_second, r.completed, r.fav_is_label_first, r.price_cents, r.price_lag_min ?? null, r.observed_first_covers,
     r.pred_favourite, r.pred_label_first, r.discriminating, r.hypo_version,
     r.score_src, r.price_src, r.fav_src, r.created_at ?? nowIso());
   return (res.changes ?? 0) > 0;
 }
 export function shcObservations(db: Database): ShcObservationRow[] {
   return db.prepare(`SELECT * FROM shc_observations ORDER BY kickoff_at, created_at`).all() as ShcObservationRow[];
+}
+/**
+ * [T3-фикс 05.08] ВОССТАНОВИТЬ РАЗРЫВ «ЦЕНА СТАРШЕ СЧЁТА» ДЛЯ СТРОК, ЗАПИСАННЫХ ДО КОЛОНКИ.
+ *
+ * Это НЕ выдумывание факта задним числом: обе метки времени уже заморожены в самой строке — `score_src`
+ * несёт `scout_snapshot@<ts>`, `price_src` несёт `markets@<ts>`. Разрыв из них ВЫЧИСЛЯЕТСЯ, а не
+ * угадывается. Ровно ради этого условие (а) ратификации требовало провенанс полями: строка отвечает на
+ * вопрос, который ей зададут позже.
+ *
+ * Строка, чей провенанс не разбирается, остаётся NULL — и остаётся недопущенной к вердикту. Идемпотентно.
+ */
+export function backfillShcPriceLag(db: Database): number {
+  const rows = db.prepare(
+    `SELECT id, score_src, price_src FROM shc_observations WHERE price_lag_min IS NULL`,
+  ).all() as { id: string; score_src: string | null; price_src: string | null }[];
+  if (!rows.length) return 0;
+  const upd = db.prepare(`UPDATE shc_observations SET price_lag_min=? WHERE id=?`);
+  const at = (s: string | null) => { const t = Date.parse((s ?? "").split("@")[1] ?? ""); return Number.isFinite(t) ? t : null; };
+  let n = 0;
+  for (const r of rows) {
+    const sc = at(r.score_src), pr = at(r.price_src);
+    if (sc == null || pr == null) continue;
+    upd.run(Math.max(0, Math.round((sc - pr) / 60_000)), r.id);
+    n++;
+  }
+  return n;
 }
 export function shcObservationCount(db: Database): number {
   return (db.prepare(`SELECT COUNT(*) n FROM shc_observations`).get() as { n: number }).n;

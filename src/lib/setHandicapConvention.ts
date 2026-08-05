@@ -63,6 +63,32 @@ import { pWithUnit } from "./signals.js";
  * невоспроизводимый вывод не имеет права держать решение о деньгах ни в какую сторону. T3 остаётся
  * fail-closed до подтверждения ПО ЖУРНАЛУ. История не стирается — она помечена.
  */
+/**
+ * [T3-фикс 05.08] СЧЁТ И ЦЕНА ОБЯЗАНЫ БЫТЬ ИЗ ОДНОГО МОМЕНТА.
+ *
+ * ЧЕМ ЗАСЛУЖЕНО. Замер 05.08: контроль дал 4 расхождения на 173 манилайнах, и отчёт объявил «сломано одно
+ * из двух звеньев самой проверки — цена→исход или ориентация подписи». Проверка этого вывода:
+ *   медиана разрыва «цена старше счёта» у 169 СОГЛАСНЫХ наблюдений — 5 минут;
+ *   у ВСЕХ ЧЕТЫРЁХ расхождений — 164 минуты (88 / 109 / 164 / 368).
+ * То есть инструмент не сломан. Сломан журнал: он берёт счёт из свежего снимка скаута, цену — из строки
+ * `markets`, которая обновляется медленным тиком, и сравнивает два факта из РАЗНЫХ моментов как
+ * одновременные. Поле `priceLagMin` для этого и существовало — но НЕ ХРАНИЛОСЬ в журнале, было NULL на
+ * всех 173 строках, и NULL читался как «свежо». Сторож-на-отсутствие-отрицательного-маркера.
+ *
+ * ПОРОГ ВЫБРАН МЕХАНИЧЕСКИ, А НЕ ПО ВЫБОРКЕ. Скаут пишет каждые ~20 секунд, `markets` обновляются раз в
+ * медленный тик — значит цена возрастом до ОДНОГО тика это норма конвейера, а не рассинхрон. Отсюда
+ * TICK_INTERVAL_MIN (по умолчанию 30). Подгонять порог под наблюдённые 88 минут я не стал: тогда он
+ * оправдывал бы сам себя данными, которые должен судить.
+ *
+ * NULL — ЭТО ОТКАЗ, А НЕ РАЗРЕШЕНИЕ. Не смогли измерить разрыв ⇒ не можем утверждать одновременность ⇒
+ * наблюдение к вердикту не допускается. Старые журнальные строки (записанные до этой колонки) остаются
+ * в журнале навсегда — append-only — но считаются ОТДЕЛЬНО и вердикт не двигают.
+ */
+export const SHC_MAX_PRICE_LAG_MIN = (() => {
+  const n = Number(process.env.TICK_INTERVAL_MIN);
+  return Number.isFinite(n) && n > 0 ? n : 30;
+})();
+
 export const PRIOR_VERDICT = {
   verdict: "ОПРОВЕРГНУТА" as ShcVerdict, status: "unverified" as const,
   why: "снят 03-04.08 на выборке из кэпнутых снимков: 11 из 12 наблюдений исчезли за часы (сверка двух прогонов). Вывод по критерию верен, но невоспроизводим — T3 остаётся fail-closed до журнального подтверждения",
@@ -117,6 +143,9 @@ export interface ShcReport {
   /** ПОЧЕМУ тест не набирается: из нерешённых гандикапов — сколько без токена и сколько с ценой,
    *  замороженной ДО конца матча. Без этих двух чисел «НЕ СОЗРЕЛО» неотличимо от «не дозреет никогда». */
   undecidedNoToken: number; undecidedStalePrice: number; undecidedMedianLagMin: number | null;
+  /** [T3-фикс] Порог допуска и отказы: сужение выборки обязано быть видимым, а не молчаливым. */
+  maxPriceLagMin: number;
+  refusedLegacyNoLag: number; refusedStalePrice: number; refusedIncomplete: number;
   /** Незавершённые (ретайр) исключены из суждения — ±1.5 там void. Число печатается, а не прячется. */
   droppedIncomplete: number;
   /** Сколько наблюдений в ЖУРНАЛЕ — знаменатель вердикта, живущий дольше снимков. */
@@ -257,6 +286,23 @@ export function observeFromSnapshots(db: Database): {
   return { rows, ambiguousProps, explicitProps, droppedIncomplete };
 }
 
+/**
+ * [T3-фикс] Допустимо ли наблюдение к ВЕРДИКТУ. Три условия, все — про то, отвечает ли строка на вопрос,
+ * который ей задают:
+ *   • разрыв «цена старше счёта» ИЗМЕРЕН — иначе одновременность недоказуема (NULL это отказ, не «свежо»);
+ *   • разрыв не больше одного тика — иначе цена описывает не тот момент, что счёт;
+ *   • матч ДОИГРАН — иначе «кто выиграл» ещё не определено, а ±1.5 там вообще void (Gate 0.2).
+ *
+ * Прежде третье условие применялось только к тесту: «манилайн при ретайре разрешается нормально». Замер
+ * 05.08 это опроверг — двое из четырёх контрольных расхождений были ровно `completed:false`. Условие
+ * распространено на ОБЕ группы; контроль худеет, но перестаёт врать.
+ */
+export function admissible(r: ShcRow): boolean {
+  if (r.priceLagMin == null) return false;
+  if (r.priceLagMin > SHC_MAX_PRICE_LAG_MIN) return false;
+  return r.completed;
+}
+
 /** Строка ЖУРНАЛА → строка вердикта. Предсказания НЕ пересчитываются: они заморожены при записи. */
 function journalRows(db: Database): ShcRow[] {
   const mk = (o: R.ShcObservationRow): ShcRow => {
@@ -268,7 +314,7 @@ function journalRows(db: Database): ShcRow[] {
       group: o.kind === "control" ? "контроль" : "тест",
       setsFirst: o.sets_first, setsSecond: o.sets_second, favIsLabelFirst: !!o.fav_is_label_first,
       predictedFirstWins: !!o.pred_favourite, lastPriceCents: o.price_cents,
-      hasToken: true, priceLagMin: null, completed: !!o.completed,
+      hasToken: true, priceLagMin: o.price_lag_min ?? null, completed: !!o.completed,
       altPredictedFirstWins: !!o.pred_label_first, altOutcome, discriminating: !!o.discriminating,
       observedFirstWins: obs, outcome,
       note: `журнал ${o.hypo_version}: счёт ${o.sets_first}:${o.sets_second}, цена ${o.price_cents}¢ · ${o.score_src} · ${o.price_src} · ${o.fav_src}`,
@@ -287,7 +333,13 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
   const rows = journalRows(db);
   const { ambiguousProps, explicitProps, droppedIncomplete } = live;
 
-  const decided = (g: ShcRow["group"]) => rows.filter((r) => r.group === g && r.outcome !== "нет исхода");
+  // [T3-фикс] К ВЕРДИКТУ ДОПУСКАЮТСЯ ТОЛЬКО ОДНОВРЕМЕННЫЕ НАБЛЮДЕНИЯ. Разрыв не измерен ⇒ отказ:
+  // невозможность доказать одновременность это не доказательство одновременности.
+  const decided = (g: ShcRow["group"]) => rows.filter((r) => r.group === g && r.outcome !== "нет исхода" && admissible(r));
+  const notAdmissible = rows.filter((r) => r.outcome !== "нет исхода" && !admissible(r));
+  const legacyNoLag = notAdmissible.filter((r) => r.priceLagMin == null).length;
+  const staleAdmission = notAdmissible.filter((r) => r.priceLagMin != null && r.priceLagMin > SHC_MAX_PRICE_LAG_MIN).length;
+  const incompleteAdmission = notAdmissible.filter((r) => !r.completed && r.priceLagMin != null && r.priceLagMin <= SHC_MAX_PRICE_LAG_MIN).length;
   const control = decided("контроль"), test = decided("тест");
   const controlMismatch = control.filter((r) => r.outcome === "РАСХОЖДЕНИЕ").length;
   const testMismatch = test.filter((r) => r.outcome === "РАСХОЖДЕНИЕ").length;
@@ -298,10 +350,10 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
   const undecided = live.rows.filter((r) => r.group === "тест" && r.outcome === "нет исхода");
   const undecidedNoToken = undecided.filter((r) => !r.hasToken).length;
   const lags = undecided.map((r) => r.priceLagMin).filter((x): x is number => x != null).sort((a, b) => a - b);
-  const undecidedStalePrice = lags.filter((x) => x > 30).length;
+  const undecidedStalePrice = lags.filter((x) => x > SHC_MAX_PRICE_LAG_MIN).length;   // тот же порог, что у допуска
   const undecidedMedianLagMin = lags.length ? lags[lags.length >> 1] : null;
   const whyStuck = undecided.length
-    ? ` Из ${undecided.length} нерешённых гандикапов сейчас: без токена ${undecidedNoToken}, с ценой старше 30мин до конца матча ${undecidedStalePrice} (медиана отставания ${undecidedMedianLagMin ?? "—"}мин).`
+    ? ` Из ${undecided.length} нерешённых гандикапов сейчас: без токена ${undecidedNoToken}, с ценой старше ${SHC_MAX_PRICE_LAG_MIN}мин до конца матча ${undecidedStalePrice} (медиана отставания ${undecidedMedianLagMin ?? "—"}мин).`
     : "";
 
   // ── АЛЬТЕРНАТИВА судится по собственной пре-регистрации: только РАЗЛИЧАЮЩИЕ матчи и только ПОСЛЕ фиксации.
@@ -329,22 +381,30 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
           + ` (ретроспективно согласована с ${retro.n - retro.bad}/${retro.n} различающими — но ЭТИ матчи гипотезу ПОРОДИЛИ и подтвердить её не могут)`,
   };
 
+  // [T3-фикс] ОТКАЗЫ ДОПУСКА ПЕЧАТАЮТСЯ ВСЕГДА. Сужение выборки, о котором не сказано, — это та же
+  // подмена, что и вердикт по несинхронным фактам: читатель обязан видеть, сколько строк не отвечало.
+  const refused = legacyNoLag + staleAdmission + incompleteAdmission;
+  const admitNote = refused
+    ? ` · к вердикту НЕ допущено ${refused}: разрыв «цена старше счёта» не измерен ${legacyNoLag} (строки старше колонки — доказать одновременность нечем),`
+      + ` разрыв больше ${SHC_MAX_PRICE_LAG_MIN}мин ${staleAdmission}, матч не доигран ${incompleteAdmission}`
+    : "";
+
   let verdict: ShcVerdict, note: string;
   if (control.length < SHC_CONTROL_MIN) {
     verdict = "НЕ СОЗРЕЛО";
-    note = `журнал: контроль не набран — манилайнов с прочитанным исходом ${control.length} при нужных ${SHC_CONTROL_MIN}. Инструмент не проверен, значит и гипотезу проверять НЕЧЕМ.${whyStuck}`;
+    note = `журнал: контроль не набран — манилайнов с прочитанным исходом ${control.length} при нужных ${SHC_CONTROL_MIN}. Инструмент не проверен, значит и гипотезу проверять НЕЧЕМ.${whyStuck}${admitNote}`;
   } else if (controlMismatch > 0) {
     verdict = "МЕТОД НЕВЕРЕН";
-    note = `контроль РАЗОШЁЛСЯ: ${controlMismatch} из ${control.length} манилайнов противоречат собственному счёту. Сломано одно из двух звеньев самой проверки — цена→исход или ориентация подписи. Вердикта о конвенции НЕТ, блок остаётся`;
+    note = `контроль РАЗОШЁЛСЯ: ${controlMismatch} из ${control.length} манилайнов противоречат собственному счёту. Сломано одно из двух звеньев самой проверки — цена→исход или ориентация подписи (несинхронные наблюдения уже отсеяны допуском, поэтому объяснить разрыв разной свежестью нельзя). Вердикта о конвенции НЕТ, блок остаётся${admitNote}`;
   } else if (testMismatch > 0) {
     verdict = "ОПРОВЕРГНУТА";
-    note = `конвенция ОПРОВЕРГНУТА по ЖУРНАЛУ: ${testMismatch} расхождений на ${testMatches} матчах при чистом контроле (${control.length}/${control.length}). Правило «фаворит несёт −1.5» неверно — блок остаётся, флаг НЕ поднимается`;
+    note = `конвенция ОПРОВЕРГНУТА по ЖУРНАЛУ: ${testMismatch} расхождений на ${testMatches} матчах при чистом контроле (${control.length}/${control.length}). Правило «фаворит несёт −1.5» неверно — блок остаётся, флаг НЕ поднимается${admitNote}`;
   } else if (testMatches < SHC_TEST_MIN_MATCHES) {
     verdict = "НЕ СОЗРЕЛО";
-    note = `журнал: контроль чист (${control.length}/${control.length}), расхождений нет, но матчей теста ${testMatches} при нужных ${SHC_TEST_MIN_MATCHES} — ОТСУТСТВИЕ ЗАМЕРА, а не разрешение.${whyStuck}`;
+    note = `журнал: контроль чист (${control.length}/${control.length}), расхождений нет, но матчей теста ${testMatches} при нужных ${SHC_TEST_MIN_MATCHES} — ОТСУТСТВИЕ ЗАМЕРА, а не разрешение.${whyStuck}${admitNote}`;
   } else {
     verdict = "ПОДТВЕРЖДЕНА";
-    note = `по ЖУРНАЛУ: контроль чист (${control.length}/${control.length}), тест чист — ${test.length} рынков на ${testMatches} матчах, ноль расхождений, ${pWithUnit(Math.pow(0.5, testMatches), testMatches, "матчах")}. Основание для снятия блока есть; флаг поднимает ВЛАДЕЛЕЦ, не отчёт`;
+    note = `по ЖУРНАЛУ: контроль чист (${control.length}/${control.length}), тест чист — ${test.length} рынков на ${testMatches} матчах, ноль расхождений, ${pWithUnit(Math.pow(0.5, testMatches), testMatches, "матчах")}. Основание для снятия блока есть; флаг поднимает ВЛАДЕЛЕЦ, не отчёт${admitNote}`;
   }
 
   return {
@@ -353,6 +413,8 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
     ambiguousProps, explicitProps,
     undecidedNoToken, undecidedStalePrice, undecidedMedianLagMin,
     droppedIncomplete, alt, verdict, note,
+    maxPriceLagMin: SHC_MAX_PRICE_LAG_MIN,
+    refusedLegacyNoLag: legacyNoLag, refusedStalePrice: staleAdmission, refusedIncomplete: incompleteAdmission,
     journalRows: rows.length, prior: PRIOR_VERDICT,
   };
 }

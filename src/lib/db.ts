@@ -323,6 +323,9 @@ export function initSchema(db: Database): void {
     "ALTER TABLE matches ADD COLUMN snapshots_seen_total INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE matches ADD COLUMN snapshots_first_at TEXT",
     "ALTER TABLE matches ADD COLUMN snapshots_last_at TEXT",
+    // [T3-фикс] Разрыв «цена старше счёта» на журнальной строке. Старые строки останутся NULL — и это
+    // честно: доказать их одновременность нечем, поэтому к вердикту они не допускаются (не «свежо»).
+    "ALTER TABLE shc_observations ADD COLUMN price_lag_min INTEGER",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }
