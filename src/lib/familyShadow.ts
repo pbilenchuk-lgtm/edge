@@ -104,7 +104,7 @@ function shadowToBetRec(r: ShadowRow): BetRec {
     entryCents: entry, closingCents: r.closing_cents, kelly: null, sizeRequested: null, sizeFilled: null, entrySlipCents: null,
     calibration: null, branchWeightSum: null, thinnessUsd: null, winsOnEvent: false, codeVersion: r.code_version,
     status: r.status, settledBy: null, outcome, stake, payout: null, pnl, bookPnl: pnl, clvCents: clv, finalScore: null,
-    decisionId: null, createdAt: r.created_at, kickoffAt: r.kickoff_at, exitCodeVersion: null, exits: [],
+    decisionId: null, createdAt: r.created_at, kickoffAt: r.kickoff_at, exitCodeVersion: null, exits: [], catchUp: false, unmarkedBook: false,
   };
 }
 

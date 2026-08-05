@@ -59,6 +59,7 @@ import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.j
 import { recordJobRun, cycleSummaryLine, liveJobKey, LIVE_PASS_LABEL } from "./jobHeartbeat.js";
 import { recordShcObservations } from "./shcJournal.js";
 import { blockedByCoherence } from "./sideCoherence.js";
+import { populationTags, CATCH_UP_CAP_FRAC } from "./entryPopulation.js";
 import { recordGatePulse } from "./gateHeartbeat.js";
 import { defensiveCutAllowed, recordHoldMark } from "./defensiveCutGate.js";
 import { chaseBoundNoScore, chaseLine } from "./boundNoScoreChase.js";
@@ -1106,7 +1107,12 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
         continue;
       }
 
-      R.updateBet(db, b.id, { status: "open", entry_price: ex.priceCents, current_price: ex.priceCents, stake: ex.stake, entered_minute: minuteLabel(m) });
+      // [N4] ПОПУЛЯЦИЯ ВХОДА ОПРЕДЕЛЯЕТСЯ НА ФИЛЛЕ — тут известны и время решения, и ЦЕНА, по которой
+      // реально вошли. Метка честная: catch-up не запрещён (терять поздно найденную фикстуру мы не хотим),
+      // но ходит половиной до созревания собственной когорты — тем же паттерном, что ft_blind.
+      const pop = populationTags({ kickoffAt: m.kickoff_at, decidedAt: b.created_at ?? now, entryCents: ex.priceCents });
+      const popStake = pop.catchUp ? Math.round(ex.stake * CATCH_UP_CAP_FRAC * 100) / 100 : ex.stake;
+      R.updateBet(db, b.id, { status: "open", entry_price: ex.priceCents, current_price: ex.priceCents, stake: popStake, entered_minute: minuteLabel(m) });
       openKey.add(key);
       // Augment the decision-time snapshot with what's only known at FILL: the actual
       // filled size and the entry slippage (measurement only — no money-path effect).
@@ -1115,14 +1121,17 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
         em.sizeFilled = ex.stake;
         if (ex.cost) em.entrySlipCents = ex.cost.slipCents;
         if (ftBlind) em.ftBlind = true; // condition 2: freeze the mode tag on the bet (separate cohort + no live exits)
+        if (pop.catchUp) em.catchUp = true;             // [N4] обе метки замораживаются НА СТАВКЕ:
+        if (pop.unmarkedBook) em.unmarkedBook = true;   // популяция вердикта не должна зависеть от позднего чтения
+        em.sizeFilled = popStake;
         R.updateBet(db, b.id, { entry_meta: serializeEntryMeta(em) });
-      } else if (ftBlind) {
+      } else if (ftBlind || pop.catchUp || pop.unmarkedBook) {
         // No decision-time meta (shouldn't happen for prematch_value) — never lose the mode tag the exit
         // machinery + cohort depend on; stamp a minimal one.
-        R.updateBet(db, b.id, { entry_meta: serializeEntryMeta({ ftBlind: true }) });
+        R.updateBet(db, b.id, { entry_meta: serializeEntryMeta({ ftBlind: ftBlind || undefined, catchUp: pop.catchUp || undefined, unmarkedBook: pop.unmarkedBook || undefined }) });
       }
       if (ex.cost) recordFill(db, { betId: b.id, matchId: m.id, competitionId: m.competition_id, strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, ex.cost, now);
-      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "enter", text: `вход «${b.market_label}» @ ${ex.priceCents}¢ · $${ex.stake}${ftBlind ? " · ft_blind (слепой вход, держим до сеттла, 50% размер)" : ""}${ex.note ? ` · ${ex.note}` : ""}`, dedup_key: `enter:${b.decision_id ?? b.id}`, created_at: now }); // Z3: one enter line per position
+      R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: b.strategy_id, minute: minuteLabel(m), type: "enter", text: `вход «${b.market_label}» @ ${ex.priceCents}¢ · $${popStake}${ftBlind ? " · ft_blind (слепой вход, держим до сеттла, 50% размер)" : ""}${pop.catchUp ? ` · catch_up (решение ПОСЛЕ кикоффа, размер ×${CATCH_UP_CAP_FRAC})` : ""}${pop.unmarkedBook ? " · unmarked_book (цена в плейсхолдер-полосе — книга не размечена)" : ""}${ex.note ? ` · ${ex.note}` : ""}`, dedup_key: `enter:${b.decision_id ?? b.id}`, created_at: now }); // Z3: one enter line per position
       out.push({ matchId: m.id, strategyId: b.strategy_id, market: b.market_label, price: ex.priceCents, stake: ex.stake });
       // Mirror this fill into the shadow batch. edge = our prob − executed price; a fill
       // while the match is already live counts as a live-triggered entry (live_buffer).

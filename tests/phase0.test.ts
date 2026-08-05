@@ -12,7 +12,7 @@ const rec = (o: Partial<BetRec>): BetRec => ({
   marketPrice: null, liveProbAdjusted: null, entryCents: null, closingCents: null, kelly: null, sizeRequested: null, sizeFilled: null, entrySlipCents: null,
   calibration: null, branchWeightSum: null, thinnessUsd: null, winsOnEvent: false, codeVersion: o.codeVersion ?? "e7·m1", status: "settled_won", settledBy: null, outcome: o.outcome ?? "won", clvSource: "closing_line", closingLineCents: null, exitsAmbiguous: false, piecePnl: null, marketLabeled: 1,
   stake: o.stake ?? 100, payout: null, pnl: o.pnl ?? 50, bookPnl: "bookPnl" in o ? (o.bookPnl ?? null) : (o.pnl ?? 50), clvCents: o.clvCents ?? 5, finalScore: null,
-  decisionId: null, createdAt: o.createdAt ?? "2026-07-24T18:00:00Z", kickoffAt: o.kickoffAt ?? null, exitCodeVersion: o.exitCodeVersion ?? null, exits: [],
+  decisionId: null, createdAt: o.createdAt ?? "2026-07-24T18:00:00Z", kickoffAt: o.kickoffAt ?? null, exitCodeVersion: o.exitCodeVersion ?? null, exits: [], catchUp: false, unmarkedBook: false,
 });
 
 // ── #4 (X2) — cross-epoch quarantine in the clean cut ─────────────────────────
