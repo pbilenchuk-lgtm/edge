@@ -24,6 +24,7 @@ import { sizePrematch } from "./strategist.js";
 import { getProfileConfig, RISK_PROFILE_DEFS } from "./riskConfig.js";
 import { tennisMoneyline, propFamily, detectTennisEvents, tennisTourOf, type PropFamily } from "./tennisScout.js";
 import { isBestOfFive } from "./tennisSetValue.js";
+import { recordNetEvShadow } from "./pmvNetEvWatch.js";
 import { tennisTheo, baseHoldFor, matchDistribution, BASE_HOLD, type TennisTheo } from "./tennisMarkov.js";
 
 export const STRAT_PMV_DESC = `# ТЕННИС — PMV (консистентность пропов, v1, БЕЗ LLM)
@@ -693,6 +694,20 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
       // FLAG-ONLY (default until re-calibrated): log the would-be entries, place NO bets.
       if (pmvFlagOnly()) {
         for (const cand of enters) {
+          // [N3(1)] ГЕЙТ СЧИТАЕТСЯ И В ТЕНИ. Условие R2-стоп-крана требует ЖИВОГО срабатывания net_ev_cut,
+          // но и сам гейт, и M21-haircut стоят НИЖЕ этой ветки: при включённом флаге до них не доходило
+          // управление, и условие было невыполнимо по построению — «подтверди то, что живёт только после
+          // снятия блокировки, которую это подтверждение и должно снять». Здесь оно считается на реальных
+          // theo/mid/книге, с тем же haircut, и НЕ двигает ни цента: гейт получает живое срабатывание, а
+          // цена его включения становится известна ДО включения.
+          const hcS = sideHaircut(cand.family, cand.side);
+          const evS = pmvNetEvCents(Math.round((cand.theoCents - hcS) * 10) / 10, cand.midCents, process.env);
+          recordNetEvShadow(db, {
+            at: now, label: cand.label, family: cand.family, side: cand.side,
+            grossCents: cand.deviation, haircutCents: hcS, feeCents: evS.feeCents, driftCents: evS.fillDriftCents,
+            marginCents: evS.marginCents, netCents: evS.netCents, pass: evS.pass,
+          });
+          if (!evS.pass) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `net_ev_shadow «${cand.label}»: gross ${cand.deviation}¢${hcS ? ` − haircut ${hcS}¢` : ""} − комиссия ${evS.feeCents}¢ − дрифт ${evS.fillDriftCents}¢ = net ${evS.netCents}¢ < маржа ${evS.marginCents}¢ — СРЕЗАЛ БЫ (теневая оценка, денег и так нет)`, created_at: now });
           // Freeze a scoreable would-be entry (dedup by (match,prop); repeats bump hits) — this is what
           // makes flag-only calibrate instead of being a mute zero. Then keep the human-readable log line.
           recordPmvShadowSignal(db, {

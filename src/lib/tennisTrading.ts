@@ -1420,6 +1420,12 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
     const snaps = db.prepare(`SELECT * FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at`).all(m.id) as R.TennisSnapshotRow[];
     if (snaps.length < 2) continue;
     const last = snaps[snaps.length - 1];
+    // [N7] ДЕТЕРМИНИРОВАННЫЙ ПРЕ-ГЕЙТ: ПЕРВЫЙ СЕТ НЕ ЗАВЕРШЁН — ОЦЕНИВАТЬ НЕЧЕГО.
+    // Set-Value срабатывает на событии «фаворит ПРОИГРАЛ первый сет»; до конца первого сета этого события
+    // не существует по определению. Прежде такие матчи всё равно доходили до проверки свежести и печатали
+    // отказ: в пачке 03-04.08 это 112 строк `no_score_data_skip[ДО НАЧАЛА]` — ровно тот шум, который
+    // МАСКИРУЕТ 68 настоящих `[УСТАРЕЛ]`. Отказ по несуществующему событию — не диагностика, а помеха ей.
+    if ((last.sets_p1 ?? 0) + (last.sets_p2 ?? 0) === 0) continue;   // сет 1 ещё идёт — стратегия не применима
     // P0.4: fail-closed on STALE scout data. The set-1 score MUST come from a FRESH snapshot — never
     // inferred (there is no price-move fallback, by design). A stale newest snapshot means the match may
     // not be in the state we read (scout unbound / lagging), so do NOT arm. Loud + counted.
