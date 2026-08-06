@@ -594,7 +594,24 @@ export async function GET(req: Request) {
           }).sort((a, b) => b.signals - a.signals);
         } catch { return null; }
       })();
-      return NextResponse.json({ ok: true, cleanEpochFloor: includeAllEpochs ? null : CLEAN_EPOCH_FLOOR, cohort, populations, ...(diagnostic ? { diagnostic } : {}) });
+      // [фикс 06.08] КОГОРТА ft_blind ОТДЕЛЬНОЙ СТРОКОЙ. Это риск-класс с СОБСТВЕННЫМ дизайном —
+      // половинный размер, ноль живого управления, сеттл только через PM-резолюцию, — и до сих пор он
+      // не имел ни поля в выгрузке, ни строки в разрезах. Отсутствие строки я сам прочитал как
+      // отсутствие режима и завёл задачу на дыру, которой нет. Класс, которого нет в отчёте, не
+      // аудируется: его вердикт нельзя ни подтвердить, ни опровергнуть.
+      const ftBlindCut = (() => {
+        const rs = recs.filter((r) => r.ftBlind);
+        const c = signalCohort(rs);
+        return {
+          bets: rs.length, signals: c.nSignals, decided: c.nDecided,
+          winPct: c.winVsImplied.winPct, meanImpliedPct: c.winVsImplied.meanImpliedPct,
+          pnlUsd: Math.round(c.pnl.totalUsd * 100) / 100, verdict: c.verdict,
+          note: rs.length === 0
+            ? "слепых входов в срезе нет — это ОТСУТСТВИЕ КОГОРТЫ, а не «режим выключен»: состояние флага читается из env, а не из пустого счётчика"
+            : `ft_blind: ${rs.length} ставок / ${c.nSignals} сигналов · половинный размер, без живого руля, сеттл через PM-резолюцию`,
+        };
+      })();
+      return NextResponse.json({ ok: true, cleanEpochFloor: includeAllEpochs ? null : CLEAN_EPOCH_FLOOR, cohort, populations, ftBlind: ftBlindCut, ...(diagnostic ? { diagnostic } : {}) });
     }
     // ?report=provider_scope → [batch-9] what each (provider × league) pair is ACTUALLY delivering, with a
     // verdict instead of a raw counter. Prod evidence that motivated it: Sportmonks on a World-Cup plan

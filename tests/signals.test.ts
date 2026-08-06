@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { signalKey, collapseToSignals, binomUpperTail, signalTests, signalCohort, marketFamily, FLAG_ONLY_STRATEGIES, type Signal } from "../src/lib/signals.js";
-import type { BetRec } from "../src/lib/profileAnalytics.js";
+import { betRecords, type BetRec } from "../src/lib/profileAnalytics.js";
+import { openDb, initSchema } from "../src/lib/db.js";
+import * as R from "../src/lib/repo.js";
 
 const rec = (o: Partial<BetRec>): BetRec => ({
   id: o.id ?? Math.random().toString(36).slice(2), matchId: o.matchId ?? "m1", matchLabel: "A — B", competitionId: "c", category: o.category ?? "MLS",
@@ -9,7 +11,7 @@ const rec = (o: Partial<BetRec>): BetRec => ({
   phase: o.phase ?? "prematch", minute: null, scoreHome: null, scoreAway: null, edge: null, aiProb: null, derivedProb: null, impliedProb: o.impliedProb ?? 0.5,
   marketPrice: null, liveProbAdjusted: null, entryCents: null, closingCents: null, kelly: null, sizeRequested: null, sizeFilled: null, entrySlipCents: null,
   calibration: null, branchWeightSum: null, thinnessUsd: null, winsOnEvent: false, codeVersion: o.codeVersion ?? null, status: "settled_won", settledBy: null, outcome: o.outcome ?? "won", clvSource: "closing_line", closingLineCents: null, exitsAmbiguous: false, piecePnl: null, marketLabeled: 1,
-  stake: o.stake ?? 100, payout: null, pnl: o.pnl ?? 50, bookPnl: "bookPnl" in o ? (o.bookPnl ?? null) : (o.pnl ?? 50), clvCents: o.clvCents ?? 5, finalScore: null, decisionId: o.decisionId ?? null, createdAt: o.createdAt ?? "2026-07-24T18:00:00Z", kickoffAt: o.kickoffAt ?? null, exitCodeVersion: o.exitCodeVersion ?? null, exits: [], catchUp: false, unmarkedBook: false,
+  stake: o.stake ?? 100, payout: null, pnl: o.pnl ?? 50, bookPnl: "bookPnl" in o ? (o.bookPnl ?? null) : (o.pnl ?? 50), clvCents: o.clvCents ?? 5, finalScore: null, decisionId: o.decisionId ?? null, createdAt: o.createdAt ?? "2026-07-24T18:00:00Z", kickoffAt: o.kickoffAt ?? null, exitCodeVersion: o.exitCodeVersion ?? null, exits: [], catchUp: false, unmarkedBook: false, ftBlind: false,
 });
 
 test("signalKey: match×market×strategy×day; per-bet decision_id is IGNORED (was the 1:1 units-bug)", () => {
@@ -87,4 +89,19 @@ test("fix #3: a flag-only strategy (tennis_pmv) returns legacy_diagnostic, not a
 test("marketFamily classifies the tradeable families", () => {
   assert.equal(marketFamily("FC X Over 2.5"), "totals");
   assert.equal(marketFamily("Both Teams to Score — No"), "btts");
+});
+
+// [фикс 06.08] Риск-класс обязан быть виден в выгрузке: `ftBlind` жил на ставке и в сеттл-путях, но в
+// BetRec его не завели — и отсутствие ПОЛЯ прочиталось как отсутствие ФАКТА (O13-b).
+test("ftBlind доезжает из entry_meta в BetRec — иначе когорту нельзя проаудитить", () => {
+  const db = openDb(":memory:"); initSchema(db);
+  R.upsertSport(db, "football", "Футбол");
+  R.upsertCompetition(db, { id: "c1", sport_id: "football", name: "C", budget: 1000, external_league: null, created_at: "t" });
+  R.insertStrategy(db, { id: "prematch_value", sport_id: "football", name: "PMV", tag: "p", color: null, version: 1, prompt: "p", prompt_live: null, params: {}, model: null, model_live: null, created_at: "t" } as never);
+  R.insertMatch(db, { id: "m1", competition_id: "c1", home: "A", away: "B", state: "finished", lineup_out: false, kickoff_at: "2026-08-05T17:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: null } as never);
+  R.insertBet(db, { id: "b1", match_id: "m1", strategy_id: "prematch_value", risk_profile_id: "medium", market_label: "Under 3.5", status: "settled_won", proposed_price: 55.2, entry_price: 55.2, current_price: 55.2, closing_price: null, ai_prob: 0.62, stake: 40, rationale: "r", entered_minute: null, result: "won", payout: 72.46, entry_meta: JSON.stringify({ ftBlind: true }), code_version: null, created_at: "2026-08-05T16:06:00Z" } as never);
+  const [rec] = betRecords(db, {});
+  assert.equal(rec.ftBlind, true, "метка режима доезжает до выгрузки");
+  assert.equal(rec.catchUp, false);
+  assert.equal(rec.unmarkedBook, false);
 });

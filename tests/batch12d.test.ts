@@ -192,7 +192,7 @@ test("пункт 6: нога CLV n/a только при НУЛЕВОМ покр
     sizeRequested: null, sizeFilled: null, entrySlipCents: null, calibration: null, branchWeightSum: null,
     thinnessUsd: null, winsOnEvent: false, codeVersion: "e9", status: "settled_won", settledBy: "settle",
     payout: null, finalScore: null, decisionId: null, exitCodeVersion: null, exits: [],
-    closingLineCents: null, exitsAmbiguous: false, catchUp: false, unmarkedBook: false,
+    closingLineCents: null, exitsAmbiguous: false, catchUp: false, unmarkedBook: false, ftBlind: false,
   };
   const rec = (i: number, clv: number | null) => ({
     ...base, id: `r${i}`, matchId: `m${i}`, strategyId: "prematch_value", market: "Over 2.5",
