@@ -736,6 +736,16 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
         const hc = sideHaircut(cand.family, cand.side);
         const effTheoCents = Math.round((cand.theoCents - hc) * 10) / 10;
         const ev = pmvNetEvCents(effTheoCents, cand.midCents, process.env);
+        // [фикс 05.08] ГЕЙТ ПИШЕТСЯ В НАБЛЮДЕНИЕ И НА ЖИВОМ ПУТИ. Первая версия записывала только из
+        // ветки flag_only — и в момент, когда владелец снял флаг, прибор замер навсегда: вахта «первых
+        // 20 paper-сигналов», ради которой флаг и снимался, читала бы застывшее число и не отличила бы
+        // «гейт больше не зовётся» от «сканов не было». Прибор обязан переживать включение того, что он
+        // измеряет; `live` разводит тень и деньги, но молчать не даёт ни одному.
+        recordNetEvShadow(db, {
+          at: now, label: cand.label, family: cand.family, side: cand.side,
+          grossCents: cand.deviation, haircutCents: hc, feeCents: ev.feeCents, driftCents: ev.fillDriftCents,
+          marginCents: ev.marginCents, netCents: ev.netCents, pass: ev.pass, live: true,
+        });
         if (!ev.pass) {
           R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `net_ev_cut «${cand.label}»: gross ${cand.deviation}¢${hc ? ` − haircut ${hc}¢ (крен ${cand.family}·${cand.side})` : ""} − комиссия ${ev.feeCents}¢ − дрифт ${ev.fillDriftCents}¢ = net ${ev.netCents}¢ < маржа ${ev.marginCents}¢ — записано в shadow, деньги не ставим`, created_at: now });
           continue;

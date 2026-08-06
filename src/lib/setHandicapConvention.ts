@@ -56,6 +56,7 @@ import { parseProp, propFirstIsP1 } from "./tennisPmv.js";
 import { tennisMoneyline } from "./tennisScout.js";
 import { isBestOfFive } from "./tennisSetValue.js";
 import { pWithUnit } from "./signals.js";
+import { terminalBookMid } from "./terminalBook.js";
 
 /**
  * ПРЕЖНИЙ ВЕРДИКТ ДАУНГРЕЙЖЕН ДО `unverified` — ратифицировано 04.08. «ОПРОВЕРГНУТА» было снято на 12
@@ -214,12 +215,24 @@ export function observeFromSnapshots(db: Database): {
       if (start?.pm_p1_cents == null) continue;
       const favIsScoutP1 = start.pm_p1_cents >= 50;
       const favSrc = `first_priced_snapshot@${start.batch_at}`;
+      // [O12] ПОЧЕМУ ЦЕНА НЕ БЕРЁТСЯ ИЗ КОЛОНКИ СКАУТА, ХОТЯ ОНА ТАМ ЕСТЬ.
+      //
+      // Соблазн очевиден: скаут пишет `pm_p1_cents` в ту же строку, что и счёт, — разрыв был бы нулевым
+      // по построению. Но у этой колонки ДВА разных происхождения (tennisScout): для рынков в скоупе это
+      // живой мидпойнт, а для вне-скоупных тиров (ITF/челленджеры/пары) — СОХРАНЁННЫЙ ДИСКАВЕРИ-манилайн,
+      // записанный под временем ТЕКУЩЕЙ строки. То есть предматчевая цена выглядела бы синхронной со
+      // счётом и получала бы разрыв 0, а различить их из строки нечем.
+      //
+      // Это тот же класс O11, спрятанный на уровень глубже: метка времени принадлежит СТРОКЕ, а не факту
+      // в ней. Источник, который не может доказать собственную свежесть, к вердикту не допускается —
+      // поэтому и манилайн, и гандикапы читаются из ТЕРМИНАЛЬНОГО СНИМКА, который несёт своё время съёма.
 
       // ── КОНТРОЛЬ: манилайн. Кто выиграл матч — известно из счёта; ориентация — из подписи.
       const ml = tennisMoneyline(db, m.id, players);
       if (ml) {
         const mlMarket = R.latestMarkets(db, m.id).find((x) => x.label === ml.label);
-        const price = mlMarket?.price == null ? null : Number(mlMarket.price);
+        const mlTerm = terminalBookMid(db, m.id, ml.label);
+        const price = mlTerm ? mlTerm.cents : (mlMarket?.price == null ? null : Number(mlMarket.price));
         const firstSets = ml.firstIsP1 ? last.sets_p1 : last.sets_p2;
         const secondSets = ml.firstIsP1 ? last.sets_p2 : last.sets_p1;
         const predicted = firstSets > secondSets;
@@ -228,8 +241,11 @@ export function observeFromSnapshots(db: Database): {
           matchId: m.id, players: `${m.home} — ${m.away}`, label: ml.label, group: "контроль",
           setsFirst: firstSets, setsSecond: secondSets, favIsLabelFirst: ml.firstIsP1 === favIsScoutP1,
           predictedFirstWins: predicted, lastPriceCents: price,
-          hasToken: !!mlMarket?.external_ref, priceLagMin: priceLag(mlMarket?.snapshot_at, lastSeenMs),
-          scoreSrc: `scout_snapshot@${lastAt}`, priceSrc: `markets@${mlMarket?.snapshot_at ?? "—"}`, favSrc, kickoffAt: m.kickoff_at ?? null,
+          hasToken: !!mlMarket?.external_ref,
+          priceLagMin: priceLag(mlTerm ? mlTerm.at : mlMarket?.snapshot_at, lastSeenMs),
+          scoreSrc: `scout_snapshot@${lastAt}`,
+          priceSrc: mlTerm ? `terminal_book@${mlTerm.at}` : `markets@${mlMarket?.snapshot_at ?? "—"}`,
+          favSrc, kickoffAt: m.kickoff_at ?? null,
           completed, altPredictedFirstWins: predicted, altOutcome: observed == null ? "нет исхода" : observed === predicted ? "совпало" : "РАСХОЖДЕНИЕ",
           discriminating: false,
           observedFirstWins: observed,
@@ -262,15 +278,23 @@ export function observeFromSnapshots(db: Database): {
         const predicted = covers(minusOnFirst);
         // АЛЬТЕРНАТИВА: −1.5 всегда у первого в подписи (outcomes[0]), независимо от того, кто фаворит.
         const altPredicted = covers(true);
-        const price = mk.price == null ? null : Number(mk.price);
+        // [O12] ЦЕНА ГАНДИКАПА — ИЗ ТЕРМИНАЛЬНОГО СНИМКА, если он есть. Он снят В МОМЕНТ терминального
+        // статуса, то есть синхронно со счётом; строка `markets` для завершившегося матча заведомо
+        // старая (её пишет медленный тик, и после `finished` не пишет вовсе). Нет снимка — падаем на
+        // `markets` и честно несём его отставание в priceLagMin, где допуск journal'а его и отсеет.
+        const term = terminalBookMid(db, m.id, mk.label);
+        const price = term ? term.cents : (mk.price == null ? null : Number(mk.price));
         const observed = resolvedFirstWins(price);
         const altOutcome: ShcOutcome = observed == null ? "нет исхода" : observed === altPredicted ? "совпало" : "РАСХОЖДЕНИЕ";
         rows.push({
           matchId: m.id, players: `${m.home} — ${m.away}`, label: mk.label, group: "тест",
           setsFirst: firstSets, setsSecond: secondSets, favIsLabelFirst,
           predictedFirstWins: predicted, lastPriceCents: price,
-          hasToken: !!mk.external_ref, priceLagMin: priceLag(mk.snapshot_at, lastSeenMs),
-          scoreSrc: `scout_snapshot@${lastAt}`, priceSrc: `markets@${mk.snapshot_at ?? "—"}`, favSrc, kickoffAt: m.kickoff_at ?? null,
+          hasToken: !!mk.external_ref,
+          priceLagMin: priceLag(term ? term.at : mk.snapshot_at, lastSeenMs),
+          scoreSrc: `scout_snapshot@${lastAt}`,
+          priceSrc: term ? `terminal_book@${term.at}` : `markets@${mk.snapshot_at ?? "—"}`,
+          favSrc, kickoffAt: m.kickoff_at ?? null,
           completed, altPredictedFirstWins: altPredicted, altOutcome,
           discriminating: predicted !== altPredicted,
           observedFirstWins: observed,

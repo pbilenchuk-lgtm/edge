@@ -18,6 +18,18 @@
 //
 // ЕДИНИЦА — КАНДИДАТ (проп×матч). Один матч даёт несколько пропов, и складывать их в «матчи» значило бы
 // повторить подмену единицы, которая уже трижды била по проекту.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// ФИКС 05.08: ПРИБОР ГАС РОВНО ТОГДА, КОГДА ОБЪЕКТ НАБЛЮДЕНИЯ ВКЛЮЧАЛСЯ.
+//
+// Первая версия записывала гейт ТОЛЬКО из ветки `flag_only`. Пока флаг стоял, счётчик рос и доказал
+// условие R2. Владелец снял флаг — и `evaluated` замер навсегда: реальная ветка тот же гейт считает, но
+// в наблюдение не кладёт. То есть вахта «первых 20 paper-сигналов», ради которой флаг и снимался,
+// читала бы ЗАМЁРЗШЕЕ число и не отличила бы «гейт больше не зовётся» от «сканов не было».
+//
+// Это тот же класс, что самозапечатывающийся гейт, только зеркальный: там проверка была невозможна ДО
+// включения, здесь — ПОСЛЕ. Прибор обязан переживать включение того, что он измеряет, поэтому запись
+// идёт с ОБЕИХ веток и несёт `live`: тень и живой режим считаются раздельно, но ни один не молчит.
 // ============================================================
 
 import type { Database } from "./db.js";
@@ -29,14 +41,18 @@ export interface NetEvShadowEntry {
   at: string; label: string; family: string; side: string;
   grossCents: number; haircutCents: number; feeCents: number; driftCents: number;
   marginCents: number; netCents: number; pass: boolean;
+  /** true — гейт считался на ЖИВОМ пути (флаг снят, за решением идут деньги); false/absent — тень. */
+  live?: boolean;
 }
 export interface NetEvShadowState {
   evaluated: number; wouldPass: number; wouldCut: number;
+  /** Раздельные счётчики живого пути: «гейт работал в тени» и «гейт режет деньги» — разные факты. */
+  liveEvaluated: number; liveCut: number; liveLastAt: string | null;
   firstAt: string | null; lastAt: string | null;
   /** Последние срабатывания — чтобы «гейт живой» можно было ПРОЧИТАТЬ, а не поверить на слово. */
   recent: NetEvShadowEntry[];
 }
-const EMPTY: NetEvShadowState = { evaluated: 0, wouldPass: 0, wouldCut: 0, firstAt: null, lastAt: null, recent: [] };
+const EMPTY: NetEvShadowState = { evaluated: 0, wouldPass: 0, wouldCut: 0, liveEvaluated: 0, liveCut: 0, liveLastAt: null, firstAt: null, lastAt: null, recent: [] };
 const RECENT_KEEP = 20;
 
 export function readNetEvShadow(db: Database): NetEvShadowState {
@@ -50,6 +66,7 @@ export function recordNetEvShadow(db: Database, e: NetEvShadowEntry): void {
   try {
     const s = readNetEvShadow(db);
     s.evaluated++; if (e.pass) s.wouldPass++; else s.wouldCut++;
+    if (e.live) { s.liveEvaluated++; if (!e.pass) s.liveCut++; s.liveLastAt = e.at; }
     s.firstAt = s.firstAt ?? e.at; s.lastAt = e.at;
     s.recent = [e, ...s.recent].slice(0, RECENT_KEEP);
     R.metaSet(db, KEY, JSON.stringify(s), e.at);
@@ -72,12 +89,15 @@ export function buildNetEvShadow(db: Database): NetEvShadowReport {
   const cutPct = s.evaluated ? Math.round((1000 * s.wouldCut) / s.evaluated) / 10 : null;
   return {
     ...s, verdict, r2ConditionMet: s.wouldCut > 0, cutPct,
-    note: s.evaluated === 0
+    note: (s.evaluated === 0
       ? "гейт не оценивался ни разу — это ОТСУТСТВИЕ ЗАМЕРА, а не «нечего резать». Условие R2 НЕ выполнено"
       : s.wouldCut === 0
         ? `гейт оценён на ${s.evaluated} кандидат(ах), не срезал НИ ОДНОГО. Вызов — это ещё не срабатывание: условие R2 требует живого СРЕЗА, и оно НЕ выполнено`
         : `гейт ЖИВОЙ: срезал бы ${s.wouldCut} из ${s.evaluated} кандидатов (${cutPct}%), окно ${s.firstAt?.slice(0, 10) ?? "?"}…${s.lastAt?.slice(0, 10) ?? "?"}.`
-          + ` Условие R2 выполнено — цена включения известна ДО включения. Флаг поднимает ВЛАДЕЛЕЦ, не отчёт`,
+          + ` Условие R2 выполнено — цена включения известна ДО включения. Флаг поднимает ВЛАДЕЛЕЦ, не отчёт`)
+      + (s.liveEvaluated
+        ? ` · ЖИВОЙ ПУТЬ: гейт оценил ${s.liveEvaluated}, срезал ${s.liveCut} (последний ${s.liveLastAt ?? "—"}) — за этими решениями идут деньги`
+        : ` · живой путь: гейт на нём ещё не звался (флаг снят? сканов не было?) — счётчик отдельный, чтобы «замерла тень» не читалось как «замер гейт»`),
   };
 }
 
