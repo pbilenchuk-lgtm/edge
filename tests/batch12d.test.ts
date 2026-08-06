@@ -262,6 +262,25 @@ test("прод-поправка: рефреш не записывает цену
   assert.equal(last.find((m) => m.label === "Over 0.5")!.price, 70, "в книге осталась последняя живая цена");
 });
 
+// [T3-корень 06.08] Рефреш — ТРЕТИЙ и самый частый пишущий путь в `markets`: каждый тик по каждому живому
+// рынку. Gamma он не переспрашивает (только /midpoint), поэтому имена исходов ему взять негде — он ОБЯЗАН
+// нести их из предыдущей строки, как уже несёт токены. Иначе первый же рефреш цены стирал бы имя,
+// положенное дискавери, `latestMarkets` читал бы строку без него, и покрытие ориентации не выросло бы
+// НИКОГДА: прибор мерил бы собственное отсутствие.
+test("[T3-корень] рефреш цены НЕСЁТ имена исходов дальше, а не теряет их", async () => {
+  const db = openDb(":memory:"); seedDatabase(db);
+  const comp = R.listCompetitions(db).find((c) => c.sport_id === "football")!;
+  R.insertMatch(db, { id: "mo", competition_id: comp.id, home: "A", away: "B", state: "live", lineup_out: true, kickoff_at: "2026-07-29T15:00:00Z", minute: 80, score_home: 0, score_away: 0, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "mo" } as any);
+  R.insertMarket(db, { id: R.uid(), match_id: "mo", label: "A vs B", price: 60, ai_prob: null, liquidity: "900", external_ref: "TOKA", token_second: "TOKB", outcome_first: "A", outcome_second: "B", snapshot_at: "2026-07-29T15:30:00Z", is_closing: false } as any);
+  const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => ({ mid: "0.55" }) })) as unknown as typeof fetch;
+  const r = await refreshMatchOdds(db, "mo", { fetchImpl, polymarket: loadPolymarketConfig({ POLYMARKET_ENABLED: "true" }), now: () => "2026-07-29T16:00:00Z" });
+  assert.equal(r.updated, 1);
+  const fresh = R.latestMarkets(db, "mo").find((m) => m.label === "A vs B")!;
+  assert.equal(fresh.price, 55, "цена обновилась");
+  assert.equal(fresh.outcome_first, "A", "и имя исхода пережило обновление");
+  assert.equal(fresh.outcome_second, "B");
+});
+
 // Единственный гейт входа, не оставлявший следа: причина писалась только в `bets.rationale`, а когда
 // исполнитель не дал текста — и там пусто. На проде это дало 80 ставок «not_filled: без_метки».
 test("прод-поправка: отказ на филле пишет машинную строку, а не пустоту", async () => {
