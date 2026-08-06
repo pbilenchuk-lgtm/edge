@@ -169,9 +169,19 @@ export async function refreshMatchOdds(
     // ask (price ≥ ask is incoherent → the book moved) — then edge falls back to mid (flagged). Cheap
     // price-based staleness, no extra timestamp; the book-fill guard remains the final backstop.
     const askStillCoherent = m.ask_cents != null && price < m.ask_cents;
+    // [T3-корень 06.08] ИМЕНА ИСХОДОВ ПЕРЕНОСЯТСЯ ВМЕСТЕ СО СТРОКОЙ, А НЕ ТЕРЯЮТСЯ ПРИ ОБНОВЛЕНИИ ЦЕНЫ.
+    //
+    // Это ТРЕТИЙ пишущий путь в `markets` — и самый частый: он идёт каждый тик по каждому живому рынку.
+    // Он не запрашивает Gamma заново (только /midpoint), поэтому имена ему взять негде — он их НЕСЁТ из
+    // предыдущей строки, ровно как уже несёт `external_ref`/`token_second`. Без этого первый же рефреш
+    // цены стирал бы имя, положенное дискавери: `latestMarkets` читает САМУЮ СВЕЖУЮ строку, и покрытие
+    // ориентации не выросло бы никогда — механизм измерял бы собственное отсутствие.
+    // Тот же класс, что O13: факт обязан пережить обновление строки, которая его несёт.
     R.insertMarket(db, {
       id: R.uid(), match_id: matchId, label: m.label, price, ai_prob: m.ai_prob,
-      liquidity: m.liquidity, external_ref: m.external_ref, token_second: m.token_second ?? null, snapshot_at: now, is_closing: false,
+      liquidity: m.liquidity, external_ref: m.external_ref, token_second: m.token_second ?? null,
+      outcome_first: m.outcome_first ?? null, outcome_second: m.outcome_second ?? null,
+      snapshot_at: now, is_closing: false,
       ask_cents: askStillCoherent ? m.ask_cents : null, spread_cents: askStillCoherent ? m.spread_cents : null,
     });
     // mark-to-market open bets on this market — at LIQUIDATION value (mid haircut

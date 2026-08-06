@@ -381,6 +381,20 @@ test("«имени ещё нет» и «имя не сопоставилось»
   assert.match(j.orientation.note, /САМО ЭТО НЕ ПРОЙДЁТ|НЕ СОПОСТАВЛЯЮТСЯ/, "громкий ноль называет причину");
 });
 
+test("ПУСТАЯ полная выборка НЕ чистая: альтернатива не подтверждается на нуле строк", () => {
+  // Замер сразу после деплоя O14 показал ровно это: `fullSetChecked: 0` и вердикт «ПОДТВЕРЖДЕНА».
+  // Различающие считались БЕЗ допуска, а `altFullBad === 0` было истинно на пустом множестве — и
+  // альтернатива стала выглядеть СИЛЬНЕЕ, чем до фикса, хотя доказательств стало МЕНЬШЕ.
+  const db = world();
+  cleanControl(db, 9);
+  // Шесть различающих матчей ПОСЛЕ пре-регистрации, где альтернатива права, — но БЕЗ прочитанной стороны.
+  for (let i = 40; i < 46; i++) played(db, i, { favP1: false, setsP1: 2, setsP2: 1, mlPrice: 99, hcapPrice: 2, outcomeFirst: null });
+  const r = buildSetHandicapConvention(db);
+  assert.equal(r.alt.fullSetChecked, 0, "судить нечего");
+  assert.equal(r.alt.discriminatingSince, 0, "различающие считаются по ДОПУЩЕННЫМ строкам, как и основная");
+  assert.equal(r.alt.verdict, "НЕ СОЗРЕЛО", "«промахов нет» на пустом множестве — не лицензия");
+});
+
 test("purity: имя исхода читается как ИМЯ, а не как порядковый номер", () => {
   assert.equal(priceSideIsLabelFirst("Carlos Alcaraz", P1, P2), true);
   assert.equal(priceSideIsLabelFirst("Alcaraz", P1, P2), true, "фамилии достаточно");

@@ -507,7 +507,17 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
     : "";
 
   // ── АЛЬТЕРНАТИВА судится по собственной пре-регистрации: только РАЗЛИЧАЮЩИЕ матчи и только ПОСЛЕ фиксации.
-  const discr = rows.filter((r) => r.group === "тест" && r.discriminating && r.altOutcome !== "нет исхода");
+  // [ФИКС 06.08, вечер] АЛЬТЕРНАТИВА СУДИТСЯ ПО ТЕМ ЖЕ ДОПУЩЕННЫМ СТРОКАМ, ЧТО И ОСНОВНАЯ ГИПОТЕЗА.
+  //
+  // Замер сразу после деплоя O14 вскрыл мой же дефект: `discr` не фильтровался через `admissible`, и
+  // альтернатива продолжала считаться на строках, которые основной вердикт только что отверг. Итог был
+  // абсурден — «ПОДТВЕРЖДЕНА» при `fullSetChecked: 0`: полная выборка пуста (все 418 строк недопущены),
+  // `altFullBad === 0` истинно НА ПУСТОМ МНОЖЕСТВЕ, и `altClean` не понизил вердикт. Альтернатива стала
+  // выглядеть СИЛЬНЕЕ, чем до фикса («ПОДТВЕРЖДЕНА» вместо «ПОДТВЕРЖДЕНА В ДУЭЛИ»), хотя доказательств
+  // стало МЕНЬШЕ. Немой ноль: пустая выборка прочиталась как чистая.
+  //
+  // Один допуск на обе гипотезы — иначе это два авторитета на одно решение, и слабейший побеждает.
+  const discr = rows.filter((r) => r.group === "тест" && r.discriminating && r.altOutcome !== "нет исхода" && admissible(r));
   const byMatch = (list: ShcRow[]) => {
     const seen = new Map<string, boolean>();
     for (const r of list) seen.set(r.matchId, (seen.get(r.matchId) ?? false) || r.altOutcome === "РАСХОЖДЕНИЕ");
@@ -538,7 +548,9 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
   // расходятся, и это НЕ то же самое, что «правило найдено».
   const altFull = rows.filter((r) => r.group === "тест" && r.altOutcome !== "нет исхода" && admissible(r));
   const altFullBad = altFull.filter((r) => r.altOutcome === "РАСХОЖДЕНИЕ").length;
-  const altClean = altFullBad === 0;
+  // ПУСТАЯ ВЫБОРКА НЕ ЧИСТАЯ. `altFullBad === 0` истинно и когда промахов нет, и когда судить нечего —
+  // это разные факты, и второй не даёт лицензии. Сторож стоит явно, а не выводится из фильтра выше.
+  const altClean = altFull.length > 0 && altFullBad === 0;
   const alt = {
     registeredAt: SHC_ALT_REGISTERED_AT, minDiscriminating: SHC_ALT_MIN_DISCRIMINATING,
     discriminatingSince: since.n, mismatchSince: since.bad,
