@@ -395,6 +395,40 @@ test("ПУСТАЯ полная выборка НЕ чистая: альтерн
   assert.equal(r.alt.verdict, "НЕ СОЗРЕЛО", "«промахов нет» на пустом множестве — не лицензия");
 });
 
+test("ПРОБА ПИСАТЕЛЯ: сломанный путь виден в тот же час, а не через сутки", () => {
+  // Покрытие ориентации зреет по ЗАВЕРШЁННЫМ матчам — между деплоем и первым доигранным матчем часы,
+  // в которые «имён ещё нет» и «путь их не кладёт» выглядят одинаково. Именно эта слепота пропустила
+  // потерю имени в refreshMatchOdds. Проба смотрит на свежие строки `markets` напрямую.
+  const now = Date.parse("2026-08-06T22:00:00Z");
+  const mkt = (db: ReturnType<typeof world>, id: string, at: string, name: string | null) =>
+    R.insertMarket(db, { id, match_id: "mx", label: `L${id}`, price: 50, ai_prob: null, liquidity: 100, external_ref: "t", outcome_first: name, outcome_second: null, snapshot_at: at, is_closing: false } as never);
+  const bed = () => {
+    const db = world();
+    R.insertMatch(db, { id: "mx", competition_id: "atp", home: P1, away: P2, state: "live", lineup_out: false, kickoff_at: "2026-08-06T20:00:00Z", minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: "mx" } as never);
+    return db;
+  };
+
+  const quiet = bed();
+  assert.equal(verdictOf(quiet, now).orientation.writeProbeMarkets, 0);
+  assert.match(verdictOf(quiet, now).orientation.note, /путь не проверен/, "нет строк — это НЕ «он мёртв»");
+
+  const broken = bed();
+  mkt(broken, "b1", "2026-08-06T21:40:00Z", null);
+  mkt(broken, "b2", "2026-08-06T21:50:00Z", null);
+  const b = verdictOf(broken, now).orientation;
+  assert.equal(b.writeProbeMarkets, 2);
+  assert.equal(b.writeProbeNamed, 0);
+  assert.match(b.note, /ПИШУЩИЙ ПУТЬ НЕ КЛАДЁТ ИМЯ/, "громко, а не молчащим нулём покрытия");
+
+  const alive = bed();
+  mkt(alive, "a1", "2026-08-06T21:40:00Z", P1);
+  mkt(alive, "a2", "2026-08-06T10:00:00Z", P1);            // вне окна — в пробу не идёт
+  const a = verdictOf(alive, now).orientation;
+  assert.equal(a.writeProbeMarkets, 1, "проба смотрит только на СВЕЖИЕ строки");
+  assert.equal(a.writeProbeNamed, 1);
+  assert.match(a.note, /пишущий путь жив/);
+});
+
 test("purity: имя исхода читается как ИМЯ, а не как порядковый номер", () => {
   assert.equal(priceSideIsLabelFirst("Carlos Alcaraz", P1, P2), true);
   assert.equal(priceSideIsLabelFirst("Alcaraz", P1, P2), true, "фамилии достаточно");

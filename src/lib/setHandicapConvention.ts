@@ -188,7 +188,11 @@ export interface ShcReport {
    *  ноль покрытия неотличим от самозапечатывающегося гейта — четвёртый раз за неделю. */
   orientation: {
     known: number; noName: number; unreadable: number;
-    journalKnown: number; journalUnknown: number; note: string;
+    journalKnown: number; journalUnknown: number;
+    /** Проба пишущего пути: сколько СВЕЖИХ строк `markets` вообще и сколько из них несут имя исхода.
+     *  Покрытие зреет сутками, а сломанный писатель обязан быть виден в тот же час. */
+    writeProbeMarkets: number; writeProbeNamed: number; writeProbeHours: number;
+    note: string;
   };
   /** Незавершённые (ретайр) исключены из суждения — ±1.5 там void. Число печатается, а не прячется. */
   droppedIncomplete: number;
@@ -207,6 +211,29 @@ export interface ShcReport {
     verdict: ShcVerdict; note: string;
   };
   verdict: ShcVerdict; note: string;
+}
+
+/**
+ * [ПРИБОР 06.08] ЖИВ ЛИ ПИШУЩИЙ ПУТЬ — УЛИКА НА ИСТОЧНИКЕ, А НЕ ЧЕРЕЗ СУТКИ.
+ *
+ * Покрытие ориентации считается по ЗАВЕРШЁННЫМ теннисным матчам — то есть между деплоем и первым
+ * доигранным матчем стоит слепая зона в часы, в которой «имён ещё нет, потому что матчей не было» и
+ * «имён нет, потому что путь их не кладёт» выглядят ОДИНАКОВО. Ровно эта слепота уже стоила одного
+ * пропущенного дефекта: `refreshMatchOdds` терял имя на каждом тике, и заметить это было нечем.
+ *
+ * Проба смотрит на СВЕЖИЕ строки `markets` — любые, не только теннис и не только завершённые. Если за
+ * последние часы строки писались, а имён в них нет, путь сломан, и это видно СРАЗУ.
+ */
+const SHC_WRITE_PROBE_H = 2;
+function writeProbe(db: Database, nowMs: number): { total: number; named: number } {
+  try {
+    const since = new Date(nowMs - SHC_WRITE_PROBE_H * 3_600_000).toISOString();
+    const r = db.prepare(
+      `SELECT COUNT(*) n, SUM(CASE WHEN outcome_first IS NOT NULL AND outcome_first<>'' THEN 1 ELSE 0 END) k
+         FROM markets WHERE snapshot_at >= ?`,
+    ).get(since) as { n?: number; k?: number } | undefined;
+    return { total: r?.n ?? 0, named: r?.k ?? 0 };
+  } catch { return { total: 0, named: 0 }; }
 }
 
 /** Насколько цена рынка старше последнего, что мы знаем о матче. Отрицательных не бывает — только 0. */
@@ -476,7 +503,7 @@ function journalRows(db: Database): ShcRow[] {
  * ВЕРДИКТ СТРОИТСЯ ИЗ ЖУРНАЛА, а не из снимков. Снимки нужны только для ТЕКУЩЕЙ диагностики — переписи
  * подписей и ответа «почему тест не набирается»; они кэпнуты и историю не хранят.
  */
-export function buildSetHandicapConvention(db: Database): ShcReport {
+export function buildSetHandicapConvention(db: Database, nowMs = Date.now()): ShcReport {
   const live = observeFromSnapshots(db);
   const rows = journalRows(db);
   const { ambiguousProps, explicitProps, droppedIncomplete } = live;
@@ -585,16 +612,24 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
   const orientUnreadable = live.rows.filter((r) => r.sideSrc.startsWith("side_unreadable")).length;
   const jKnown = rows.filter((r) => r.sideFromToken != null).length;
   const jUnknown = rows.length - jKnown;
+  const probe = writeProbe(db, nowMs);
+  const probeNote = probe.total === 0
+    ? ` · проба писателя: свежих строк markets за ${SHC_WRITE_PROBE_H}ч НЕТ — путь не проверен (это не «он мёртв»)`
+    : probe.named === 0
+      ? ` · ⚠ ПИШУЩИЙ ПУТЬ НЕ КЛАДЁТ ИМЯ: ${probe.total} свежих строк markets за ${SHC_WRITE_PROBE_H}ч, из них с именем НОЛЬ — покрытие само не вырастет`
+      : ` · пишущий путь жив: ${probe.named} из ${probe.total} свежих строк markets несут имя`;
   const orientation = {
     known: orientKnown, noName: orientAbsent, unreadable: orientUnreadable,
     journalKnown: jKnown, journalUnknown: jUnknown,
+    writeProbeMarkets: probe.total, writeProbeNamed: probe.named, writeProbeHours: SHC_WRITE_PROBE_H,
     note: `ориентация из токена: в журнале прочитана у ${jKnown} из ${rows.length} строк`
       + ` · по текущим снимкам прочитана ${orientKnown}, имени исхода нет ${orientAbsent}, имя не сопоставилось ${orientUnreadable}`
       + (orientKnown === 0 && orientUnreadable > 0
         ? `. ИМЕНА ПРИХОДЯТ, НО НЕ СОПОСТАВЛЯЮТСЯ — само это не пройдёт: механизм требует разбора, а не ожидания`
         : orientKnown === 0
           ? `. Колонка заведена 06.08 и заполняется только на ЖИВЫХ рынках — покрытие растёт с новыми матчами, уже завершённым его взять негде`
-          : ""),
+          : "")
+      + probeNote,
   };
 
   let verdict: ShcVerdict, note: string;
@@ -636,5 +671,6 @@ export function setHandicapConventionLine(r: ShcReport): string {
     + ` · ${r.verdict}`
     + ` · альт «−1.5 у первого»: ${r.alt.discriminatingSince}/${r.alt.minDiscriminating} различающих после ${r.alt.registeredAt} → ${r.alt.verdict}`
     + ` · сторона из токена ${r.orientation.journalKnown}/${r.journalRows} (имени нет ${r.orientation.noName}, не сопоставилось ${r.orientation.unreadable})`
+    + ` · писатель ${r.orientation.writeProbeNamed}/${r.orientation.writeProbeMarkets} свежих строк с именем`
     + ` · журнал ${r.journalRows} набл. · прежних вердиктов помечено unverified: ${r.priors.length}`;
 }
