@@ -47,6 +47,18 @@
 // не может — контракт там void. Я это знание при построении выборки упустил, и в неё попал Mackenzie —
 // Rodionov со счётом 1:0. Правило исключения независимо от гипотез и применяется ко всем строкам сразу.
 //
+// ── КОРЕНЬ, НАЙДЕННЫЙ 06.08: ОРИЕНТАЦИЯ БЫЛА ДОПУЩЕНИЕМ, А НЕ ФАКТОМ (см. O14) ───────────────────
+// Все три гипотезы («−1.5 у фаворита», «−1.5 у первого в подписи», «цена — контракт фаворита») спорили о
+// том, КТО несёт −1.5, и молча сходились в том, что цена относится к ПЕРВОМУ В ПОДПИСИ. Это неверно:
+// цена относится к outcomes[0], а подпись «A vs B Set Handicap +/-1.5» называет ОБОИХ и стороны не несёт.
+// Разбивка замера 06.08 (n=91) показала ячейку «фаворит второй, разница 2 сета» (n=22), где промахнулись
+// ОБЕ гипотезы по 13 строк, а ЗЕРКАЛЬНЫЙ прогноз угадал все 13 — переворачивалась не гипотеза, а чтение.
+//
+// Знание было на входе и выбрасывалось за шаг до потребителя: `marketSides` не сохраняла имя исхода,
+// когда подпись «уже называет» его. Теперь имя приходит соседним полем (`markets.outcome_first`), сторона
+// ЧИТАЕТСЯ, а наблюдение без прочитанной стороны к вердикту НЕ ДОПУСКАЕТСЯ — как и наблюдение с
+// неизмеренным разрывом «цена старше счёта». Невозможность доказать сторону не есть доказательство стороны.
+//
 // Модуль ТОЛЬКО читает. Флага он не касается: снятие блока — отдельное решение владельца по этим числам.
 // ============================================================
 
@@ -54,6 +66,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import { parseProp, propFirstIsP1 } from "./tennisPmv.js";
 import { tennisMoneyline } from "./tennisScout.js";
+import { normName } from "./tennisMatch.js";
 import { isBestOfFive } from "./tennisSetValue.js";
 import { pWithUnit } from "./signals.js";
 import { terminalBookMid } from "./terminalBook.js";
@@ -90,10 +103,24 @@ export const SHC_MAX_PRICE_LAG_MIN = (() => {
   return Number.isFinite(n) && n > 0 ? n : 30;
 })();
 
-export const PRIOR_VERDICT = {
-  verdict: "ОПРОВЕРГНУТА" as ShcVerdict, status: "unverified" as const,
-  why: "снят 03-04.08 на выборке из кэпнутых снимков: 11 из 12 наблюдений исчезли за часы (сверка двух прогонов). Вывод по критерию верен, но невоспроизводим — T3 остаётся fail-closed до журнального подтверждения",
-};
+/**
+ * ПРЕЖНИЕ ВЕРДИКТЫ — В СПИСКЕ, А НЕ ЗАТЁРТЫЕ. История снятого вывода это тоже наблюдение: каждый из них
+ * был верен по своему критерию и каждый пал не от новых данных, а от найденного дефекта ИНСТРУМЕНТА.
+ * Список печатается целиком — иначе «третий раз опровергли» неотличимо от «один раз опровергли».
+ */
+export interface ShcPriorVerdict { verdict: ShcVerdict; status: "unverified"; why: string }
+export const PRIOR_VERDICTS: ShcPriorVerdict[] = [
+  {
+    verdict: "ОПРОВЕРГНУТА", status: "unverified",
+    why: "снят 03-04.08 на выборке из кэпнутых снимков: 11 из 12 наблюдений исчезли за часы (сверка двух прогонов). Вывод по критерию верен, но невоспроизводим — T3 остаётся fail-closed до журнального подтверждения",
+  },
+  {
+    verdict: "ОПРОВЕРГНУТА", status: "unverified",
+    why: "снят 06.08 по журналу (28 расхождений на 91 наблюдении при чистом контроле 302/302). Вывод опирался на ДОПУЩЕНИЕ «цена всегда про первого в подписи» — а ячейка «первый не фаворит, разница 2 сета» (n=22) показала, что там ориентация переворачивается: обе гипотезы промахнулись по 13, зеркальный прогноз угадал все 13. Наблюдения без ПРОЧИТАННОЙ стороны к вердикту больше не допускаются",
+  },
+];
+/** @deprecated читать `PRIOR_VERDICTS`; оставлено, пока внешние потребители не переехали. */
+export const PRIOR_VERDICT = PRIOR_VERDICTS[0]!;
 
 /** Версия набора гипотез. Строка журнала судится ТОЙ версией, при которой записана: пере-считывать
  *  предсказания сегодняшним кодом значило бы судить старое наблюдение новым правилом. */
@@ -126,6 +153,11 @@ export interface ShcRow {
   priceLagMin: number | null;
   /** Матч сыгран до конца (кто-то набрал победные сеты)? Ретайр ⇒ ±1.5 void ⇒ судить нельзя. */
   completed: boolean;
+  /** [T3-корень] Цена относится к ПЕРВОМУ в подписи? ПРОЧИТАНО из имени исхода (markets.outcome_first).
+   *  null — сторона не прочитана: наблюдение к вердикту не допускается (догадка тут и была корнем саги). */
+  sideFromToken: boolean | null;
+  /** Провенанс стороны: имя исхода / «имени нет» / «имя не сопоставилось» — три РАЗНЫХ факта. */
+  sideSrc: string;
   /** Предсказание АЛЬТЕРНАТИВЫ («−1.5 всегда у первого») и её исход. */
   altPredictedFirstWins: boolean; altOutcome: ShcOutcome;
   /** Гипотезы предсказывают РАЗНОЕ — только такие матчи что-то доказывают об их различии. */
@@ -149,13 +181,21 @@ export interface ShcReport {
   undecidedNoToken: number; undecidedStalePrice: number; undecidedMedianLagMin: number | null;
   /** [T3-фикс] Порог допуска и отказы: сужение выборки обязано быть видимым, а не молчаливым. */
   maxPriceLagMin: number;
-  refusedLegacyNoLag: number; refusedStalePrice: number; refusedIncomplete: number;
+  refusedLegacyNoLag: number; refusedStalePrice: number; refusedIncomplete: number; refusedSideUnknown: number;
+  /** [T3-корень] ПОКРЫТИЕ ОРИЕНТАЦИИ. Отдельный блок нужен потому, что «колонки ещё нет» и «имя пришло,
+   *  но не сопоставилось» лечатся ПРОТИВОПОЛОЖНО: первое проходит само с новыми матчами, второе значит,
+   *  что провайдер не даёт имён вовсе и механизм не заработает НИКОГДА. Без этого различения молчащий
+   *  ноль покрытия неотличим от самозапечатывающегося гейта — четвёртый раз за неделю. */
+  orientation: {
+    known: number; noName: number; unreadable: number;
+    journalKnown: number; journalUnknown: number; note: string;
+  };
   /** Незавершённые (ретайр) исключены из суждения — ±1.5 там void. Число печатается, а не прячется. */
   droppedIncomplete: number;
   /** Сколько наблюдений в ЖУРНАЛЕ — знаменатель вердикта, живущий дольше снимков. */
   journalRows: number;
-  /** ПРЕЖНИЙ вердикт, снятый на испарившейся выборке: история не стирается, но помечена. */
-  prior: { verdict: ShcVerdict; status: "unverified"; why: string };
+  /** ПРЕЖНИЕ вердикты, снятые дефектами инструмента: история не стирается, но помечена. */
+  priors: ShcPriorVerdict[];
   /** АЛЬТЕРНАТИВА, порождённая данными: считается только на РАЗЛИЧАЮЩИХ матчах ПОСЛЕ фиксации. */
   alt: {
     registeredAt: string; minDiscriminating: number;
@@ -176,12 +216,67 @@ function priceLag(snapshotAt: string | null | undefined, lastSeenMs: number): nu
   return Math.max(0, Math.round((lastSeenMs - t) / 60_000));
 }
 
+/**
+ * [T3-корень 06.08] СТОРОНА ЧИТАЕТСЯ ИЗ ИМЕНИ ИСХОДА, А НЕ ВЫВОДИТСЯ.
+ *
+ * `outcome_first` — имя исхода, чью вероятность несёт цена (outcomes[0] у Polymarket). Для «A vs B Set
+ * Handicap +/-1.5» это единственный факт, который вообще говорит, ЧЬЮ сторону мы видим: подпись называет
+ * обоих и не различает их. Возвращает true, если цена относится к ПЕРВОМУ игроку в подписи.
+ *
+ * null — имя не сопоставилось (нет колонки у старых строк, или провайдер дал не-именной исход). Это
+ * ОТСУТСТВИЕ ФАКТА: наблюдение к вердикту не допускается. Догадка здесь и была источником всей саги —
+ * три глобальных правила подряд объясняли по три четверти выборки и врали на остатке.
+ */
+export function priceSideIsLabelFirst(outcomeFirst: string | null | undefined, p1: string, p2: string): boolean | null {
+  const o = normName(String(outcomeFirst ?? ""));
+  if (!o) return null;
+  const a = normName(p1), b = normName(p2);
+  if (!a || !b || a === b) return null;
+  const hitA = o.includes(a) || a.includes(o);
+  const hitB = o.includes(b) || b.includes(o);
+  if (hitA === hitB) return null;                 // ни одного или оба — различить нечем
+  return hitA;
+}
+
+/**
+ * Сторона наблюдения: цена рынка относится к ПЕРВОМУ В ПОДПИСИ?
+ *
+ * `priceSideIsLabelFirst` отвечает про p1/p2 скаута, а подпись может называть их в обратном порядке —
+ * поэтому ответ ещё разворачивается через `labelFirstIsP1`. Три исхода различаются НАЗВАНИЕМ:
+ *   • имя есть и сопоставилось — сторона прочитана;
+ *   • имени нет вовсе (строка старше колонки) — пройдёт само с новыми матчами;
+ *   • имя есть, но не сопоставилось («Yes»/«No», иная транслитерация) — механизм НЕ заработает сам,
+ *     и это обязано быть видно отдельным числом, а не растворяться в общем «не прочитано».
+ */
+function orientationOf(
+  outcomeFirst: string | null | undefined, players: { p1: string; p2: string }, labelFirstIsP1: boolean,
+): { side: boolean | null; src: string } {
+  const raw = String(outcomeFirst ?? "").trim();
+  if (!raw) return { side: null, src: "side_absent:имени исхода нет" };
+  const isP1 = priceSideIsLabelFirst(raw, players.p1, players.p2);
+  if (isP1 == null) return { side: null, src: `side_unreadable:${raw}` };
+  return { side: isP1 === labelFirstIsP1, src: `outcome_first:${raw}` };
+}
+
 /** Разрешился ли рынок и в какую сторону. Середина — ЧЕСТНОЕ «нет исхода», а не округление к ближнему. */
 function resolvedFirstWins(price: number | null): boolean | null {
   if (price == null) return null;
   if (price >= SHC_RESOLVED_HI) return true;
   if (price <= SHC_RESOLVED_LO) return false;
   return null;
+}
+
+/**
+ * Развернуть исход, прочитанный ПО ЦЕНЕ (то есть про outcomes[0]), в исход ПЕРВОГО В ПОДПИСИ.
+ *
+ * Рынок бинарен и ничья по ±1.5 в сетах невозможна — значит «второй покрыл» это ровно «первый не покрыл»,
+ * и разворот законен без знания, у кого из них −1.5. Сторона неизвестна ⇒ РАЗВОРАЧИВАТЬ НЕЧЕМ: строка
+ * остаётся с прежним, ДОПУЩЕННЫМ чтением и помечается недопустимой — это честнее, чем ронять её в
+ * «нет исхода», где она смешалась бы с рынками, которые действительно не разрешились.
+ */
+function orient(outcomeFirstWins: boolean | null, sideIsLabelFirst: boolean | null): boolean | null {
+  if (outcomeFirstWins == null) return null;
+  return sideIsLabelFirst === false ? !outcomeFirstWins : outcomeFirstWins;
 }
 
 /**
@@ -241,12 +336,16 @@ export function observeFromSnapshots(db: Database): {
         const firstSets = ml.firstIsP1 ? last.sets_p1 : last.sets_p2;
         const secondSets = ml.firstIsP1 ? last.sets_p2 : last.sets_p1;
         const predicted = firstSets > secondSets;
-        const observed = resolvedFirstWins(price);
+        // [T3-корень] Ориентация читается и в КОНТРОЛЕ — иначе контроль подтверждал бы инструмент, не
+        // проверив то самое звено, ради которого он заведён («ориентация подписи читается верно»).
+        const mlSide = orientationOf(mlMarket?.outcome_first, players, ml.firstIsP1);
+        const observed = orient(resolvedFirstWins(price), mlSide.side);
         rows.push({
           matchId: m.id, players: `${m.home} — ${m.away}`, label: ml.label, group: "контроль",
           setsFirst: firstSets, setsSecond: secondSets, favIsLabelFirst: ml.firstIsP1 === favIsScoutP1,
           predictedFirstWins: predicted, lastPriceCents: price,
           hasToken: !!mlMarket?.external_ref,
+          sideFromToken: mlSide.side, sideSrc: mlSide.src,
           priceLagMin: priceLag(mlTerm ? mlTerm.at : mlMarket?.snapshot_at, lastSeenMs),
           scoreSrc: `scout_snapshot@${lastAt}`,
           priceSrc: mlTerm ? `terminal_book@${mlTerm.at}` : `markets@${mlMarket?.snapshot_at ?? "—"}`,
@@ -289,13 +388,19 @@ export function observeFromSnapshots(db: Database): {
         // `markets` и честно несём его отставание в priceLagMin, где допуск journal'а его и отсеет.
         const term = terminalBookMid(db, m.id, mk.label);
         const price = term ? term.cents : (mk.price == null ? null : Number(mk.price));
-        const observed = resolvedFirstWins(price);
+        // [T3-корень 06.08] СТОРОНА ЧИТАЕТСЯ ИЗ ИМЕНИ ИСХОДА, А НЕ ВЫВОДИТСЯ. Цена всегда относится к
+        // outcomes[0]; чей это игрок — говорит только `outcome_first`. Прежде здесь стояло молчаливое
+        // допущение «outcomes[0] = первый в подписи», и именно оно давало ячейку n=22, где промахивались
+        // ОБЕ гипотезы, а зеркальный прогноз угадывал все 13.
+        const side = orientationOf(mk.outcome_first, players, first === true);
+        const observed = orient(resolvedFirstWins(price), side.side);
         const altOutcome: ShcOutcome = observed == null ? "нет исхода" : observed === altPredicted ? "совпало" : "РАСХОЖДЕНИЕ";
         rows.push({
           matchId: m.id, players: `${m.home} — ${m.away}`, label: mk.label, group: "тест",
           setsFirst: firstSets, setsSecond: secondSets, favIsLabelFirst,
           predictedFirstWins: predicted, lastPriceCents: price,
           hasToken: !!mk.external_ref,
+          sideFromToken: side.side, sideSrc: side.src,
           priceLagMin: priceLag(term ? term.at : mk.snapshot_at, lastSeenMs),
           scoreSrc: `scout_snapshot@${lastAt}`,
           priceSrc: term ? `terminal_book@${term.at}` : `markets@${mk.snapshot_at ?? "—"}`,
@@ -306,7 +411,7 @@ export function observeFromSnapshots(db: Database): {
           outcome: observed == null ? "нет исхода" : observed === predicted ? "совпало" : "РАСХОЖДЕНИЕ",
           note: observed == null
             ? `цена ${price ?? "—"}¢ между ${SHC_RESOLVED_LO} и ${SHC_RESOLVED_HI} — исход НЕ прочитан (не судим, а не «наверное да»)`
-            : `счёт ${firstSets}:${secondSets}, −1.5 у ${minusOnFirst ? "первого" : "второго"} в подписи (первый ${favIsLabelFirst ? "И ЕСТЬ" : "НЕ"} фаворит) ⇒ ждём ${predicted ? "покрытие" : "непокрытие"}; цена ${price}¢ ⇒ ${observed ? "покрыл" : "не покрыл"}`,
+            : `счёт ${firstSets}:${secondSets}, −1.5 у ${minusOnFirst ? "первого" : "второго"} в подписи (первый ${favIsLabelFirst ? "И ЕСТЬ" : "НЕ"} фаворит) ⇒ ждём ${predicted ? "покрытие" : "непокрытие"}; цена ${price}¢ про ${side.side == null ? "НЕИЗВЕСТНО КОГО" : side.side ? "первого" : "ВТОРОГО"} (${side.src}) ⇒ ${observed ? "покрыл" : "не покрыл"}`,
         });
       }
     }
@@ -326,11 +431,24 @@ export function observeFromSnapshots(db: Database): {
  * 05.08 это опроверг — двое из четырёх контрольных расхождений были ровно `completed:false`. Условие
  * распространено на ОБЕ группы; контроль худеет, но перестаёт врать.
  */
-export function admissible(r: ShcRow): boolean {
-  if (r.priceLagMin == null) return false;
-  if (r.priceLagMin > SHC_MAX_PRICE_LAG_MIN) return false;
-  return r.completed;
+export type ShcRefusal = "lag_unknown" | "stale_price" | "incomplete" | "side_unknown";
+/** Первая непройденная причина, а не набор: так счётчики отказов НЕ пересекаются и сумма сходится. */
+export function refusalCause(r: ShcRow): ShcRefusal | null {
+  if (r.priceLagMin == null) return "lag_unknown";
+  if (r.priceLagMin > SHC_MAX_PRICE_LAG_MIN) return "stale_price";
+  if (!r.completed) return "incomplete";
+  // [T3-корень 06.08] ЧЕТВЁРТОЕ УСЛОВИЕ — СТОРОНА ПРОЧИТАНА, А НЕ ДОПУЩЕНА.
+  //
+  // Прежде наблюдение молча считало, что цена относится к первому в подписи. Замер 06.08 (n=91) это
+  // допущение опроверг: в ячейке «первый не фаворит, разница 2 сета» (n=22) промахнулись ОБЕ гипотезы
+  // по 13 строк, а ЗЕРКАЛЬНЫЙ прогноз угадал все 13 — подпись ориентации не несёт, её несёт токен.
+  //
+  // Это ровно тот же ход, что и с priceLagMin: невозможность доказать сторону не есть доказательство
+  // стороны. Прежние строки журнала остаются (append-only), но вердикт не двигают.
+  if (r.sideFromToken == null) return "side_unknown";
+  return null;
 }
+export function admissible(r: ShcRow): boolean { return refusalCause(r) == null; }
 
 /** Строка ЖУРНАЛА → строка вердикта. Предсказания НЕ пересчитываются: они заморожены при записи. */
 function journalRows(db: Database): ShcRow[] {
@@ -344,6 +462,7 @@ function journalRows(db: Database): ShcRow[] {
       setsFirst: o.sets_first, setsSecond: o.sets_second, favIsLabelFirst: !!o.fav_is_label_first,
       predictedFirstWins: !!o.pred_favourite, lastPriceCents: o.price_cents,
       hasToken: true, priceLagMin: o.price_lag_min ?? null, completed: !!o.completed,
+      sideFromToken: o.side_from_token == null ? null : !!o.side_from_token, sideSrc: o.side_src ?? "side_absent:строка старше колонки",
       altPredictedFirstWins: !!o.pred_label_first, altOutcome, discriminating: !!o.discriminating,
       observedFirstWins: obs, outcome,
       note: `журнал ${o.hypo_version}: счёт ${o.sets_first}:${o.sets_second}, цена ${o.price_cents}¢ · ${o.score_src} · ${o.price_src} · ${o.fav_src}`,
@@ -366,9 +485,11 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
   // невозможность доказать одновременность это не доказательство одновременности.
   const decided = (g: ShcRow["group"]) => rows.filter((r) => r.group === g && r.outcome !== "нет исхода" && admissible(r));
   const notAdmissible = rows.filter((r) => r.outcome !== "нет исхода" && !admissible(r));
-  const legacyNoLag = notAdmissible.filter((r) => r.priceLagMin == null).length;
-  const staleAdmission = notAdmissible.filter((r) => r.priceLagMin != null && r.priceLagMin > SHC_MAX_PRICE_LAG_MIN).length;
-  const incompleteAdmission = notAdmissible.filter((r) => !r.completed && r.priceLagMin != null && r.priceLagMin <= SHC_MAX_PRICE_LAG_MIN).length;
+  const byCause = (c: ShcRefusal) => notAdmissible.filter((r) => refusalCause(r) === c).length;
+  const legacyNoLag = byCause("lag_unknown");
+  const staleAdmission = byCause("stale_price");
+  const incompleteAdmission = byCause("incomplete");
+  const sideUnknownAdmission = byCause("side_unknown");
   const control = decided("контроль"), test = decided("тест");
   const controlMismatch = control.filter((r) => r.outcome === "РАСХОЖДЕНИЕ").length;
   const testMismatch = test.filter((r) => r.outcome === "РАСХОЖДЕНИЕ").length;
@@ -438,16 +559,36 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
 
   // [T3-фикс] ОТКАЗЫ ДОПУСКА ПЕЧАТАЮТСЯ ВСЕГДА. Сужение выборки, о котором не сказано, — это та же
   // подмена, что и вердикт по несинхронным фактам: читатель обязан видеть, сколько строк не отвечало.
-  const refused = legacyNoLag + staleAdmission + incompleteAdmission;
+  const refused = legacyNoLag + staleAdmission + incompleteAdmission + sideUnknownAdmission;
   const admitNote = refused
     ? ` · к вердикту НЕ допущено ${refused}: разрыв «цена старше счёта» не измерен ${legacyNoLag} (строки старше колонки — доказать одновременность нечем),`
-      + ` разрыв больше ${SHC_MAX_PRICE_LAG_MIN}мин ${staleAdmission}, матч не доигран ${incompleteAdmission}`
+      + ` разрыв больше ${SHC_MAX_PRICE_LAG_MIN}мин ${staleAdmission}, матч не доигран ${incompleteAdmission},`
+      + ` сторона НЕ ПРОЧИТАНА ${sideUnknownAdmission} (ориентация была допущением, а не фактом)`
     : "";
+
+  // ── [T3-корень] ПОКРЫТИЕ ОРИЕНТАЦИИ. Громкий ноль обязателен: механизм, который «просто ещё не набрал»,
+  // и механизм, который не заработает НИКОГДА, выглядят одинаково ровно до тех пор, пока их не разделить.
+  const orientKnown = live.rows.filter((r) => r.sideFromToken != null).length;
+  const orientAbsent = live.rows.filter((r) => r.sideSrc.startsWith("side_absent")).length;
+  const orientUnreadable = live.rows.filter((r) => r.sideSrc.startsWith("side_unreadable")).length;
+  const jKnown = rows.filter((r) => r.sideFromToken != null).length;
+  const jUnknown = rows.length - jKnown;
+  const orientation = {
+    known: orientKnown, noName: orientAbsent, unreadable: orientUnreadable,
+    journalKnown: jKnown, journalUnknown: jUnknown,
+    note: `ориентация из токена: в журнале прочитана у ${jKnown} из ${rows.length} строк`
+      + ` · по текущим снимкам прочитана ${orientKnown}, имени исхода нет ${orientAbsent}, имя не сопоставилось ${orientUnreadable}`
+      + (orientKnown === 0 && orientUnreadable > 0
+        ? `. ИМЕНА ПРИХОДЯТ, НО НЕ СОПОСТАВЛЯЮТСЯ — само это не пройдёт: механизм требует разбора, а не ожидания`
+        : orientKnown === 0
+          ? `. Колонка заведена 06.08 и заполняется только на ЖИВЫХ рынках — покрытие растёт с новыми матчами, уже завершённым его взять негде`
+          : ""),
+  };
 
   let verdict: ShcVerdict, note: string;
   if (control.length < SHC_CONTROL_MIN) {
     verdict = "НЕ СОЗРЕЛО";
-    note = `журнал: контроль не набран — манилайнов с прочитанным исходом ${control.length} при нужных ${SHC_CONTROL_MIN}. Инструмент не проверен, значит и гипотезу проверять НЕЧЕМ.${whyStuck}${admitNote}`;
+    note = `журнал: контроль не набран — манилайнов с прочитанным исходом ${control.length} при нужных ${SHC_CONTROL_MIN}. Инструмент не проверен, значит и гипотезу проверять НЕЧЕМ.${whyStuck}${admitNote} · ${orientation.note}`;
   } else if (controlMismatch > 0) {
     verdict = "МЕТОД НЕВЕРЕН";
     note = `контроль РАЗОШЁЛСЯ: ${controlMismatch} из ${control.length} манилайнов противоречат собственному счёту. Сломано одно из двух звеньев самой проверки — цена→исход или ориентация подписи (несинхронные наблюдения уже отсеяны допуском, поэтому объяснить разрыв разной свежестью нельзя). Вердикта о конвенции НЕТ, блок остаётся${admitNote}`;
@@ -456,7 +597,7 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
     note = `конвенция ОПРОВЕРГНУТА по ЖУРНАЛУ: ${testMismatch} расхождений на ${testMatches} матчах при чистом контроле (${control.length}/${control.length}). Правило «фаворит несёт −1.5» неверно — блок остаётся, флаг НЕ поднимается${admitNote}`;
   } else if (testMatches < SHC_TEST_MIN_MATCHES) {
     verdict = "НЕ СОЗРЕЛО";
-    note = `журнал: контроль чист (${control.length}/${control.length}), расхождений нет, но матчей теста ${testMatches} при нужных ${SHC_TEST_MIN_MATCHES} — ОТСУТСТВИЕ ЗАМЕРА, а не разрешение.${whyStuck}${admitNote}`;
+    note = `журнал: контроль чист (${control.length}/${control.length}), расхождений нет, но матчей теста ${testMatches} при нужных ${SHC_TEST_MIN_MATCHES} — ОТСУТСТВИЕ ЗАМЕРА, а не разрешение.${whyStuck}${admitNote} · ${orientation.note}`;
   } else {
     verdict = "ПОДТВЕРЖДЕНА";
     note = `по ЖУРНАЛУ: контроль чист (${control.length}/${control.length}), тест чист — ${test.length} рынков на ${testMatches} матчах, ноль расхождений, ${pWithUnit(Math.pow(0.5, testMatches), testMatches, "матчах")}. Основание для снятия блока есть; флаг поднимает ВЛАДЕЛЕЦ, не отчёт${admitNote}`;
@@ -470,7 +611,8 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
     droppedIncomplete, alt, verdict, note,
     maxPriceLagMin: SHC_MAX_PRICE_LAG_MIN,
     refusedLegacyNoLag: legacyNoLag, refusedStalePrice: staleAdmission, refusedIncomplete: incompleteAdmission,
-    journalRows: rows.length, prior: PRIOR_VERDICT,
+    refusedSideUnknown: sideUnknownAdmission, orientation,
+    journalRows: rows.length, priors: PRIOR_VERDICTS,
   };
 }
 
@@ -481,5 +623,6 @@ export function setHandicapConventionLine(r: ShcReport): string {
     + ` · тест ${r.testChecked - r.testMismatch}/${r.testChecked} на ${r.testMatches} матчах`
     + ` · ${r.verdict}`
     + ` · альт «−1.5 у первого»: ${r.alt.discriminatingSince}/${r.alt.minDiscriminating} различающих после ${r.alt.registeredAt} → ${r.alt.verdict}`
-    + ` · журнал ${r.journalRows} набл. · прежний вердикт ${r.prior.verdict} помечен ${r.prior.status}`;
+    + ` · сторона из токена ${r.orientation.journalKnown}/${r.journalRows} (имени нет ${r.orientation.noName}, не сопоставилось ${r.orientation.unreadable})`
+    + ` · журнал ${r.journalRows} набл. · прежних вердиктов помечено unverified: ${r.priors.length}`;
 }

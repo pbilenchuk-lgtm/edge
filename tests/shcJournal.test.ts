@@ -26,7 +26,7 @@ function world() {
   R.upsertCompetition(db, { id: "atp", sport_id: "tennis", name: "ATP", budget: 1000, external_league: null, created_at: "2026-07-01" } as never);
   return db;
 }
-function played(db: ReturnType<typeof world>, i: number, o: { favP1: boolean; setsP1: number; setsP2: number; mlPrice: number; hcapPrice?: number }) {
+function played(db: ReturnType<typeof world>, i: number, o: { favP1: boolean; setsP1: number; setsP2: number; mlPrice: number; hcapPrice?: number; outcomeFirst?: string | null }) {
   const id = `m${i}`;
   const day = new Date(Date.UTC(2026, 6, 1) + i * 86_400_000).toISOString().slice(0, 10);
   R.insertMatch(db, { id, competition_id: "atp", home: P1, away: P2, state: "finished", lineup_out: false, kickoff_at: `${day}T10:00:00Z`, minute: null, score_home: null, score_away: null, final_score: null, kickoff_time: null, end_time: null, duration: null, end_note: null, external_ref: id } as never);
@@ -38,8 +38,10 @@ function played(db: ReturnType<typeof world>, i: number, o: { favP1: boolean; se
   });
   snap(`${day}T10:00:00Z`, o.favP1 ? 70 : 30, 0, 0);
   snap(`${day}T13:00:00Z`, null, o.setsP1, o.setsP2);
-  R.insertMarket(db, { id: `mk${i}ml`, match_id: id, label: ML, price: o.mlPrice, ai_prob: null, liquidity: 3000, external_ref: null, snapshot_at: `${day}T14:00:00Z`, is_closing: false } as never);
-  if (o.hcapPrice != null) R.insertMarket(db, { id: `mk${i}h`, match_id: id, label: HCAP, price: o.hcapPrice, ai_prob: null, liquidity: 3000, external_ref: null, snapshot_at: `${day}T14:00:00Z`, is_closing: false } as never);
+  // `outcome_first` — имя исхода, чью вероятность несёт цена. Здесь это ПЕРВЫЙ в подписи: фикстуры
+  // моделируют «нормальный» листинг, а переворот проверяется отдельным тестом.
+  R.insertMarket(db, { id: `mk${i}ml`, match_id: id, label: ML, price: o.mlPrice, ai_prob: null, liquidity: 3000, external_ref: null, outcome_first: o.outcomeFirst ?? P1, outcome_second: P2, snapshot_at: `${day}T14:00:00Z`, is_closing: false } as never);
+  if (o.hcapPrice != null) R.insertMarket(db, { id: `mk${i}h`, match_id: id, label: HCAP, price: o.hcapPrice, ai_prob: null, liquidity: 3000, external_ref: null, outcome_first: o.outcomeFirst ?? P1, outcome_second: P2, snapshot_at: `${day}T14:00:00Z`, is_closing: false } as never);
 }
 
 test("ВЕРДИКТ ПЕРЕЖИВАЕТ ИСТОЧНИК: снимки стёрты — журнал держит", () => {
@@ -109,12 +111,13 @@ test("не разрешившееся и не доигранное в журна
   assert.match(rec.note, /заморожено новых/);
 });
 
-test("ПРЕЖНИЙ вердикт помечен unverified — невоспроизводимый вывод не держит решение о деньгах", () => {
+test("ПРЕЖНИЕ вердикты помечены unverified — невоспроизводимый вывод не держит решение о деньгах", () => {
   const db = world();
   const r = buildSetHandicapConvention(db);
-  assert.equal(r.prior.verdict, "ОПРОВЕРГНУТА");
-  assert.equal(r.prior.status, "unverified");
-  assert.match(r.prior.why, /11 из 12 наблюдений исчезли/);
+  assert.equal(r.priors.length, 2, "их уже два, и оба пали от дефекта ИНСТРУМЕНТА, а не от новых данных");
+  assert.ok(r.priors.every((p) => p.status === "unverified" && p.verdict === "ОПРОВЕРГНУТА"));
+  assert.match(r.priors[0]!.why, /11 из 12 наблюдений исчезли/);
+  assert.match(r.priors[1]!.why, /ДОПУЩЕНИЕ «цена всегда про первого в подписи»/);
   assert.equal(PRIOR_VERDICT.status, "unverified");
   assert.equal(r.verdict, "НЕ СОЗРЕЛО", "пустой журнал = отсутствие замера, T3 остаётся fail-closed");
 });

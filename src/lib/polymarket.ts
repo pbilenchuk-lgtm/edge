@@ -675,6 +675,12 @@ export interface MarketSnapshot {
    *  100 − bestBid (buying No = selling Yes at its bid). Null when Gamma gave no book — caller falls
    *  back to `price` (the mid) and flags it. `spreadCents` is the market's bid/ask spread. */
   askCents: number | null; spreadCents: number | null;
+  /** [T3-корень] ИМЯ ИСХОДА, чью вероятность несёт `price` (outcomes[0]), и имя противоположного.
+   *  Сторона ±1.5 читается ОТСЮДА, а не выводится из подписи и фаворита: для «A vs B Set Handicap
+   *  +/-1.5» подпись называет обоих и не различает их, а порядок outcomes — факт Polymarket, а не
+   *  наша догадка. Null — провайдер имён не дал: это ОТСУТСТВИЕ ФАКТА, и потребитель обязан читать
+   *  его как «сторона неизвестна», а не как «первый в подписи». */
+  outcomeFirst?: string | null; outcomeSecond?: string | null;
 }
 
 export function eventToMarketSnapshots(event: PolyEvent, snapshotAt: string): MarketSnapshot[] {
@@ -719,7 +725,7 @@ export function matchMarketSnapshots(
         const key = side.label.toLowerCase().trim();
         if (seen.has(key)) continue;
         seen.add(key);
-        rows.push({ label: side.label, price: side.price, external_ref: side.token, tokenSecond: side.token2, liquidity: m.liquidity, liq: Number(m.liquidity ?? 0) || 0, askCents: side.askCents, spreadCents: side.spreadCents });
+        rows.push({ label: side.label, price: side.price, external_ref: side.token, tokenSecond: side.token2, liquidity: m.liquidity, liq: Number(m.liquidity ?? 0) || 0, askCents: side.askCents, spreadCents: side.spreadCents, outcomeFirst: side.outcomeFirst, outcomeSecond: side.outcomeSecond });
       }
     }
   }
@@ -735,7 +741,7 @@ export function matchMarketSnapshots(
  * team isn't hidden. Spreads/moneylines already name their side in the title
  * (and Polymarket lists each side separately), so they stay single.
  */
-function marketSides(m: PolyMarketRow): { label: string; price: number | null; token: string | null; token2: string | null; askCents: number | null; spreadCents: number | null }[] {
+function marketSides(m: PolyMarketRow): { label: string; price: number | null; token: string | null; token2: string | null; askCents: number | null; spreadCents: number | null; outcomeFirst: string | null; outcomeSecond: string | null }[] {
   const o = m.outcomes;
   // Executable BUY ask per outcome index: outcome[0] = Gamma bestAsk; outcome[1] (complement) = 100 − bestBid
   // (buying No = selling Yes at its bid). Same book, mirrored — spread is shared. Null → no book → mid fallback.
@@ -753,11 +759,23 @@ function marketSides(m: PolyMarketRow): { label: string; price: number | null; t
     // (-1.5)") is already one side — its opposite is a separate market — so keep
     // it single. An "O/U 2.5" label (side lives only in the outcomes) expands.
     const directionalLabel = /\bover\b|\bunder\b|[+-]\s*\d/i.test(m.label);
-    if (!namesOutcome && !directionalLabel) return [0, 1].map((i) => ({ label: sideLabel(m.label, o[i], o[1 - i]), price: m.prices[i]!, token: m.tokenIds[i] ?? null, token2: m.tokenIds[1 - i] ?? null, askCents: askFor(i), spreadCents: m.spreadCents }));
+    if (!namesOutcome && !directionalLabel) return [0, 1].map((i) => ({ label: sideLabel(m.label, o[i], o[1 - i]), price: m.prices[i]!, token: m.tokenIds[i] ?? null, token2: m.tokenIds[1 - i] ?? null, askCents: askFor(i), spreadCents: m.spreadCents, outcomeFirst: o[i] ?? null, outcomeSecond: o[1 - i] ?? null }));
   }
   // Single side (spread/moneyline/one priced outcome): `token` backs the shown price (outcomes[0]);
   // `token2` carries the complementary outcome so a 2-outcome "A vs B" moneyline still knows BOTH sides.
-  return [{ label: clarifyLabel(m.label, o), price: m.priceCents, token: m.tokenIds[0] ?? null, token2: m.tokenIds[1] ?? null, askCents: m.bestAskCents, spreadCents: m.spreadCents }];
+  // [T3-корень 06.08] ИМЯ ИСХОДА СОХРАНЯЕТСЯ ВСЕГДА, даже когда подпись его «уже содержит».
+  //
+  // Именно здесь терялась ориентация ±1.5. Выше стоит эвристика `namesOutcome`: если подпись упоминает
+  // исход, значит она уже называет сторону, и рынок оставляют одной строкой. Для «A vs B Set Handicap
+  // +/-1.5» подпись упоминает ОБОИХ — эвристика срабатывает, `clarifyLabel` возвращает подпись без
+  // изменений (её условие `label.includes(outcomes[0])` тоже истинно), и знание о том, чью сторону несёт
+  // цена, ВЫБРАСЫВАЕТСЯ. Дальше вся машинерия пыталась вывести его обратно из имени и фаворита — и не
+  // могла: замер 06.08 показал, что в ячейке «первый в подписи не фаворит, разница 2 сета» (n=22) ни
+  // одно из трёх правил не работает, потому что outcomes[0] это просто порядок листинга Polymarket.
+  //
+  // Подпись НЕ меняется: она — ключ идентичности на ставках, дедупе и сеттле. Имя исхода приходит
+  // СОСЕДНИМ полем, и сторона читается, а не угадывается.
+  return [{ label: clarifyLabel(m.label, o), price: m.priceCents, token: m.tokenIds[0] ?? null, token2: m.tokenIds[1] ?? null, askCents: m.bestAskCents, spreadCents: m.spreadCents, outcomeFirst: o[0] ?? null, outcomeSecond: o[1] ?? null }];
 }
 
 /** Clear label for ONE side of a 2-way market. Over/Under bakes the side into

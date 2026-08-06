@@ -614,9 +614,9 @@ export function failStaleAnalysisJobs(db: Database, error: string, at: string): 
 // ---------- markets ----------
 export function insertMarket(db: Database, m: Market): void {
   db.prepare(
-    `INSERT INTO markets(id,match_id,label,price,ai_prob,liquidity,external_ref,token_second,snapshot_at,is_closing,ask_cents,spread_cents)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-  ).run(m.id, m.match_id, m.label, m.price, m.ai_prob, m.liquidity, m.external_ref, m.token_second ?? null, m.snapshot_at, m.is_closing ? 1 : 0, m.ask_cents ?? null, m.spread_cents ?? null);
+    `INSERT INTO markets(id,match_id,label,price,ai_prob,liquidity,external_ref,token_second,outcome_first,outcome_second,snapshot_at,is_closing,ask_cents,spread_cents)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(m.id, m.match_id, m.label, m.price, m.ai_prob, m.liquidity, m.external_ref, m.token_second ?? null, m.outcome_first ?? null, m.outcome_second ?? null, m.snapshot_at, m.is_closing ? 1 : 0, m.ask_cents ?? null, m.spread_cents ?? null);
 }
 /** Remove a market entirely (all snapshot rows + its kickoff-open row) from a match
  *  — used to drop a dust/orphan listing the importer no longer wants to surface.
@@ -1574,6 +1574,8 @@ export interface ShcObservationRow {
   kickoff_at: string | null;
   sets_first: number; sets_second: number; completed: number; fav_is_label_first: number;
   price_cents: number; price_lag_min?: number | null; observed_first_covers: number;
+  /** [T3-корень] Цена относится к первому в подписи? ПРОЧИТАНО из имени исхода. NULL = не прочитано. */
+  side_from_token?: number | null; side_src?: string | null;
   pred_favourite: number; pred_label_first: number; discriminating: number; hypo_version: string;
   score_src: string; price_src: string; fav_src: string; created_at?: string;
 }
@@ -1581,11 +1583,13 @@ export interface ShcObservationRow {
 export function insertShcObservation(db: Database, r: ShcObservationRow): boolean {
   const res = db.prepare(
     `INSERT OR IGNORE INTO shc_observations(id,kind,match_id,label,players,kickoff_at,
-       sets_first,sets_second,completed,fav_is_label_first,price_cents,price_lag_min,observed_first_covers,
+       sets_first,sets_second,completed,fav_is_label_first,price_cents,price_lag_min,
+       side_from_token,side_src,observed_first_covers,
        pred_favourite,pred_label_first,discriminating,hypo_version,score_src,price_src,fav_src,created_at)
-     VALUES(?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?)`,
+     VALUES(?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?, ?,?,?,?,?,?,?,?)`,
   ).run(r.id ?? uid(), r.kind, r.match_id, r.label, r.players, r.kickoff_at,
-    r.sets_first, r.sets_second, r.completed, r.fav_is_label_first, r.price_cents, r.price_lag_min ?? null, r.observed_first_covers,
+    r.sets_first, r.sets_second, r.completed, r.fav_is_label_first, r.price_cents, r.price_lag_min ?? null,
+    r.side_from_token ?? null, r.side_src ?? null, r.observed_first_covers,
     r.pred_favourite, r.pred_label_first, r.discriminating, r.hypo_version,
     r.score_src, r.price_src, r.fav_src, r.created_at ?? nowIso());
   return (res.changes ?? 0) > 0;
