@@ -40,12 +40,12 @@ const H = 3_600_000;
 
 interface Row { id: string; competition_id: string; kickoff_at: string | null; state: string }
 
-export function sweepAbandonedMatches(db: Database, nowMs = Date.now()): { abandoned: number; fixed: number; voided: number; deferredBets: number } {
+export function sweepAbandonedMatches(db: Database, nowMs = Date.now()): { abandoned: number; fixed: number; voided: number; deferredBets: number; handedToPm: number } {
   const sportOf = new Map(R.listCompetitions(db).map((c) => [c.id, c.sport_id]));
   const rows = db.prepare(`SELECT id, competition_id, kickoff_at, state FROM matches WHERE state IN ('upcoming','lineup','live')`).all() as Row[];
   const nowIso = new Date(nowMs).toISOString();
   const lastSnapMs = (id: string): number => { const r = db.prepare(`SELECT MAX(batch_at) b FROM tennis_snapshots WHERE pm_match_id=?`).get(id) as { b: string | null } | undefined; const t = r?.b ? Date.parse(r.b) : NaN; return isNaN(t) ? -Infinity : t; };
-  let abandoned = 0, fixed = 0, voided = 0, deferredBets = 0;
+  let abandoned = 0, fixed = 0, voided = 0, deferredBets = 0, handedToPm = 0;
 
   for (const m of rows) {
     const sport = sportOf.get(m.competition_id) ?? "";
@@ -80,9 +80,32 @@ export function sweepAbandonedMatches(db: Database, nowMs = Date.now()): { aband
       voided++;
     }
     deferredBets += deferred;
-    if (deferred) continue;   // деньги ещё в игре — состояние матча не переписываем, чтобы не потерять его из виду
+    if (deferred) {
+      // [ФИКС 06.08] СОСТОЯНИЕ ЧИНИТСЯ ИМЕННО ЗДЕСЬ, А НЕ «ПОТОМ». Прежняя строка делала `continue` —
+      // и это был ДЕДЛОК, стоивший живых денег.
+      //
+      // ИМЕННОЙ КЕЙС: Racing FC Union Lëtzebuerg — Helsingin JK (WCL, кикофф 05.08 17:00Z, фикстура
+      // unbound — ESPN/StatPal её не связали НИКОГДА). $125 в трёх профилях на «Under 3.5» висели
+      // открытыми спустя 14 часов, матч всё ещё числился `live`.
+      //   • свип видел матч, но не переписывал состояние, пока есть открытые деньги;
+      //   • `settlePmResolutionBets` берёт в очередь ТОЛЬКО `state === "finished"` без счёта.
+      // Каждый ждал другого. Через 72 часа тай-брейк делал свип — воидом, то есть худшим из трёх
+      // исходов: рынок-то разрешился чисто, деньги надо было СЧИТАТЬ, а не возвращать.
+      //
+      // Условие входа в очередь урегулирования производилось теми самыми данными, чьё ОТСУТСТВИЕ и
+      // отправляло матч в эту очередь — самозапечатывающийся гейт в чистом виде.
+      //
+      // Шапка этого модуля всё это время говорила правильно: «свип может починить СОСТОЯНИЕ матча, но
+      // НЕ трогает открытые ставки». Реализация делала обратное. Теперь состояние чинится, ставки не
+      // трогаются, и матч уходит в PM-резолюцию — к ЕДИНСТВЕННОМУ авторитету на судьбу этих денег,
+      // включая её собственный таймаут-воид. BROKEN_NOTE не ставится: матч не «поломан», он наш-слепой
+      // и ждёт разрешения рынка; пометка поломки была бы вердиктом, которого свип выносить не вправе.
+      R.updateMatch(db, m.id, { state: "finished", final_score: null });
+      handedToPm++;
+      continue;
+    }
     if (hasSettled) { R.updateMatch(db, m.id, { state: "finished" }); fixed++; }        // it resolved — just fix the stuck state
     else { R.updateMatch(db, m.id, { state: "finished", end_note: BROKEN_NOTE, final_score: null }); abandoned++; } // never lived → broken
   }
-  return { abandoned, fixed, voided, deferredBets };
+  return { abandoned, fixed, voided, deferredBets, handedToPm };
 }
