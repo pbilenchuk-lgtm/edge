@@ -198,3 +198,49 @@ test("обещание отчёта = поставка прогона, числ�
   assert.equal(r.regraded + r.confirmed, promised);
   assert.equal(buildSuspectBreakdown(db, OPTS).total, 1, "остался ровно необещанный");
 });
+
+// ── [ФИКС 06.08] КАРАНТИН ОТ СЧЁТА НЕ ПРИМЕНЯЕТСЯ К СТАВКЕ, КОТОРУЮ СЧЁТ НЕ ГРАДУИРОВАЛ ──────────
+// ИМЕННЫЕ КЕЙСЫ: Racing FC Union Lëtzebuerg — Helsingin JK (3 ставки) и UMF Breiðablik — Aqtöbe FK (5).
+// Обе — Polymarket-only фикстуры, вход ft_blind, расчёт PM-резолюцией; обе стояли в карантине с причиной
+// «счёта нет — судить не по чему». Но карантин защищает от ЧУЖОГО СЧЁТА второго круга, а эти ставки счёта
+// не касались ни разу. Режим ft_blind по построению входит туда, где счёта нет и не будет, — значит
+// каждая его правильно отработавшая ставка выпадала из собственной когорты, и созреть она не могла.
+test("[фикс] ft_blind + PM-резолюция: счёт в оценке не участвовал — карантин снимается, деньги не трогаются", () => {
+  const db = seed();
+  match(db, "mb", { state: "finished", sh: null, sa: null });     // слепая фикстура: счёта нет и не будет
+  suspectBet(db, "bb", "mb", "Under 3.5", "settled_won");
+  db.prepare(`UPDATE bets SET entry_meta=?, settled_via='pm_resolution' WHERE id=?`)
+    .run(JSON.stringify({ ftBlind: true }), "bb");
+
+  const rep = buildSuspectBreakdown(db, OPTS);
+  assert.equal(rep.byClass.not_score_graded, 1);
+  assert.equal(rep.byClass.uncovered_state, 0, "прежний класс «счёта нет» больше не поглощает эту строку");
+  assert.equal(rep.releasableNow, 1, "и она НЕ считается вечной — прогон её закроет");
+  assert.match(rep.note, /градуированы РЕЗОЛЮЦИЕЙ РЫНКА/);
+
+  const before = bookTotals(db);
+  const r = reSettleSuspectBets(db, { now: () => "2026-08-06T22:00:00.000Z" });
+  assert.equal(r.confirmed, 1);
+  assert.equal(r.regraded, 0, "статус не пересчитывается: пересчитывать по счёту нечем");
+  assert.equal(r.bookDeltaUsd, 0, "деньги не двинулись — снята ТОЛЬКО метка");
+  assert.equal(bookTotals(db).pnlSum, before.pnlSum);
+
+  const bet = R.getBet(db, "bb")!;
+  assert.equal(bet.settle_suspect, 0);
+  const raw = db.prepare(`SELECT settle_verified v FROM bets WHERE id=?`).get("bb") as { v: number };
+  assert.equal(raw.v, 1, "без этого грубый карантин по перечню турниров вернёт метку при следующем openDb");
+  assert.equal(bet.settle_verified_by, CLASSIFY_VERSION);
+});
+
+test("[фикс] граница узкая: без метки ft_blind или без PM-резолюции строка остаётся в карантине", () => {
+  const db = seed();
+  match(db, "m1", { state: "finished", sh: null, sa: null });
+  suspectBet(db, "b-nometa", "m1", "Under 3.5", "settled_won");                       // pm_resolution, но не ft_blind
+  db.prepare(`UPDATE bets SET settled_via='pm_resolution' WHERE id=?`).run("b-nometa");
+  suspectBet(db, "b-nopm", "m1", "Under 2.5", "settled_won");                          // ft_blind, но сеттл иной
+  db.prepare(`UPDATE bets SET entry_meta=?, settled_via='abandoned_sweep' WHERE id=?`)
+    .run(JSON.stringify({ ftBlind: true }), "b-nopm");
+  const rep = buildSuspectBreakdown(db, OPTS);
+  assert.equal(rep.byClass.not_score_graded, 0, "правило ратифицировано узко и расширяется решением, а не кодом");
+  assert.equal(rep.byClass.uncovered_state, 2);
+});

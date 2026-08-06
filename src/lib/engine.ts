@@ -413,6 +413,16 @@ export function reSettleSuspectBets(db: Database, deps: EngineDeps = {}): ReSett
     // написали рядом, повторила бы их своим кодом — и однажды разошлась бы. Мы этот класс уже оплатили
     // на CLV («скрипт мимо кода»), второй раз не платим: отчёт зовёт ту же функцию и ничего не делает.
     const cls = classifySuspect(db, id, { legGapMs: gap, isStateSuspect, resolveOutcome: (b, mm) => resolveOutcome(b, mm, {}) });
+    // [ФИКС 06.08] ГРАДУИРОВАНА РЕЗОЛЮЦИЕЙ РЫНКА ⇒ КАРАНТИН ОТ СЧЁТА НЕПРИМЕНИМ — снимаем метку, деньги
+    // НЕ трогаем. Оценка уже сделана единственным авторитетом на эти деньги (PM-резолюция), пересчитывать
+    // по счёту нечего и нечем: счёта у слепой фикстуры нет по построению. `settle_verified=1` обязателен —
+    // иначе грубый карантин по перечню турниров вернёт метку на следующем же открытии базы (маятник,
+    // однажды уже вернувший 135 строк).
+    if (cls.cls === "not_score_graded") {
+      db.prepare(`UPDATE bets SET settle_suspect=0, settle_verified=1, settle_verified_at=?, settle_verified_by=? WHERE id=?`)
+        .run(now, CLASSIFY_VERSION, id);
+      confirmed++; continue;
+    }
     if (cls.cls !== "ready_regrade" && cls.cls !== "ready_confirm") { deferred++; continue; }
     const bet = R.getBet(db, id)!;
     const m = R.getMatch(db, bet.match_id)!;
