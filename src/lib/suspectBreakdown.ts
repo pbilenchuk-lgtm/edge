@@ -27,11 +27,12 @@
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { Bet, Match } from "./types.js";
+import { parseEntryMeta } from "./betMeta.js";
 
 /** Версия решающего предиката. Пишется в `settle_verified_by` вместе с датой: через месяц вопрос «чем
  *  именно снят этот флаг» обязан иметь ответ в самой строке, а не в чьей-то памяти. Поднимать при ЛЮБОМ
  *  изменении условий классификации — иначе снятия разных эпох станут неразличимы. */
-export const CLASSIFY_VERSION = "classify-1.0";
+export const CLASSIFY_VERSION = "classify-1.1";   // 1.1: класс not_score_graded (ft_blind + PM-резолюция)
 
 /** Итог массовой записи, СНЯТЫЙ ИЗ БАЗЫ ПОСЛЕ неё, а не выведенный из предиката. Предикат обещает нулевую
  *  дельгу денег и покрыт тестом — но стандарт со времён бэкфиллов такой: после каждой массовой записи
@@ -53,6 +54,7 @@ export type SuspectClass =
   | "unprovable_binding"   // (а) нет даты события / разрыв больше допустимого
   | "uncovered_label"      // (в) привязка доказана, но ярлык не разрешается по счёту
   | "uncovered_state"      // (в) матч не завершён / нет счёта / заморозка F2
+  | "not_score_graded"     // (г) градуирована РЕЗОЛЮЦИЕЙ РЫНКА, а не счётом — двухкруговая подмена неприменима
   | "orphan";              // строка ставки/матча исчезла — не классифицируется
 
 export interface SuspectRow {
@@ -92,6 +94,29 @@ export function classifySuspect(
   const m = R.getMatch(db, bet.match_id);
   if (!m) return { cls: "orphan", reason: "строка матча исчезла", legGapHours: null };
 
+  // ── [ФИКС 06.08] КАРАНТИН ОТ СЧЁТА НЕ ПРИМЕНЯЕТСЯ К СТАВКЕ, КОТОРУЮ СЧЁТ НЕ ГРАДУИРОВАЛ ──────────
+  //
+  // ИМЕННЫЕ КЕЙСЫ: Racing FC Union Lëtzebuerg — Helsingin JK (3 ставки, 05.08) и UMF Breiðablik — Aqtöbe FK
+  // (5 ставок, 04.08). Обе фикстуры — Polymarket-only, вход через ft_blind, расчёт через PM-резолюцию.
+  // Обе стоят в карантине с причиной «счёта нет — судить не по чему».
+  //
+  // ЗАЧЕМ ВООБЩЕ КАРАНТИН: в двухкруговом турнире оценка ставки могла прийти со СЧЁТА ЧУЖОГО КРУГА.
+  // Опасность целиком про счёт. Ставка, урегулированная резолюцией рынка, счёта не касалась ни разу —
+  // подменить чужим кругом там нечего.
+  //
+  // ПОЧЕМУ ЭТО БЫЛО ФАТАЛЬНО ИМЕННО ДЛЯ ft_blind: режим ПО ПОСТРОЕНИЮ входит на фикстуру, у которой счёта
+  // нет и не будет — это его нормальное состояние, ради него он и заведён. Значит каждая правильно
+  // отработавшая ставка ft_blind на двухкруговом турнире попадала в карантин, а `betRecords` выбрасывает
+  // suspect-строки из ВСЕХ срезов — то есть когорта теряла ровно те входы, которые вела как задумано, и
+  // не могла созреть никогда. Пятый самозапечатывающийся гейт и тот же класс, что дедлок свип↔PM-резолюция:
+  // правило, написанное для матчей со счётом, применялось к когорте, чьё определяющее свойство — его отсутствие.
+  //
+  // ГРАНИЦА УЗКАЯ И РАТИФИЦИРОВАННАЯ: снимается ТОЛЬКО с ft_blind-ставки, урегулированной `pm_resolution`.
+  // Более широкая форма («любой pm_resolution») выглядит верной по той же логике — счёт не участвовал, —
+  // но расширять ратифицированное правило самовольно нельзя, поэтому вопрос вынесен в отчёт, а не в код.
+  if (parseEntryMeta(bet.entry_meta)?.ftBlind === true && bet.settled_via === "pm_resolution") {
+    return { cls: "not_score_graded", reason: "ft_blind + PM-резолюция: счёт в оценке не участвовал — подменить чужим кругом нечего", legGapHours: null };
+  }
   if (m.state !== "finished") return { cls: "uncovered_state", reason: `матч не завершён (${m.state})`, legGapHours: null };
   if (m.score_home == null || m.score_away == null) return { cls: "uncovered_state", reason: "счёта нет — судить не по чему", legGapHours: null };
   if (opts.isStateSuspect(db, m.id)) return { cls: "uncovered_state", reason: "матч под state_suspect (F2) — сеттл заморожен", legGapHours: null };
@@ -116,7 +141,7 @@ export function classifySuspect(
 }
 
 const EMPTY: Record<SuspectClass, number> = {
-  ready_regrade: 0, ready_confirm: 0, unprovable_binding: 0, uncovered_label: 0, uncovered_state: 0, orphan: 0,
+  ready_regrade: 0, ready_confirm: 0, unprovable_binding: 0, uncovered_label: 0, uncovered_state: 0, not_score_graded: 0, orphan: 0,
 };
 
 /** Раскладка карантина. Только чтение — ничего не снимает и не пересчитывает. */
@@ -139,13 +164,14 @@ export function buildSuspectBreakdown(
       cls: c.cls, reason: c.reason, legGapHours: c.legGapHours,
     });
   }
-  const releasableNow = byClass.ready_regrade + byClass.ready_confirm;
+  // `not_score_graded` снимается тем же прогоном — предикат один, поэтому и счётчик один.
+  const releasableNow = byClass.ready_regrade + byClass.ready_confirm + byClass.not_score_graded;
   const permanentQuarantine = byClass.unprovable_binding;
   const uncovered = byClass.uncovered_label + byClass.uncovered_state;
 
   const note = ids.length === 0
     ? "карантина нет — раскладывать нечего"
-    : `в карантине ${ids.length}. ГОТОВЫ К СНЯТИЮ СЕЙЧАС: ${releasableNow} (${byClass.ready_regrade} с пересчётом статуса, ${byClass.ready_confirm} только снятие метки) — прогон reSettleSuspectBets закроет их тем же предикатом. `
+    : `в карантине ${ids.length}. ГОТОВЫ К СНЯТИЮ СЕЙЧАС: ${releasableNow} (${byClass.ready_regrade} с пересчётом статуса, ${byClass.ready_confirm} только снятие метки, ${byClass.not_score_graded} градуированы РЕЗОЛЮЦИЕЙ РЫНКА — счёт в оценке не участвовал) — прогон reSettleSuspectBets закроет их тем же предикатом. `
       + `НАВСЕГДА В КАРАНТИНЕ: ${permanentQuarantine} — привязка честно недоказуема, и это правильный исход, а не недоработка. `
       + `КОНВЕЙЕР НЕ БЕРЁТ: ${uncovered} (${byClass.uncovered_label} нерешаемый ярлык, ${byClass.uncovered_state} матч не в терминальном состоянии) — единственный класс, который был бы РАБОТОЙ.`
       + (byClass.orphan ? ` Осиротевших строк: ${byClass.orphan}.` : "");
