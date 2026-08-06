@@ -1626,3 +1626,34 @@ export function backfillShcPriceLag(db: Database): number {
 export function shcObservationCount(db: Database): number {
   return (db.prepare(`SELECT COUNT(*) n FROM shc_observations`).get() as { n: number }).n;
 }
+
+
+// ---------- decision_prices (T6: честная калибровка) ----------
+export interface DecisionPriceRow {
+  id?: string; match_id: string; strategy_id: string; label: string; stage: string | null;
+  mid_cents: number; ask_cents: number | null; implied_prob: number | null; our_prob: number;
+  edge_source: string | null; picked: number; outcome?: number | null; outcome_src?: string | null;
+  decided_at: string; created_at?: string;
+}
+/** Идемпотентна по (матч, стратегия, ярлык, момент): повтор того же решения не плодит строк. */
+export function insertDecisionPrice(db: Database, r: DecisionPriceRow): boolean {
+  const res = db.prepare(
+    `INSERT OR IGNORE INTO decision_prices(id,match_id,strategy_id,label,stage,mid_cents,ask_cents,
+       implied_prob,our_prob,edge_source,picked,outcome,outcome_src,decided_at,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run(r.id ?? uid(), r.match_id, r.strategy_id, r.label, r.stage ?? null, r.mid_cents, r.ask_cents ?? null,
+    r.implied_prob ?? null, r.our_prob, r.edge_source ?? null, r.picked ?? 0,
+    r.outcome ?? null, r.outcome_src ?? null, r.decided_at, r.created_at ?? nowIso());
+  return (res.changes ?? 0) > 0;
+}
+export function decisionPrices(db: Database, opts: { withOutcome?: boolean } = {}): DecisionPriceRow[] {
+  const where = opts.withOutcome ? "WHERE outcome IS NOT NULL" : "";
+  return db.prepare(`SELECT * FROM decision_prices ${where} ORDER BY decided_at`).all() as DecisionPriceRow[];
+}
+export function decisionPriceCount(db: Database): number {
+  try { return (db.prepare(`SELECT COUNT(*) n FROM decision_prices`).get() as { n: number }).n; } catch { return 0; }
+}
+/** Дописать исход, когда он СТАЛ ИЗВЕСТЕН. Цену не трогает — она заморожена моментом решения. */
+export function setDecisionOutcome(db: Database, id: string, outcome: 0 | 1, src: string): void {
+  db.prepare(`UPDATE decision_prices SET outcome=?, outcome_src=? WHERE id=? AND outcome IS NULL`).run(outcome, src, id);
+}

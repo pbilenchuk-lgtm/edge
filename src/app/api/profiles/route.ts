@@ -149,6 +149,25 @@ export async function GET(req: Request) {
       const r = buildNetEvShadow(db);
       return NextResponse.json({ ok: true, report: r, line: netEvShadowLine(r) });
     }
+    // ?report=honest_calibration → T6: Brier нашей оценки против ЦЕНЫ МОМЕНТА РЕШЕНИЯ. Секция «Рынки»
+    // здесь недоступна КОНСТРУКЦИЕЙ: модуль не импортирует репозиторий рынков вовсе — прежний замер на
+    // текущих котировках сравнивал предматчевый прогноз с ценой урегулирования и дал ложный вывод
+    // «рынок вдвое лучше». Read-only.
+    if (new URL(req.url).searchParams.get("report") === "honest_calibration") {
+      const { buildHonestCalibration, honestCalibrationLine } = await import("@/lib/honestCalibration");
+      const st = (new URL(req.url).searchParams.get("stage") ?? "prematch") as "prematch" | "live" | "all";
+      const r = buildHonestCalibration(db, st);
+      return NextResponse.json({ ok: true, report: r, line: honestCalibrationLine(r) });
+    }
+    // ?report=cost_parity → T5: списывают ли ноги портфеля издержки ПО ОДНОЙ модели. Теннис ходит через
+    // исполнителя, и `OrderAck` не нёс разбивку — его леджер показывал $0 комиссий ПО ПОСТРОЕНИЮ, пока
+    // net_ev-гейт той же ветки резал кандидатов, зная про 2.6¢. История не переписывается: расхождение
+    // называется числом и флагом. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "cost_parity") {
+      const { buildCostParity, costParityLine } = await import("@/lib/costParity");
+      const r = buildCostParity(db, new Date().toISOString(), process.env);
+      return NextResponse.json({ ok: true, report: r, line: costParityLine(r) });
+    }
     // ?report=set_handicap_convention → T3: проверка конвенции ±1.5 по РАЗРЕШИВШИМСЯ рынкам против
     // фактического счёта. Контроль — манилайн (проверяет инструмент: цену→исход и ориентацию подписи),
     // тест — гандикапы. Флага не касается: снятие блока — решение владельца по этим числам. Read-only.

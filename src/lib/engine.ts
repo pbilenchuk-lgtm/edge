@@ -457,6 +457,32 @@ export function reSettleSuspectBets(db: Database, deps: EngineDeps = {}): ReSett
   return { regraded, confirmed, deferred, bookBefore, bookAfter, bookDeltaUsd, classifyVersion: CLASSIFY_VERSION, at: now, note };
 }
 
+/**
+ * [T6] Дописать исход строкам решения по ЗАВЕРШИВШИМСЯ матчам. Цена НЕ трогается — она заморожена
+ * моментом решения; дописывается только то, что тогда не могло быть известно. Идемпотентно
+ * (UPDATE … WHERE outcome IS NULL), ограничено по объёму, ошибка не роняет тик.
+ */
+export function gradeDecisionPrices(db: Database, max = 500): { graded: number; unresolvable: number } {
+  let graded = 0, unresolvable = 0;
+  try {
+    const rows = db.prepare(
+      `SELECT dp.id id, dp.match_id mid, dp.label label FROM decision_prices dp
+         JOIN matches m ON m.id = dp.match_id
+        WHERE dp.outcome IS NULL AND m.state='finished' AND m.score_home IS NOT NULL AND m.score_away IS NOT NULL
+        LIMIT ?`,
+    ).all(max) as { id: string; mid: string; label: string }[];
+    for (const r of rows) {
+      const m = R.getMatch(db, r.mid);
+      if (!m || m.score_home == null || m.score_away == null) { unresolvable++; continue; }
+      const won = resolveFootballMarket(r.label, m.score_home, m.score_away, { home: m.home, away: m.away }, matchPhase(m));
+      if (won == null) { unresolvable++; continue; }   // ярлык не разрешается по счёту — НЕ «не сбылось»
+      R.setDecisionOutcome(db, r.id, won ? 1 : 0, `match_score@${m.final_score ?? `${m.score_home}:${m.score_away}`}`);
+      graded++;
+    }
+  } catch { /* инструмент калибровки не роняет тик */ }
+  return { graded, unresolvable };
+}
+
 function resolveOutcome(bet: Bet, match: Match, overrides: Record<string, boolean>): boolean | null {
   if (bet.market_label in overrides) return overrides[bet.market_label];
   if (match.score_home == null || match.score_away == null) return null;

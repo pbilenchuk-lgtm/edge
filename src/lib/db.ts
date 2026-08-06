@@ -333,6 +333,7 @@ export function initSchema(db: Database): void {
     // [T3-корень] Сторона, ПРОЧИТАННАЯ из имени исхода, и её провенанс. Прежние журнальные строки
     // останутся NULL — их ориентация была ДОПУЩЕНИЕМ («цена всегда про первого в подписи»), и замер
     // 06.08 показал ячейку, где это допущение ложно. Недоказуемое допущение к вердикту не допускается.
+    // [T6] Таблица цен решения создаётся из schema.sql; ALTER здесь не нужен — она новая целиком.
     "ALTER TABLE shc_observations ADD COLUMN side_from_token INTEGER",
     "ALTER TABLE shc_observations ADD COLUMN side_src TEXT",
   ]) {
