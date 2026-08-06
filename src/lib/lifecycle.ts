@@ -2943,7 +2943,11 @@ export async function runAutoCycle(
     // ОТЛОЖЕННЫЕ СТАВКИ ПЕЧАТАЮТСЯ: «свип ничего не тронул» и «свип отступил, потому что деньги ещё в
     // очереди резолюции» — разные факты, и второй обязан быть слышен (иначе тишина снова скроет путь).
     if (r.deferredBets) console.log(`[sweepAbandoned] отложено ${r.deferredBets} открытых ставок — терпение PM-резолюции ещё не истекло`);
-    return r.abandoned + r.fixed;
+    // [ФИКС 06.08] Передача в PM-резолюцию печатается отдельно: «свип отступил» и «свип передал матч
+    // единственному авторитету на судьбу этих денег» — разные факты, и второй закрывает дедлок,
+    // из-за которого $125 висели 14 часов в статусе live (Racing FC Union — Helsingin JK).
+    if (r.handedToPm) console.log(`[sweepAbandoned] ${r.handedToPm} матч(ей) переведены в finished и переданы PM-резолюции (деньги не тронуты)`);
+    return r.abandoned + r.fixed + r.handedToPm;
   }, 0);
   // Bound the matches table: drop finished/stale matches that carry NO bets (the
   // Polymarket discovery flood). Never touches a match with betting history, so

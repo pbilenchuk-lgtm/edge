@@ -110,3 +110,26 @@ test("sweep: idempotent — a second pass changes nothing", () => {
   const r2 = sweepAbandonedMatches(db, NOW);
   assert.equal(r2.abandoned + r2.fixed + r2.voided, 0, "already finished → not re-swept");
 });
+
+// ── ФИКС 06.08: ДЕДЛОК «СВИП ЖДЁТ РЕЗОЛЮЦИЮ, РЕЗОЛЮЦИЯ ЖДЁТ СВИП» ─────────────────────────────────
+// Именной кейс: Racing FC Union Lëtzebuerg — Helsingin JK (WCL, кикофф 05.08 17:00Z, фикстура unbound).
+// $125 в трёх профилях висели открытыми спустя 14 часов, матч всё ещё `live`. Свип не переписывал
+// состояние, пока есть открытые деньги; settlePmResolutionBets берёт в очередь ТОЛЬКО `finished` без
+// счёта. Каждый ждал другого, и через 72ч тай-брейк делал свип — воидом, хотя рынок разрешился чисто.
+test("отложенные деньги НЕ мешают починить состояние — матч уходит в PM-резолюцию, а не в подвешенный live", () => {
+  const db = db0();
+  // 14 часов после кикоффа: свип сработает (футбол 5ч), терпение PM-резолюции (72ч) ещё НЕ истекло.
+  mk(db, { id: "wcl", comp: "epl", state: "live", kickoff: iso(-14) });
+  const bid = bet(db, "wcl", "open");
+
+  const r = sweepAbandonedMatches(db, NOW);
+  assert.equal(r.deferredBets, 1, "открытые деньги НЕ воидятся до истечения терпения PM-резолюции");
+  assert.equal(r.voided, 0);
+  assert.equal(r.handedToPm, 1, "и передача в PM-резолюцию посчитана отдельным числом");
+
+  const m = R.getMatch(db, "wcl")!;
+  assert.equal(m.state, "finished", "состояние починено — иначе очередь PM-резолюции матч НЕ ВИДИТ");
+  assert.equal(m.score_home, null, "счёта нет — ровно то, что делает матч кандидатом pmOnly");
+  assert.ok(!m.end_note, "матч НЕ «поломан»: он наш-слепой и ждёт разрешения рынка");
+  assert.equal(R.getBet(db, bid)!.status, "open", "ставка не тронута — судьбу денег решает один авторитет");
+});
