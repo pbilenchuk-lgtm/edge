@@ -30,6 +30,7 @@ import { loadAnalysisDuel, pickAnalysisModel, analysisModelTag } from "./analysi
 import { canonicalizeDrawForMatch, drawCanonEnabled } from "./drawCanon.js";
 import { captureShadowDepth } from "./bookDepthCapture.js";
 import { sameMarketLabel, tokenSet, numTokens, extraAllFiller } from "./marketLabel.js";
+import { structuralPlaceholders, placeholderFunnelLine, executableImplied } from "./placeholderStructural.js";
 import { blockedByCoherence, blocksLabel } from "./sideCoherence.js";
 import { checkPickBranches, branchContradictionNote } from "./pickBranchCoherence.js";
 
@@ -277,8 +278,32 @@ export async function runStrategists(
     } catch { return new Set<string>(); }   // канон не имеет права ломать анализ
   })();
   const mirrored = drawMirrors.size ? allMarkets.filter((m) => drawMirrors.has(m.label.toLowerCase().trim())) : [];
-  const hidden = new Set([...railed, ...mirrored]);
+  // [#121] СТРУКТУРНЫЙ ПЛЕЙСХОЛДЕР СРЕЗАЕТСЯ ЗДЕСЬ — ДО КАТАЛОГА, ЗНАЧИТ ДО LLM-ВЫЗОВА.
+  //
+  // Временной карантин (placeholder_mid / stale_book) ловит те же рынки правилом «не менялась N минут»:
+  // 70 срабатываний на 1737 плоских рынков переписи 07.08. Он по построению опаздывает — рынку надо
+  // сначала простоять, — а предматчевый вызов стратега случается раньше. То есть фантомный эдж уже
+  // оплачен контекстом, и отказ приходит после. Структурный признак читается из самой строки на первом
+  // же тике. Временной остаётся ВТОРЫМ ЭШЕЛОНОМ для того, что структурный не покрывает.
+  const structural = (() => {
+    try { return structuralPlaceholders(allMarkets); } catch { return []; }   // тест не имеет права ломать анализ
+  })();
+  const structuralLabels = new Set(structural.map((x) => x.label));
+  const placeheld = structural.length ? allMarkets.filter((m) => structuralLabels.has(m.label)) : [];
+  const hidden = new Set([...railed, ...mirrored, ...placeheld]);
   const freshMarkets = hidden.size ? allMarkets.filter((m) => !hidden.has(m)) : allMarkets;
+  if (structural.length) {
+    try {
+      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? "", minute: null, type: "skip",
+        text: `placeholder_structural: ${structural.length} из ${allMarkets.length} рынков скрыто ДО стратега — ${structural.slice(0, 3).map((x) => `«${x.label}» ${x.note}`).join(" · ")}${structural.length > 3 ? ` · ещё ${structural.length - 3}` : ""}`,
+        dedup_key: `phstruct:${matchId}:${stage}`, created_at: now() });
+      // ТРИ ЧИСЛА ВОРОНКИ, каждый прогон, громко — «срезано структурно», «срезано по времени (планка/
+      // зеркала)» и «дошло до стратега» лечатся по-разному, и слипшись в одно они неразличимы.
+      R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? "", minute: null, type: "skip",
+        text: placeholderFunnelLine({ total: allMarkets.length, structural: structural.length, temporal: railed.length + mirrored.length, toLlm: freshMarkets.length }),
+        dedup_key: `phfunnel:${matchId}:${stage}`, created_at: now() });
+    } catch { /* улика не имеет права ломать анализ */ }
+  }
   if (mirrored.length) {
     try {
       R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? "", minute: null, type: "skip",
@@ -371,7 +396,8 @@ export async function runStrategists(
         strategyName: strat.name, strategyPrompt: strat.prompt,
         match: { home: match.home, away: match.away, sport, state: match.state, minute: match.minute, scoreHome: match.score_home, scoreAway: match.score_away },
         assessment: { confidence: assessment.confidence ?? "средняя", short: assessment.short ?? "", verdict: assessment.verdict ?? "" },
-        markets: freshMarkets.map((m) => ({ id: catId.get(m.id), label: m.label, priceCents: m.price, aiProb: m.ai_prob, conflict: conflicts.get(m.label) ?? null })),
+        // [#120] Аск идёт в каталог: стратег обязан считать край от цены, по которой ПОКУПАЮТ.
+        markets: freshMarkets.map((m) => ({ id: catId.get(m.id), label: m.label, priceCents: m.price, aiProb: m.ai_prob, conflict: conflicts.get(m.label) ?? null, askCents: m.ask_cents ?? null, spreadCents: m.spread_cents ?? null })),
         openPositions: openPos.map((b) => ({ market: b.market_label, entryCents: b.entry_price ?? 0, currentCents: b.current_price ?? b.entry_price ?? 0 })),
         context: stratCtx,
       }, stratModel, { fetchImpl: deps.fetchImpl, env });
@@ -428,8 +454,16 @@ export async function runStrategists(
           type: "skip", text: `provenance_review [side_incoherent] ${c.note}`, created_at: now() });
       } catch { /* журнал не роняет торговый путь */ }
     }
+    // [#120] ПОРЯДОК КАНДИДАТОВ — ПО ИСПОЛНИМОМУ КРАЮ. Раньше сортировка шла по краю от мида, и наверх
+    // всплывали ровно те рынки, чей мид дальше всего от аска, — то есть самые НЕисполнимые. Замер 07.08:
+    // оба крупнейших заявленных эджа выборки не исполнились. Сайзинг уже считал от аска (fix #1) — теперь
+    // от него же считает и очередь, иначе два авторитета на одно число.
     const ranked = freshMarkets.filter((m) => m.ai_prob != null)
-      .map((m) => { const implied = impliedMap.get(m.label)?.implied ?? m.price / 100; return { m, implied, edge: (m.ai_prob as number) - implied }; })
+      .map((m) => {
+        const implied = impliedMap.get(m.label)?.implied ?? m.price / 100;
+        const ex = executableImplied(m, implied);
+        return { m, implied, edge: (m.ai_prob as number) - ex.implied };
+      })
       .sort((x, y) => y.edge - x.edge);
     for (const { m, implied } of ranked) {
       // P4: match by catalog id first (identity by reference); fall back to label ONLY for a pick the model left
@@ -491,10 +525,11 @@ export async function runStrategists(
       // ask when we have the book (ask ≥ mid keeps it conservative — never inflates edge, closes the
       // "1−ask phantom" on the other side); else fall back to the mid and FLAG it (mid_fallback) so the
       // edge-analytics can separate honest executable edges from mid estimates.
-      const askUsable = m.ask_cents != null && m.ask_cents >= m.price && m.ask_cents < 100;
-      const execCents = askUsable ? (m.ask_cents as number) : m.price;
-      const edgeSource: "executable" | "mid_fallback" = askUsable ? "executable" : "mid_fallback";
-      const effImplied = askUsable ? execCents / 100 : implied;
+      // [#120] ОДНА ФУНКЦИЯ НА ОБА МЕСТА: очередь кандидатов и сайзинг читают ОДНУ исполнимую цену.
+      // Два вычисления одного числа — это два авторитета, и они однажды разойдутся.
+      const exq = executableImplied(m, implied);
+      const askUsable = exq.usable, execCents = exq.cents, effImplied = exq.implied;
+      const edgeSource: "executable" | "mid_fallback" = exq.source;
       // bankCeiling: the sizing_insanity backstop, built after a corrupted budget sized a $28k tennis stake on a
       // $1k bank, was wired into tennis ONLY — football sized off `competitions.budget` (a DB row, i.e. the exact
       // corruptible input) with no absolute floor under it. Undeclared bank → 0 → undefined → guard stays inert,

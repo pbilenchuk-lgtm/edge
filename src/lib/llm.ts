@@ -634,7 +634,9 @@ export interface StrategistInput {
   strategyName: string; strategyPrompt: string;
   match: { home: string; away: string; sport: string; state: string; minute: number | null; scoreHome: number | null; scoreAway: number | null; minuteApprox?: number | null };
   assessment: { confidence: string; short: string; verdict: string };
-  markets: { id?: string; label: string; priceCents: number; aiProb: number | null; liquidity?: number | null; openCents?: number | null; conflict?: string | null; liveProbAdjusted?: { prob: number; note: string } | null }[];
+  markets: { id?: string; label: string; priceCents: number; aiProb: number | null; liquidity?: number | null; openCents?: number | null; conflict?: string | null; liveProbAdjusted?: { prob: number; note: string } | null;
+    /** [#120] ИСПОЛНИМАЯ цена покупки (аск) и спред. Эдж строится ПРОТИВ НЕЁ, мид — справочный. */
+    askCents?: number | null; spreadCents?: number | null }[];
   openPositions: { market: string; entryCents: number; currentCents: number }[];
   context?: string; // real lineups + in-match events (ESPN) — the reassessment triggers
 }
@@ -830,7 +832,14 @@ export async function strategistDecide(
     const conflict = m.conflict ? `  ${m.conflict}` : "";
     // P4: prefix the stable catalog id so the pick can reference the market by reference, not a paraphrase.
     const idTag = m.id ? `[${m.id}] ` : "";
-    return `- ${idTag}${m.label}: ${m.priceCents}¢${move}${liq}${ai}${gsAdj}${conflict}`;
+    // [#120] ИСПОЛНИМАЯ ЦЕНА ПОКАЗЫВАЕТСЯ ПЕРВОЙ И ЯВНО. Покупка платит АСК, а не мид: замер 07.08 дал
+    // медиану разрыва +27.5¢ (макс +55.5¢), и на аске эдж уходил в минус (−7 / −14 / −18 п.п.). Пока
+    // стратег видел только мид, два КРУПНЕЙШИХ заявленных эджа выборки (+24.5 и +22.0 п.п.) рождались
+    // на цене, по которой купить было нельзя, и умирали на гейте филла — после оплаченного LLM-вызова.
+    const exec = m.askCents != null && m.askCents >= m.priceCents && m.askCents < 100
+      ? ` · ПОКУПКА ПО ${m.askCents}¢${m.askCents - m.priceCents >= 1 ? ` (мид ${m.priceCents}¢ — справочно, эдж считай ОТ ${m.askCents}¢)` : ""}`
+      : " · аск неизвестен — книги нет, эдж считай консервативно от мида";
+    return `- ${idTag}${m.label}: ${m.priceCents}¢${exec}${move}${liq}${ai}${gsAdj}${conflict}`;
   }).join("\n");
   const posList = input.openPositions.length
     ? input.openPositions.map((p) => `- ${p.market}: вход ${p.entryCents}¢ → сейчас ${p.currentCents}¢`).join("\n")
@@ -846,6 +855,7 @@ export async function strategistDecide(
     model,
     system:
       "Ты — трейдер на прогнозных рынках, действующий СТРОГО по методологии из промта стратегии (это твой единственный свод правил). На основе оценки матча, дерева исходов и цен реши ДЕЙСТВИЯ. " +
+      "ЭДЖ СЧИТАЕТСЯ ОТ ИСПОЛНИМОЙ ЦЕНЫ. У рынка показана «ПОКУПКА ПО N¢» — это аск, реальная цена входа. Край считай как (твой prob − N/100), а НЕ от мида: мид это середина, по ней не покупают. Если на аске края нет — входа нет, каким бы привлекательным ни выглядел мид. Где аск неизвестен, книги нет — это причина воздержаться, а не считать по миду. " +
       "Правила: входи в рынок ТОЛЬКО если методология это разрешает и ты можешь назвать конкретную причину, почему цена неверна; не давай конфликтующих ставок на один матч; уважай стадию (предматч/лайв); выход может быть ЧАСТИЧНЫМ (fraction 0..1: 0.5 = половина, 1 = полностью). " +
       "Для КАЖДОГО входа укажи prob — свою АКТУАЛЬНУЮ вероятность (0..1), что рынок сыграет ДА на ТЕКУЩИЙ момент (счёт/минута/события). НЕ копируй «предматч. оценку» — в лайве она устаревает (при 0:2 «Over 1.5» ≈ 1.0); пересчитай. " +
       "Где у рынка есть «game-state P=…%» — это P(события за остаток) от счёта и времени, посчитанная кодом (отстающий обязан раскрываться, голы кластеризуются в концовке). Для тающего опциона (ставка на наступление события: командный Over 0.5/1.5, BTTS-Yes) считай edge против этого числа, а НЕ против экстраполяции прошлого темпа. " +

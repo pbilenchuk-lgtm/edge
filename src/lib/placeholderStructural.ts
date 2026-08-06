@@ -1,0 +1,115 @@
+// ============================================================
+// EDGE LAB — СТРУКТУРНЫЙ ТЕСТ ПЛЕЙСХОЛДЕРА: НЕРАЗМЕЧЕННАЯ КНИГА ОТСЕКАЕТСЯ ДО LLM
+//
+// ЧЕМ ЗАСЛУЖЕНО (перепись 151 матч-лога, 07.08). Из 2487 теннисных рынков 1737 (70%) стоят РОВНО на 50¢;
+// в футболе 103 из 562 (18%). Это не «равные шансы», а незаполненная строка — доказано независимо от цены:
+// у 80 из 81 матча с ЯВНЫМ манилайн-фаворитом (≤25¢ или ≥75¢) пропы всё равно стоят ровно 50¢. При
+// фаворите 94% «Total Sets Under 2.5 = 50%» невозможен как оценка.
+//
+// ЦЕНА ДЕФЕКТА ИЗМЕРЕНА: 3 из 13 тезисов пачки построены против цены 50¢, и ЕДИНСТВЕННЫЙ проигравший
+// зафилленный тезис — ровно такой (Eintracht, 50.0¢, «эдж» +8 п.п.). Два крупнейших заявленных эджа
+// выборки (+24.5 и +22.0 п.п.) тоже родились у плохой цены и не исполнились. Заявленный эдж — функция
+// качества ЦЕНЫ, а не качества анализа: плохо размеченная цена ПРОИЗВОДИТ фантомный эдж.
+//
+// ПОЧЕМУ ВРЕМЕННОГО КАРАНТИНА НЕ ХВАТАЕТ. `zombie_quarantine:placeholder_mid` ловит их правилом «цена не
+// менялась N минут»: 70 срабатываний на 1737 плоских рынков. Правило по времени ловит только то, что
+// успело простоять, и НЕ успевает до предматчевого вызова стратега — то есть LLM-бюджет уже потрачен.
+// Структурный признак доступен в первый же тик и работает ДО вызова.
+//
+// ═══ ПОРОГИ НАЗВАНЫ ДО ДАННЫХ (требование ТЗ; подгонка под выборку запрещена) ═══
+//
+// FLAT_TOL_CENTS = 0.5¢. Обоснование — про ФОРМАТ, а не про выборку: котировки Polymarket приходят с шагом
+// 0.1¢, и незаполненный дефолт пишет ровно 50.0. Окно ±0.5¢ покрывает округление до одного знака и не
+// шире: настоящая книга у равных шансов почти никогда не стоит РОВНО на середине целый тик.
+//
+// ML_SKEW_MIN_CENTS = 15¢ (фаворит ≥65% или ≤35%). Обоснование априорное: при 65/35 матч уже заметно
+// перекошен, и производные пропы (тоталы сетов/геймов, гандикапы) не могут честно стоять на 50/50. Ниже
+// 15¢ они МОГУТ там стоять законно, и резать их значило бы менять фантом на потерю. Число round и выбрано
+// за однозначность асимметрии, а не подобрано: на замере 07.08 порог был бы 25¢, я сознательно беру более
+// КОНСЕРВАТИВНЫЙ (широкий) 15¢ — он режет больше, поэтому обязан быть под сторожем ложных срезов.
+//
+// АСИММЕТРИЯ ГАРАНТИИ. Тест обвиняет только при ЕДИНОГЛАСНОЙ улике: цена на дефолте И (книга не котирована
+// ИЛИ независимая ссылка доказывает, что 50 неверно). Отсутствие манилайна — не улика: без него тест
+// молчит, а не срабатывает.
+// ============================================================
+
+import type { Market } from "./types.js";
+
+/** Допуск «цена стоит РОВНО на дефолте». Про формат котировки, не про выборку. */
+export const FLAT_TOL_CENTS = 0.5;
+/** Насколько манилайн должен быть перекошен, чтобы служить уликой против 50/50 на пропе. */
+export const ML_SKEW_MIN_CENTS = 15;
+/** Спред, при котором книга считается НЕ котированной (двусторонней цены фактически нет). */
+export const UNQUOTED_SPREAD_CENTS = 20;
+
+export type PlaceholderReason = "unquoted_book" | "moneyline_contradicts";
+export interface PlaceholderVerdict { label: string; reason: PlaceholderReason; note: string }
+
+/** Манилайн матча — рынок вида «Турнир: A vs B» / «A vs B» без суффикса-пропа. Null, если его нет. */
+export function moneylineOf(markets: Pick<Market, "label" | "price">[]): number | null {
+  const isMl = (l: string) => /(^|:\s*)[^:]+\s+vs\.?\s+[^:]+$/i.test(l.trim());
+  const ml = markets.find((m) => isMl(m.label) && m.price != null);
+  return ml?.price == null ? null : Number(ml.price);
+}
+
+const flat = (c: number | null | undefined) => c != null && Math.abs(Number(c) - 50) <= FLAT_TOL_CENTS;
+
+/**
+ * Какие рынки матча — структурные плейсхолдеры. Читает ТОЛЬКО поля самой строки: цена, аск, спред,
+ * и манилайн того же матча. Ни сети, ни истории — поэтому работает на первом же тике, до вызова LLM.
+ */
+export function structuralPlaceholders(markets: Market[]): PlaceholderVerdict[] {
+  const ml = moneylineOf(markets);
+  const mlSkewed = ml != null && Math.abs(ml - 50) >= ML_SKEW_MIN_CENTS;
+  const out: PlaceholderVerdict[] = [];
+  for (const m of markets) {
+    if (!flat(m.price)) continue;
+    // Манилайн сам себя плейсхолдером не объявляет: он и есть ссылка, и «50¢ на манилайне» —
+    // законная оценка равных соперников. Улики против него у нас нет.
+    if (ml != null && Number(m.price) === ml && /(^|:\s*)[^:]+\s+vs\.?\s+[^:]+$/i.test(m.label.trim())) continue;
+    const spread = m.spread_cents == null ? null : Number(m.spread_cents);
+    const unquoted = m.ask_cents == null || (spread != null && spread >= UNQUOTED_SPREAD_CENTS);
+    if (unquoted) {
+      out.push({ label: m.label, reason: "unquoted_book",
+        note: `цена ровно ${m.price}¢ при ${m.ask_cents == null ? "ОТСУТСТВУЮЩЕМ аске" : `спреде ${spread}¢ ≥ ${UNQUOTED_SPREAD_CENTS}¢`} — книга не котирована, это дефолт, а не оценка` });
+    } else if (mlSkewed) {
+      out.push({ label: m.label, reason: "moneyline_contradicts",
+        note: `цена ровно ${m.price}¢, но манилайн матча ${ml}¢ (перекос ${Math.abs((ml as number) - 50).toFixed(1)}¢ ≥ ${ML_SKEW_MIN_CENTS}¢) — при таком фаворите производный проп не может стоять 50/50` });
+    }
+  }
+  return out;
+}
+
+/**
+ * СТОРОЖ ЛОЖНОГО СРЕЗА. Рынок, срезанный структурно, но потом ОЖИВШИЙ (цена ушла от 50 дальше порога),
+ * был срезан зря. Автооткат НЕ делается — только видимость: правило, которое ошибается молча, через месяц
+ * неотличимо от правила, которое право.
+ */
+export const FALSE_CUT_MIN_MOVE_CENTS = 10;
+export function falseCut(cutAtCents: number, laterCents: number | null | undefined): boolean {
+  if (laterCents == null) return false;
+  return Math.abs(Number(laterCents) - 50) >= FALSE_CUT_MIN_MOVE_CENTS && Math.abs(cutAtCents - 50) <= FLAT_TOL_CENTS;
+}
+
+/** Строка воронки: три числа, каждое своим именем. Ноль печатается наравне с двадцатью. */
+export function placeholderFunnelLine(t: { total: number; structural: number; temporal: number; toLlm: number }): string {
+  return `каталог рынков: всего ${t.total} · срезано СТРУКТУРНО ${t.structural} · срезано по времени ${t.temporal} · дошло до стратега ${t.toLlm}`;
+}
+
+/**
+ * [#120] ИСПОЛНИМАЯ ЦЕНА — ЕДИНСТВЕННЫЙ АВТОРИТЕТ. Одна функция на очередь кандидатов, на сайзинг и на
+ * каталог стратега: покупка платит АСК. Аск ниже мида невозможен как котировка (это перевёрнутая книга),
+ * поэтому такой аск не используется — иначе гейт «улучшал» бы край на битой строке.
+ *
+ * Мид-фолбэк НЕ запрещён, но ПОМЕЧЕН: `mid_fallback` в провенансе ставки отделяет честный исполнимый край
+ * от оценки по середине, и вердиктные срезы обязаны уметь их разделить.
+ */
+export function executableImplied(
+  m: { price: number; ask_cents?: number | null }, midImplied: number,
+): { usable: boolean; cents: number; implied: number; source: "executable" | "mid_fallback" } {
+  const ask = m.ask_cents == null ? null : Number(m.ask_cents);
+  const usable = ask != null && ask >= m.price && ask < 100;
+  return usable
+    ? { usable: true, cents: ask as number, implied: (ask as number) / 100, source: "executable" }
+    : { usable: false, cents: m.price, implied: midImplied, source: "mid_fallback" };
+}
