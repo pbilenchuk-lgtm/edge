@@ -134,7 +134,10 @@ export interface ShcRow {
   /** ПРОВЕНАНС: у каждого факта свой источник и своё время — строка журнала объясняет саму себя. */
   scoreSrc: string; priceSrc: string; favSrc: string; kickoffAt: string | null;
 }
-export type ShcVerdict = "МЕТОД НЕВЕРЕН" | "ОПРОВЕРГНУТА" | "ПОДТВЕРЖДЕНА" | "НЕ СОЗРЕЛО";
+/** «ПОДТВЕРЖДЕНА В ДУЭЛИ» — гипотеза обыграла соперницу там, где они расходятся, но правилом не стала:
+ *  на полной выборке промахи есть. Отдельное слово нужно ровно потому, что «ПОДТВЕРЖДЕНА» читается как
+ *  лицензия на снятие блока, а дуэльная победа лицензией не является. */
+export type ShcVerdict = "МЕТОД НЕВЕРЕН" | "ОПРОВЕРГНУТА" | "ПОДТВЕРЖДЕНА" | "ПОДТВЕРЖДЕНА В ДУЭЛИ" | "НЕ СОЗРЕЛО";
 export interface ShcReport {
   rows: ShcRow[];
   controlChecked: number; controlMismatch: number;
@@ -159,6 +162,8 @@ export interface ShcReport {
     discriminatingSince: number; mismatchSince: number;
     /** Ретроспектива — явно помечена: эти матчи гипотезу ПОРОДИЛИ и подтвердить её не могут. */
     discriminatingRetro: number; mismatchRetro: number;
+    /** Промахи альтернативы на ВСЕЙ тест-выборке — то, чего пре-регистрация по построению не видит. */
+    fullSetChecked: number; fullSetMismatch: number;
     verdict: ShcVerdict; note: string;
   };
   verdict: ShcVerdict; note: string;
@@ -392,15 +397,41 @@ export function buildSetHandicapConvention(db: Database): ShcReport {
   const retro = byMatch(discr.filter((r) => day(r) <= SHC_ALT_REGISTERED_AT));
   const altVerdict: ShcVerdict = since.bad > 0 ? "ОПРОВЕРГНУТА"
     : since.n >= SHC_ALT_MIN_DISCRIMINATING ? "ПОДТВЕРЖДЕНА" : "НЕ СОЗРЕЛО";
+  // [ФИКС 06.08] КРИТЕРИЙ БЫЛ НЕДОСПЕЦИФИЦИРОВАН, И ЭТО МОЯ ОШИБКА ПРОТОКОЛА.
+  //
+  // Пре-регистрация судила альтернативу ТОЛЬКО на РАЗЛИЧАЮЩИХ матчах — там, где две гипотезы дают разные
+  // ответы. Для ВЫБОРА между ними это верно. Но слово вердикта — «ПОДТВЕРЖДЕНА» — читается как «конвенция
+  // установлена», а критерий по построению СЛЕП к ячейке, где обе гипотезы отвечают ОДИНАКОВО и обе
+  // ошибаются.
+  //
+  // Замер 06.08, разбивка теста по ячейкам (n=91):
+  //     fav_first=true,  margin=1  n=24 — промахов: основная 0 · альтернатива 0
+  //     fav_first=true,  margin=2  n=30 — промахов: основная 0 · альтернатива 0
+  //     fav_first=false, margin=1  n=15 — промахов: основная 15 · альтернатива 0   ← различающая ячейка
+  //     fav_first=false, margin=2  n=22 — промахов: основная 13 · альтернатива 13  ← СЛЕПАЯ ЗОНА
+  // В слепой зоне 13 из 22 идут против ОБЕИХ, причём зеркальный прогноз угадывает все 13 — то есть там
+  // ориентация токена переворачивается, и ни подпись, ни фаворит её не предсказывают.
+  //
+  // Поэтому вердикт альтернативы отныне НЕСЁТ ЧИСЛО ПРОМАХОВ ПО ВСЕЙ ВЫБОРКЕ, а «ПОДТВЕРЖДЕНА» без
+  // чистой полной выборки понижается до «ПОДТВЕРЖДЕНА В ДУЭЛИ»: она обыграла соперницу там, где они
+  // расходятся, и это НЕ то же самое, что «правило найдено».
+  const altFull = rows.filter((r) => r.group === "тест" && r.altOutcome !== "нет исхода" && admissible(r));
+  const altFullBad = altFull.filter((r) => r.altOutcome === "РАСХОЖДЕНИЕ").length;
+  const altClean = altFullBad === 0;
   const alt = {
     registeredAt: SHC_ALT_REGISTERED_AT, minDiscriminating: SHC_ALT_MIN_DISCRIMINATING,
     discriminatingSince: since.n, mismatchSince: since.bad,
     discriminatingRetro: retro.n, mismatchRetro: retro.bad,
-    verdict: altVerdict,
+    fullSetChecked: altFull.length, fullSetMismatch: altFullBad,
+    verdict: altVerdict === "ПОДТВЕРЖДЕНА" && !altClean ? ("ПОДТВЕРЖДЕНА В ДУЭЛИ" as ShcVerdict) : altVerdict,
     note: altVerdict === "ОПРОВЕРГНУТА"
       ? `альтернатива «−1.5 всегда у первого» ОПРОВЕРГНУТА: ${since.bad} расхождений на ${since.n} различающих матчах после ${SHC_ALT_REGISTERED_AT}`
       : altVerdict === "ПОДТВЕРЖДЕНА"
-        ? `альтернатива ПОДТВЕРЖДЕНА на НОВЫХ данных: ${since.n} различающих матчей после ${SHC_ALT_REGISTERED_AT}, ноль расхождений — ${pWithUnit(Math.pow(0.5, since.n), since.n, "матчах")}. Флаг поднимает ВЛАДЕЛЕЦ`
+        ? (altClean
+            ? `альтернатива ПОДТВЕРЖДЕНА на НОВЫХ данных: ${since.n} различающих матчей после ${SHC_ALT_REGISTERED_AT}, ноль расхождений — ${pWithUnit(Math.pow(0.5, since.n), since.n, "матчах")}; и по ВСЕЙ тест-выборке (${altFull.length}) промахов тоже нет. Флаг поднимает ВЛАДЕЛЕЦ`
+            : `альтернатива выиграла ДУЭЛЬ, но правилом НЕ стала: ${since.n} различающих матчей после ${SHC_ALT_REGISTERED_AT} без единого расхождения (${pWithUnit(Math.pow(0.5, since.n), since.n, "матчах")}) — И ${altFullBad} промахов на ВСЕЙ тест-выборке (${altFull.length}).`
+              + ` Пре-регистрация судила только ячейку, где гипотезы РАСХОДЯТСЯ, и по построению слепа там, где обе отвечают одинаково и обе ошибаются.`
+              + ` «Обыграла соперницу» ≠ «правило найдено»: блок остаётся, ориентацию нужно брать из ТОКЕНА, а не выводить из подписи и фаворита`)
         : `альтернатива НЕ СОЗРЕЛА: различающих матчей после ${SHC_ALT_REGISTERED_AT} ${since.n} при нужных ${SHC_ALT_MIN_DISCRIMINATING}`
           + ` (ретроспективно согласована с ${retro.n - retro.bad}/${retro.n} различающими — но ЭТИ матчи гипотезу ПОРОДИЛИ и подтвердить её не могут)`,
   };
