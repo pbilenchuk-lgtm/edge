@@ -389,7 +389,10 @@ test("polymarket: eventToMarketSnapshots drops priceless markets", () => {
   const labels = snaps.map((s) => s.label);
   assert.equal(snaps.length, 3); // priceless dropped; the O/U total expands to BOTH sides
   // token-fix-m1: the moneyline persists BOTH outcome tokens — external_ref (outcomes[0]) + tokenSecond (outcomes[1]).
-  assert.deepEqual(snaps.find((s) => s.label === "Connor Doig vs Eudald Gonzalez"), { label: "Connor Doig vs Eudald Gonzalez", price: 62, external_ref: "tok-a", tokenSecond: "tok-b", liquidity: "1234", askCents: null, spreadCents: null });
+  // [T3-корень 06.08] И ОБА ИМЕНИ. Эта подпись — ровно тот случай, на котором терялась ориентация ±1.5:
+  // она называет ОБОИХ игроков, эвристика «подпись уже называет исход» срабатывает, рынок остаётся одной
+  // строкой — и знание о том, ЧЬЮ сторону несёт цена (62¢ = P(Connor Doig)), прежде выбрасывалось.
+  assert.deepEqual(snaps.find((s) => s.label === "Connor Doig vs Eudald Gonzalez"), { label: "Connor Doig vs Eudald Gonzalez", price: 62, external_ref: "tok-a", tokenSecond: "tok-b", liquidity: "1234", askCents: null, spreadCents: null, outcomeFirst: "Connor Doig", outcomeSecond: "Eudald Gonzalez" });
   assert.ok(labels.includes("Total Sets: Over 2.5") && labels.includes("Total Sets: Under 2.5")); // both sides of the total
 });
 

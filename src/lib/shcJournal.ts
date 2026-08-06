@@ -32,7 +32,7 @@ import { observeFromSnapshots, SHC_HYPO_VERSION, SHC_MAX_PRICE_LAG_MIN } from ".
 
 export interface ShcJournalResult {
   seen: number; written: number; skippedUndecided: number; skippedIncomplete: number;
-  skippedStalePrice: number; skippedLagUnknown: number; backfilled: number;
+  skippedStalePrice: number; skippedLagUnknown: number; skippedSideUnknown: number; backfilled: number;
   total: number; note: string;
 }
 
@@ -48,7 +48,7 @@ export function recordShcObservations(db: Database, nowIso = new Date().toISOStr
   const backfilled = R.backfillShcPriceLag(db);
   if (backfilled) console.log(`[shcJournal] восстановлен разрыв цена/счёт у ${backfilled} строк из их провенанса`);
   const live = observeFromSnapshots(db);
-  let written = 0, skippedUndecided = 0, skippedIncomplete = 0, skippedStalePrice = 0, skippedLagUnknown = 0;
+  let written = 0, skippedUndecided = 0, skippedIncomplete = 0, skippedStalePrice = 0, skippedLagUnknown = 0, skippedSideUnknown = 0;
   for (const r of live.rows) {
     // [T3-фикс 05.08] НЕДОИГРАННЫЙ МАТЧ НЕ ПИШЕТСЯ НИ В ОДНУ ГРУППУ. Раньше это правило применялось
     // только к тесту («манилайн при ретайре разрешается нормально»), и замер 05.08 его опроверг: двое
@@ -62,12 +62,18 @@ export function recordShcObservations(db: Database, nowIso = new Date().toISOStr
     // одновременность ⇒ строку не морозим: NULL это отказ, а не «свежо».
     if (r.priceLagMin == null) { skippedLagUnknown++; continue; }
     if (r.priceLagMin > SHC_MAX_PRICE_LAG_MIN) { skippedStalePrice++; continue; }
+    // [T3-корень 06.08] СТОРОНА НЕ ПРОЧИТАНА ⇒ СТРОКА НЕ МОРОЗИТСЯ. Цена относится к outcomes[0]; чей это
+    // игрок, говорит только имя исхода. Прежде здесь замораживалось ДОПУЩЕНИЕ «цена про первого в подписи»,
+    // и замер 06.08 показал ячейку (n=22), где оно ложно: обе гипотезы промахнулись по 13, зеркальный
+    // прогноз угадал все 13. Журнал append-only — не записать догадку это единственный способ её не иметь.
+    if (r.sideFromToken == null) { skippedSideUnknown++; continue; }
     const ok = R.insertShcObservation(db, {
       kind: r.group === "контроль" ? "control" : "test",
       match_id: r.matchId, label: r.label, players: r.players, kickoff_at: r.kickoffAt,
       sets_first: r.setsFirst, sets_second: r.setsSecond, completed: r.completed ? 1 : 0,
       fav_is_label_first: r.favIsLabelFirst ? 1 : 0,
       price_cents: r.lastPriceCents ?? 0, price_lag_min: r.priceLagMin,
+      side_from_token: r.sideFromToken ? 1 : 0, side_src: r.sideSrc,
       observed_first_covers: r.observedFirstWins ? 1 : 0,
       pred_favourite: r.predictedFirstWins ? 1 : 0,
       pred_label_first: r.altPredictedFirstWins ? 1 : 0,
@@ -80,10 +86,11 @@ export function recordShcObservations(db: Database, nowIso = new Date().toISOStr
   }
   const total = R.shcObservationCount(db);
   return {
-    seen: live.rows.length, written, skippedUndecided, skippedIncomplete, skippedStalePrice, skippedLagUnknown, backfilled, total,
+    seen: live.rows.length, written, skippedUndecided, skippedIncomplete, skippedStalePrice, skippedLagUnknown, skippedSideUnknown, backfilled, total,
     note: `журнал ±1.5: осмотрено ${live.rows.length}, заморожено новых ${written} (в журнале ${total})`
       + ` · пропущено: не разрешилось ${skippedUndecided}, не доиграно ${skippedIncomplete},`
-      + ` цена старше счёта >${SHC_MAX_PRICE_LAG_MIN}мин ${skippedStalePrice}, разрыв не измерен ${skippedLagUnknown}`
+      + ` цена старше счёта >${SHC_MAX_PRICE_LAG_MIN}мин ${skippedStalePrice}, разрыв не измерен ${skippedLagUnknown},`
+      + ` сторона не прочитана ${skippedSideUnknown}`
       + (backfilled ? ` · восстановлен разрыв из провенанса у ${backfilled} прежних строк` : ""),
   };
 }

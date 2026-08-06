@@ -673,7 +673,8 @@ export async function linkMatchOdds(
   for (const s of snaps) {
     R.insertMarket(db, {
       id: R.uid(), match_id: match.id, label: s.label, price: s.price, ai_prob: null,
-      liquidity: s.liquidity, external_ref: s.external_ref, token_second: s.tokenSecond ?? null, snapshot_at: now, is_closing: false,
+      liquidity: s.liquidity, external_ref: s.external_ref, token_second: s.tokenSecond ?? null,
+      outcome_first: s.outcomeFirst ?? null, outcome_second: s.outcomeSecond ?? null, snapshot_at: now, is_closing: false,
     });
   }
   return snaps.length;
@@ -1024,7 +1025,7 @@ export async function importPolymarketMatches(
       // dedup by token (tokenless → by label) so re-discovery can't duplicate.
       if (s.external_ref ? haveTokens.has(s.external_ref) : haveLabels.has(s.label)) continue;
       if (isDust(liqOf(s.liquidity))) continue; // orphan/degenerate dust listing — don't surface it
-      R.insertMarket(db, { id: R.uid(), match_id: match.id, label: s.label, price: s.price, ai_prob: null, liquidity: s.liquidity, external_ref: s.external_ref, token_second: s.tokenSecond ?? null, snapshot_at: now, is_closing: false });
+      R.insertMarket(db, { id: R.uid(), match_id: match.id, label: s.label, price: s.price, ai_prob: null, liquidity: s.liquidity, external_ref: s.external_ref, token_second: s.tokenSecond ?? null, outcome_first: s.outcomeFirst ?? null, outcome_second: s.outcomeSecond ?? null, snapshot_at: now, is_closing: false });
     }
     out.push({ sport, match: `${d.home}–${d.away}`, created, markets: d.markets.length });
   }

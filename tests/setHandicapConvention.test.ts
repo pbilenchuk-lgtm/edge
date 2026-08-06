@@ -17,7 +17,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { buildSetHandicapConvention as verdictOf, observeFromSnapshots, setHandicapConventionLine, SHC_CONTROL_MIN, SHC_TEST_MIN_MATCHES } from "../src/lib/setHandicapConvention.js";
+import { buildSetHandicapConvention as verdictOf, observeFromSnapshots, setHandicapConventionLine, priceSideIsLabelFirst, SHC_CONTROL_MIN, SHC_TEST_MIN_MATCHES } from "../src/lib/setHandicapConvention.js";
 import { recordShcObservations } from "../src/lib/shcJournal.js";
 
 // ВЕРДИКТ ЧИТАЕТСЯ ИЗ ЖУРНАЛА (O8): наблюдение сначала замораживается, потом судится. Тесты идут тем же
@@ -45,7 +45,7 @@ const HCAP = `Canadian Open: ${P1} vs ${P2} Set Handicap +/-1.5`;
  */
 function played(
   db: ReturnType<typeof world>, i: number,
-  o: { favP1: boolean; setsP1: number; setsP2: number; mlPrice?: number | null; hcapPrice?: number | null },
+  o: { favP1: boolean; setsP1: number; setsP2: number; mlPrice?: number | null; hcapPrice?: number | null; outcomeFirst?: string | null },
 ) {
   const id = `m${i}`;
   const day = new Date(Date.UTC(2026, 6, 1) + i * 86_400_000).toISOString().slice(0, 10);
@@ -58,7 +58,9 @@ function played(
   });
   snap(`${day}T10:00:00Z`, o.favP1 ? 70 : 30, 0, 0);   // стартовая цена → фаворит
   snap(`${day}T13:00:00Z`, null, o.setsP1, o.setsP2);  // финальный счёт
-  const mk = (label: string, price: number, sfx: string) => R.insertMarket(db, { id: `mk${i}${sfx}`, match_id: id, label, price, ai_prob: null, liquidity: 3000, external_ref: null, snapshot_at: `${day}T14:00:00Z`, is_closing: false } as never);
+  // `outcome_first` — имя исхода, чью вероятность несёт цена (markets.outcome_first). В фикстурах по
+  // умолчанию это ПЕРВЫЙ в подписи; переворот и отсутствие имени проверяются отдельными тестами.
+  const mk = (label: string, price: number, sfx: string) => R.insertMarket(db, { id: `mk${i}${sfx}`, match_id: id, label, price, ai_prob: null, liquidity: 3000, external_ref: null, outcome_first: o.outcomeFirst === undefined ? P1 : o.outcomeFirst, outcome_second: P2, snapshot_at: `${day}T14:00:00Z`, is_closing: false } as never);
   if (o.mlPrice != null) mk(ML, o.mlPrice, "ml");
   if (o.hcapPrice != null) mk(HCAP, o.hcapPrice, "h");
 }
@@ -145,7 +147,7 @@ test("ЕДИНИЦА — МАТЧ: два гандикап-пропа одног
   // Снимок цены — ДНЯ ЭТОГО МАТЧА. Прежняя фикстура ставила 01.07 матчу сотого дня, то есть цену
   // столетней давности; допуск разрыва «цена старше счёта» её теперь законно отсеивает.
   const day100 = new Date(Date.UTC(2026, 6, 1) + 100 * 86_400_000).toISOString().slice(0, 10);
-  R.insertMarket(db, { id: "mk100b", match_id: "m100", label: `Canadian Open: ${P1} vs ${P2} Set Handicap 1.5`, price: 99, ai_prob: null, liquidity: 3000, external_ref: null, snapshot_at: `${day100}T14:00:00Z`, is_closing: false } as never);
+  R.insertMarket(db, { id: "mk100b", match_id: "m100", label: `Canadian Open: ${P1} vs ${P2} Set Handicap 1.5`, price: 99, ai_prob: null, liquidity: 3000, external_ref: null, outcome_first: P1, outcome_second: P2, snapshot_at: `${day100}T14:00:00Z`, is_closing: false } as never);
   const r = buildSetHandicapConvention(db);
   assert.equal(r.testChecked, 2, "рынков два");
   assert.equal(r.testMatches, 1, "а испытание одно — счёт у них общий");
@@ -179,7 +181,7 @@ test("незрелость объясняется числами: сколько
   const day = new Date(Date.UTC(2026, 6, 1) + i * 86_400_000).toISOString().slice(0, 10);
   played(db, i, { favP1: true, setsP1: 2, setsP2: 0, mlPrice: 99 });
   // Гандикап с ценой, снятой за 3 часа ДО последнего снимка скаута, и без токена.
-  R.insertMarket(db, { id: `mk${i}old`, match_id: `m${i}`, label: HCAP, price: 25, ai_prob: null, liquidity: 3000, external_ref: null, snapshot_at: `${day}T10:00:00Z`, is_closing: false } as never);
+  R.insertMarket(db, { id: `mk${i}old`, match_id: `m${i}`, label: HCAP, price: 25, ai_prob: null, liquidity: 3000, external_ref: null, outcome_first: P1, outcome_second: P2, snapshot_at: `${day}T10:00:00Z`, is_closing: false } as never);
   const r = buildSetHandicapConvention(db);
   const row = observeFromSnapshots(db).rows.find((x) => x.group === "тест")!;
   assert.equal(row.outcome, "нет исхода");
@@ -256,7 +258,7 @@ test("[T3-фикс] цена СТАРШЕ счёта больше чем на т
   });
   snap(`${day}T10:00:00Z`, 70, 0, 0);
   snap(`${day}T19:00:00Z`, null, 2, 0);                       // счёт — 19:00
-  R.insertMarket(db2, { id: "mk20ml", match_id: "m20", label: ML, price: 99, ai_prob: null, liquidity: 3000, external_ref: null, snapshot_at: `${day}T13:00:00Z`, is_closing: false } as never); // цена — 13:00
+  R.insertMarket(db2, { id: "mk20ml", match_id: "m20", label: ML, price: 99, ai_prob: null, liquidity: 3000, external_ref: null, outcome_first: P1, outcome_second: P2, snapshot_at: `${day}T13:00:00Z`, is_closing: false } as never); // цена — 13:00
   // Отказ происходит НА ЗАПИСИ: журнал append-only, и не заморозить плохую строку — единственный способ
   // её не иметь. Поэтому счётчик отказа приходит из шага журнала, а не из вердикта.
   const rec = recordShcObservations(db2, "2026-08-04T12:00:00Z");
@@ -307,4 +309,83 @@ test("[фикс] альтернатива с промахами на полно�
   assert.equal(r.alt.verdict, "ПОДТВЕРЖДЕНА В ДУЭЛИ");
   assert.match(r.alt.note, /правилом НЕ стала/);
   assert.match(r.alt.note, /из ТОКЕНА/);
+});
+
+// ── КОРЕНЬ 06.08: СТОРОНА ЧИТАЕТСЯ ИЗ ИМЕНИ ИСХОДА, А НЕ ВЫВОДИТСЯ ───────────────────────────────
+// Цена рынка всегда относится к outcomes[0]. Чей это игрок — говорит ТОЛЬКО имя исхода: подпись
+// «A vs B Set Handicap +/-1.5» называет обоих и стороны не несёт. Три «глобальных правила» подряд
+// (фаворит, первый в подписи, контракт фаворита) объясняли по три четверти выборки и врали на остатке
+// именно потому, что порядок outcomes — факт листинга Polymarket, а не конвенция.
+
+test("ИМЕННАЯ ЯЧЕЙКА (n=22): токен переворачивает чтение, и обе гипотезы перестают промахиваться", () => {
+  // Профиль ячейки замера 06.08: первый в подписи НЕ фаворит, разница ровно 2 сета. Обе гипотезы
+  // предсказывают «первый не покрыл», рынок стоит на 99¢ — под прежним ДОПУЩЕНИЕМ «цена про первого»
+  // это расхождение у обеих (13 из 22), а зеркальное чтение угадывает все 13.
+  const cell = { favP1: false, setsP1: 0, setsP2: 2, mlPrice: 2, hcapPrice: 99 };
+
+  const blind = world();
+  played(blind, 60, { ...cell, outcomeFirst: null });               // имени исхода нет — сторона допущена
+  const bRow = observeFromSnapshots(blind).rows.find((x) => x.group === "тест")!;
+  assert.equal(bRow.sideFromToken, null);
+  assert.equal(bRow.outcome, "РАСХОЖДЕНИЕ", "без стороны обе гипотезы «промахиваются»");
+  assert.equal(bRow.altOutcome, "РАСХОЖДЕНИЕ");
+
+  const read = world();
+  played(read, 60, { ...cell, outcomeFirst: P2 });                  // цена — про ВТОРОГО в подписи
+  const rRow = observeFromSnapshots(read).rows.find((x) => x.group === "тест")!;
+  assert.equal(rRow.sideFromToken, false, "сторона ПРОЧИТАНА и она обратная");
+  assert.equal(rRow.observedFirstWins, false, "99¢ на втором = первый НЕ покрыл");
+  assert.equal(rRow.outcome, "совпало", "промах был артефактом ориентации, а не гипотезы");
+  assert.equal(rRow.altOutcome, "совпало");
+  assert.match(rRow.note, /цена 99¢ про ВТОРОГО/, "строка называет, чью сторону она видит");
+});
+
+test("сторона НЕ прочитана — строка не морозится и к вердикту не допускается", () => {
+  const db = world();
+  played(db, 100, { favP1: true, setsP1: 2, setsP2: 0, mlPrice: 99, hcapPrice: 97, outcomeFirst: null });
+  const rec = recordShcObservations(db, "2026-08-04T12:00:00Z");
+  assert.equal(rec.written, 0, "догадку не морозим: журнал append-only, не записать — единственный способ не иметь");
+  assert.equal(rec.skippedSideUnknown, 2, "и манилайн, и гандикап — оба без прочитанной стороны");
+  assert.match(rec.note, /сторона не прочитана 2/, "отказ НАПЕЧАТАН, а не спрятан");
+
+  // Прежняя журнальная строка (записанная до колонки) вердикт не двигает — но названа числом.
+  R.insertShcObservation(db, {
+    kind: "test", match_id: "m-legacy", label: HCAP, players: `${P1} — ${P2}`, kickoff_at: "2026-07-20T10:00:00Z",
+    sets_first: 2, sets_second: 0, completed: 1, fav_is_label_first: 1, price_cents: 97,
+    price_lag_min: 5, side_from_token: null, side_src: null,
+    observed_first_covers: 1, pred_favourite: 1, pred_label_first: 1, discriminating: 0,
+    hypo_version: "shc-h1", score_src: "legacy", price_src: "legacy", fav_src: "legacy",
+    created_at: "2026-07-20T12:00:00Z",
+  });
+  const r = verdictOf(db);
+  assert.equal(r.refusedSideUnknown, 1);
+  assert.equal(r.testChecked, 0, "недопущенная строка тест не набирает");
+  assert.match(r.note, /сторона НЕ ПРОЧИТАНА 1/);
+});
+
+test("«имени ещё нет» и «имя не сопоставилось» — РАЗНЫЕ числа: лечатся противоположно", () => {
+  // Без различения молчащий ноль покрытия неотличим от механизма, который не заработает НИКОГДА.
+  const absent = world();
+  played(absent, 100, { favP1: true, setsP1: 2, setsP2: 0, mlPrice: 99, hcapPrice: 97, outcomeFirst: null });
+  const a = verdictOf(absent);
+  assert.equal(a.orientation.known, 0);
+  assert.equal(a.orientation.noName, 2);
+  assert.equal(a.orientation.unreadable, 0);
+  assert.match(a.orientation.note, /покрытие растёт с новыми матчами/);
+
+  const junk = world();
+  played(junk, 100, { favP1: true, setsP1: 2, setsP2: 0, mlPrice: 99, hcapPrice: 97, outcomeFirst: "Yes" });
+  const j = verdictOf(junk);
+  assert.equal(j.orientation.known, 0);
+  assert.equal(j.orientation.unreadable, 2, "имя пришло — но игрока в нём нет");
+  assert.match(j.orientation.note, /САМО ЭТО НЕ ПРОЙДЁТ|НЕ СОПОСТАВЛЯЮТСЯ/, "громкий ноль называет причину");
+});
+
+test("purity: имя исхода читается как ИМЯ, а не как порядковый номер", () => {
+  assert.equal(priceSideIsLabelFirst("Carlos Alcaraz", P1, P2), true);
+  assert.equal(priceSideIsLabelFirst("Alcaraz", P1, P2), true, "фамилии достаточно");
+  assert.equal(priceSideIsLabelFirst("Sinner", P1, P2), false);
+  assert.equal(priceSideIsLabelFirst("Yes", P1, P2), null, "не-именной исход — ОТСУТСТВИЕ факта");
+  assert.equal(priceSideIsLabelFirst("", P1, P2), null);
+  assert.equal(priceSideIsLabelFirst("Alcaraz", P1, P1), null, "одинаковые имена различить нечем");
 });

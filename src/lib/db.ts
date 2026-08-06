@@ -326,6 +326,15 @@ export function initSchema(db: Database): void {
     // [T3-фикс] Разрыв «цена старше счёта» на журнальной строке. Старые строки останутся NULL — и это
     // честно: доказать их одновременность нечем, поэтому к вердикту они не допускаются (не «свежо»).
     "ALTER TABLE shc_observations ADD COLUMN price_lag_min INTEGER",
+    // [T3-корень] Имя исхода, чью вероятность несёт цена. Старые строки останутся NULL — и это честно:
+    // для них сторона неизвестна, и вердикт обязан их не допускать, а не догадываться.
+    "ALTER TABLE markets ADD COLUMN outcome_first TEXT",
+    "ALTER TABLE markets ADD COLUMN outcome_second TEXT",
+    // [T3-корень] Сторона, ПРОЧИТАННАЯ из имени исхода, и её провенанс. Прежние журнальные строки
+    // останутся NULL — их ориентация была ДОПУЩЕНИЕМ («цена всегда про первого в подписи»), и замер
+    // 06.08 показал ячейку, где это допущение ложно. Недоказуемое допущение к вердикту не допускается.
+    "ALTER TABLE shc_observations ADD COLUMN side_from_token INTEGER",
+    "ALTER TABLE shc_observations ADD COLUMN side_src TEXT",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }
