@@ -115,6 +115,15 @@ const TENNIS_STRATEGIES = new Set([TENNIS_STRATEGY, SET_VALUE_STRATEGY]);
 export interface TennisFinal {
   finished: boolean; canceled: boolean; retired: boolean; advancing: "first" | "second" | null;
   manual: boolean; p1: string; p2: string;
+  /**
+   * ПОЧЕМУ именно неизвестен ПОБЕДИТЕЛЬ. Флаг `manual` говорит только «мы не знаем, кто прошёл дальше», и
+   * этого достаточно для ставки на матч — но НЕ для пропа, которому победитель не нужен вовсе (тотал геймов
+   * в сете, победитель сета, число сетов). Разные причины дают разное доверие к САМОМУ СЧЁТУ:
+   *   • `winner_conflict` — event_winner противоречит счёту по сетам ⇒ под сомнением и счёт тоже;
+   *   • `retired_no_winner` / `no_winner_no_score` — счёт как таковой не оспорен, неизвестен лишь проходящий.
+   * Без этого различения любой потребитель вынужден считать все три случая одинаково слепыми.
+   */
+  manualReason: "winner_conflict" | "retired_no_winner" | "no_winner_no_score" | null;
   /** Счёт по сетам из ТЕРМИНАЛЬНОГО снимка — то, что обязано переехать в карточку матча. */
   setsP1: number | null; setsP2: number | null;
 }
@@ -148,6 +157,7 @@ export function tennisFinalResult(db: Database, matchId: string): TennisFinal | 
   const bySets: "first" | "second" | null = (r.sets_p1 != null && r.sets_p2 != null && r.sets_p1 !== r.sets_p2) ? (r.sets_p1 > r.sets_p2 ? "first" : "second") : null;
   let advancing: "first" | "second" | null = null;
   let manual = false;
+  let manualReason: TennisFinal["manualReason"] = null;
   if (canceled) {
     advancing = null; // void family — no advancer, settle refunds
   } else if (fromWinner != null) {
@@ -155,18 +165,18 @@ export function tennisFinalResult(db: Database, matchId: string): TennisFinal | 
     // Cross-check ONLY a clean (non-retired) finish: a decisive set score that disagrees with
     // event_winner means we can't trust either → manual. A RETIREMENT's set score is mid-match and
     // naturally disagrees with the advancer (the leader often retires), so it must NOT cross-check.
-    if (!retired && bySets != null && bySets !== fromWinner) { advancing = null; manual = true; }
+    if (!retired && bySets != null && bySets !== fromWinner) { advancing = null; manual = true; manualReason = "winner_conflict"; }
   } else if (retired) {
     // Retirement WITHOUT event_winner: the set-count leader is OFTEN the one who retired (injury while
     // ahead), so the leader is NOT the advancer. We cannot know the advancer → manual, never guess (bug B).
-    manual = true;
+    manual = true; manualReason = "retired_no_winner";
   } else if (bySets != null) {
     advancing = bySets; // a clean, decisive finish (2-0 / 2-1) with no event_winner → the set winner advanced
   } else {
-    manual = true; // finished, no event_winner, no decisive score → honest don't-know
+    manual = true; manualReason = "no_winner_no_score"; // finished, no event_winner, no decisive score → honest don't-know
   }
   return {
-    finished: true, canceled, retired, advancing, manual, p1: String(r.p1 ?? ""), p2: String(r.p2 ?? ""),
+    finished: true, canceled, retired, advancing, manual, manualReason, p1: String(r.p1 ?? ""), p2: String(r.p2 ?? ""),
     setsP1: r.sets_p1 == null ? null : Number(r.sets_p1), setsP2: r.sets_p2 == null ? null : Number(r.sets_p2),
   };
 }

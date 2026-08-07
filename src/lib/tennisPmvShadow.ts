@@ -74,6 +74,69 @@ export function resolvePmvShadowSignals(db: Database, deps: EngineDeps = {}): { 
   return { resolved, unresolved };
 }
 
+// ============================================================================
+// [07.08] КОНТРФАКТИЧЕСКИЙ ЗОНД ПО «manual»-ветке.
+//
+// Замер разбора неразрешённых дал 144 из 144 в ОДНОМ классе `manual_finish`, а `resolverGaps` — пусто.
+// Прочитать это как «восстановимых нет» НЕЛЬЗЯ: `if (fin.manual)` стоит ПЕРВЫМ и уходит в `unresolved`
+// ДО того, как хоть раз вызваны `finalSetsFromRaw` и `resolveTennisProp`. Ноль в двух последующих классах
+// означает не «там пусто», а «туда не дошло НИ ОДНОЙ строки». Вердикт о ветках, которые не исполнялись, —
+// ровно тот класс, за который мы наказываем гипотезы; сторож посчитал СВОЙ первый гейт за весь конвейер.
+//
+// Хуже того, гейт заведомо ШИРЕ своего смысла: `manual` = «неизвестно, КТО ПРОШЁЛ ДАЛЬШЕ». Пропу
+// «Set 1 Over 8.5», «Set 2 Winner» или «Total Sets: Under 2.5» проходящий не нужен ВООБЩЕ — а именно эти
+// три ярлыка и стоят в примерах прода.
+//
+// Зонд НИЧЕГО НЕ РАЗРЕШАЕТ. Он считает, ЧТО БЫ вышло, и дописывает это в заметку машинным тегом. Статус
+// остаётся `unresolved`. Разрешать на этом же деплое было бы нельзя: при `winner_conflict` под сомнением
+// сам СЧЁТ, и такие строки влили бы неверные исходы в базу Brier, на которой стоит вердикт «GO».
+// ============================================================================
+
+/** Машинный тег контрфактического зонда в `resolve_note`. Идемпотентен: строка с тегом не перепроверяется. */
+const CF_TAG = "[cf:";
+export type CfWould = "won" | "lost" | "void" | "unreadable_sets" | "resolver_cannot";
+
+/** Что БЫ вышло по одной неразрешённой строке, если бы `manual`-гейт её не проглотил. Ничего не пишет. */
+export function probeOne(db: Database, matchId: string, label: string, firstIsP1Col: number | null): { would: CfWould; mr: string } | null {
+  const fin = tennisFinalResult(db, matchId);
+  if (!fin || !fin.finished || !fin.manual) return null; // зонд только по manual-ветке
+  const mr = fin.manualReason ?? "unknown";
+  const row = db.prepare(`SELECT raw FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(matchId) as { raw?: string } | undefined;
+  const fs = finalSetsFromRaw(row?.raw ?? null);
+  if (!fs) return { would: "unreadable_sets", mr };
+  const firstIsP1 = firstIsP1Col == null ? (propFirstIsP1(label, { p1: fin.p1, p2: fin.p2 }) ?? true) : firstIsP1Col === 1;
+  let won: boolean | null | undefined;
+  try { won = resolveTennisProp(label, fs, { retired: fin.retired, canceled: fin.canceled, firstIsP1 }); }
+  catch { won = undefined; }
+  if (won === undefined) return { would: "resolver_cannot", mr };
+  if (won == null) return { would: "void", mr };
+  return { would: won ? "won" : "lost", mr };
+}
+
+/** Прогон зонда по уже накопленным `unresolved`. Статусы не трогает — дописывает тег в заметку. */
+export function probePmvShadowManual(db: Database, _deps: EngineDeps = {}): { probed: number; wouldResolve: number } {
+  let probed = 0, wouldResolve = 0;
+  const rows = db.prepare(
+    `SELECT id, match_id, market_label, first_is_p1, resolve_note FROM pmv_shadow_signals WHERE status='unresolved'`,
+  ).all() as { id: string; match_id: string; market_label: string; first_is_p1: number | null; resolve_note: string | null }[];
+  for (const s of rows) {
+    if (s.resolve_note && s.resolve_note.includes(CF_TAG)) continue; // уже зондировано
+    const p = probeOne(db, s.match_id, s.market_label, s.first_is_p1);
+    if (!p) continue;
+    probed++;
+    if (p.would === "won" || p.would === "lost" || p.would === "void") wouldResolve++;
+    const note = `${s.resolve_note ?? ""} ${CF_TAG}would=${p.would},mr=${p.mr}]`.trim();
+    db.prepare(`UPDATE pmv_shadow_signals SET resolve_note=? WHERE id=?`).run(note, s.id);
+  }
+  return { probed, wouldResolve };
+}
+
+/** Разбор тега обратно. Отсутствие тега — СВОЙ случай, а не «зонд ничего не нашёл». */
+export function parseCf(note: string | null): { would: CfWould; mr: string } | null {
+  const m = /\[cf:would=([a-z_]+),mr=([a-z_]+)\]/.exec(note ?? "");
+  return m ? { would: m[1] as CfWould, mr: m[2]! } : null;
+}
+
 export interface PmvShadowCalibration {
   criteria: string[];
   counts: { total: number; pending: number; won: number; lost: number; void: number; unresolved: number; repeats: number };
@@ -92,6 +155,23 @@ export interface PmvShadowCalibration {
   unresolvedBreakdown: { reason: string; cls: "feed_no_detail" | "manual_finish" | "resolver_cannot" | "other"; n: number; sampleLabels: string[] }[];
   /** Ярлыки, которые резолвер не осилил, сгруппированные по семье — адресный список работы. */
   resolverGaps: { family: string; n: number; sampleLabels: string[] }[];
+  /**
+   * [07.08, ПОПРАВКА ПО ЗАМЕРУ] Первый замер разбора дал 144/144 в `manual_finish` и ПУСТОЙ `resolverGaps`,
+   * а заметка объявила «восстановимых 0 — остальное ожиданием не лечится». Это было НЕОБОСНОВАННО: гейт
+   * `if (fin.manual)` стоит первым и уходит в `unresolved` ДО вызова `finalSetsFromRaw`/`resolveTennisProp`.
+   * Ноль в последующих классах означал «туда не дошло ни одной строки», а не «там пусто» — вердикт о
+   * ветках, которые не исполнялись. Здесь конвейер измеряется ДО КОНЦА: контрфактический зонд считает,
+   * что БЫ вышло, ничего не разрешая.
+   * `wouldResolveSafe` — строки, где счёт НЕ оспорен (`retired_no_winner` / `no_winner_no_score`): их можно
+   * разрешать. `wouldResolveDisputed` — `winner_conflict`: под сомнением сам счёт, разрешать НЕЛЬЗЯ.
+   */
+  manualProbe: {
+    probed: number; unprobed: number;
+    wouldResolve: number; wouldResolveSafe: number; wouldResolveDisputed: number;
+    byWould: { would: string; n: number; sampleLabels: string[] }[];
+    byReason: { manualReason: string; n: number; wouldResolve: number }[];
+    note: string;
+  };
   winPctActual: number | null;    // realized win% of scored props
   theoMeanPct: number | null;     // mean model prob on the same rows
   brierMarkov: number | null;
@@ -165,6 +245,38 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
   const resolverGaps = [...byFamily.values()].sort((a, b) => b.n - a.n);
   const recoverable = unresolvedBreakdown.filter((x) => x.cls === "resolver_cannot").reduce((s, x) => s + x.n, 0);
 
+  // ── КОНТРФАКТИЧЕСКИЙ ЗОНД: конвейер меряется ДО КОНЦА, а не по первому гейту.
+  const wouldOf = new Map<string, { would: string; n: number; sampleLabels: string[] }>();
+  const mrOf = new Map<string, { manualReason: string; n: number; wouldResolve: number }>();
+  let probed = 0, unprobed = 0, wouldResolve = 0, wouldResolveSafe = 0, wouldResolveDisputed = 0;
+  for (const r of unrRows) {
+    const cf = parseCf(r.note);
+    if (!cf) { unprobed++; continue; }
+    probed++;
+    const w = wouldOf.get(cf.would) ?? { would: cf.would, n: 0, sampleLabels: [] };
+    w.n++; if (w.sampleLabels.length < 4) w.sampleLabels.push(r.label);
+    wouldOf.set(cf.would, w);
+    const m = mrOf.get(cf.mr) ?? { manualReason: cf.mr, n: 0, wouldResolve: 0 };
+    m.n++;
+    if (cf.would === "won" || cf.would === "lost" || cf.would === "void") {
+      m.wouldResolve++; wouldResolve++;
+      // Счёт оспорен ТОЛЬКО при winner_conflict: там event_winner противоречит счёту по сетам, поэтому
+      // разрешать проп на этом счёте значило бы влить в базу Brier исход, которому мы сами не верим.
+      if (cf.mr === "winner_conflict") wouldResolveDisputed++; else wouldResolveSafe++;
+    }
+    mrOf.set(cf.mr, m);
+  }
+  const manualProbe: PmvShadowCalibration["manualProbe"] = {
+    probed, unprobed, wouldResolve, wouldResolveSafe, wouldResolveDisputed,
+    byWould: [...wouldOf.values()].sort((a, b) => b.n - a.n),
+    byReason: [...mrOf.values()].sort((a, b) => b.n - a.n),
+    note: !probed
+      ? (unprobed ? `зонд ещё не прошёл по ${unprobed} строкам — «восстановимых нет» пока НЕ УСТАНОВЛЕНО` : "неразрешённых нет")
+      : `зонд по ${probed} строкам: разрешилось бы ${wouldResolve}`
+        + (wouldResolve ? ` (из них БЕЗОПАСНО ${wouldResolveSafe} — счёт не оспорен; ${wouldResolveDisputed} на спорном счёте, разрешать нельзя)` : "")
+        + (unprobed ? ` · не зондировано ${unprobed}` : ""),
+  };
+
   const verdict: PmvShadowCalibration["verdict"] = !matured ? "insufficient" : markovBeatsImplied ? "go" : "no_go";
   const note = !matured
     ? `копим: ${scored}/${NEED_N} разрешённых кейсов (это НЕ «немой ноль» — данные теперь реально приходят). unresolved=${c.unresolved}${terminal ? ` (${Math.round(100 * c.unresolved / terminal)}% терминальных)` : ""} — следи за долей, это диагностика конвейера.`
@@ -173,9 +285,18 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
       : `NO_GO: Brier марковских ${r3(brierMarkov)} > implied ${r3(brierImplied)} на n=${scored} — модель НЕ бьёт рынок. Ядро не готово.`;
   // ВОССТАНОВИМОЕ НАЗЫВАЕТСЯ ЧИСЛОМ. «Данных мало» и «мы их не дочитываем» — разные диагнозы, и второй
   // чинится кодом за один прогон, а не ожиданием новых матчей.
+  // [ПОПРАВКА 07.08] Прежняя строка при recoverable=0 печатала «все остальные это отсутствие исхода в
+  // фиде, ожиданием не лечится». Это утверждение о ветках, которые НЕ ИСПОЛНЯЛИСЬ: `manual`-гейт стоит
+  // первым и глотает строку до резолвера, поэтому ноль в классе `resolver_cannot` не является
+  // свидетельством об отсутствии восстановимых. Теперь «не лечится» говорится ТОЛЬКО когда зонд реально
+  // дошёл до конца конвейера и не нашёл разрешимых; иначе строка честно называет незнание.
   const recoveryNote = c.unresolved === 0 ? ""
-    : ` · неразрешённых ${c.unresolved}, из них ВОССТАНОВИМЫХ (резолвер не осилил ярлык) ${recoverable}`
-      + (recoverable > 0 ? ` — это не отсутствие исхода, а недочитанные данные: +${recoverable} к когорте без единого нового матча` : ` — все остальные это отсутствие исхода в фиде, ожиданием не лечится`);
+    : ` · неразрешённых ${c.unresolved}, из них восстановимых резолвером ${recoverable}`
+      + (recoverable > 0 ? `: +${recoverable} к когорте без единого нового матча` : "")
+      + ` · ${manualProbe.note}`
+      + (manualProbe.wouldResolveSafe > 0
+        ? ` — ГЕЙТ ШИРЕ СМЫСЛА: ${manualProbe.wouldResolveSafe} пропов не нуждаются в победителе матча и разрешимы кодом`
+        : manualProbe.probed && !manualProbe.wouldResolve ? " — конвейер пройден до конца: исхода нет в фиде, ожиданием не лечится" : "");
 
   return {
     criteria: [
@@ -185,7 +306,7 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
       "Brier марковских ≤ Brier implied на n≥40; implied из ЗАМОРОЖЕННОГО mid того же снапшота (модель против рынка в один момент).",
       "CLV не считаем (нет closing-книги по shadow) — только win%-vs-theo и Brier. Часы критерия с деплоя; текстовые flag_only задним числом не парсим.",
     ],
-    counts: c, scored, unresolvedBreakdown, resolverGaps,
+    counts: c, scored, unresolvedBreakdown, resolverGaps, manualProbe,
     unresolvedPct: terminal ? Math.round(1000 * c.unresolved / terminal) / 10 : null,
     winPctActual: outcomes.length ? Math.round(1000 * (mean(outcomes) ?? 0)) / 10 : null,
     theoMeanPct: scored ? Math.round(1000 * (mean(scoredRows.map((r) => r.t / 100)) ?? 0)) / 10 : null,

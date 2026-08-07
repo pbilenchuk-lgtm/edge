@@ -13,7 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { buildPmvShadowCalibration } from "../src/lib/tennisPmvShadow.js";
+import { buildPmvShadowCalibration, probePmvShadowManual, parseCf } from "../src/lib/tennisPmvShadow.js";
 
 const NOW = "2026-08-07T00:00:00.000Z";
 const db0 = () => { const db = openDb(":memory:"); initSchema(db); return db; };
@@ -42,7 +42,7 @@ test("ИМЕННОЙ ЗАМЕР: причины разведены по клас
   assert.equal(cls.resolver_cannot, 3, "восстановимые отделены");
   assert.equal(cls.feed_no_detail, 2);
   assert.equal(cls.manual_finish, 1);
-  assert.match(c.note, /ВОССТАНОВИМЫХ \(резолвер не осилил ярлык\) 3/);
+  assert.match(c.note, /восстановимых резолвером 3/);
   assert.match(c.note, /без единого нового матча/);
 });
 
@@ -72,10 +72,55 @@ test("нет неразрешённых — строка восстановле�
   assert.ok(!/ВОССТАНОВИМЫХ/.test(c.note));
 });
 
-test("все неразрешённые — из фида: сказано ПРЯМО, что ожиданием не лечится", () => {
+// ============================================================
+// ПОПРАВКА ПО ЗАМЕРУ 07.08. Прод дал 144 из 144 в классе `manual_finish` и ПУСТОЙ `resolverGaps`, а
+// заметка объявила «восстановимых 0 — остальное ожиданием не лечится». Утверждение было НЕОБОСНОВАННЫМ:
+// `if (fin.manual)` стоит ПЕРВЫМ и уходит в unresolved ДО вызова finalSetsFromRaw/resolveTennisProp, так
+// что ноль в последующих классах означал «туда не дошло ни одной строки», а не «там пусто». Сторож
+// посчитал свой ПЕРВЫЙ гейт за весь конвейер и вынес вердикт о ветках, которые не исполнялись.
+//
+// Ниже держатся три свойства: (1) незондированное НЕ выдаётся за «не лечится»; (2) зонд не меняет
+// статусов; (3) разрешимое на СПОРНОМ счёте не смешивается с безопасным.
+// ============================================================
+
+test("СТОРОЖ ЛОЖНОЙ УВЕРЕННОСТИ: пока зонд не прошёл, «ожиданием не лечится» НЕ утверждается", () => {
   const db = db0();
-  sig(db, "a1", { status: "unresolved", note: "детализация по сетам не читается на финале" });
-  assert.match(buildPmvShadowCalibration(db).note, /ожиданием не лечится/);
+  sig(db, "a1", { status: "unresolved", note: "исход неизвестен (manual/нет детали финала)" });
+  const c = buildPmvShadowCalibration(db);
+  assert.equal(c.manualProbe.probed, 0);
+  assert.equal(c.manualProbe.unprobed, 1);
+  assert.ok(!/не лечится/.test(c.note), "вердикт о ветке, которая не исполнялась, не выносится");
+  assert.match(c.note, /НЕ УСТАНОВЛЕНО/);
+});
+
+test("конвейер пройден ДО КОНЦА и разрешимых нет — только тогда «ожиданием не лечится»", () => {
+  const db = db0();
+  sig(db, "a1", { status: "unresolved", note: "исход неизвестен (manual/нет детали финала) [cf:would=unreadable_sets,mr=no_winner_no_score]" });
+  const c = buildPmvShadowCalibration(db);
+  assert.equal(c.manualProbe.probed, 1);
+  assert.equal(c.manualProbe.wouldResolve, 0);
+  assert.match(c.note, /ожиданием не лечится/);
+});
+
+test("ГЕЙТ ШИРЕ СМЫСЛА: проп, которому победитель матча не нужен, назван разрешимым", () => {
+  const db = db0();
+  sig(db, "a1", { status: "unresolved", label: "Total Sets: Under 2.5", note: "исход неизвестен (manual/нет детали финала) [cf:would=won,mr=no_winner_no_score]" });
+  sig(db, "a2", { status: "unresolved", label: "Set 2 Winner", note: "исход неизвестен (manual/нет детали финала) [cf:would=lost,mr=retired_no_winner]" });
+  const c = buildPmvShadowCalibration(db);
+  assert.equal(c.manualProbe.wouldResolve, 2);
+  assert.equal(c.manualProbe.wouldResolveSafe, 2, "счёт не оспорен ни в одной из двух причин");
+  assert.equal(c.manualProbe.wouldResolveDisputed, 0);
+  assert.match(c.note, /ГЕЙТ ШИРЕ СМЫСЛА: 2 пропов/);
+});
+
+test("спорный счёт НЕ выдаётся за восстановимое: winner_conflict считается отдельно", () => {
+  const db = db0();
+  sig(db, "a1", { status: "unresolved", note: "исход неизвестен (manual/нет детали финала) [cf:would=won,mr=winner_conflict]" });
+  const c = buildPmvShadowCalibration(db);
+  assert.equal(c.manualProbe.wouldResolve, 1);
+  assert.equal(c.manualProbe.wouldResolveDisputed, 1, "event_winner противоречит счёту — разрешать на нём нельзя");
+  assert.equal(c.manualProbe.wouldResolveSafe, 0);
+  assert.ok(!/ГЕЙТ ШИРЕ СМЫСЛА/.test(c.note), "спорное не зовётся к разрешению");
 });
 
 test("причина не записана — это СВОЙ класс, а не молчаливое слияние с фидовым", () => {
@@ -84,4 +129,51 @@ test("причина не записана — это СВОЙ класс, а н
   const b = buildPmvShadowCalibration(db).unresolvedBreakdown;
   assert.equal(b[0]!.cls, "other");
   assert.match(b[0]!.reason, /причина не записана/);
+});
+
+// Снимок ЗАВЕРШЁННОГО матча без event_winner и с равным счётом по сетам → manual (`no_winner_no_score`).
+// Победитель матча неизвестен, но посетовая детализация ЧИТАЕТСЯ — а значит проп, которому победитель не
+// нужен, разрешим. Ровно этот случай гейт и глотал.
+function finishedSnap(db: ReturnType<typeof db0>, matchId: string, sets: [number, number][], opts: { winner?: string; status?: string } = {}) {
+  const raw = JSON.stringify({
+    event_winner: opts.winner ?? null,
+    scores: sets.map(([a, b], i) => ({ score_set: String(i + 1), score_first: String(a), score_second: String(b) })),
+  });
+  const setsP1 = sets.filter(([a, b]) => a > b).length, setsP2 = sets.filter(([a, b]) => b > a).length;
+  db.prepare(`INSERT INTO tennis_snapshots(id,event_key,provider,batch_at,p1,p2,live,status,sets_p1,sets_p2,pm_match_id,raw,created_at)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(R.uid(), `k-${matchId}`, "apitennis", NOW, "Player One", "Player Two", 0, opts.status ?? "Finished", setsP1, setsP2, matchId, raw, NOW);
+}
+
+test("ЗОНД НИЧЕГО НЕ РАЗРЕШАЕТ: статус остаётся unresolved, но известно, ЧТО БЫ вышло", () => {
+  const db = db0();
+  // 1-1 по сетам, победителя нет → manual. Проп «Total Sets: Under 2.5» победителя не требует.
+  sig(db, "a1", { status: "unresolved", label: "Total Sets: Under 2.5", note: "исход неизвестен (manual/нет детали финала)" });
+  finishedSnap(db, "m-a1", [[6, 4], [3, 6]]);
+  const r = probePmvShadowManual(db);
+  assert.equal(r.probed, 1);
+  const row = db.prepare(`SELECT status, resolve_note n FROM pmv_shadow_signals WHERE id='a1'`).get() as { status: string; n: string };
+  assert.equal(row.status, "unresolved", "зонд не разрешает — иначе он влил бы исход в базу Brier мимо решения");
+  const cf = parseCf(row.n);
+  assert.equal(cf?.mr, "no_winner_no_score");
+  assert.ok(cf && cf.would !== "unreadable_sets", "детализация ЧИТАЕТСЯ — гейт остановил не фид, а нас самих");
+  assert.match(row.n, /manual\/нет детали финала/, "исходная причина не затёрта");
+});
+
+test("зонд идемпотентен: второй прогон не переписывает и не удваивает", () => {
+  const db = db0();
+  sig(db, "a1", { status: "unresolved", label: "Total Sets: Under 2.5", note: "исход неизвестен (manual/нет детали финала)" });
+  finishedSnap(db, "m-a1", [[6, 4], [3, 6]]);
+  probePmvShadowManual(db);
+  const first = (db.prepare(`SELECT resolve_note n FROM pmv_shadow_signals WHERE id='a1'`).get() as { n: string }).n;
+  assert.equal(probePmvShadowManual(db).probed, 0, "уже зондированную строку не трогаем");
+  assert.equal((db.prepare(`SELECT resolve_note n FROM pmv_shadow_signals WHERE id='a1'`).get() as { n: string }).n, first);
+});
+
+test("не-manual строку зонд не трогает: он не подменяет собой резолвер", () => {
+  const db = db0();
+  sig(db, "a1", { status: "unresolved", note: "детализация по сетам не читается на финале" });
+  finishedSnap(db, "m-a1", [[6, 4], [6, 3]], { winner: "First Player" }); // чистый финал → manual=false
+  assert.equal(probePmvShadowManual(db).probed, 0);
+  assert.equal(parseCf((db.prepare(`SELECT resolve_note n FROM pmv_shadow_signals WHERE id='a1'`).get() as { n: string }).n), null);
 });

@@ -43,7 +43,14 @@ export const ML_SKEW_MIN_CENTS = 15;
 export const UNQUOTED_SPREAD_CENTS = 20;
 
 export type PlaceholderReason = "unquoted_book" | "moneyline_contradicts";
-export interface PlaceholderVerdict { label: string; reason: PlaceholderReason; note: string }
+/**
+ * ПУТЬ СРЕЗА — то, что обязан различать сторож ложных срезов. `reason` их два, а путей ТРИ: внутри
+ * `unquoted_book` живут «аска нет вовсе» и «спред шире UNQUOTED_SPREAD_CENTS», и это разные утверждения о
+ * книге. Слепив их, сторож не смог бы ответить, какой ИМЕННО порог ошибается: отсутствующий аск это факт
+ * котировки, а порог спреда — наше число, и подозрение в первую очередь к нему.
+ */
+export type PlaceholderPath = "no_ask" | "wide_spread" | "moneyline_contradicts";
+export interface PlaceholderVerdict { label: string; reason: PlaceholderReason; path: PlaceholderPath; note: string }
 
 /** Манилайн матча — рынок вида «Турнир: A vs B» / «A vs B» без суффикса-пропа. Null, если его нет. */
 export function moneylineOf(markets: Pick<Market, "label" | "price">[]): number | null {
@@ -70,10 +77,10 @@ export function structuralPlaceholders(markets: Market[]): PlaceholderVerdict[] 
     const spread = m.spread_cents == null ? null : Number(m.spread_cents);
     const unquoted = m.ask_cents == null || (spread != null && spread >= UNQUOTED_SPREAD_CENTS);
     if (unquoted) {
-      out.push({ label: m.label, reason: "unquoted_book",
+      out.push({ label: m.label, reason: "unquoted_book", path: m.ask_cents == null ? "no_ask" : "wide_spread",
         note: `цена ровно ${m.price}¢ при ${m.ask_cents == null ? "ОТСУТСТВУЮЩЕМ аске" : `спреде ${spread}¢ ≥ ${UNQUOTED_SPREAD_CENTS}¢`} — книга не котирована, это дефолт, а не оценка` });
     } else if (mlSkewed) {
-      out.push({ label: m.label, reason: "moneyline_contradicts",
+      out.push({ label: m.label, reason: "moneyline_contradicts", path: "moneyline_contradicts",
         note: `цена ровно ${m.price}¢, но манилайн матча ${ml}¢ (перекос ${Math.abs((ml as number) - 50).toFixed(1)}¢ ≥ ${ML_SKEW_MIN_CENTS}¢) — при таком фаворите производный проп не может стоять 50/50` });
     }
   }

@@ -172,6 +172,15 @@ export async function GET(req: Request) {
       const r = buildCostParity(db, new Date().toISOString(), process.env);
       return NextResponse.json({ ok: true, report: r, line: costParityLine(r) });
     }
+    // ?report=placeholder_false_cuts → сторож ложных срезов #121. Порог ML_SKEW_MIN_CENTS=15 выбран
+    // СОЗНАТЕЛЬНО шире того, что показал бы замер, значит режет больше и обязан быть под наблюдением.
+    // Три пути (нет аска / широкий спред / манилайн противоречит) считаются ПОРОЗНЬ, чтобы подозрение
+    // адресовалось конкретному числу. Автооткат не делается; правку порогов даёт только ратификация.
+    if (new URL(req.url).searchParams.get("report") === "placeholder_false_cuts") {
+      const { buildFalseCutReport, falseCutLine } = await import("@/lib/placeholderFalseCut");
+      const r = buildFalseCutReport(db, new Date().toISOString());
+      return NextResponse.json({ ok: true, report: r, line: falseCutLine(r) });
+    }
     // ?report=set_handicap_convention → T3: проверка конвенции ±1.5 по РАЗРЕШИВШИМСЯ рынкам против
     // фактического счёта. Контроль — манилайн (проверяет инструмент: цену→исход и ориентацию подписи),
     // тест — гандикапы. Флага не касается: снятие блока — решение владельца по этим числам. Read-only.
