@@ -12,8 +12,12 @@ export async function GET(req: Request) {
     const { getDb } = await import("@/lib/db");
     const db = getDb();
     if (new URL(req.url).searchParams.get("report") === "pmv_origin_cut") {
+      // `?cutoff=ISO` — WHAT-IF пересчёт эпох под другой отсечкой. Спор о точной минуте деплоя a3ac8e4
+      // (код выводит 01:08, владелец помнит ~01:40) разрешается ЗАМЕРОМ, а не сдвигом константы по памяти:
+      // отчёт печатает провенанс действующей отсечки и поимённо строки у границы. Read-only.
       const { buildPmvOriginCut } = await import("@/lib/pmvOriginCut");
-      return NextResponse.json({ ok: true, cut: buildPmvOriginCut(db) });
+      const cutoff = new URL(req.url).searchParams.get("cutoff");
+      return NextResponse.json({ ok: true, cut: buildPmvOriginCut(db, { cutoff }) });
     }
     // ?report=draw_empirics → B1 step 1: the EMPIRICAL pass over settled draw bets — did they resolve as a
     // 90'-draw contract MUST? Confirms/refutes the "HT vs 90'" contract model before any canon settles money.
