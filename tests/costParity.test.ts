@@ -43,6 +43,25 @@ test("ставка комиссии берётся из той же env, что 
   assert.equal(takerRate({ POLYMARKET_TAKER_FEE_RATE: "0.02" }), 0.02);
 });
 
+// Первая версия отчёта считала ожидание как rate × notional и объявила теннису ≈$2527. Число было
+// ЗАВЫШЕНО: комиссия Polymarket биномиальна (rate·p·(100−p)/100 за акцию ⇒ notional·rate·(1−p/100)).
+// Сторож, меряющий расхождение СВОЕЙ моделью вместо модели исполнения, обвиняет тем громче, чем дороже
+// контракт: у 90¢ он завысил бы вдесятеро. Здесь формула прибита к той же, что списывает исполнение.
+test("модель ожидания — ТА ЖЕ, что у исполнения: комиссия падает с ростом цены", () => {
+  const db = world();
+  bet(db, "cheap", "mt", "tennis_ovr", 100, 0);   // вход $100 @ 50¢, не закрыт → только входная нога
+  db.prepare(`UPDATE bets SET status='open', payout=NULL, entry_price=50 WHERE id=?`).run("cheap");
+  const t1 = buildCostParity(db, NOW, {}).legs.find((l) => l.leg === "tennis")!;
+  // Допуск, а не пин на цент: это ДЕНЕЖНАЯ ОЦЕНКА, и 0.075 у границы округления даёт то 0.07, то 0.08
+  // от плавающей точки. Тест, прибитый к центу, ловил бы арифметику IEEE, а не свойство модели.
+  const near = (got: number, want: number, why: string) => assert.ok(Math.abs(got - want) <= 0.011, `${why}: получено ${got}, ждали ≈${want}`);
+  near(t1.expectedFeeUsd, 0.375, "100 · 0.0075 · (1−0.50)");
+  db.prepare(`UPDATE bets SET entry_price=90 WHERE id=?`).run("cheap");
+  const t2 = buildCostParity(db, NOW, {}).legs.find((l) => l.leg === "tennis")!;
+  near(t2.expectedFeeUsd, 0.075, "та же сумма по 90¢ стоит ВДЕСЯТЕРО дешевле: 100 · 0.0075 · 0.10");
+  assert.ok(t2.expectedFeeUsd < t1.expectedFeeUsd / 4, "свойство модели: комиссия падает с ростом цены");
+});
+
 test("ИМЕННОЙ ДЕФЕКТ: у тенниса нет строк издержек — расхождение НАЗВАНО числом, а не спрятано", () => {
   const db = world();
   bet(db, "bf", "mf", "prematch_value", 100, 200);   // футбол: леджер есть
@@ -53,8 +72,9 @@ test("ИМЕННОЙ ДЕФЕКТ: у тенниса нет строк изде�
   const f = r.legs.find((l) => l.leg === "football")!;
   assert.equal(t.betsWithLedger, 0);
   assert.equal(t.notionalUsd, 300, "оборот считается ПО СТАВКАМ, а не по леджеру — иначе пустая нога показала бы ноль");
-  assert.equal(t.expectedFeeUsd, 2.25);
-  assert.equal(t.underchargedUsd, 2.25, "недосписанное названо суммой");
+  // вход $100 @ 50¢ → 100·0.0075·0.5 = $0.375; выход $200 @ 100¢ → комиссии нет (p·(100−p)=0).
+  assert.ok(Math.abs(t.expectedFeeUsd - 0.375) <= 0.011);
+  assert.ok(Math.abs(t.underchargedUsd - 0.375) <= 0.011, "недосписанное названо суммой");
   assert.equal(f.underchargedUsd, 0, "нога с честным списанием расхождения не даёт");
   assert.equal(r.flagged, true);
   assert.match(r.note, /ПАРИТЕТА НЕТ/);
@@ -72,8 +92,8 @@ test("сторож самообмана: пустой леджер НЕ чита
 
 test("обе ноги списывают честно — паритет держится, флага нет", () => {
   const db = world();
-  bet(db, "bf", "mf", "prematch_value", 100, 200);  ledger(db, "bf", "mf", "epl", "prematch_value", 2.25);
-  bet(db, "bt", "mt", "tennis_ovr", 100, 200);      ledger(db, "bt", "mt", "atp", "tennis_ovr", 2.25);
+  bet(db, "bf", "mf", "prematch_value", 100, 200);  ledger(db, "bf", "mf", "epl", "prematch_value", 0.38);
+  bet(db, "bt", "mt", "tennis_ovr", 100, 200);      ledger(db, "bt", "mt", "atp", "tennis_ovr", 0.38);
   const r = buildCostParity(db, NOW, {});
   assert.equal(r.flagged, false);
   assert.match(r.note, /паритет держится/);
@@ -90,5 +110,5 @@ test("неисполненные и предложенные в оборот н�
 test("строка еженедельника печатает ноль наравне с сотней", () => {
   const db = world();
   bet(db, "bt", "mt", "tennis_ovr", 100, 200);
-  assert.match(costParityLine(buildCostParity(db, NOW, {})), /tennis 0\/1 строк, недосписано \$2\.25/);
+  assert.match(costParityLine(buildCostParity(db, NOW, {})), /tennis 0\/1 строк, недосписано \$0\.3[78]/);
 });
