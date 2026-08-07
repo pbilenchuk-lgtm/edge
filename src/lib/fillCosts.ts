@@ -5,6 +5,9 @@
 // ============================================================
 
 import type { FillCostRow } from "./repo.js";
+import type { Database } from "./db.js";
+import type { FillCost } from "./executor/paperFill.js";
+import * as R from "./repo.js";
 
 export interface FillCostSummary {
   fills: number; buys: number; sells: number;
@@ -48,4 +51,36 @@ export function groupFillCosts(rows: FillCostRow[], keyOf: (r: FillCostRow) => s
   const out = new Map<string, FillCostSummary>();
   for (const [k, rs] of buckets) out.set(k, summarizeFillCosts(rs));
   return out;
+}
+
+
+/**
+ * [T5 07.08] ЕДИНСТВЕННОЕ МЕСТО, ГДЕ ИЗДЕРЖКИ ПОПАДАЮТ В ЛЕДЖЕР.
+ *
+ * Раньше эта функция жила приватной в `lifecycle.ts` — и была доступна только футбольному пути.
+ * Теннис ходит через исполнителя и до неё не дотягивался: его леджер списывал $0 комиссий, хотя
+ * net_ev-гейт той же ветки знает про 2.6¢ и режет ими кандидатов. Две ноги портфеля считались в
+ * РАЗНЫХ единицах, а сравнивались как в одной.
+ *
+ * Наблюдение-only: падение записи никогда не ломает филл — но и молчать не должно, поэтому счётчик
+ * отказов ведётся вызывающим, а не прячется здесь.
+ */
+export function recordFill(
+  db: Database,
+  ids: { betId: string | null; matchId: string; competitionId: string; strategyId: string; profileId: string },
+  cost: FillCost, now: string,
+): boolean {
+  const r2v = (n: number) => Math.round(n * 100) / 100;
+  try {
+    R.insertFillCost(db, {
+      id: R.uid(), bet_id: ids.betId, match_id: ids.matchId, competition_id: ids.competitionId,
+      strategy_id: ids.strategyId, profile_id: ids.profileId, side: cost.side,
+      shares: r2v(cost.shares), notional_usd: r2v(cost.notionalUsd),
+      quote_cents: cost.quoteCents, vwap_cents: cost.vwapCents,
+      fee_cents: cost.feeCents, fee_usd: r2v(cost.feeUsd),
+      slip_cents: cost.slipCents, slip_usd: r2v(cost.slipUsd),
+      from_book: cost.fromBook ? 1 : 0, created_at: now,
+    });
+    return true;
+  } catch { return false; }
 }

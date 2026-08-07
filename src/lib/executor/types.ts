@@ -74,6 +74,16 @@ export interface OrderAck {
   reason?: string;
   /** A fill was clamped by book depth (THIN book: filled smaller than requested). */
   clamped?: boolean;
+  /**
+   * [T5 07.08] РАЗБИВКА ИЗДЕРЖЕК ФИЛЛА — комиссия и слиппедж, уже свёрнутые в эффективную цену.
+   *
+   * ЧЕМ ЗАСЛУЖЕНО: футбольный путь зовёт `paperBuyFill`/`paperSellFill` НАПРЯМУЮ и получает `cost`,
+   * а теннисный идёт через исполнителя — и `OrderAck` это поле не нёс. То есть теннисный леджер
+   * списывал $0 комиссий НЕ по забывчивости, а ПО ПОСТРОЕНИЮ: числа считались и выбрасывались на
+   * границе абстракции. Одна нога портфеля считалась в честных издержках, вторая — в нулевых, и
+   * сравнивать их P&L было нельзя. Поле обязано доезжать до вызывающего, иначе леджер добрее жизни.
+   */
+  cost?: import("./paperFill.js").FillCost;
 }
 
 export interface CancelAck { clientOrderId: string; cancelled: boolean; note?: string }

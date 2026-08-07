@@ -563,6 +563,22 @@ export async function runStrategists(
           r.status = "skip"; r.reason = `family_shadow: prematch_value ставит деньги только в «totals» — «${fam}» демоутнут в shadow-когорту (kill/promote по созревшему R0.1-вердикту), капитал не выделен`;
         }
       }
+      // [T6] ЦЕНА МОМЕНТА РЕШЕНИЯ МАТЕРИАЛИЗУЕТСЯ ЗДЕСЬ — до того, как матч сыграет и цена станет исходом.
+      //
+      // Теневая калибровка на 282 рынках дала «рынок вдвое лучше нас» и была НЕВЕРНА: она читала
+      // ТЕКУЩИЕ котировки, а у завершённого матча они уже равны исходу (цена «угадала» в 92%). Это тот
+      // же класс O11, который в тот же день дважды чинился в коде — и был допущен в собственном анализе.
+      // Дисциплина «помнить, что так нельзя» уже не сработала у того, кто правило и сформулировал;
+      // поэтому источник калибровки делается ЕДИНСТВЕННЫМ доступным, а не рекомендованным.
+      // Пишется КАЖДЫЙ оценённый рынок, а не только купленный: калибровка шире выборки ставок.
+      try {
+        R.insertDecisionPrice(db, {
+          match_id: matchId, strategy_id: strat.id, label: m.label, stage: match.state === "live" ? "live" : "prematch",
+          mid_cents: m.price, ask_cents: askUsable ? execCents : null, implied_prob: round3(effImplied),
+          our_prob: round3(ourProb), edge_source: edgeSource, picked: r.status === "enter" ? 1 : 0,
+          decided_at: now(),
+        });
+      } catch { /* инструмент калибровки не имеет права ломать торговый путь */ }
       battle.push({ market: m.label, our_prob: round3(ourProb), implied: round3(implied), edge_pct: round3(r.edge * 100), status: r.status, stake: r.stake, kelly_fraction: round3(r.kellyFraction), reason: r.reason,
         ...(pick?.role ? { role: pick.role } : {}), ...(pick?.livesInBranches ? { lives_in_branches: pick.livesInBranches } : {}), ...(pick?.branchWeightSum != null ? { branch_weight_sum: pick.branchWeightSum } : {}), ...(pick?.phantomCheck ? { phantom_check: pick.phantomCheck } : {}), ...(pick?.totalCheck ? { total_check: pick.totalCheck } : {}), ...(pick?.exitPlan ? { exit: pick.exitPlan } : {}) });
       if (r.status === "flag") { flagged++; continue; }

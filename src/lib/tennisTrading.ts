@@ -21,7 +21,8 @@ import { SET_VALUE_STRATEGY, SET_VALUE_ARMED, SET_VALUE_EPOCH, setValueGate, set
 import { recordSvShadowSignal, SV_SHADOW_EPOCH } from "./tennisSetValueShadow.js";
 import { detectBreaks, detectTennisEvents, tennisMoneyline, favTokenOf, tennisTourOf, tourFromEventType, fetchTennisFixtures, trimRaw, TENNIS_TERMINAL_RE, loadTennisConfig } from "./tennisScout.js";
 import { loadPolymarketConfig, type OrderBookFetch, type PolymarketConfig } from "./polymarket.js";
-import { classifyOrderBook, paperSellFill } from "./executor/paperFill.js";
+import { classifyOrderBook, paperSellFill, scaleCost, type FillCost } from "./executor/paperFill.js";
+import { recordFill } from "./fillCosts.js";
 import { bookDepthUsd, liquidationCents } from "./execution.js";
 import { PaperExecutor } from "./executor/paper.js";
 import { clientOrderIdFor, type OrderAck } from "./executor/types.js";
@@ -452,9 +453,16 @@ interface TennisSellCtx {
   // T3: per-token blended exit price for the tick — the whole twin cluster (all profiles on one market) is
   // priced as ONE aggregate order, so every twin exits at the same per-share price + fill fraction, instead
   // of each walking the book on its own size (on real, sequential twins get progressively worse prices).
-  exitCache?: Map<string, { cents: number; fromBook: boolean; filledFrac: number; note: string }>;
+  exitCache?: Map<string, { cents: number; fromBook: boolean; filledFrac: number; note: string; cost?: FillCost }>;
 }
-interface TennisSellQuote { exitCents: number; fromBook: boolean; filledFrac: number; note: string; stale: boolean; blocked?: "token_side_unavailable" | "token_orientation_mismatch" }
+/** Соревнование матча — нужно леджеру издержек; ошибка чтения не имеет права ронять выход. */
+function matchCompId(db: Database, matchId: string): string {
+  try { return R.getMatch(db, matchId)?.competition_id ?? ""; } catch { return ""; }
+}
+
+interface TennisSellQuote { exitCents: number; fromBook: boolean; filledFrac: number; note: string; stale: boolean; blocked?: "token_side_unavailable" | "token_orientation_mismatch";
+  /** [T5] Разбивка издержек продажи — доезжает до леджера, а не теряется на границе. */
+  cost?: FillCost }
 
 // ── token-fix-m1 RUNTIME INVARIANT — the belt behind the token fix (kept FOREVER) ───────────────
 // Every consumer that re-derives orientation instead of reading it once is how the four orientation
@@ -516,14 +524,16 @@ async function resolveTennisSell(db: Database, ctx: TennisSellCtx, b: Bet, playe
   // twins never get a worse fill than the first. Falls back to this bet's own size when nothing is cached.
   const cacheKey = `${b.match_id}|${b.strategy_id}|${favToken}`;
   const cached = ctx.exitCache?.get(cacheKey);
-  if (cached) return { exitCents: cached.cents, fromBook: cached.fromBook, filledFrac: cached.filledFrac, note: cached.note, stale: !cached.fromBook };
+  if (cached) return { exitCents: cached.cents, fromBook: cached.fromBook, filledFrac: cached.filledFrac, note: cached.note, stale: !cached.fromBook, cost: cached.cost };
   const sibs = R.betsForMatch(db, b.match_id, b.strategy_id).filter((x) => x.status === "open" && x.market_label === b.market_label);
   const aggStake = sibs.reduce((s, x) => s + (x.stake ?? 0), 0) || stake;
   const aggShares = sibs.reduce((s, x) => s + ((x.entry_price ?? 0) > 0 ? (x.stake ?? 0) / ((x.entry_price as number) / 100) : 0), 0) || shares;
   const r = paperSellFill(bookRes, aggShares, aggStake, midCents, ml?.liquidity ?? 0, ctx.poly.exec);
   const filledFrac = r.requestedShares > 0 ? r.filledShares / r.requestedShares : 1;
-  ctx.exitCache?.set(cacheKey, { cents: r.cents, fromBook: r.fromBook, filledFrac, note: r.note ?? "" });
-  return { exitCents: r.cents, fromBook: r.fromBook, filledFrac, note: r.note ?? "", stale: !r.fromBook };
+  // [T5] Разбивка издержек кладётся В КЭШ вместе с ценой: близнецы одного тика делят один филл, значит
+  // и одни издержки — иначе повторное списание нарисовало бы комиссию, которой не было.
+  ctx.exitCache?.set(cacheKey, { cents: r.cents, fromBook: r.fromBook, filledFrac, note: r.note ?? "", cost: r.cost });
+  return { exitCents: r.cents, fromBook: r.fromBook, filledFrac, note: r.note ?? "", stale: !r.fromBook, cost: r.cost };
 }
 
 /** Route ONE tennis exit through the book (book-fill-m1). kind="take": a take that can't execute on a
@@ -555,8 +565,12 @@ async function execTennisExit(
     const slipC = midCents - sell.exitCents;
     if (slipC > TENNIS_EXIT_MAX_SLIP_C) { logSkip(`тейк отложен: бид даёт ${sell.exitCents}¢, на ${Math.round(slipC)}¢ ниже цены триггера ${Math.round(midCents)}¢ (dust-бид > ${TENNIS_EXIT_MAX_SLIP_C}¢) — держим, повтор на след. тике (${trigger})`); return 0; }
     const eff = Math.min(o.fraction ?? 1, sell.filledFrac);
-    if (eff >= 0.999) return closeTennisBetEarly(db, b.id, sell.exitCents, "take_price", reason, deps, now, extra) != null ? 1 : 0;
-    return closeTennisBetPortion(db, b.id, eff, sell.exitCents, reason, deps, now) != null ? 1 : 0;
+    // [T5] ИЗДЕРЖКИ ВЫХОДА СПИСЫВАЮТСЯ ПО ФАКТИЧЕСКИ ЗАКРЫТОЙ ДОЛЕ. Кэш отдаёт разбивку на весь
+    // агрегированный филл близнецов, поэтому на строку идёт её доля — иначе леджер посчитал бы
+    // комиссию за чужие акции. Ноль долей ничего не пишет: списание без закрытия было бы выдумкой.
+    const bookExit = (frac: number) => { if (sell.cost && frac > 0) recordFill(db, { betId: b.id, matchId: b.match_id, competitionId: matchCompId(db, b.match_id), strategyId: b.strategy_id, profileId: b.risk_profile_id ?? "medium" }, frac < 1 ? scaleCost(sell.cost, frac) : sell.cost, now); };
+    if (eff >= 0.999) { const r = closeTennisBetEarly(db, b.id, sell.exitCents, "take_price", reason, deps, now, extra); if (r != null) bookExit(1); return r != null ? 1 : 0; }
+    { const r = closeTennisBetPortion(db, b.id, eff, sell.exitCents, reason, deps, now); if (r != null) bookExit(eff); return r != null ? 1 : 0; }
   }
   // protective
   if (sell.stale) { // §4.5: no live bid → last-model (stale) price, flagged + alert; the exit MUST leave
@@ -1331,6 +1345,11 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
         entered_minute: `сет ${br.setNum}`, result: null, payout: null, settled_by: null, settled_at: null,
         entry_meta: serializeEntryMeta(meta), code_version: codeVer, decision_id: decisionId, created_at: now,
       });
+      // [T5] ИЗДЕРЖКИ ВХОДА СПИСЫВАЮТСЯ И ЗДЕСЬ. Раньше теннисный леджер показывал $0 комиссий не
+      // потому, что их не было, а потому, что `OrderAck` не нёс разбивку через границу исполнителя.
+      // Гейт net_ev той же ветки при этом режет кандидатов ЗНАЯ про 2.6¢ — то есть вход считался в
+      // одних единицах, а учёт вёлся в других.
+      if (ack.cost) recordFill(db, { betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile }, ack.cost, now);
       try { shadowOnEntries(db, [{ betId, matchId: m.id, competitionId: comp, strategyId: TENNIS_STRATEGY, profileId: profile, size: fillStake, edge: edgeAtFill, isLive: true }], shadowCfg, now); } catch { /* observe-only */ }
       R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "enter", text: `[${profile}] ВЫКУП «${favName}» @ ${fillCents}¢ · $${Math.round(fillStake)}${ack.clamped ? " (урезан по глубине)" : ""} · ${ack.note ?? ""} (edge ${(edgeAtFill * 100).toFixed(1)}% от филла, тейк ~${Math.round((prePrice - TENNIS_TAKE_BUFFER) * 10) / 10}¢, стоп ${TENNIS_GAME_COUNT_STOP} приёмных / floor ${Math.round((fillCents - TENNIS_CATASTROPHIC_FLOOR) * 10) / 10}¢, пороги:${TENNIS_ARMED_EPOCH})${cohortTag}`, dedup_key: `enter:${betId}`, created_at: now });
       opened++;

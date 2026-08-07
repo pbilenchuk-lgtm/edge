@@ -16,8 +16,10 @@
 
 import type { Database } from "./db.js";
 import * as R from "./repo.js";
+import { recordFill } from "./fillCosts.js";
 import type { EngineDeps } from "./engine.js";
 import { syncCompetitions, refreshActiveOdds, recomputeMetrics, importPolymarketMatches, enrichFromEspn, settleStaleOpenBets, reSettleSuspectBets, seriesAllowFor, dedupeMatches, espnLeagueForSeries, repairCategoryLeagues, refreshTeamAliasOverlay } from "./engine.js";
+import { gradeDecisionPrices } from "./engine.js";
 import { settlePmResolutionBets } from "./pmResolution.js";
 import { backfillComplementTokens, auditComplementVoids } from "./complementBackfill.js";
 import { reconcileFootballCategories } from "./seed.js";
@@ -735,20 +737,8 @@ export function liveDelivering(db: Database, m: Match, sport: string): boolean {
 // executeEntry / sellVwapCents below are thin football-facing wrappers over it.
 type EntryExec = EntryFillResult;
 
-/** Persist a fill's cost breakdown to the ledger. Observe-only; never throws into a fill. */
-function recordFill(db: Database, ids: { betId: string | null; matchId: string; competitionId: string; strategyId: string; profileId: string }, cost: FillCost, now: string): void {
-  try {
-    R.insertFillCost(db, {
-      id: R.uid(), bet_id: ids.betId, match_id: ids.matchId, competition_id: ids.competitionId,
-      strategy_id: ids.strategyId, profile_id: ids.profileId, side: cost.side,
-      shares: round2(cost.shares), notional_usd: round2(cost.notionalUsd),
-      quote_cents: cost.quoteCents, vwap_cents: cost.vwapCents,
-      fee_cents: cost.feeCents, fee_usd: round2(cost.feeUsd),
-      slip_cents: cost.slipCents, slip_usd: round2(cost.slipUsd),
-      from_book: cost.fromBook ? 1 : 0, created_at: now,
-    });
-  } catch { /* cost ledger is observe-only, never break a real fill */ }
-}
+// [T5] Запись издержек переехала в `fillCosts.ts` — она нужна ОБЕИМ ногам портфеля, а приватная
+// функция здесь была доступна только футбольной. Один авторитет на списание, не два.
 
 /** Football entry fill — thin wrapper over the shared paper fill engine. Reads the
  *  decision context off the Bet/Market (fair = ai_prob, phantom ref = proposed_price)
@@ -2798,6 +2788,9 @@ export async function runAutoCycle(
   // carry no provider bind (category_tier_mismatch / name-fold / dark board). Instead of a
   // silent «?:?», persist the flagged set + emit a loud warn so it can't hide. The R2(в)
   // network probe classifies the cause; this step just refuses silent blindness.
+  // [T6] Дописать исходы строкам решения — цена там заморожена, дописывается только ставший известным
+  // факт. Без этого ряд честной калибровки копится, но никогда не становится читаемым.
+  stepSync("gradeDecisionPrices", () => gradeDecisionPrices(db).graded, 0);
   stepSync("blindFundedAudit", () => {
     const now = nowFn(deps)(); const nowMs = Date.parse(now) || Date.now();
     const blind = R.listBlindFundedFootball(db, { nowMs });

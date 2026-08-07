@@ -104,6 +104,8 @@ export function expectedTickJobs(tickMin: number): { label: string; everyMin: nu
     "pmvShadowResolve", "familyShadowResolve", "refusalShadowResolve", "svShadowResolve",
     "prune", "pruneProviderSnapshots", "noFeedCoverage", "sweepAbandoned", "pruneMatches", "capLogArchive",
     "tennisScoutWatchdog", "tennisBreakMarks", "reconcileFootball", "pruneCategories", "shcObserve",
+    // [T6] Грейдер строк решения: без него ряд честной калибровки копится, но никогда не читается.
+    "gradeDecisionPrices",
   ].map((label) => ({ label, everyMin: tickMin }));
 }
 

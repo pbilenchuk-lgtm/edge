@@ -44,7 +44,7 @@ export class PaperExecutor implements Executor {
         // = transient vs no_edge vs phantom) so the caller maps it to the right skip counter.
         return { clientOrderId: order.clientOrderId, exchangeOrderId: null, status: "rejected", filledSizeUsd: 0, avgFillPriceCents: null, reason: r.reason ?? "untradeable_market", note: r.note ?? NO_BOOK_LIQUIDITY };
       }
-      return { clientOrderId: order.clientOrderId, exchangeOrderId: null, status: "filled", filledSizeUsd: r.stake, avgFillPriceCents: r.priceCents, clamped: r.clamped, note: r.note };
+      return { clientOrderId: order.clientOrderId, exchangeOrderId: null, status: "filled", filledSizeUsd: r.stake, avgFillPriceCents: r.priceCents, clamped: r.clamped, note: r.note, cost: r.cost };
     }
     // SELL: sell the shares implied by sizeUsd at the limit into the bid side.
     const shares = order.limitPriceCents > 0 ? order.sizeUsd / (order.limitPriceCents / 100) : 0;
@@ -55,7 +55,7 @@ export class PaperExecutor implements Executor {
       // (last bid + stale flag for defensive exits; skip otherwise).
       return { clientOrderId: order.clientOrderId, exchangeOrderId: null, status: "rejected", filledSizeUsd: 0, avgFillPriceCents: r.cents, note: `${NO_BOOK_LIQUIDITY}: ${r.note ?? "нет книги на продажу"}` };
     }
-    return { clientOrderId: order.clientOrderId, exchangeOrderId: null, status: "filled", filledSizeUsd: order.sizeUsd, avgFillPriceCents: r.cents, note: r.note };
+    return { clientOrderId: order.clientOrderId, exchangeOrderId: null, status: "filled", filledSizeUsd: order.sizeUsd, avgFillPriceCents: r.cents, note: r.note, cost: r.cost };
   }
 
   // Paper has no resting orders, no separate wallet, no exchange — these satisfy the
