@@ -170,10 +170,32 @@ test("зонд идемпотентен: второй прогон не пере
   assert.equal((db.prepare(`SELECT resolve_note n FROM pmv_shadow_signals WHERE id='a1'`).get() as { n: string }).n, first);
 });
 
-test("не-manual строку зонд не трогает: он не подменяет собой резолвер", () => {
+test("не-manual строку зонд не разрешает, но НАЗЫВАЕТ, почему пропустил", () => {
   const db = db0();
   sig(db, "a1", { status: "unresolved", note: "детализация по сетам не читается на финале" });
   finishedSnap(db, "m-a1", [[6, 4], [6, 3]], { winner: "First Player" }); // чистый финал → manual=false
-  assert.equal(probePmvShadowManual(db).probed, 0);
-  assert.equal(parseCf((db.prepare(`SELECT resolve_note n FROM pmv_shadow_signals WHERE id='a1'`).get() as { n: string }).n), null);
+  const r = probePmvShadowManual(db);
+  assert.equal(r.probed, 0, "зонд не подменяет собой резолвер");
+  assert.equal(r.skipped.not_manual, 1);
+  // Первый прогон на проде дал probed=0 при 144 строках и МОЛЧАЛ о причине — «зонд ничего не нашёл» было
+  // неотличимо от «зонду нечего было читать». Причина теперь пишется в ту же заметку.
+  assert.equal(parseCf((db.prepare(`SELECT resolve_note n FROM pmv_shadow_signals WHERE id='a1'`).get() as { n: string }).n)?.would, "skip_not_manual");
+  assert.equal((db.prepare(`SELECT status s FROM pmv_shadow_signals WHERE id='a1'`).get() as { s: string }).s, "unresolved");
+});
+
+test("СНИМКА НЕТ ≠ МАТЧ НЕ ДОИГРАН: prune-съеденный источник — свой диагноз", () => {
+  const db = db0();
+  sig(db, "gone", { status: "unresolved", note: "исход неизвестен (manual/нет детали финала)" });  // снимка нет вовсе
+  sig(db, "young", { status: "unresolved", note: "исход неизвестен (manual/нет детали финала)" });
+  finishedSnap(db, "m-young", [], { status: "Scheduled" });   // снимок есть, матч ещё НЕ начат
+  const r = probePmvShadowManual(db);
+  assert.equal(r.skipped.no_snapshot, 1, "источник стёрт — исход существовал, копии нет");
+  assert.equal(r.skipped.not_finished, 1, "матч просто не доигран — строка ещё дозреет");
+  // Незавершённый матч метку НЕ получает: он временный, и следующий прогон обязан его перечитать.
+  assert.equal(parseCf((db.prepare(`SELECT resolve_note n FROM pmv_shadow_signals WHERE id='young'`).get() as { n: string }).n), null);
+  assert.equal(parseCf((db.prepare(`SELECT resolve_note n FROM pmv_shadow_signals WHERE id='gone'`).get() as { n: string }).n)?.would, "skip_no_snapshot");
+  // Отчёт не записывает объяснённое себе в актив: это НЕ пройденные зондом строки.
+  const c = buildPmvShadowCalibration(db);
+  assert.equal(c.manualProbe.probed, 0);
+  assert.match(c.note, /причины: no_snapshot 1/);
 });

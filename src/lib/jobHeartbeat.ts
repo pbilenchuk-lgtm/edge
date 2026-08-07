@@ -86,10 +86,29 @@ export function cycleSummaryLine(prefix: string, steps: { label: string; result:
   return `[${prefix}] ${ms}мс · шагов ${steps.length} (нулевых ${zeros}, ошибок ${steps.filter((s) => !s.ok).length}) · ${body}`;
 }
 
+/**
+ * Шаги ПОЛНОГО цикла, идущие НЕ по часам тика. Планировщик документирует три каденции, и `discover` —
+ * третья: «DISCOVER every DISCOVER_INTERVAL_HR (default 24)», а тик прямо помечен «No discovery».
+ *
+ * [ПОПРАВКА 07.08] Раньше перечень раздавал интервал тика ВСЕМ через один `.map`, поэтому `discover`
+ * читался как «УСТАРЕЛ 347мин при ожидаемых 30 — подозрение на мёртвую проводку». Проводка была живая;
+ * неверным было ОЖИДАНИЕ: сторож сверял шаг с контрактом, которого код никогда не давал, и строка горела
+ * красным всегда. Цена не нулевая — сводка вела заголовком эту ложную тревогу, а в той же строке стояли
+ * настоящие «НИ РАЗУ». Сторож, который шумит постоянно, обучает не читать себя тогда, когда он прав.
+ *
+ * ПОЧЕМУ НЕ В `UNWATCHED_STEPS`. Снять наблюдение было бы проще и НЕВЕРНО: `discover` — единственный
+ * поставщик новых матчей, и его настоящая смерть обязана быть видна. Ему нужен СВОЙ срок, а не немота.
+ */
+function jobIntervalMin(label: string, tickMin: number, env: Record<string, string | undefined>): number {
+  if (label === "discover") return Math.max(1, Number(env.DISCOVER_INTERVAL_HR ?? 24)) * 60;
+  return tickMin;
+}
+
 /** Ожидаемые шаги ПОЛНОГО цикла с интервалами. Перечень явный: «шага нет в метриках» иначе неотличимо
- *  от «мы про него забыли». Интервал берётся из настройки тика, а не зашит числом. */
-export function expectedTickJobs(tickMin: number): { label: string; everyMin: number }[] {
+ *  от «мы про него забыли». Интервалы берутся из настроек, а не зашиты числом. */
+export function expectedTickJobs(tickMin: number, env: Record<string, string | undefined> = process.env): { label: string; everyMin: number }[] {
   return [
+    "discover",
     // АСИНХРОННЫЕ ШАГИ — они тоже отмечаются с 02.08. До этого `step()` не звал `noteStep` вовсе, и пульс
     // был СТРУКТУРНО слеп ко всему асинхронному: половина цикла (сеть, LLM, провайдер) следа не оставляла.
     // В списке только БЕЗУСЛОВНЫЕ: `dryExitSweep` включается режимом торговли, а провайдер-зависимые
@@ -106,7 +125,7 @@ export function expectedTickJobs(tickMin: number): { label: string; everyMin: nu
     "tennisScoutWatchdog", "tennisBreakMarks", "reconcileFootball", "pruneCategories", "shcObserve",
     // [T6] Грейдер строк решения: без него ряд честной калибровки копится, но никогда не читается.
     "gradeDecisionPrices",
-  ].map((label) => ({ label, everyMin: tickMin }));
+  ].map((label) => ({ label, everyMin: jobIntervalMin(label, tickMin, env) }));
 }
 
 /**
@@ -116,14 +135,6 @@ export function expectedTickJobs(tickMin: number): { label: string; everyMin: nu
  */
 export const UNWATCHED_STEPS: Record<string, string> = {
   dryExitSweep: "включается режимом торговли (readTradingMode ≠ off); при выключенном режиме «НИ РАЗУ» было бы ложной тревогой",
-  // [07.08] СТОРОЖ КРИЧАЛ НА КОНТРАКТ, КОТОРОГО КОД НЕ ДАВАЛ. `discover` стоял в перечне с интервалом
-  // ТИКА, а планировщик зовёт полный цикл ИСКЛЮЧИТЕЛЬНО с `discover: false` (scheduler.ts) — шаг живёт
-  // только на ручном действии `/api/engine {action:"discover"}`. Значит «УСТАРЕЛ 347мин при ожидаемых 30»
-  // было структурно неизбежным: строка горела красным всегда и не могла погаснуть ничем.
-  // ЦЕНА ЛОЖНОЙ ТРЕВОГИ НЕ НУЛЕВАЯ. Сводка пульса вела заголовком «⚠ устарели 1 (discover)», и ровно в
-  // той же строке стояли ДВА настоящих «НИ РАЗУ». Сторож, который шумит постоянно, обучает не читать себя
-  // именно тогда, когда он прав, — тот же класс, что «немой ноль», только с обратным знаком.
-  discover: "запускается ТОЛЬКО вручную (`/api/engine {action:\"discover\"}`); планировщик всегда идёт с `discover:false`, поэтому ожидание по часам тика — ложная тревога по построению",
 };
 
 // ── ЖИВОЙ ТИК: ВТОРАЯ ПОЛОВИНА ТОЙ ЖЕ СЛЕПОТЫ ───────────────────────────────────────────────────
