@@ -1080,3 +1080,26 @@ CREATE TABLE IF NOT EXISTS shc_observations (
   UNIQUE(match_id, label)            -- одно наблюдение на рынок; повтор НЕ плодит строк
 );
 CREATE INDEX IF NOT EXISTS idx_shc_obs_kind ON shc_observations(kind, kickoff_at);
+
+-- ── СТОРОЖ ЛОЖНЫХ СРЕЗОВ ПЛЕЙСХОЛДЕРА (#121) ────────────────────────────────
+-- Правило #121 режет рынок ДО стратега по трём путям (нет аска / широкий спред / манилайн противоречит),
+-- и порог ML_SKEW_MIN_CENTS=15 выбран СОЗНАТЕЛЬНО шире того, что показал бы замер, — значит режет больше и
+-- обязан быть под наблюдением. Строка пишется в момент среза и ДОЗРЕВАЕТ: позже читается текущая цена того
+-- же рынка, и уход от 50¢ дальше FALSE_CUT_MIN_MOVE_CENTS означает, что рынок был живой, а срез — ложный.
+-- Автооткат НЕ делается: правило, которое ошибается молча, через месяц неотличимо от правила, которое право.
+-- `path` хранится отдельно от `reason`, потому что подозрение адресуется КОНКРЕТНОМУ порогу.
+CREATE TABLE IF NOT EXISTS placeholder_cuts (
+  id            TEXT PRIMARY KEY,
+  match_id      TEXT NOT NULL,
+  market_label  TEXT NOT NULL,
+  reason        TEXT NOT NULL,     -- unquoted_book | moneyline_contradicts
+  path          TEXT NOT NULL,     -- no_ask | wide_spread | moneyline_contradicts
+  cut_cents     REAL NOT NULL,     -- цена В МОМЕНТ среза (заморожена, не пересчитывается)
+  ask_cents     REAL, spread_cents REAL, ml_cents REAL,
+  cut_at        TEXT NOT NULL,
+  later_cents   REAL,              -- цена при дозревании; NULL = ещё НЕ ПРОВЕРЕНО (не «срез верен»)
+  later_at      TEXT,
+  false_cut     INTEGER,           -- 1 = рынок ожил ⇒ срез был ложным; 0 = не ожил; NULL = не проверено
+  UNIQUE(match_id, market_label)   -- первый срез замораживается; повтор не плодит строк
+);
+CREATE INDEX IF NOT EXISTS idx_ph_cuts_open ON placeholder_cuts(false_cut, cut_at);

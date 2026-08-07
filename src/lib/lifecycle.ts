@@ -57,6 +57,7 @@ import { tennisTradingTick, tennisSetValueTick, tennisExitTick, settleTennisBets
 import { sweepAbandonedMatches } from "./staleSweep.js";
 import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
 import { resolvePmvShadowSignals, probePmvShadowManual } from "./tennisPmvShadow.js";
+import { checkPlaceholderFalseCuts } from "./placeholderFalseCut.js";
 import { resolveFamilyShadowSignals } from "./familyShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
@@ -2886,6 +2887,9 @@ export async function runAutoCycle(
   // до резолвера. Без него ноль в классе «резолвер не осилил» читался как «восстановимых нет», хотя туда
   // не доходило ни одной строки.
   stepSync("pmvShadowProbe", () => probePmvShadowManual(db, deps).probed, 0);
+  // Срез #121 ДОЗРЕВАЕТ: поздняя цена того же рынка судит, был ли срез ложным. Без этого шага `falseCut`
+  // остаётся чистой функцией под зелёным тестом, которую никто не зовёт, — чем она и была с деплоя #121.
+  stepSync("placeholderFalseCut", () => checkPlaceholderFalseCuts(db, deps).checked, 0);
   stepSync("familyShadowResolve", () => { const r = resolveFamilyShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // [Phase 1.1] score demoted-family would-be entries post-match (no money)
   stepSync("refusalShadowResolve", () => { const r = resolveRefusalShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // [R5] score the markets the strategist walked away from
   stepSync("svShadowResolve", () => { const r = resolveSvShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // score set_value flag-only would-be entries post-match (no money)

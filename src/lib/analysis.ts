@@ -30,7 +30,8 @@ import { loadAnalysisDuel, pickAnalysisModel, analysisModelTag } from "./analysi
 import { canonicalizeDrawForMatch, drawCanonEnabled } from "./drawCanon.js";
 import { captureShadowDepth } from "./bookDepthCapture.js";
 import { sameMarketLabel, tokenSet, numTokens, extraAllFiller } from "./marketLabel.js";
-import { structuralPlaceholders, placeholderFunnelLine, executableImplied } from "./placeholderStructural.js";
+import { structuralPlaceholders, placeholderFunnelLine, executableImplied, moneylineOf } from "./placeholderStructural.js";
+import { recordPlaceholderCuts } from "./placeholderFalseCut.js";
 import { blockedByCoherence, blocksLabel } from "./sideCoherence.js";
 import { checkPickBranches, branchContradictionNote } from "./pickBranchCoherence.js";
 
@@ -293,6 +294,12 @@ export async function runStrategists(
   const hidden = new Set([...railed, ...mirrored, ...placeheld]);
   const freshMarkets = hidden.size ? allMarkets.filter((m) => !hidden.has(m)) : allMarkets;
   if (structural.length) {
+    try {
+      // СТОРОЖ ЛОЖНЫХ СРЕЗОВ ЗАПИСЫВАЕТСЯ ЗДЕСЬ — иначе `falseCut` остаётся определением, а не прибором
+      // (ровно так она и прожила с деплоя #121: покрыта тестом, не вызвана ни разу). Цена замораживается
+      // в момент среза; судится позже, при дозревании.
+      recordPlaceholderCuts(db, matchId, structural, allMarkets, moneylineOf(allMarkets), now());
+    } catch { /* улика не имеет права ломать анализ */ }
     try {
       R.insertTradeLog(db, { id: R.uid(), match_id: matchId, strategy_id: R.listStrategies(db).find((x) => x.sport_id === sport)?.id ?? "", minute: null, type: "skip",
         text: `placeholder_structural: ${structural.length} из ${allMarkets.length} рынков скрыто ДО стратега — ${structural.slice(0, 3).map((x) => `«${x.label}» ${x.note}`).join(" · ")}${structural.length > 3 ? ` · ещё ${structural.length - 3}` : ""}`,
