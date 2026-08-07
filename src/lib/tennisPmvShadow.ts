@@ -79,6 +79,19 @@ export interface PmvShadowCalibration {
   counts: { total: number; pending: number; won: number; lost: number; void: number; unresolved: number; repeats: number };
   scored: number;                 // won + lost — the Brier base
   unresolvedPct: number | null;   // pipeline diagnostic (of the reached-terminal rows)
+  /**
+   * [07.08] РАЗБОР 144 НЕРАЗРЕШЁННЫХ. Отчёт СЧИТАЛ их долю и НЕ НАЗЫВАЛ причин — а классы лечатся
+   * ПРОТИВОПОЛОЖНО, и слитые в один процент они неразличимы:
+   *   • `feed_no_detail` / `manual_finish` — исхода нет В ПРИРОДЕ данных (провайдер не отдал детализацию
+   *     по сетам, финал проставлен вручную). Правильный отказ; лечится только покрытием фида;
+   *   • `resolver_cannot` — ярлык НЕ РАЗБИРАЕТСЯ нашим резолвером. Это НЕ отсутствие исхода: исход есть,
+   *     мы не умеем его прочитать. Каждая такая строка — бесплатная единица когорты, недоделанная кодом.
+   * Половина корпуса (50.3%) висит здесь, и вердикт «GO» стоит на второй половине. Пока классы не
+   * разведены, «данных мало» неотличимо от «мы их не дочитываем».
+   */
+  unresolvedBreakdown: { reason: string; cls: "feed_no_detail" | "manual_finish" | "resolver_cannot" | "other"; n: number; sampleLabels: string[] }[];
+  /** Ярлыки, которые резолвер не осилил, сгруппированные по семье — адресный список работы. */
+  resolverGaps: { family: string; n: number; sampleLabels: string[] }[];
   winPctActual: number | null;    // realized win% of scored props
   theoMeanPct: number | null;     // mean model prob on the same rows
   brierMarkov: number | null;
@@ -124,12 +137,45 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
   const sideBias = [...grp.values()].map((g) => { const actual = (g.won / g.n) * 100, theo = (g.theoSum / g.n) * 100; return { family: g.family, side: g.side, n: g.n, winPctActual: r1(actual), theoMeanPct: r1(theo), optimismPp: r1(theo - actual) }; }).sort((a, b) => b.n - a.n);
   const biasFlags = sideBias.filter((b) => b.n >= BIAS_MIN_N && b.optimismPp >= BIAS_FLAG_PP).map((b) => `${b.family}·${b.side}: модель ${b.theoMeanPct}% vs факт ${b.winPctActual}% (переоценка +${b.optimismPp}пп, n=${b.n}) — систематический крен, срезать theo этой стороны`);
 
+  // ── РАЗБОР НЕРАЗРЕШЁННЫХ ПО ПРИЧИНЕ. Причина уже пишется построчно в `resolve_note` при разрешении —
+  // её просто никто не агрегировал. Считать долю и не называть состав это ровно «немой процент».
+  const unrRows = db.prepare(
+    `SELECT resolve_note note, market_label label, family FROM pmv_shadow_signals WHERE status='unresolved'`,
+  ).all() as { note: string | null; label: string; family: string | null }[];
+  const clsOf = (note: string | null): PmvShadowCalibration["unresolvedBreakdown"][number]["cls"] =>
+    !note ? "other"
+      : note.includes("resolveTennisProp") ? "resolver_cannot"
+        : note.includes("детализация по сетам") ? "feed_no_detail"
+          : note.includes("manual") ? "manual_finish" : "other";
+  const byReason = new Map<string, { reason: string; cls: ReturnType<typeof clsOf>; n: number; sampleLabels: string[] }>();
+  const byFamily = new Map<string, { family: string; n: number; sampleLabels: string[] }>();
+  for (const r of unrRows) {
+    const reason = r.note ?? "(причина не записана)";
+    const g = byReason.get(reason) ?? { reason, cls: clsOf(r.note), n: 0, sampleLabels: [] };
+    g.n++; if (g.sampleLabels.length < 4) g.sampleLabels.push(r.label);
+    byReason.set(reason, g);
+    if (clsOf(r.note) === "resolver_cannot") {
+      const fam = r.family ?? "(без семьи)";
+      const f = byFamily.get(fam) ?? { family: fam, n: 0, sampleLabels: [] };
+      f.n++; if (f.sampleLabels.length < 4) f.sampleLabels.push(r.label);
+      byFamily.set(fam, f);
+    }
+  }
+  const unresolvedBreakdown = [...byReason.values()].sort((a, b) => b.n - a.n);
+  const resolverGaps = [...byFamily.values()].sort((a, b) => b.n - a.n);
+  const recoverable = unresolvedBreakdown.filter((x) => x.cls === "resolver_cannot").reduce((s, x) => s + x.n, 0);
+
   const verdict: PmvShadowCalibration["verdict"] = !matured ? "insufficient" : markovBeatsImplied ? "go" : "no_go";
   const note = !matured
     ? `копим: ${scored}/${NEED_N} разрешённых кейсов (это НЕ «немой ноль» — данные теперь реально приходят). unresolved=${c.unresolved}${terminal ? ` (${Math.round(100 * c.unresolved / terminal)}% терминальных)` : ""} — следи за долей, это диагностика конвейера.`
     : markovBeatsImplied
       ? `GO: Brier марковских ${r3(brierMarkov)} ≤ implied ${r3(brierImplied)} на n=${scored} — модель бьёт рынок в тот же таймстемп.`
       : `NO_GO: Brier марковских ${r3(brierMarkov)} > implied ${r3(brierImplied)} на n=${scored} — модель НЕ бьёт рынок. Ядро не готово.`;
+  // ВОССТАНОВИМОЕ НАЗЫВАЕТСЯ ЧИСЛОМ. «Данных мало» и «мы их не дочитываем» — разные диагнозы, и второй
+  // чинится кодом за один прогон, а не ожиданием новых матчей.
+  const recoveryNote = c.unresolved === 0 ? ""
+    : ` · неразрешённых ${c.unresolved}, из них ВОССТАНОВИМЫХ (резолвер не осилил ярлык) ${recoverable}`
+      + (recoverable > 0 ? ` — это не отсутствие исхода, а недочитанные данные: +${recoverable} к когорте без единого нового матча` : ` — все остальные это отсутствие исхода в фиде, ожиданием не лечится`);
 
   return {
     criteria: [
@@ -139,7 +185,7 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
       "Brier марковских ≤ Brier implied на n≥40; implied из ЗАМОРОЖЕННОГО mid того же снапшота (модель против рынка в один момент).",
       "CLV не считаем (нет closing-книги по shadow) — только win%-vs-theo и Brier. Часы критерия с деплоя; текстовые flag_only задним числом не парсим.",
     ],
-    counts: c, scored,
+    counts: c, scored, unresolvedBreakdown, resolverGaps,
     unresolvedPct: terminal ? Math.round(1000 * c.unresolved / terminal) / 10 : null,
     winPctActual: outcomes.length ? Math.round(1000 * (mean(outcomes) ?? 0)) / 10 : null,
     theoMeanPct: scored ? Math.round(1000 * (mean(scoredRows.map((r) => r.t / 100)) ?? 0)) / 10 : null,
@@ -147,7 +193,7 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
     criterion: { needN: NEED_N, haveN: scored, matured, markovBeatsImplied },
     clv: "n/a — closing-книга по shadow не пишется; считаем только win%-vs-theo и Brier",
     sideBias, biasFlags,
-    verdict, note,
+    verdict, note: note + recoveryNote,
   };
 }
 
