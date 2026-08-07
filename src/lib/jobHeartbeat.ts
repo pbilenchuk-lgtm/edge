@@ -101,7 +101,7 @@ export function expectedTickJobs(tickMin: number): { label: string; everyMin: nu
     "aliasOverlay", "repairLeagueMap", "dedupe", "reSettleSuspects", "staleShadowResolve", "pieceRelabel",
     "legGapSuspect", "reSettleSuspectsFresh", "blindFundedAudit", "advanceClocks", "stats", "settleStale",
     "captureLiveOpens", "tennisFinish", "tennisScoreBackfill", "tennisSettle", "tennisPmvSettle",
-    "pmvShadowResolve", "familyShadowResolve", "refusalShadowResolve", "svShadowResolve",
+    "pmvShadowResolve", "pmvShadowProbe", "familyShadowResolve", "refusalShadowResolve", "svShadowResolve",
     "prune", "pruneProviderSnapshots", "noFeedCoverage", "sweepAbandoned", "pruneMatches", "capLogArchive",
     "tennisScoutWatchdog", "tennisBreakMarks", "reconcileFootball", "pruneCategories", "shcObserve",
     // [T6] Грейдер строк решения: без него ряд честной калибровки копится, но никогда не читается.

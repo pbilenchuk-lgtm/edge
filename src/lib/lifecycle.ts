@@ -56,7 +56,7 @@ import { collectTennisSnapshots, collectTennisPrematchSnapshots, recordTennisBre
 import { tennisTradingTick, tennisSetValueTick, tennisExitTick, settleTennisBets, finishTennisMatches, backfillTennisScores, tennisScoutInPlay, tennisFinalResult, pollTennisFinals } from "./tennisTrading.js";
 import { sweepAbandonedMatches } from "./staleSweep.js";
 import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
-import { resolvePmvShadowSignals } from "./tennisPmvShadow.js";
+import { resolvePmvShadowSignals, probePmvShadowManual } from "./tennisPmvShadow.js";
 import { resolveFamilyShadowSignals } from "./familyShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
@@ -2882,6 +2882,10 @@ export async function runAutoCycle(
   stepSync("tennisSettle", () => settleTennisBets(db, deps), 0);           // safety-net settle for finished tennis matches
   stepSync("tennisPmvSettle", () => settleTennisPmvBets(db, deps), 0);     // safety-net settle for PMV props (Gate-0.2 void clauses)
   stepSync("pmvShadowResolve", () => { const r = resolvePmvShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // score flag-only would-be entries post-match (no money)
+  // Зонд НИЧЕГО НЕ РАЗРЕШАЕТ — он дописывает в заметку, что БЫ вышло, если бы manual-гейт не глотал строку
+  // до резолвера. Без него ноль в классе «резолвер не осилил» читался как «восстановимых нет», хотя туда
+  // не доходило ни одной строки.
+  stepSync("pmvShadowProbe", () => probePmvShadowManual(db, deps).probed, 0);
   stepSync("familyShadowResolve", () => { const r = resolveFamilyShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // [Phase 1.1] score demoted-family would-be entries post-match (no money)
   stepSync("refusalShadowResolve", () => { const r = resolveRefusalShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // [R5] score the markets the strategist walked away from
   stepSync("svShadowResolve", () => { const r = resolveSvShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // score set_value flag-only would-be entries post-match (no money)
