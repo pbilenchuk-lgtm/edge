@@ -31,7 +31,22 @@ const VERDICT_SOURCES = new Set(["decision", "meta_backfill"]);
 // Live 2026-07-17 01:08 UTC (deploy start 01:06:07 + 1m53s build). Verified against settled_at: three
 // PMV "wins" at 00:55/01:02/01:03 UTC settled under the BUGGY exit and correctly fall to pre_fix.
 // Env-overridable for what-if re-cuts.
-const STOP_FIX_CUTOFF = process.env.STOP_FIX_CUTOFF_ISO || "2026-07-17T01:08:00Z";
+export const STOP_FIX_CUTOFF_DEFAULT = "2026-07-17T01:08:00Z";
+const STOP_FIX_CUTOFF = process.env.STOP_FIX_CUTOFF_ISO || STOP_FIX_CUTOFF_DEFAULT;
+
+/**
+ * [07.08] ОТСЕЧКА СПОРНА — И СПОР РАЗРЕШАЕТСЯ ЗАМЕРОМ, А НЕ ПАМЯТЬЮ.
+ *
+ * Владелец помнит деплой a3ac8e4 как «~01:40 UTC»; в коде выведено 01:08 (старт деплоя 01:06:07 + сборка
+ * 1м53с) и сверено по трём именным PMV-«победам» 00:55/01:02/01:03, которые обязаны падать в pre_fix.
+ * Проверка их НЕ различает: обе версии позже 01:03.
+ *
+ * Двигать вердикт-релевантную константу по воспоминанию нельзя В ОБЕ СТОРОНЫ: сдвиг вперёд загоняет
+ * честные пост-фиксовые строки в грязную эпоху, сдвиг назад тащит грязь в чистую. Поэтому вместо выбора
+ * отчёт получает (а) ПРОВЕНАНС отсечки — откуда взялось это число, (б) what-if через параметр, (в) список
+ * строк У САМОЙ ГРАНИЦЫ. Если в спорном окне нет ни одной строки, спор пуст, и это видно одним запросом.
+ */
+export const BOUNDARY_WINDOW_H = 3;
 
 export type PmvFamily = "totals" | "btts" | "handicap" | "outcome" | "other";
 export function pmvFamily(label: string): PmvFamily {
@@ -44,9 +59,20 @@ export function pmvFamily(label: string): PmvFamily {
 }
 
 export interface PmvCell { origin: string; family: PmvFamily; epoch: "pre_fix" | "post_fix"; n: number; clvMean: number | null; winPct: number | null; pnlSum: number; winPnlValid: boolean }
+export interface PmvBoundaryRow {
+  settledAt: string; family: PmvFamily; origin: string | null; source: string;
+  outcome: "won" | "lost" | "void" | "open"; pnl: number | null; epoch: "pre_fix" | "post_fix" | "open";
+}
+
 export interface PmvOriginCut {
   criteria: string[];
   stopFixCutoff: string;
+  /** ОТКУДА взялась отсечка. Число без источника — это мнение, а вердикт на мнении не стоит. */
+  cutoffSource: "code_default" | "env" | "query_whatif";
+  cutoffProvenance: string;
+  /** Строки, чья эпоха зависит от ТОЧНОЙ минуты отсечки. Пустой список = спор о минуте пуст. */
+  boundaryWindowHours: number;
+  boundaryRows: PmvBoundaryRow[];
   originSourceCounts: Record<string, number>;
   dataHealth: { total: number; originNull: number; unknownSource: number; valid: boolean };
   verdictCells: PmvCell[];        // origin_source ∈ {decision, meta_backfill}
@@ -80,7 +106,13 @@ function cellsFrom(rows: Row[]): PmvCell[] {
   return out.sort((a, b) => b.n - a.n);
 }
 
-export function buildPmvOriginCut(db: Database): PmvOriginCut {
+export function buildPmvOriginCut(db: Database, opts: { cutoff?: string | null } = {}): PmvOriginCut {
+  const whatIf = opts.cutoff && /^\d{4}-\d\d-\d\dT/.test(opts.cutoff) ? opts.cutoff : null;
+  const cutoff = whatIf ?? STOP_FIX_CUTOFF;
+  const cutoffSource: PmvOriginCut["cutoffSource"] = whatIf ? "query_whatif"
+    : process.env.STOP_FIX_CUTOFF_ISO ? "env" : "code_default";
+  const cutMs = Date.parse(cutoff) || 0;
+  const boundary: PmvOriginCut["boundaryRows"] = [];
   const bets = R.allBets(db).filter((b) => b.strategy_id === PMV);
   const originSourceCounts: Record<string, number> = {};
   let originNull = 0, unknownSource = 0;
@@ -98,7 +130,17 @@ export function buildPmvOriginCut(db: Database): PmvOriginCut {
     const outcome: Row["outcome"] = !settled ? "open" : b.result === "won" ? "won" : b.result === "lost" ? "lost" : "void";
     const pnl = settled && b.payout != null ? Math.round((b.payout - (b.stake ?? 0)) * 100) / 100 : null;
     const settledAt = (b as any).settled_at as string | null;
-    const epoch: Row["epoch"] = !settled ? "open" : (settledAt ?? b.created_at) >= STOP_FIX_CUTOFF ? "post_fix" : "pre_fix";
+    const stamp = settledAt ?? b.created_at;
+    const epoch: Row["epoch"] = !settled ? "open" : stamp >= cutoff ? "post_fix" : "pre_fix";
+    // Строки У ГРАНИЦЫ: те, чья эпоха зависит от точной минуты отсечки. Пустой список — доказательство,
+    // что спор о минуте ни на что не влияет; непустой — поимённый счёт того, что стоит на кону.
+    const stampMs = Date.parse(stamp) || 0;
+    if (settled && cutMs && Math.abs(stampMs - cutMs) <= BOUNDARY_WINDOW_H * 3_600_000
+        && src != null && VERDICT_SOURCES.has(src)) {
+      boundary.push({ settledAt: stamp, family: pmvFamily(b.market_label), origin: (b as any).origin ?? null,
+        source: src, outcome: !settled ? "open" : b.result === "won" ? "won" : b.result === "lost" ? "lost" : "void",
+        pnl: b.payout != null ? Math.round((b.payout - (b.stake ?? 0)) * 100) / 100 : null, epoch });
+    }
     rows.push({ origin: (b as any).origin ?? null, source: src, family: pmvFamily(b.market_label), epoch, clv, outcome, pnl });
   }
   const valid = originNull === 0 && unknownSource === 0;
@@ -119,7 +161,14 @@ export function buildPmvOriginCut(db: Database): PmvOriginCut {
       "Вердикт — ТОЛЬКО при согласии CLV + win% + P&L на чистой (пост-фиксовой) эпохе. Расхождение = вопрос, не вердикт.",
       "Симметрично: prematch × totals пост-фикс — тот же срез пересуживает сброшенный вердикт предматч-тоталов (−$1030), когда n дозреет.",
     ],
-    stopFixCutoff: STOP_FIX_CUTOFF,
+    stopFixCutoff: cutoff,
+    cutoffSource,
+    cutoffProvenance: cutoffSource === "code_default"
+      ? `выведена из деплоя a3ac8e4: старт 2026-07-17T01:06:07Z + сборка 1м53с → Live 01:08; сверена по трём PMV-«победам» 00:55/01:02/01:03, падающим в pre_fix`
+      : cutoffSource === "env" ? "переопределена переменной окружения STOP_FIX_CUTOFF_ISO"
+        : "what-if из параметра запроса — НЕ действующая отсечка, только пересчёт «а если бы»",
+    boundaryWindowHours: BOUNDARY_WINDOW_H,
+    boundaryRows: boundary.sort((x, y) => x.settledAt.localeCompare(y.settledAt)),
     originSourceCounts,
     dataHealth: { total: bets.length, originNull, unknownSource, valid },
     verdictCells, diagnosticInferredCells, note,

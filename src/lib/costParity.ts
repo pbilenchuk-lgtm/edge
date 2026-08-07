@@ -65,6 +65,13 @@ export function buildCostParity(db: Database, nowIso: string, env: Record<string
     for (const r of rows) ledgerByBet.set(r.bet_id, { fee: Number(r.f) || 0, slip: Number(r.s) || 0 });
   } catch { /* леджера может не быть — тогда всё «без строк», и это честный ответ */ }
 
+  /** Ожидаемая комиссия на ногу сделки: notional · rate · (1 − p/100). Цена неизвестна ⇒ вклада нет:
+   *  выдумать её значило бы обвинить наугад (без цены неизвестен даже знак поправки). */
+  const feeFor = (notionalUsd: number, priceCents: number | null | undefined): number => {
+    const p = priceCents == null ? null : Number(priceCents);
+    if (!notionalUsd || p == null || !Number.isFinite(p) || p <= 0 || p >= 100) return 0;
+    return notionalUsd * rate * (1 - p / 100);
+  };
   const acc = new Map<string, CostParityLeg>();
   for (const b of R.allBets(db)) {
     if (b.status === "proposed" || b.status === "not_filled") continue;
@@ -78,7 +85,14 @@ export function buildCostParity(db: Database, nowIso: string, env: Record<string
     const inUsd = b.stake ?? 0;
     const outUsd = R.isSettled(b.status) ? (b.payout ?? 0) : 0;
     a.notionalUsd += inUsd + outUsd;
-    a.expectedFeeUsd += (inUsd + outUsd) * rate;
+    // [ПОПРАВКА 07.08] МОДЕЛЬ КОМИССИИ — ТА ЖЕ, ЧТО У ИСПОЛНЕНИЯ, А НЕ «ставка × оборот».
+    //
+    // Первая версия этого отчёта считала ожидание как rate × notional и дала теннису ≈$2527. Число было
+    // ЗАВЫШЕНО: комиссия Polymarket биномиальна — takerFeeCents = rate·p·(100−p)/100 за акцию, что на
+    // номинал даёт notional · rate · (1 − p/100). У цены 54¢ это 0.35% от номинала, а не 0.75%; у 90¢ —
+    // 0.075%. Сторож, который меряет расхождение СВОЕЙ моделью вместо модели исполнения, обвиняет тем
+    // громче, чем дороже контракт, — и это ровно тот класс, за который мы наказываем гипотезы.
+    a.expectedFeeUsd += feeFor(inUsd, b.entry_price) + feeFor(outUsd, b.closing_price ?? b.current_price ?? b.entry_price);
   }
   const legs = [...acc.values()].map((a) => {
     a.notionalUsd = r2(a.notionalUsd); a.ledgerFeeUsd = r2(a.ledgerFeeUsd); a.ledgerSlipUsd = r2(a.ledgerSlipUsd);
