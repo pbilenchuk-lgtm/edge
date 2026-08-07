@@ -95,7 +95,7 @@ export function expectedTickJobs(tickMin: number): { label: string; everyMin: nu
     // В списке только БЕЗУСЛОВНЫЕ: `dryExitSweep` включается режимом торговли, а провайдер-зависимые
     // (`enrich`, `fixtureDateBackfill`, `boundNoScoreChase`) на проде идут всегда — их отсутствие само по
     // себе повод для тревоги, поэтому они здесь и стоят.
-    "discover", "sync", "odds", "enrich", "fixtureDateBackfill", "boundNoScoreChase", "snapshots",
+    "sync", "odds", "enrich", "fixtureDateBackfill", "boundNoScoreChase", "snapshots",
     "analyze", "runStrategists", "reassess", "exits", "autoEnter", "complementAudit", "pmResolution",
     "tennisScout", "tennisPrematchScout", "tennisExit", "tennisFinalPoll",
     "aliasOverlay", "repairLeagueMap", "dedupe", "reSettleSuspects", "staleShadowResolve", "pieceRelabel",
@@ -116,6 +116,14 @@ export function expectedTickJobs(tickMin: number): { label: string; everyMin: nu
  */
 export const UNWATCHED_STEPS: Record<string, string> = {
   dryExitSweep: "включается режимом торговли (readTradingMode ≠ off); при выключенном режиме «НИ РАЗУ» было бы ложной тревогой",
+  // [07.08] СТОРОЖ КРИЧАЛ НА КОНТРАКТ, КОТОРОГО КОД НЕ ДАВАЛ. `discover` стоял в перечне с интервалом
+  // ТИКА, а планировщик зовёт полный цикл ИСКЛЮЧИТЕЛЬНО с `discover: false` (scheduler.ts) — шаг живёт
+  // только на ручном действии `/api/engine {action:"discover"}`. Значит «УСТАРЕЛ 347мин при ожидаемых 30»
+  // было структурно неизбежным: строка горела красным всегда и не могла погаснуть ничем.
+  // ЦЕНА ЛОЖНОЙ ТРЕВОГИ НЕ НУЛЕВАЯ. Сводка пульса вела заголовком «⚠ устарели 1 (discover)», и ровно в
+  // той же строке стояли ДВА настоящих «НИ РАЗУ». Сторож, который шумит постоянно, обучает не читать себя
+  // именно тогда, когда он прав, — тот же класс, что «немой ноль», только с обратным знаком.
+  discover: "запускается ТОЛЬКО вручную (`/api/engine {action:\"discover\"}`); планировщик всегда идёт с `discover:false`, поэтому ожидание по часам тика — ложная тревога по построению",
 };
 
 // ── ЖИВОЙ ТИК: ВТОРАЯ ПОЛОВИНА ТОЙ ЖЕ СЛЕПОТЫ ───────────────────────────────────────────────────
