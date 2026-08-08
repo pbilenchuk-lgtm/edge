@@ -86,9 +86,15 @@ test("сводная строка показывает ВСЕ шаги, вклю
 });
 
 test("перечень ожидаемых шагов ЯВНЫЙ — иначе «шага нет в метриках» неотличимо от «мы про него забыли»", () => {
-  const jobs = expectedTickJobs(30);
+  const jobs = expectedTickJobs(30, {});
   assert.ok(jobs.length >= 20);
-  assert.ok(jobs.every((j) => j.everyMin === 30), "интервал берётся из настройки, а не зашит числом");
+  // Интервал берётся из НАСТРОЙКИ, а не зашит числом: сменили такт тика — сменились все тактовые шаги.
+  assert.ok(expectedTickJobs(7, {}).filter((j) => j.label !== "discover").every((j) => j.everyMin === 7));
+  // …но НЕ все шаги тактовые. `discover` идёт своей суточной каденцией (DISCOVER_INTERVAL_HR), и раньше
+  // общий `.map` выдавал ему часы тика — отчего он читался «УСТАРЕЛ» ВСЕГДА и не мог погаснуть ничем.
+  // Сторож обязан сверять шаг с ЕГО контрактом, а не с чужим.
+  assert.equal(jobs.find((j) => j.label === "discover")!.everyMin, 24 * 60, "суточный шаг судится по суткам");
+  assert.equal(expectedTickJobs(30, { DISCOVER_INTERVAL_HR: "6" }).find((j) => j.label === "discover")!.everyMin, 360);
   for (const need of ["pieceRelabel", "reSettleSuspects", "tennisScoreBackfill", "refusalShadowResolve"]) {
     assert.ok(jobs.some((j) => j.label === need), `${need} обязан быть в перечне`);
   }

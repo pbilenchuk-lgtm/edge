@@ -94,12 +94,35 @@ export function resolvePmvShadowSignals(db: Database, deps: EngineDeps = {}): { 
 
 /** Машинный тег контрфактического зонда в `resolve_note`. Идемпотентен: строка с тегом не перепроверяется. */
 const CF_TAG = "[cf:";
-export type CfWould = "won" | "lost" | "void" | "unreadable_sets" | "resolver_cannot";
+export type CfWould = "won" | "lost" | "void" | "unreadable_sets" | "resolver_cannot"
+  | "skip_no_snapshot" | "skip_not_manual";
+
+/**
+ * ПОЧЕМУ ЗОНД ПРОПУСТИЛ СТРОКУ. Первый прогон на проде дал `probed=0` при 144 неразрешённых — и это был
+ * ФАКТ (шаг отработал, пульс подтвердил), а не отсутствие запуска. Но `probeOne` возвращал один `null` на
+ * три РАЗНЫЕ причины, и «зонд ничего не нашёл» оказалось неотличимо от «зонду нечего было читать».
+ * Ровно тот дефект, который зонд и создавался лечить, — на уровень ниже, в самом зонде.
+ *
+ * Причины лечатся по-разному и это разные диагнозы:
+ *   • `no_snapshot` — снимка матча БОЛЬШЕ НЕТ (prune съел источник, переживший архив). Исход существовал,
+ *     мы стёрли свою копию — это не «фид не отдал» и не «резолвер не умеет»;
+ *   • `not_finished` — матч ещё не финализирован нашим финишером: строка просто рано;
+ *   • `not_manual` — финал читается чисто, значит `manual`-гейт эту строку не глотал, и unresolved у неё
+ *     от другой причины.
+ */
+export type ProbeSkip = "no_snapshot" | "not_finished" | "not_manual";
 
 /** Что БЫ вышло по одной неразрешённой строке, если бы `manual`-гейт её не проглотил. Ничего не пишет. */
-export function probeOne(db: Database, matchId: string, label: string, firstIsP1Col: number | null): { would: CfWould; mr: string } | null {
+export function probeOne(db: Database, matchId: string, label: string, firstIsP1Col: number | null): { would: CfWould; mr: string } | { skip: ProbeSkip } {
   const fin = tennisFinalResult(db, matchId);
-  if (!fin || !fin.finished || !fin.manual) return null; // зонд только по manual-ветке
+  // `tennisFinalResult` возвращает null и когда снимка нет вовсе, и когда он есть, но матч не финал.
+  // Различаем по наличию строки: молчание источника и незавершённость — не одно и то же.
+  if (!fin) {
+    const has = db.prepare(`SELECT 1 FROM tennis_snapshots WHERE pm_match_id=? LIMIT 1`).get(matchId);
+    return { skip: has ? "not_finished" : "no_snapshot" };
+  }
+  if (!fin.finished) return { skip: "not_finished" };
+  if (!fin.manual) return { skip: "not_manual" };   // зонд только по manual-ветке
   const mr = fin.manualReason ?? "unknown";
   const row = db.prepare(`SELECT raw FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(matchId) as { raw?: string } | undefined;
   const fs = finalSetsFromRaw(row?.raw ?? null);
@@ -114,21 +137,34 @@ export function probeOne(db: Database, matchId: string, label: string, firstIsP1
 }
 
 /** Прогон зонда по уже накопленным `unresolved`. Статусы не трогает — дописывает тег в заметку. */
-export function probePmvShadowManual(db: Database, _deps: EngineDeps = {}): { probed: number; wouldResolve: number } {
+export function probePmvShadowManual(db: Database, _deps: EngineDeps = {}): {
+  probed: number; wouldResolve: number; skipped: Record<ProbeSkip | "already_tagged", number>;
+} {
   let probed = 0, wouldResolve = 0;
+  const skipped: Record<ProbeSkip | "already_tagged", number> = { no_snapshot: 0, not_finished: 0, not_manual: 0, already_tagged: 0 };
   const rows = db.prepare(
     `SELECT id, match_id, market_label, first_is_p1, resolve_note FROM pmv_shadow_signals WHERE status='unresolved'`,
   ).all() as { id: string; match_id: string; market_label: string; first_is_p1: number | null; resolve_note: string | null }[];
   for (const s of rows) {
-    if (s.resolve_note && s.resolve_note.includes(CF_TAG)) continue; // уже зондировано
+    if (s.resolve_note && s.resolve_note.includes(CF_TAG)) { skipped.already_tagged++; continue; }
     const p = probeOne(db, s.match_id, s.market_label, s.first_is_p1);
-    if (!p) continue;
+    // ПРИЧИНА ПРОПУСКА ЗАПИСЫВАЕТСЯ В ТУ ЖЕ ЗАМЕТКУ. Иначе следующий прогон снова читает 144 строки и
+    // снова молча их бросает, а отчёт снова печатает «зонд не прошёл» — при том что он прошёл трижды.
+    if ("skip" in p) {
+      skipped[p.skip]++;
+      // `not_finished` — состояние ВРЕМЕННОЕ: матч дозреет, и строку надо перечитать. Метку не ставим.
+      if (p.skip !== "not_finished") {
+        const note = `${s.resolve_note ?? ""} ${CF_TAG}would=skip_${p.skip},mr=none]`.trim();
+        db.prepare(`UPDATE pmv_shadow_signals SET resolve_note=? WHERE id=?`).run(note, s.id);
+      }
+      continue;
+    }
     probed++;
     if (p.would === "won" || p.would === "lost" || p.would === "void") wouldResolve++;
     const note = `${s.resolve_note ?? ""} ${CF_TAG}would=${p.would},mr=${p.mr}]`.trim();
     db.prepare(`UPDATE pmv_shadow_signals SET resolve_note=? WHERE id=?`).run(note, s.id);
   }
-  return { probed, wouldResolve };
+  return { probed, wouldResolve, skipped };
 }
 
 /** Разбор тега обратно. Отсутствие тега — СВОЙ случай, а не «зонд ничего не нашёл». */
@@ -252,6 +288,14 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
   for (const r of unrRows) {
     const cf = parseCf(r.note);
     if (!cf) { unprobed++; continue; }
+    // Строка, помеченная ПРИЧИНОЙ ПРОПУСКА, зондом не пройдена — она объяснена. Считать её «зондированной»
+    // значило бы записать себе в актив то, что мы как раз НЕ прочитали.
+    if (cf.would.startsWith("skip_")) {
+      const w = wouldOf.get(cf.would) ?? { would: cf.would, n: 0, sampleLabels: [] };
+      w.n++; if (w.sampleLabels.length < 4) w.sampleLabels.push(r.label);
+      wouldOf.set(cf.would, w);
+      unprobed++; continue;
+    }
     probed++;
     const w = wouldOf.get(cf.would) ?? { would: cf.would, n: 0, sampleLabels: [] };
     w.n++; if (w.sampleLabels.length < 4) w.sampleLabels.push(r.label);
@@ -266,12 +310,18 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
     }
     mrOf.set(cf.mr, m);
   }
+  // СОСТАВ НЕПРОЙДЕННОГО НАЗЫВАЕТСЯ. «Зонд не прошёл» без причин — та же немота, что и «144 unresolved».
+  const skipNote = [...wouldOf.values()].filter((w) => w.would.startsWith("skip_"))
+    .sort((a, b) => b.n - a.n)
+    .map((w) => `${w.would.replace("skip_", "")} ${w.n}`).join(", ");
   const manualProbe: PmvShadowCalibration["manualProbe"] = {
     probed, unprobed, wouldResolve, wouldResolveSafe, wouldResolveDisputed,
     byWould: [...wouldOf.values()].sort((a, b) => b.n - a.n),
     byReason: [...mrOf.values()].sort((a, b) => b.n - a.n),
     note: !probed
-      ? (unprobed ? `зонд ещё не прошёл по ${unprobed} строкам — «восстановимых нет» пока НЕ УСТАНОВЛЕНО` : "неразрешённых нет")
+      ? (unprobed ? `зонд не прочитал ни одной из ${unprobed} строк — «восстановимых нет» пока НЕ УСТАНОВЛЕНО`
+          + (skipNote ? ` · причины: ${skipNote}` : " · причина пока не записана — следующий прогон её назовёт")
+        : "неразрешённых нет")
       : `зонд по ${probed} строкам: разрешилось бы ${wouldResolve}`
         + (wouldResolve ? ` (из них БЕЗОПАСНО ${wouldResolveSafe} — счёт не оспорен; ${wouldResolveDisputed} на спорном счёте, разрешать нельзя)` : "")
         + (unprobed ? ` · не зондировано ${unprobed}` : ""),
