@@ -30,6 +30,17 @@ import { falseCut, FALSE_CUT_MIN_MOVE_CENTS, FLAT_TOL_CENTS, ML_SKEW_MIN_CENTS, 
 /** Сколько срез должен «отстояться», прежде чем его судить. Раньше этого поздняя цена — та же цена. */
 export const MATURITY_MIN = 45;
 
+/**
+ * Сколько дозревших срезов нужно, чтобы вердикт «чисто» вообще прозвучал.
+ *
+ * [ПОПРАВКА 08.08] Первый прод-замер дал `checked=1, falseCuts=0` — и отчёт объявил «чисто». Это был
+ * вердикт на выборке из ОДНОГО наблюдения: то же самое, за что мы наказываем гипотезы, только со знаком
+ * оправдания. Хуже «немого нуля» тем, что выглядит как работающая проверка. Ниже порога сторож остаётся
+ * `unmeasured` и печатает, сколько ещё надо, — а вот ОБВИНЕНИЕ порога не имеет: даже один ложный срез это
+ * факт, который надо назвать сразу. Асимметрия намеренная: оправдание требует выборки, улика — нет.
+ */
+export const VERDICT_MIN_CHECKED = 20;
+
 export const PATHS: PlaceholderPath[] = ["no_ask", "wide_spread", "moneyline_contradicts"];
 
 /** Запись среза в момент среза. Цена ЗАМОРАЖИВАЕТСЯ: сторож, пересчитывающий вход из текущего состояния,
@@ -139,13 +150,15 @@ export function buildFalseCutReport(db: Database, nowIso: string): FalseCutRepor
   };
   // Вердикт «чисто» имеет право прозвучать ТОЛЬКО когда проверено хоть что-то. Пустой сторож обязан
   // называть себя неизмеренным, а не оправдывать правило.
-  const verdict: FalseCutReport["verdict"] = !totals.checked ? "unmeasured" : totals.falseCuts ? "suspect" : "clean";
+  const verdict: FalseCutReport["verdict"] = totals.falseCuts ? "suspect"
+    : totals.checked >= VERDICT_MIN_CHECKED ? "clean" : "unmeasured";
   const worst = [...paths].filter((p) => p.falseCutPct != null).sort((a, b) => (b.falseCutPct ?? 0) - (a.falseCutPct ?? 0))[0];
   return {
     at: nowIso, maturityMin: MATURITY_MIN, minMoveCents: FALSE_CUT_MIN_MOVE_CENTS,
     paths, totals, verdict,
     note: verdict === "unmeasured"
-      ? `НЕ ИЗМЕРЕНО: срезов ${totals.cuts}, проверено 0 — сторож пока ничего не утверждает о правиле #121`
+      ? `НЕ ИЗМЕРЕНО: срезов ${totals.cuts}, дозрело ${totals.checked} из нужных ${VERDICT_MIN_CHECKED}`
+        + ` — сторож пока ничего не утверждает о правиле #121 (ложных среди дозревших пока нет, но это НЕ вердикт)`
       : verdict === "clean"
         ? `чисто: ${totals.checked} срезов дозрело, ни один рынок не ожил (порог оживления ${FALSE_CUT_MIN_MOVE_CENTS}¢ от 50¢, допуск плоскости ${FLAT_TOL_CENTS}¢)`
         : `ЛОЖНЫЕ СРЕЗЫ ЕСТЬ: ${totals.falseCuts} из ${totals.checked} проверенных — хуже всех «${worst?.path}» (${worst?.falseCutPct}%), отвечает ${worst?.threshold}.`

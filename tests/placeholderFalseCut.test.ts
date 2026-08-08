@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
 import { structuralPlaceholders, moneylineOf } from "../src/lib/placeholderStructural.js";
-import { recordPlaceholderCuts, checkPlaceholderFalseCuts, buildFalseCutReport, falseCutLine, MATURITY_MIN } from "../src/lib/placeholderFalseCut.js";
+import { recordPlaceholderCuts, checkPlaceholderFalseCuts, buildFalseCutReport, falseCutLine, MATURITY_MIN, VERDICT_MIN_CHECKED } from "../src/lib/placeholderFalseCut.js";
 import type { Market } from "../src/lib/types.js";
 
 const T0 = "2026-08-07T10:00:00.000Z";
@@ -103,13 +103,15 @@ test("СТОРОЖ СОБСТВЕННОЙ СЛЕПОТЫ: непроверенн
   assert.ok(!/чисто/.test(rep.note), "пустой сторож не оправдывает правило");
 });
 
-test("вердикт «чисто» возможен ТОЛЬКО после дозревания", () => {
+test("«чисто» ДОСТИЖИМО: набрали выборку, ни один рынок не ожил — правило оправдано числом", () => {
   const db = db0();
-  const markets = [mkt({ label: "X", price: 50, ask_cents: null })];
+  const labels = Array.from({ length: VERDICT_MIN_CHECKED }, (_, i) => `X${i}`);
+  const markets = labels.map((l) => mkt({ label: l, price: 50, ask_cents: null }));
   recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
-  board(db, "m1", later(MATURITY_MIN + 5), [{ label: "X", price: 52 }]);  // не ожил: 2¢ < 10¢
+  board(db, "m1", later(MATURITY_MIN + 5), labels.map((l) => ({ label: l, price: 52 })));  // не ожили: 2¢ < 10¢
   checkPlaceholderFalseCuts(db, { now: () => later(MATURITY_MIN + 10) });
   const rep = buildFalseCutReport(db, T0);
+  assert.equal(rep.totals.checked, VERDICT_MIN_CHECKED);
   assert.equal(rep.verdict, "clean");
   assert.equal(rep.paths.find((x) => x.path === "no_ask")!.falseCutPct, 0);
 });
@@ -140,4 +142,31 @@ test("строка еженедельника печатает непровер�
   const markets = [mkt({ label: "X", price: 50, ask_cents: null })];
   recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
   assert.match(falseCutLine(buildFalseCutReport(db, T0)), /no_ask 0\/— из 1/);
+});
+
+// [ПОПРАВКА 08.08] Первый прод-замер дал checked=1, falseCuts=0 — и отчёт объявил «чисто». Вердикт на
+// ОДНОМ наблюдении: то же, за что мы наказываем гипотезы, только со знаком оправдания. Асимметрия ниже
+// намеренная: оправдание требует выборки, обвинение — нет.
+test("«чисто» требует ВЫБОРКИ: один дозревший срез вердиктом не является", () => {
+  const db = db0();
+  const markets = [mkt({ label: "X", price: 50, ask_cents: null })];
+  recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
+  board(db, "m1", later(MATURITY_MIN + 5), [{ label: "X", price: 52 }]);
+  checkPlaceholderFalseCuts(db, { now: () => later(MATURITY_MIN + 10) });
+  const rep = buildFalseCutReport(db, T0);
+  assert.equal(rep.totals.checked, 1);
+  assert.equal(rep.verdict, "unmeasured", "одно наблюдение не оправдывает правило");
+  assert.match(rep.note, new RegExp(`дозрело 1 из нужных ${VERDICT_MIN_CHECKED}`));
+  assert.ok(!/^чисто/.test(rep.note));
+});
+
+test("ОБВИНЕНИЕ порога не имеет: один ложный срез называется сразу", () => {
+  const db = db0();
+  const markets = [mkt({ label: "X", price: 50, ask_cents: null })];
+  recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
+  board(db, "m1", later(MATURITY_MIN + 5), [{ label: "X", price: 72 }]);   // ожил
+  checkPlaceholderFalseCuts(db, { now: () => later(MATURITY_MIN + 10) });
+  const rep = buildFalseCutReport(db, T0);
+  assert.equal(rep.verdict, "suspect", "улика не ждёт выборки");
+  assert.match(rep.note, /ЛОЖНЫЕ СРЕЗЫ ЕСТЬ/);
 });
