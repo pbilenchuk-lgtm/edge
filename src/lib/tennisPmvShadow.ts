@@ -21,7 +21,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { EngineDeps } from "./engine.js";
 import { resolveTennisProp, finalSetsFromRaw, propFirstIsP1, PMV_STRATEGY, PMV_PAPER_EPOCH } from "./tennisPmv.js";
-import { tennisFinalResult } from "./tennisTrading.js";
+import { tennisFinalResult, tennisFinalFromRow, type TennisSnapshotRow } from "./tennisTrading.js";
 
 export const PMV_SHADOW_EPOCH = "shadow-s1"; // bump when the shadow-scoring logic changes
 
@@ -43,6 +43,37 @@ export function recordPmvShadowSignal(db: Database, s: PmvShadowInput): void {
     s.theoCents, s.midCents, s.deviation, s.delta, s.bookUsd, s.tour, s.surface, s.epoch, s.at);
 }
 
+/**
+ * Копия терминального `raw` В САМУ СТРОКУ СИГНАЛА. Идемпотентна: первый мороз побеждает, повтор ничего не
+ * переписывает — иначе поздний (уже испорченный или обрезанный) снимок вытеснил бы верный.
+ */
+export function freezeShadowEvidence(db: Database, signalId: string, matchId: string, nowIso: string): boolean {
+  try {
+    const have = db.prepare(`SELECT final_raw FROM pmv_shadow_signals WHERE id=?`).get(signalId) as { final_raw?: string | null } | undefined;
+    if (have?.final_raw) return false;
+    // Морозим ВСЮ строку, а не только `raw`: финал выводится ещё из status/live/sets, и копия одного поля
+    // оставила бы потребителя без половины улики — тот же дефект, только тише.
+    const row = db.prepare(`SELECT p1,p2,sets_p1,sets_p2,live,status,raw FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(matchId) as Record<string, unknown> | undefined;
+    if (!row) return false;   // нечего морозить — молчим, это не отказ
+    db.prepare(`UPDATE pmv_shadow_signals SET final_raw=?, final_frozen_at=? WHERE id=?`).run(JSON.stringify(row), nowIso, signalId);
+    return true;
+  } catch { return false; }
+}
+
+/** Строка снимка для сигнала: ЗАМОРОЖЕННАЯ в приоритете — она и есть то, по чему выносился вердикт. */
+export function snapshotRowForShadow(db: Database, signalId: string, matchId: string): TennisSnapshotRow | null {
+  try {
+    const f = db.prepare(`SELECT final_raw FROM pmv_shadow_signals WHERE id=?`).get(signalId) as { final_raw?: string | null } | undefined;
+    if (f?.final_raw) { try { return JSON.parse(f.final_raw) as TennisSnapshotRow; } catch { /* битая копия — падаем на живой */ } }
+  } catch { /* колонки может не быть на старой базе */ }
+  return (db.prepare(`SELECT p1,p2,sets_p1,sets_p2,live,status,raw FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(matchId) as TennisSnapshotRow | undefined) ?? null;
+}
+
+export function rawForShadow(db: Database, signalId: string, matchId: string): string | null {
+  const r = snapshotRowForShadow(db, signalId, matchId);
+  return r?.raw == null ? null : String(r.raw);
+}
+
 /** Resolve pending shadow signals against finished matches — same settlement code as real PMV bets.
  *  Fail-closed: anything that can't resolve becomes `unresolved` WITH a reason, never a silent skip. */
 export function resolvePmvShadowSignals(db: Database, deps: EngineDeps = {}): { resolved: number; unresolved: number } {
@@ -52,11 +83,16 @@ export function resolvePmvShadowSignals(db: Database, deps: EngineDeps = {}): { 
   for (const s of pend) {
     const fin = tennisFinalResult(db, s.match_id);
     if (!fin || !fin.finished) continue; // match not over → stay pending (not a failure)
+    // УЛИКА МОРОЗИТСЯ ПЕРВЫМ ДЕЙСТВИЕМ ПОСЛЕ ФИНАЛА, ДО ЛЮБОГО ВЕТВЛЕНИЯ. Прежде разрешение читало
+    // `tennis_snapshots` по ссылке — а прун сносит их по возрасту и капу, вслепую к тому, нужна ли строка.
+    // Замер 08.08: 144 из 144 неразрешённых оказались `skip_no_snapshot`. Исход существовал; мы стёрли
+    // свою копию, и вернуться к этим строкам стало нечем. Морозим ДО ветвления именно потому, что
+    // `manual`-ветка — самая нуждающаяся в пересмотре и раньше уходила вообще ничего не сохранив.
+    freezeShadowEvidence(db, s.id, s.match_id, now);
     let status: string, note: string | null = null;
     if (fin.manual) { status = "unresolved"; note = "исход неизвестен (manual/нет детали финала)"; }
     else {
-      const row = db.prepare(`SELECT raw FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(s.match_id) as { raw?: string } | undefined;
-      const fs = finalSetsFromRaw(row?.raw ?? null);
+      const fs = finalSetsFromRaw(rawForShadow(db, s.id, s.match_id));
       if (!fs) { status = "unresolved"; note = "детализация по сетам не читается на финале"; }
       else {
         const firstIsP1 = s.first_is_p1 == null ? (propFirstIsP1(s.market_label, { p1: fin.p1, p2: fin.p2 }) ?? true) : s.first_is_p1 === 1;
@@ -113,19 +149,16 @@ export type CfWould = "won" | "lost" | "void" | "unreadable_sets" | "resolver_ca
 export type ProbeSkip = "no_snapshot" | "not_finished" | "not_manual";
 
 /** Что БЫ вышло по одной неразрешённой строке, если бы `manual`-гейт её не проглотил. Ничего не пишет. */
-export function probeOne(db: Database, matchId: string, label: string, firstIsP1Col: number | null): { would: CfWould; mr: string } | { skip: ProbeSkip } {
-  const fin = tennisFinalResult(db, matchId);
-  // `tennisFinalResult` возвращает null и когда снимка нет вовсе, и когда он есть, но матч не финал.
-  // Различаем по наличию строки: молчание источника и незавершённость — не одно и то же.
-  if (!fin) {
-    const has = db.prepare(`SELECT 1 FROM tennis_snapshots WHERE pm_match_id=? LIMIT 1`).get(matchId);
-    return { skip: has ? "not_finished" : "no_snapshot" };
-  }
-  if (!fin.finished) return { skip: "not_finished" };
+export function probeOne(db: Database, signalId: string, matchId: string, label: string, firstIsP1Col: number | null): { would: CfWould; mr: string } | { skip: ProbeSkip } {
+  // ЗАМОРОЖЕННАЯ КОПИЯ ПЕРВЕЕ ЖИВОГО СНИМКА: живой прун сносит по возрасту и капу, и зонд, читающий только
+  // его, обречён однажды прочитать пустоту по всем строкам разом — что замер 08.08 и показал (144 из 144).
+  const row = snapshotRowForShadow(db, signalId, matchId);
+  if (!row) return { skip: "no_snapshot" };
+  const fin = tennisFinalFromRow(row);
+  if (!fin || !fin.finished) return { skip: "not_finished" };
   if (!fin.manual) return { skip: "not_manual" };   // зонд только по manual-ветке
   const mr = fin.manualReason ?? "unknown";
-  const row = db.prepare(`SELECT raw FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).get(matchId) as { raw?: string } | undefined;
-  const fs = finalSetsFromRaw(row?.raw ?? null);
+  const fs = finalSetsFromRaw(row.raw == null ? null : String(row.raw));
   if (!fs) return { would: "unreadable_sets", mr };
   const firstIsP1 = firstIsP1Col == null ? (propFirstIsP1(label, { p1: fin.p1, p2: fin.p2 }) ?? true) : firstIsP1Col === 1;
   let won: boolean | null | undefined;
@@ -147,7 +180,7 @@ export function probePmvShadowManual(db: Database, _deps: EngineDeps = {}): {
   ).all() as { id: string; match_id: string; market_label: string; first_is_p1: number | null; resolve_note: string | null }[];
   for (const s of rows) {
     if (s.resolve_note && s.resolve_note.includes(CF_TAG)) { skipped.already_tagged++; continue; }
-    const p = probeOne(db, s.match_id, s.market_label, s.first_is_p1);
+    const p = probeOne(db, s.id, s.match_id, s.market_label, s.first_is_p1);
     // ПРИЧИНА ПРОПУСКА ЗАПИСЫВАЕТСЯ В ТУ ЖЕ ЗАМЕТКУ. Иначе следующий прогон снова читает 144 строки и
     // снова молча их бросает, а отчёт снова печатает «зонд не прошёл» — при том что он прошёл трижды.
     if ("skip" in p) {

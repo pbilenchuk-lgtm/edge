@@ -649,6 +649,13 @@ CREATE TABLE IF NOT EXISTS pmv_shadow_signals (
   hits          INTEGER NOT NULL DEFAULT 1,   -- how many times this signal re-fired (dedup counter)
   status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','won','lost','void','unresolved')),
   resolve_note  TEXT,
+  -- [08.08] УЛИКА ЗАМОРАЖИВАЕТСЯ ЗДЕСЬ. Разрешение читало `tennis_snapshots` по ссылке, а прун сносит их
+  -- по возрасту и по капу — вслепую к тому, нужна ли строка ещё. Замер дал 144 из 144 неразрешённых с
+  -- вердиктом `skip_no_snapshot`: исход существовал, мы стёрли СВОЮ копию. Сигнал, чьё доказательство
+  -- живёт в чужой таблице по чужим правилам, обречён пережить его. Терминальный `raw` копируется в сам
+  -- сигнал в момент, когда матч впервые прочитан завершённым.
+  final_raw       TEXT,
+  final_frozen_at TEXT,
   created_at    TEXT NOT NULL,
   resolved_at   TEXT,
   UNIQUE(match_id, market_label)

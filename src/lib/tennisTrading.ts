@@ -127,11 +127,23 @@ export interface TennisFinal {
   /** Счёт по сетам из ТЕРМИНАЛЬНОГО снимка — то, что обязано переехать в карточку матча. */
   setsP1: number | null; setsP2: number | null;
 }
+/** Поля терминального снимка, из которых читается финал. Ровно то, что обязано ПЕРЕЖИТЬ прун. */
+export interface TennisSnapshotRow { p1?: unknown; p2?: unknown; sets_p1?: unknown; sets_p2?: unknown; live?: unknown; status?: unknown; raw?: unknown }
+
 export function tennisFinalResult(db: Database, matchId: string): TennisFinal | null {
   // Newest snapshot whose pm_match_id == this match.
   const rows = db.prepare(`SELECT p1,p2,sets_p1,sets_p2,live,status,raw FROM tennis_snapshots WHERE pm_match_id=? ORDER BY batch_at DESC LIMIT 1`).all(matchId) as any[];
   if (!rows.length) return null;
-  const r = rows[0];
+  return tennisFinalFromRow(rows[0]);
+}
+
+/**
+ * ЧИСТАЯ ЧАСТЬ, ОТДЕЛЁННАЯ ОТ ЧТЕНИЯ БАЗЫ [08.08]. Раньше вывод финала был сплавлен с запросом к
+ * `tennis_snapshots`, поэтому любой потребитель мог узнать исход ТОЛЬКО пока жив снимок. Прун сносит
+ * снимки по возрасту и по капу — и замер дал 144 из 144 теневых сигналов с вердиктом «снимка нет».
+ * Разделение позволяет судить по ЗАМОРОЖЕННОЙ копии строки, пережившей источник.
+ */
+export function tennisFinalFromRow(r: TennisSnapshotRow): TennisFinal | null {
   const status = String(r.status ?? "");
   // Polymarket resolution (verified from the market description, uniform across ATP/WTA/ITF/doubles):
   //   • WALKOVER (withdraws BEFORE start) / canceled / tie / delayed>7d w/o winner → 50-50 → VOID.
@@ -153,8 +165,9 @@ export function tennisFinalResult(db: Database, matchId: string): TennisFinal | 
   if (!finished) return null;
   // event_winner is the PRIMARY (authoritative) source of the advancer.
   let fromWinner: "first" | "second" | null = null;
-  try { const raw = r.raw ? JSON.parse(r.raw) : null; const w = String(raw?.event_winner ?? "").toLowerCase(); if (w.includes("first")) fromWinner = "first"; else if (w.includes("second")) fromWinner = "second"; } catch { /* fall through */ }
-  const bySets: "first" | "second" | null = (r.sets_p1 != null && r.sets_p2 != null && r.sets_p1 !== r.sets_p2) ? (r.sets_p1 > r.sets_p2 ? "first" : "second") : null;
+  try { const raw = r.raw ? JSON.parse(String(r.raw)) : null; const w = String(raw?.event_winner ?? "").toLowerCase(); if (w.includes("first")) fromWinner = "first"; else if (w.includes("second")) fromWinner = "second"; } catch { /* fall through */ }
+  const s1 = r.sets_p1 == null ? null : Number(r.sets_p1), s2 = r.sets_p2 == null ? null : Number(r.sets_p2);
+  const bySets: "first" | "second" | null = (s1 != null && s2 != null && s1 !== s2) ? (s1 > s2 ? "first" : "second") : null;
   let advancing: "first" | "second" | null = null;
   let manual = false;
   let manualReason: TennisFinal["manualReason"] = null;
@@ -177,7 +190,7 @@ export function tennisFinalResult(db: Database, matchId: string): TennisFinal | 
   }
   return {
     finished: true, canceled, retired, advancing, manual, manualReason, p1: String(r.p1 ?? ""), p2: String(r.p2 ?? ""),
-    setsP1: r.sets_p1 == null ? null : Number(r.sets_p1), setsP2: r.sets_p2 == null ? null : Number(r.sets_p2),
+    setsP1: s1, setsP2: s2,
   };
 }
 

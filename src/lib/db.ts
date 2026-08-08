@@ -336,6 +336,13 @@ export function initSchema(db: Database): void {
     // [T6] Таблица цен решения создаётся из schema.sql; ALTER здесь не нужен — она новая целиком.
     "ALTER TABLE shc_observations ADD COLUMN side_from_token INTEGER",
     "ALTER TABLE shc_observations ADD COLUMN side_src TEXT",
+    // [08.08] ИСТОЧНИК ЖИВЁТ КОРОЧЕ АРХИВА. Замер: 144 из 144 неразрешённых теневых сигналов зонд не смог
+    // прочитать — `skip_no_snapshot`, снимков этих матчей больше НЕТ. Прун сносит `tennis_snapshots` по
+    // возрасту и по жёсткому капу, вслепую к тому, нужна ли строка ещё кому-то. Сигнал ссылался на чужую
+    // таблицу и пережил её. Теперь улика ЗАМОРАЖИВАЕТСЯ в самой строке сигнала: архив обязан владеть тем,
+    // на чём стоит, а не указывать на живущее по другим правилам.
+    "ALTER TABLE pmv_shadow_signals ADD COLUMN final_raw TEXT",
+    "ALTER TABLE pmv_shadow_signals ADD COLUMN final_frozen_at TEXT",
   ]) {
     try { db.exec(alter); } catch { /* column already exists */ }
   }
