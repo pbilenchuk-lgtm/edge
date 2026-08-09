@@ -53,7 +53,7 @@ test("ПРОВОДКА: срез оставляет строку, дозрева
   assert.equal(v.length, 1);
   assert.equal(recordPlaceholderCuts(db, "m1", v, markets, moneylineOf(markets), T0), 1);
   const row = db.prepare(`SELECT * FROM placeholder_cuts`).get() as any;
-  assert.equal(row.path, "no_book_ml");
+  assert.equal(row.path, "no_book");
   assert.equal(row.cut_cents, 50);
   assert.equal(row.ml_cents, 80, "манилайн заморожен вместе со срезом");
   assert.equal(row.false_cut, null, "до дозревания вердикта нет");
@@ -82,16 +82,16 @@ test("ПУТИ РАЗЛИЧИМЫ, включая UNQUOTED_SPREAD: подозр�
     mkt({ label: "ml-says-no", price: 50, ask_cents: 51, spread_cents: 2 }), // книга котирована, но манилайн 80
   ];
   const v = structuralPlaceholders(markets);
-  assert.deepEqual(v.map((x) => x.path).sort(), ["moneyline_contradicts", "no_book_ml", "wide_spread"]);
+  assert.deepEqual(v.map((x) => x.path).sort(), ["moneyline_contradicts", "no_book", "wide_spread"]);
   recordPlaceholderCuts(db, "m1", v, markets, moneylineOf(markets), T0);
   const rep = buildFalseCutReport(db, T0);
   assert.deepEqual(rep.paths.map((p) => [p.path, p.cuts]),
-    [["wide_spread", 1], ["no_book_ml", 1], ["no_ask_ml", 0], ["moneyline_contradicts", 1], ["no_ask", 0], ["no_book", 0]],
+    [["no_book", 1], ["no_ask", 0], ["wide_spread", 1], ["moneyline_contradicts", 1], ["no_book_ml", 0], ["no_ask_ml", 0]],
     "устаревший путь стоит в конце и виден даже пустым — он основание правки");
   // Порог назван поимённо — иначе «правило ошибается» не превращается в работу.
   assert.match(rep.paths.find((p) => p.path === "wide_spread")!.threshold, /UNQUOTED_SPREAD_CENTS = 20¢/);
   assert.match(rep.paths.find((p) => p.path === "moneyline_contradicts")!.threshold, /ML_SKEW_MIN_CENTS = 15¢/);
-  assert.match(rep.paths.find((p) => p.path === "no_book_ml")!.threshold, /одного молчания мало/);
+  assert.match(rep.paths.find((p) => p.path === "no_book")!.threshold, /ИЗМЕРЕННАЯ цена 17\.2% ложных принята сознательно/);
 });
 
 test("СТОРОЖ СОБСТВЕННОЙ СЛЕПОТЫ: непроверенный путь даёт null, а не 0% — иначе он чище проверенного", () => {
@@ -99,7 +99,7 @@ test("СТОРОЖ СОБСТВЕННОЙ СЛЕПОТЫ: непроверенн
   const markets = [mlSkewed(), mkt({ label: "X", price: 50, ask_cents: null, spread_cents: null })];
   recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
   const rep = buildFalseCutReport(db, T0);
-  const p = rep.paths.find((x) => x.path === "no_book_ml")!;
+  const p = rep.paths.find((x) => x.path === "no_book")!;
   assert.equal(p.cuts, 1);
   assert.equal(p.checked, 0);
   assert.equal(p.falseCutPct, null, "доля без знаменателя не печатается");
@@ -118,7 +118,7 @@ test("«чисто» ДОСТИЖИМО: набрали выборку, ни о�
   const rep = buildFalseCutReport(db, T0);
   assert.equal(rep.totals.checked, VERDICT_MIN_CHECKED);
   assert.equal(rep.verdict, "clean");
-  assert.equal(rep.paths.find((x) => x.path === "no_book_ml")!.falseCutPct, 0);
+  assert.equal(rep.paths.find((x) => x.path === "no_book")!.falseCutPct, 0);
 });
 
 test("рынок исчез с доски — это НЕ «срез верен»: строка ждёт дальше", () => {
@@ -146,7 +146,7 @@ test("строка еженедельника печатает непровер�
   const db = db0();
   const markets = [mlSkewed(), mkt({ label: "X", price: 50, ask_cents: null, spread_cents: null })];
   recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
-  assert.match(falseCutLine(buildFalseCutReport(db, T0)), /no_book_ml 0\/— из 1/);
+  assert.match(falseCutLine(buildFalseCutReport(db, T0)), /no_book 0\/— из 1/);
 });
 
 // [ПОПРАВКА 08.08] Первый прод-замер дал checked=1, falseCuts=0 — и отчёт объявил «чисто». Вердикт на
@@ -183,66 +183,65 @@ test("ОБВИНЕНИЕ порога не имеет: один ложный с�
 // снимке говорит о полноте наших данных, а не о книге биржи.
 // ============================================================
 
-test("ИМЕННОЙ СЛУЧАЙ ЗАМЕРА: тотал без аска, но со спредом и без перекоса — НЕ режется", () => {
+// [ОТКАТ 08.08] Здесь стояло «НЕ режется»: правка требовала корроборации. Ретро её опровергло — признак
+// не разделяет брак (18.2% среди срезанных против 17.2% раньше), а цена 21 верный срез из 48. Поведение
+// вернулось к исходному; 17.2% ложных приняты как ИЗМЕРЕННАЯ цена, а не как недосмотр.
+test("тотал без аска при ровном манилайне — режется: молчание книги снова самостоятельная улика", () => {
   const markets = [
-    mkt({ label: "Chelsea vs Arsenal", price: 52, ask_cents: 53 }),          // манилайн ровный: перекос 2¢ < 15¢
-    mkt({ label: "Under 3.5", price: 50, ask_cents: null, spread_cents: 3 }), // ровно тот случай, что срезался ложно
-    mkt({ label: "Over 3.5", price: 50, ask_cents: null, spread_cents: 3 }),
-  ];
-  assert.deepEqual(structuralPlaceholders(markets), [], "одного молчания аска мало — это факт нашей выгрузки, не рынка");
-});
-
-test("аск молчит, но манилайн перекошен — ВТОРАЯ улика есть, срез законен", () => {
-  const markets = [
-    mkt({ label: "Bayern vs Bochum", price: 88, ask_cents: 89 }),             // перекос 38¢ ≥ 15¢
+    mkt({ label: "Chelsea vs Arsenal", price: 52, ask_cents: 53 }),
     mkt({ label: "Under 3.5", price: 50, ask_cents: null, spread_cents: 3 }),
   ];
   const v = structuralPlaceholders(markets);
-  assert.deepEqual(v.map((x) => x.path), ["no_ask_ml"]);
-  assert.match(v[0]!.note, /корроборация есть/);
+  assert.deepEqual(v.map((x) => x.path), ["no_ask"]);
 });
 
-// [ВТОРАЯ ПРАВКА] Раньше здесь стояло «единственное, что режет в одиночку». Ретро показало, что именно эта
-// поблажка проглатывала ВСЕ случаи: 58 из 58 срезов, 0 избежавших ложных. Молчание книги — про полноту
-// нашей выгрузки, а не про биржу, и корроборация нужна ему так же, как отсутствию аска.
-test("книга молчит по всем полям, но манилайн ровный — НЕ режем: молчанию тоже нужна корроборация", () => {
+test("перекошенный манилайн НЕ меняет путь: молчание аска само по себе и есть причина", () => {
+  const markets = [
+    mkt({ label: "Bayern vs Bochum", price: 88, ask_cents: 89 }),
+    mkt({ label: "Under 3.5", price: 50, ask_cents: null, spread_cents: 3 }),
+  ];
+  assert.deepEqual(structuralPlaceholders(markets).map((x) => x.path), ["no_ask"]);
+});
+
+// [ОТКАТ 08.08] Здесь стояло «НЕ режем без корроборации». Ретро опровергло гипотезу дважды, и правило
+// вернулось к исходному: молчание книги режет само. 17.2% ложных — ИЗМЕРЕННАЯ цена, принятая сознательно.
+test("книга молчит по всем полям — режется независимо от манилайна", () => {
   const markets = [mkt({ label: "Chelsea vs Arsenal", price: 52, ask_cents: 53 }),
     mkt({ label: "Under 3.5", price: 50, ask_cents: null, spread_cents: null })];
+  const v = structuralPlaceholders(markets);
+  assert.deepEqual(v.map((x) => x.path), ["no_book"]);
+  const db = db0();
+  recordPlaceholderCuts(db, "m1", v, markets, moneylineOf(markets), T0);
+  assert.equal(buildFalseCutReport(db, T0).paths.find((p) => p.path === "no_book")!.cuts, 1);
+});
+
+test("книга в порядке и манилайн ровный — не режем: улики нет ни одной", () => {
+  const markets = [mkt({ label: "Chelsea vs Arsenal", price: 52, ask_cents: 53 }),
+    mkt({ label: "Under 3.5", price: 50, ask_cents: 51, spread_cents: 2 })];
   assert.deepEqual(structuralPlaceholders(markets), []);
 });
 
-test("книга молчит ПЛЮС перекошенный манилайн — улика есть", () => {
-  const markets = [mkt({ label: "Bayern vs Bochum", price: 88, ask_cents: 89 }),
-    mkt({ label: "Under 3.5", price: 50, ask_cents: null, spread_cents: null })];
-  const v = structuralPlaceholders(markets);
-  assert.deepEqual(v.map((x) => x.path), ["no_book_ml"]);
-  const db = db0();
-  recordPlaceholderCuts(db, "m1", v, markets, moneylineOf(markets), T0);
-  assert.equal(buildFalseCutReport(db, T0).paths.find((p) => p.path === "no_book_ml")!.cuts, 1);
-});
-
-test("ШИРОКИЙ СПРЕД — единственная самостоятельная улика: книга ОТВЕТИЛА, ответ плохой", () => {
+test("широкий спред режет независимо от манилайна", () => {
   const markets = [mkt({ label: "Chelsea vs Arsenal", price: 52, ask_cents: 53 }),
     mkt({ label: "Under 3.5", price: 50, ask_cents: 60, spread_cents: 25 })];
   const v = structuralPlaceholders(markets);
-  assert.deepEqual(v.map((x) => x.path), ["wide_spread"], "ровный манилайн не мешает: это утверждение о рынке");
-  assert.match(v[0]!.note, /книга ОТВЕТИЛА/);
+  assert.deepEqual(v.map((x) => x.path), ["wide_spread"], "ровный манилайн не мешает");
 });
 
 test("ИСТОРИЯ НЕ СТИРАЕТСЯ: устаревший путь остаётся виден как основание правки", () => {
   const db = db0();
   // Строка, записанная СТАРЫМ правилом: путь `no_ask`, ложный срез.
   db.prepare(`INSERT INTO placeholder_cuts(id,match_id,market_label,reason,path,cut_cents,cut_at,later_cents,later_at,false_cut)
-              VALUES(?,?,?,?,?,?,?,?,?,1)`).run(R.uid(), "m1", "Under 3.5", "unquoted_book", "no_ask", 50, T0, 72, later(60));
+              VALUES(?,?,?,?,?,?,?,?,?,1)`).run(R.uid(), "m1", "Under 3.5", "unquoted_book", "no_book_ml", 50, T0, 72, later(60));
   const rep = buildFalseCutReport(db, T0);
-  const legacy = rep.paths.find((p) => p.path === "no_ask")!;
-  assert.equal(legacy.cuts, 1, "строка старого правила НЕ выброшена из отчёта");
+  const legacy = rep.paths.find((p) => p.path === "no_book_ml")!;
+  assert.equal(legacy.cuts, 1, "строка снятого правила НЕ выброшена из отчёта");
   assert.match(legacy.threshold, /УСТАРЕЛ 08\.08/);
   // …но вердикт о ДЕЙСТВУЮЩЕМ правиле она не выносит: иначе снятое правило вечно обвиняло бы живое.
   assert.equal(rep.totals.cuts, 0);
   assert.equal(rep.verdict, "unmeasured");
   assert.equal(rep.totals.legacyFalseCuts, 1);
-  assert.match(falseCutLine(rep), /устар\. no_ask: 1 ложных из 1 — улика, по которой правило правили/);
+  assert.match(falseCutLine(rep), /устар\..*1 ложных из 1/);
 });
 
 // ============================================================
@@ -257,9 +256,9 @@ const cutRow = (db: ReturnType<typeof db0>, o: { ask: number | null; spread: num
 
 test("РЕТРО СЧИТАЕТ ОБЕ СТОРОНЫ: спасённые ложные И потерянные верные", () => {
   const db = db0();
-  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: true });   // ложный, новое правило пропустит → спасли
-  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: false });  // ВЕРНЫЙ, но тоже пропустит → цена
-  cutRow(db, { ask: null, spread: null, ml: 88, wasFalse: false }); // no_book_ml → срежет и дальше
+  cutRow(db, { ask: 51, spread: 2, ml: 50, wasFalse: true });    // книга в порядке, манилайн ровный → пропустит: спасли
+  cutRow(db, { ask: 51, spread: 2, ml: 50, wasFalse: false });   // ВЕРНЫЙ, но тоже пропустит → цена
+  cutRow(db, { ask: null, spread: null, ml: 50, wasFalse: false }); // книга молчит → срежет и дальше
   cutRow(db, { ask: 51, spread: 2, ml: 88, wasFalse: false });      // манилайн перекошен → срежет
   const rt = buildFalseCutReport(db, T0).retro!;
   assert.equal(rt.rows, 4);
@@ -270,9 +269,9 @@ test("РЕТРО СЧИТАЕТ ОБЕ СТОРОНЫ: спасённые лож
 
 test("СТОРОЖ ПЕРЕПРАВКИ: если ни один верный срез не выжил — правило выключено, и это сказано прямо", () => {
   const db = db0();
-  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: true });
-  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: false });
-  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: false });
+  cutRow(db, { ask: 51, spread: 2, ml: 50, wasFalse: true });
+  cutRow(db, { ask: 51, spread: 2, ml: 50, wasFalse: false });
+  cutRow(db, { ask: 51, spread: 2, ml: 50, wasFalse: false });
   const rt = buildFalseCutReport(db, T0).retro!;
   assert.equal(rt.keptTrue, 0);
   assert.match(rt.note, /ПРАВИЛО ВЫКЛЮЧЕНО ЦЕЛИКОМ/);
@@ -292,22 +291,22 @@ test("недозревшие в ретро не идут: судить по не
 // «правка не сработала» превратилось в адрес, а не в «сузим ещё».
 test("ПРАВКА ИНЕРТНА — сказано прямо, и названа ветка, которая всё глотает", () => {
   const db = db0();
-  for (let i = 0; i < 3; i++) cutRow(db, { ask: null, spread: null, ml: 88, wasFalse: i === 0 });
+  for (let i = 0; i < 3; i++) cutRow(db, { ask: null, spread: null, ml: 50, wasFalse: i === 0 });
   const rt = buildFalseCutReport(db, T0).retro!;
   assert.equal(rt.stillCut, 3);
   assert.equal(rt.avoidedFalse, 0);
   assert.match(rt.note, /ПРАВКА ИНЕРТНА на этой улике/);
-  assert.deepEqual(rt.byNewPath, [{ path: "no_book_ml", n: 3, falseCuts: 1, falseCutPct: 33.3 }]);
+  assert.deepEqual(rt.byNewPath, [{ path: "no_book", n: 3, falseCuts: 1, falseCutPct: 33.3 }]);
 });
 
-test("ветка с корроборацией отделена от поблажки: адрес виден, а не «правило вообще»", () => {
+test("ветки названы порознь: адрес виден, а не «правило вообще»", () => {
   const db = db0();
-  cutRow(db, { ask: null, spread: null, ml: 88, wasFalse: true });   // корроборация есть → срежет
-  cutRow(db, { ask: null, spread: 3, ml: 88, wasFalse: false });     // корроборация no_ask_ml — срежет
-  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: true });      // ни того, ни другого — ПРОПУСТИТ
+  cutRow(db, { ask: null, spread: null, ml: 50, wasFalse: true });   // книга молчит вся → no_book
+  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: false });     // аска нет, спред есть → no_ask
+  cutRow(db, { ask: 51, spread: 2, ml: 50, wasFalse: true });        // улик нет — ПРОПУСТИТ
   const rt = buildFalseCutReport(db, T0).retro!;
   const m = Object.fromEntries(rt.byNewPath.map((x) => [x.path, [x.n, x.falseCuts]]));
-  assert.deepEqual(m, { no_book_ml: [1, 1], no_ask_ml: [1, 0] }, "ветки названы порознь — предложение будет адресным");
+  assert.deepEqual(m, { no_book: [1, 1], no_ask: [1, 0] }, "ветки названы порознь — предложение будет адресным");
   assert.equal(rt.avoidedFalse, 1);
   // «Инертна» — про ИСХОДЫ, а не про маршрут: здесь один срез исчез, значит правка что-то изменила.
   assert.ok(!/ПРАВКА ИНЕРТНА/.test(rt.note));
@@ -315,8 +314,8 @@ test("ветка с корроборацией отделена от побла�
 
 test("«инертна» судит ИСХОДЫ, а не маршруты: разные ветки при тех же срезах — всё равно инертна", () => {
   const db = db0();
-  cutRow(db, { ask: null, spread: null, ml: 88, wasFalse: true });   // no_book_ml
-  cutRow(db, { ask: null, spread: 3, ml: 88, wasFalse: false });     // no_ask_ml
+  cutRow(db, { ask: null, spread: null, ml: 50, wasFalse: true });   // no_book
+  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: false });     // no_ask
   const rt = buildFalseCutReport(db, T0).retro!;
   assert.equal(rt.stillCut, 2);
   assert.match(rt.note, /ПРАВКА ИНЕРТНА/, "переименовать путь не значит изменить решение");
