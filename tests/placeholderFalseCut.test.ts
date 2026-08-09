@@ -265,3 +265,39 @@ test("недозревшие в ретро не идут: судить по не
               VALUES(?,?,?,?,?,?,?,?,?,?)`).run(R.uid(), "m1", "нов", "unquoted_book", "no_book", 50, null, null, null, T0);
   assert.equal(buildFalseCutReport(db, T0).retro, null, "нет дозревших — ретро молчит, а не показывает нули");
 });
+
+// [08.08, ЗАМЕР ПРОТИВ МЕНЯ] Ретро на проде: 58 из 58 срезов остались бы срезанными, избежали 0 ложных
+// из 10. Правка оказалась ИНЕРТНОЙ на той самой улике, что её вызвала — поблажка `no_book`, которую я сам
+// пометил как необоснованную замером, проглотила все случаи. Разбивка по ветке существует затем, чтобы
+// «правка не сработала» превратилось в адрес, а не в «сузим ещё».
+test("ПРАВКА ИНЕРТНА — сказано прямо, и названа ветка, которая всё глотает", () => {
+  const db = db0();
+  for (let i = 0; i < 3; i++) cutRow(db, { ask: null, spread: null, ml: 50, wasFalse: i === 0 });
+  const rt = buildFalseCutReport(db, T0).retro!;
+  assert.equal(rt.stillCut, 3);
+  assert.equal(rt.avoidedFalse, 0);
+  assert.match(rt.note, /ПРАВКА ИНЕРТНА на этой улике/);
+  assert.deepEqual(rt.byNewPath, [{ path: "no_book", n: 3, falseCuts: 1, falseCutPct: 33.3 }]);
+});
+
+test("ветка с корроборацией отделена от поблажки: адрес виден, а не «правило вообще»", () => {
+  const db = db0();
+  cutRow(db, { ask: null, spread: null, ml: 50, wasFalse: true });   // поблажка no_book — срежет
+  cutRow(db, { ask: null, spread: 3, ml: 88, wasFalse: false });     // корроборация no_ask_ml — срежет
+  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: true });      // ни того, ни другого — ПРОПУСТИТ
+  const rt = buildFalseCutReport(db, T0).retro!;
+  const m = Object.fromEntries(rt.byNewPath.map((x) => [x.path, [x.n, x.falseCuts]]));
+  assert.deepEqual(m, { no_book: [1, 1], no_ask_ml: [1, 0] }, "ветки названы порознь — предложение будет адресным");
+  assert.equal(rt.avoidedFalse, 1);
+  // «Инертна» — про ИСХОДЫ, а не про маршрут: здесь один срез исчез, значит правка что-то изменила.
+  assert.ok(!/ПРАВКА ИНЕРТНА/.test(rt.note));
+});
+
+test("«инертна» судит ИСХОДЫ, а не маршруты: разные ветки при тех же срезах — всё равно инертна", () => {
+  const db = db0();
+  cutRow(db, { ask: null, spread: null, ml: 50, wasFalse: true });   // no_book
+  cutRow(db, { ask: null, spread: 3, ml: 88, wasFalse: false });     // no_ask_ml
+  const rt = buildFalseCutReport(db, T0).retro!;
+  assert.equal(rt.stillCut, 2);
+  assert.match(rt.note, /ПРАВКА ИНЕРТНА/, "переименовать путь не значит изменить решение");
+});

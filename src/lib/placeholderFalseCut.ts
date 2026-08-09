@@ -136,6 +136,9 @@ export interface FalseCutPathRow {
 export interface FalseCutRetro {
   rows: number; stillCut: number; nowKept: number;
   avoidedFalse: number; lostTrue: number; keptTrue: number; keptFalse: number;
+  /** КАКАЯ ветка нового правила ловит строку — иначе «правка ничего не изменила» не превращается в работу:
+   *  следующее предложение обязано быть адресным, а не «сузим ещё». Ложные считаются на каждой ветке. */
+  byNewPath: { path: string; n: number; falseCuts: number; falseCutPct: number }[];
   note: string;
 }
 
@@ -163,6 +166,17 @@ const THRESHOLD_OF: Record<string, string> = {
   moneyline_contradicts: `ML_SKEW_MIN_CENTS = ${ML_SKEW_MIN_CENTS}¢`,
 };
 
+/** Каким путём действующее правило срезало бы строку. Пусто, если не срезало бы. */
+export function newPathOf(r: { ask_cents: number | null; spread_cents: number | null; ml_cents: number | null }): string {
+  const noAsk = r.ask_cents == null;
+  const spread = r.spread_cents == null ? null : Number(r.spread_cents);
+  const mlSkewed = r.ml_cents != null && Math.abs(Number(r.ml_cents) - 50) >= ML_SKEW_MIN_CENTS;
+  if (noAsk && spread == null) return "no_book";
+  if (spread != null && spread >= UNQUOTED_SPREAD_CENTS) return "wide_spread";
+  if (noAsk && mlSkewed) return "no_ask_ml";
+  return mlSkewed ? "moneyline_contradicts" : "";
+}
+
 /** Срезало ли БЫ действующее правило эту строку — по ЗАМОРОЖЕННЫМ полям среза, а не по текущим. */
 export function wouldCutUnderCurrentRule(r: { ask_cents: number | null; spread_cents: number | null; ml_cents: number | null }): boolean {
   const noAsk = r.ask_cents == null;
@@ -187,16 +201,28 @@ export function buildFalseCutReport(db: Database, nowIso: string): FalseCutRepor
     ).all() as { ask_cents: number | null; spread_cents: number | null; ml_cents: number | null; false_cut: number }[];
     if (judged.length) {
       let stillCut = 0, nowKept = 0, avoidedFalse = 0, lostTrue = 0, keptTrue = 0, keptFalse = 0;
+      const byPath = new Map<string, { path: string; n: number; falseCuts: number; falseCutPct: number }>();
       for (const r of judged) {
         const cut = wouldCutUnderCurrentRule(r), wasFalse = r.false_cut === 1;
-        if (cut) { stillCut++; wasFalse ? keptFalse++ : keptTrue++; }
+        if (cut) {
+          stillCut++; wasFalse ? keptFalse++ : keptTrue++;
+          const np = newPathOf(r);
+          const g = byPath.get(np) ?? { path: np, n: 0, falseCuts: 0, falseCutPct: 0 };
+          g.n++; if (wasFalse) g.falseCuts++;
+          byPath.set(np, g);
+        }
         else { nowKept++; wasFalse ? avoidedFalse++ : lostTrue++; }
       }
+      for (const g of byPath.values()) g.falseCutPct = pct(g.falseCuts, g.n);
       const wasFalseTotal = avoidedFalse + keptFalse;
       retro = { rows: judged.length, stillCut, nowKept, avoidedFalse, lostTrue, keptTrue, keptFalse,
+        byNewPath: [...byPath.values()].sort((a, b) => b.n - a.n),
         note: `на ${judged.length} дозревших срезах новое правило срезало бы ${stillCut}, пропустило ${nowKept}`
           + ` · ИЗБЕЖАЛО ложных ${avoidedFalse} из ${wasFalseTotal}`
           + ` · ЦЕНА: потеряно верных срезов ${lostTrue} (сохранено ${keptTrue})`
+          + (stillCut === judged.length
+            ? ` — ПРАВКА ИНЕРТНА на этой улике: ни один срез не изменился, все ${keptFalse} ложных остаются. Чинили не тот случай.`
+            : ``)
           + (keptTrue === 0 && lostTrue > 0
             ? ` — ПРАВИЛО ВЫКЛЮЧЕНО ЦЕЛИКОМ, а не сужено: ни один верный срез не выжил. Фантом променян на потерю.`
             : lostTrue > keptTrue ? ` — сужение вышло АГРЕССИВНЫМ: верных срезов потеряно больше, чем сохранено.` : ``) };
