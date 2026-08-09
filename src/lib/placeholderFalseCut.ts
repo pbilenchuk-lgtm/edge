@@ -53,8 +53,8 @@ export const VERDICT_MIN_CHECKED = 20;
  * стереть основание собственного решения: через месяц «правило поменяли» стало бы неотличимо от «правило
  * всегда было таким». История append-only и здесь — путь помечен УСТАРЕВШИМ, а не удалён.
  */
-export const PATHS: PlaceholderPath[] = ["no_book", "no_ask_ml", "wide_spread", "moneyline_contradicts"];
-export const LEGACY_PATHS = ["no_ask"] as const;
+export const PATHS: PlaceholderPath[] = ["wide_spread", "no_book_ml", "no_ask_ml", "moneyline_contradicts"];
+export const LEGACY_PATHS = ["no_ask", "no_book"] as const;
 const ALL_PATHS = [...PATHS, ...LEGACY_PATHS] as readonly string[];
 
 /** Запись среза в момент среза. Цена ЗАМОРАЖИВАЕТСЯ: сторож, пересчитывающий вход из текущего состояния,
@@ -136,6 +136,9 @@ export interface FalseCutPathRow {
 export interface FalseCutRetro {
   rows: number; stillCut: number; nowKept: number;
   avoidedFalse: number; lostTrue: number; keptTrue: number; keptFalse: number;
+  /** КАКАЯ ветка нового правила ловит строку — иначе «правка ничего не изменила» не превращается в работу:
+   *  следующее предложение обязано быть адресным, а не «сузим ещё». Ложные считаются на каждой ветке. */
+  byNewPath: { path: string; n: number; falseCuts: number; falseCutPct: number }[];
   note: string;
 }
 
@@ -157,20 +160,31 @@ const THRESHOLD_OF: Record<string, string> = {
   no_ask: "УСТАРЕЛ 08.08 — резал в одиночку, дал 16.7% ложных; заменён на no_book + no_ask_ml",
   // [08.08] Прежняя формулировка гласила «факт котировки, нашего числа здесь нет». Сторож её опроверг:
   // 6 ложных из 36. Отсутствие аска — утверждение о полноте НАШЕЙ выгрузки, и оно бывает неверным.
-  no_book: "книги нет НИ ПО ОДНОМУ полю — единственный случай, где одного молчания книги достаточно (сам под наблюдением)",
+  no_book: "УСТАРЕЛ 08.08 (2-я правка) — молчание книги само по себе ложно в 17.2%; заменён на no_book_ml",
+  no_book_ml: `молчащая книга ПЛЮС перекос манилайна ≥ ${ML_SKEW_MIN_CENTS}¢ — одного молчания мало (10 ложных из 58)`,
   no_ask_ml: `аска нет ПЛЮС перекос манилайна ≥ ${ML_SKEW_MIN_CENTS}¢ — одного отсутствия аска мало (16.7% ложных на замере 08.08)`,
-  wide_spread: `UNQUOTED_SPREAD_CENTS = ${UNQUOTED_SPREAD_CENTS}¢`,
+  wide_spread: `UNQUOTED_SPREAD_CENTS = ${UNQUOTED_SPREAD_CENTS}¢ — ЕДИНСТВЕННАЯ самостоятельная улика: книга ОТВЕТИЛА, ответ плохой. Наблюдений пока ноль`,
   moneyline_contradicts: `ML_SKEW_MIN_CENTS = ${ML_SKEW_MIN_CENTS}¢`,
 };
+
+/** Каким путём действующее правило срезало бы строку. Пусто, если не срезало бы. */
+export function newPathOf(r: { ask_cents: number | null; spread_cents: number | null; ml_cents: number | null }): string {
+  const noAsk = r.ask_cents == null;
+  const spread = r.spread_cents == null ? null : Number(r.spread_cents);
+  const mlSkewed = r.ml_cents != null && Math.abs(Number(r.ml_cents) - 50) >= ML_SKEW_MIN_CENTS;
+  if (spread != null && spread >= UNQUOTED_SPREAD_CENTS) return "wide_spread";
+  if (!mlSkewed) return "";                       // корроборации нет — не режем вовсе
+  if (noAsk && spread == null) return "no_book_ml";
+  return noAsk ? "no_ask_ml" : "moneyline_contradicts";
+}
 
 /** Срезало ли БЫ действующее правило эту строку — по ЗАМОРОЖЕННЫМ полям среза, а не по текущим. */
 export function wouldCutUnderCurrentRule(r: { ask_cents: number | null; spread_cents: number | null; ml_cents: number | null }): boolean {
   const noAsk = r.ask_cents == null;
   const spread = r.spread_cents == null ? null : Number(r.spread_cents);
   const mlSkewed = r.ml_cents != null && Math.abs(Number(r.ml_cents) - 50) >= ML_SKEW_MIN_CENTS;
-  if (noAsk && spread == null) return true;                       // no_book
-  if (spread != null && spread >= UNQUOTED_SPREAD_CENTS) return true; // wide_spread
-  return mlSkewed;                                                 // no_ask_ml либо moneyline_contradicts
+  if (spread != null && spread >= UNQUOTED_SPREAD_CENTS) return true; // wide_spread — единственный самостоятельный
+  return mlSkewed;   // всё остальное требует корроборации перекошенным манилайном
 }
 
 export function buildFalseCutReport(db: Database, nowIso: string): FalseCutReport {
@@ -187,16 +201,28 @@ export function buildFalseCutReport(db: Database, nowIso: string): FalseCutRepor
     ).all() as { ask_cents: number | null; spread_cents: number | null; ml_cents: number | null; false_cut: number }[];
     if (judged.length) {
       let stillCut = 0, nowKept = 0, avoidedFalse = 0, lostTrue = 0, keptTrue = 0, keptFalse = 0;
+      const byPath = new Map<string, { path: string; n: number; falseCuts: number; falseCutPct: number }>();
       for (const r of judged) {
         const cut = wouldCutUnderCurrentRule(r), wasFalse = r.false_cut === 1;
-        if (cut) { stillCut++; wasFalse ? keptFalse++ : keptTrue++; }
+        if (cut) {
+          stillCut++; wasFalse ? keptFalse++ : keptTrue++;
+          const np = newPathOf(r);
+          const g = byPath.get(np) ?? { path: np, n: 0, falseCuts: 0, falseCutPct: 0 };
+          g.n++; if (wasFalse) g.falseCuts++;
+          byPath.set(np, g);
+        }
         else { nowKept++; wasFalse ? avoidedFalse++ : lostTrue++; }
       }
+      for (const g of byPath.values()) g.falseCutPct = pct(g.falseCuts, g.n);
       const wasFalseTotal = avoidedFalse + keptFalse;
       retro = { rows: judged.length, stillCut, nowKept, avoidedFalse, lostTrue, keptTrue, keptFalse,
+        byNewPath: [...byPath.values()].sort((a, b) => b.n - a.n),
         note: `на ${judged.length} дозревших срезах новое правило срезало бы ${stillCut}, пропустило ${nowKept}`
           + ` · ИЗБЕЖАЛО ложных ${avoidedFalse} из ${wasFalseTotal}`
           + ` · ЦЕНА: потеряно верных срезов ${lostTrue} (сохранено ${keptTrue})`
+          + (stillCut === judged.length
+            ? ` — ПРАВКА ИНЕРТНА на этой улике: ни один срез не изменился, все ${keptFalse} ложных остаются. Чинили не тот случай.`
+            : ``)
           + (keptTrue === 0 && lostTrue > 0
             ? ` — ПРАВИЛО ВЫКЛЮЧЕНО ЦЕЛИКОМ, а не сужено: ни один верный срез не выжил. Фантом променян на потерю.`
             : lostTrue > keptTrue ? ` — сужение вышло АГРЕССИВНЫМ: верных срезов потеряно больше, чем сохранено.` : ``) };
