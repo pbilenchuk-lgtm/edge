@@ -111,8 +111,12 @@ export function checkPlaceholderFalseCuts(db: Database, deps: EngineDeps = {}, m
   return { checked, falseCuts };
 }
 
+/** Путь в ОТЧЁТЕ шире, чем путь в правиле: отчёт обязан показывать и снятые пути, иначе улика,
+ *  по которой правило меняли, исчезает вместе с правилом. */
+export type ReportedPath = PlaceholderPath | (typeof LEGACY_PATHS)[number];
+
 export interface FalseCutPathRow {
-  path: PlaceholderPath; threshold: string;
+  path: ReportedPath; threshold: string;
   cuts: number; checked: number; falseCuts: number;
   falseCutPct: number | null;   // null = НЕ ПРОВЕРЕНО, а не «ноль ложных»
   sampleLabels: string[];
@@ -153,7 +157,7 @@ export function buildFalseCutReport(db: Database, nowIso: string): FalseCutRepor
     // выглядел бы чище проверенного, и сторож награждал бы собственную слепоту (тот же дефект, что O15).
     const falseCutPct = checkedRows.length ? pct(bad.length, checkedRows.length) : null;
     return {
-      path: p as PlaceholderPath, threshold: THRESHOLD_OF[p] ?? "путь УСТАРЕЛ — правилом больше не производится",
+      path: p as ReportedPath, threshold: THRESHOLD_OF[p] ?? "путь УСТАРЕЛ — правилом больше не производится",
       cuts: mine.length, checked: checkedRows.length, falseCuts: bad.length, falseCutPct,
       sampleLabels: bad.slice(0, 4).map((r) => r.market_label),
       note: !mine.length ? "срезов по этому пути не было"
