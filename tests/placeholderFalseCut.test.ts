@@ -224,3 +224,44 @@ test("ИСТОРИЯ НЕ СТИРАЕТСЯ: устаревший путь ос
   assert.equal(rep.totals.legacyFalseCuts, 1);
   assert.match(falseCutLine(rep), /устар\. no_ask: 1 ложных из 1 — улика, по которой правило правили/);
 });
+
+// ============================================================
+// РЕТРО-ПРОВЕРКА ПРАВКИ НА ТОЙ УЛИКЕ, ЧТО ЕЁ ВЫЗВАЛА. У сужения правила ДВЕ стороны, и обе измеримы из
+// уже записанных полей среза. Отчёт, показывающий только спасённые ложные срезы и молчащий про
+// потерянные верные, — реклама правки, а не её замер.
+// ============================================================
+const cutRow = (db: ReturnType<typeof db0>, o: { ask: number | null; spread: number | null; ml: number | null; wasFalse: boolean }) =>
+  db.prepare(`INSERT INTO placeholder_cuts(id,match_id,market_label,reason,path,cut_cents,ask_cents,spread_cents,ml_cents,cut_at,later_cents,later_at,false_cut)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(R.uid(), "m1", `L${R.uid()}`, "unquoted_book", "no_ask", 50, o.ask, o.spread, o.ml, T0, o.wasFalse ? 72 : 51, later(60), o.wasFalse ? 1 : 0);
+
+test("РЕТРО СЧИТАЕТ ОБЕ СТОРОНЫ: спасённые ложные И потерянные верные", () => {
+  const db = db0();
+  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: true });   // ложный, новое правило пропустит → спасли
+  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: false });  // ВЕРНЫЙ, но тоже пропустит → цена
+  cutRow(db, { ask: null, spread: null, ml: 50, wasFalse: false }); // no_book → срежет и дальше
+  cutRow(db, { ask: 51, spread: 2, ml: 88, wasFalse: false });      // манилайн перекошен → срежет
+  const rt = buildFalseCutReport(db, T0).retro!;
+  assert.equal(rt.rows, 4);
+  assert.deepEqual({ a: rt.avoidedFalse, l: rt.lostTrue, k: rt.keptTrue, f: rt.keptFalse }, { a: 1, l: 1, k: 2, f: 0 });
+  assert.match(rt.note, /ИЗБЕЖАЛО ложных 1 из 1/);
+  assert.match(rt.note, /ЦЕНА: потеряно верных срезов 1/);
+});
+
+test("СТОРОЖ ПЕРЕПРАВКИ: если ни один верный срез не выжил — правило выключено, и это сказано прямо", () => {
+  const db = db0();
+  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: true });
+  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: false });
+  cutRow(db, { ask: null, spread: 3, ml: 50, wasFalse: false });
+  const rt = buildFalseCutReport(db, T0).retro!;
+  assert.equal(rt.keptTrue, 0);
+  assert.match(rt.note, /ПРАВИЛО ВЫКЛЮЧЕНО ЦЕЛИКОМ/);
+  assert.match(rt.note, /Фантом променян на потерю/);
+});
+
+test("недозревшие в ретро не идут: судить по неизвестному нельзя", () => {
+  const db = db0();
+  db.prepare(`INSERT INTO placeholder_cuts(id,match_id,market_label,reason,path,cut_cents,ask_cents,spread_cents,ml_cents,cut_at)
+              VALUES(?,?,?,?,?,?,?,?,?,?)`).run(R.uid(), "m1", "нов", "unquoted_book", "no_book", 50, null, null, null, T0);
+  assert.equal(buildFalseCutReport(db, T0).retro, null, "нет дозревших — ретро молчит, а не показывает нули");
+});
