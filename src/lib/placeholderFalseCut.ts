@@ -122,11 +122,30 @@ export interface FalseCutPathRow {
   sampleLabels: string[];
   note: string;
 }
+/**
+ * РЕТРО-ПРОВЕРКА ПРАВКИ НА ТОЙ САМОЙ УЛИКЕ, ЧТО ЕЁ ВЫЗВАЛА.
+ *
+ * Правку «`no_ask` один не режет» нельзя принимать на слово: у неё ДВЕ стороны, и обе измеримы прямо
+ * сейчас, потому что `placeholder_cuts` хранит аск, спред и манилайн КАЖДОГО среза.
+ *   • `avoidedFalse` — ложные срезы, которых новое правило НЕ сделало бы. Ради этого правку и делали;
+ *   • `lostTrue` — ВЕРНЫЕ срезы, которых новое правило тоже не сделает. Это ЦЕНА, и она обязана стоять
+ *     рядом с выгодой. Правка, показывающая только спасённое, — реклама, а не замер.
+ * Если `lostTrue` сопоставим с `keptTrue`, значит правило выключено целиком, а не сужено: фантом променян
+ * на потерю, ровно та подмена, от которой предостерегает обоснование порогов.
+ */
+export interface FalseCutRetro {
+  rows: number; stillCut: number; nowKept: number;
+  avoidedFalse: number; lostTrue: number; keptTrue: number; keptFalse: number;
+  note: string;
+}
+
 export interface FalseCutReport {
   at: string; maturityMin: number; minMoveCents: number;
   paths: FalseCutPathRow[];
   totals: { cuts: number; checked: number; falseCuts: number; unchecked: number; legacyCuts: number; legacyFalseCuts: number };
   verdict: "clean" | "suspect" | "unmeasured";
+  /** Что новое правило сделало БЫ с уже записанными срезами. Null, если считать не на чем. */
+  retro: FalseCutRetro | null;
   note: string;
 }
 
@@ -144,11 +163,45 @@ const THRESHOLD_OF: Record<string, string> = {
   moneyline_contradicts: `ML_SKEW_MIN_CENTS = ${ML_SKEW_MIN_CENTS}¢`,
 };
 
+/** Срезало ли БЫ действующее правило эту строку — по ЗАМОРОЖЕННЫМ полям среза, а не по текущим. */
+export function wouldCutUnderCurrentRule(r: { ask_cents: number | null; spread_cents: number | null; ml_cents: number | null }): boolean {
+  const noAsk = r.ask_cents == null;
+  const spread = r.spread_cents == null ? null : Number(r.spread_cents);
+  const mlSkewed = r.ml_cents != null && Math.abs(Number(r.ml_cents) - 50) >= ML_SKEW_MIN_CENTS;
+  if (noAsk && spread == null) return true;                       // no_book
+  if (spread != null && spread >= UNQUOTED_SPREAD_CENTS) return true; // wide_spread
+  return mlSkewed;                                                 // no_ask_ml либо moneyline_contradicts
+}
+
 export function buildFalseCutReport(db: Database, nowIso: string): FalseCutReport {
   let rows: { path: string; market_label: string; false_cut: number | null }[] = [];
   try {
     rows = db.prepare(`SELECT path, market_label, false_cut FROM placeholder_cuts`).all() as typeof rows;
   } catch { rows = []; }
+  // ── РЕТРО: правка проверяется на той улике, что её вызвала. Считаем только по ДОЗРЕВШИМ строкам —
+  // у недозревшей неизвестно, был ли срез ложным, и включать её значило бы судить по неизвестному.
+  let retro: FalseCutRetro | null = null;
+  try {
+    const judged = db.prepare(
+      `SELECT ask_cents, spread_cents, ml_cents, false_cut FROM placeholder_cuts WHERE false_cut IS NOT NULL`,
+    ).all() as { ask_cents: number | null; spread_cents: number | null; ml_cents: number | null; false_cut: number }[];
+    if (judged.length) {
+      let stillCut = 0, nowKept = 0, avoidedFalse = 0, lostTrue = 0, keptTrue = 0, keptFalse = 0;
+      for (const r of judged) {
+        const cut = wouldCutUnderCurrentRule(r), wasFalse = r.false_cut === 1;
+        if (cut) { stillCut++; wasFalse ? keptFalse++ : keptTrue++; }
+        else { nowKept++; wasFalse ? avoidedFalse++ : lostTrue++; }
+      }
+      const wasFalseTotal = avoidedFalse + keptFalse;
+      retro = { rows: judged.length, stillCut, nowKept, avoidedFalse, lostTrue, keptTrue, keptFalse,
+        note: `на ${judged.length} дозревших срезах новое правило срезало бы ${stillCut}, пропустило ${nowKept}`
+          + ` · ИЗБЕЖАЛО ложных ${avoidedFalse} из ${wasFalseTotal}`
+          + ` · ЦЕНА: потеряно верных срезов ${lostTrue} (сохранено ${keptTrue})`
+          + (keptTrue === 0 && lostTrue > 0
+            ? ` — ПРАВИЛО ВЫКЛЮЧЕНО ЦЕЛИКОМ, а не сужено: ни один верный срез не выжил. Фантом променян на потерю.`
+            : lostTrue > keptTrue ? ` — сужение вышло АГРЕССИВНЫМ: верных срезов потеряно больше, чем сохранено.` : ``) };
+    }
+  } catch { retro = null; }
   const paths: FalseCutPathRow[] = ALL_PATHS.map((p) => {
     const mine = rows.filter((r) => r.path === p);
     const checkedRows = mine.filter((r) => r.false_cut != null);
@@ -184,7 +237,7 @@ export function buildFalseCutReport(db: Database, nowIso: string): FalseCutRepor
   const worst = [...paths].filter((p) => p.falseCutPct != null).sort((a, b) => (b.falseCutPct ?? 0) - (a.falseCutPct ?? 0))[0];
   return {
     at: nowIso, maturityMin: MATURITY_MIN, minMoveCents: FALSE_CUT_MIN_MOVE_CENTS,
-    paths, totals, verdict,
+    paths, totals, verdict, retro,
     note: verdict === "unmeasured"
       ? `НЕ ИЗМЕРЕНО: срезов ${totals.cuts}, дозрело ${totals.checked} из нужных ${VERDICT_MIN_CHECKED}`
         + ` — сторож пока ничего не утверждает о правиле #121 (ложных среди дозревших пока нет, но это НЕ вердикт)`
@@ -202,6 +255,8 @@ export function falseCutLine(r: FalseCutReport): string {
     + ` · не дозрело ${r.totals.unchecked} · ${r.verdict}`
     // Устаревший путь печатается ОТДЕЛЬНО и всегда, когда его строки есть: он основание правки 08.08,
     // и молчание о нём сделало бы «правило поменяли» неотличимым от «правило всегда было таким».
-    + (r.totals.legacyCuts ? ` · [устар. no_ask: ${r.totals.legacyFalseCuts} ложных из ${r.totals.legacyCuts} — улика, по которой правило правили]` : "");
+    + (r.totals.legacyCuts ? ` · [устар. no_ask: ${r.totals.legacyFalseCuts} ложных из ${r.totals.legacyCuts} — улика, по которой правило правили]` : "")
+    // Ретро печатается ВСЕГДА, когда есть на чём считать: выгода правки без её цены — реклама, не замер.
+    + (r.retro ? ` · ретро: избежали ${r.retro.avoidedFalse} ложных ценой ${r.retro.lostTrue} верных` : "");
 }
 const LEGACY = new Set<string>(LEGACY_PATHS);
