@@ -320,3 +320,30 @@ test("«инертна» судит ИСХОДЫ, а не маршруты: ра
   assert.equal(rt.stillCut, 2);
   assert.match(rt.note, /ПРАВКА ИНЕРТНА/, "переименовать путь не значит изменить решение");
 });
+
+// [08.08, ЗАМЕР ПОЙМАЛ ЖИВЬЁМ] Вердикт о ДЕЙСТВУЮЩЕМ правиле показывал пальцем на `no_book_ml` (66.7%) —
+// путь, снятый часом ранее. Обвинять живое правило поведением снятого — тот же класс, что судить ветку,
+// которая не исполнялась: адрес есть, но ведёт в никуда, и чинить по нему нечего.
+test("виновный путь ищется только среди ДЕЙСТВУЮЩИХ: снятый не обвиняет живое правило", () => {
+  const db = db0();
+  // Снятый путь с ужасной долей…
+  for (let i = 0; i < 3; i++)
+    db.prepare(`INSERT INTO placeholder_cuts(id,match_id,market_label,reason,path,cut_cents,cut_at,later_cents,later_at,false_cut)
+                VALUES(?,?,?,?,?,?,?,?,?,1)`).run(R.uid(), "m1", `dead${i}`, "unquoted_book", "no_book_ml", 50, T0, 72, later(60));
+  // …и действующий с одной ошибкой.
+  cutRow(db, { ask: null, spread: null, ml: 50, wasFalse: true });
+  const rep = buildFalseCutReport(db, T0);
+  assert.equal(rep.verdict, "suspect");
+  assert.match(rep.note, /хуже всех «no_ask»/, "назван действующий путь, а не снятый");
+  assert.ok(!/no_book_ml/.test(rep.note));
+  assert.equal(rep.totals.legacyFalseCuts, 3, "снятое при этом НЕ спрятано — оно в своей строке");
+});
+
+test("ложные есть только на снятых путях — виновного среди действующих нет, и это сказано", () => {
+  const db = db0();
+  cutRow(db, { ask: null, spread: null, ml: 50, wasFalse: true });
+  db.prepare(`UPDATE placeholder_cuts SET path='no_ask_ml'`).run();
+  const rep = buildFalseCutReport(db, T0);
+  assert.equal(rep.verdict, "unmeasured", "живых дозревших нет — вердикта о живом правиле тоже");
+  assert.equal(rep.totals.legacyFalseCuts, 1);
+});

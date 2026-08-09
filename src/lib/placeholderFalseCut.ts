@@ -260,7 +260,13 @@ export function buildFalseCutReport(db: Database, nowIso: string): FalseCutRepor
   // называть себя неизмеренным, а не оправдывать правило.
   const verdict: FalseCutReport["verdict"] = totals.falseCuts ? "suspect"
     : totals.checked >= VERDICT_MIN_CHECKED ? "clean" : "unmeasured";
-  const worst = [...paths].filter((p) => p.falseCutPct != null).sort((a, b) => (b.falseCutPct ?? 0) - (a.falseCutPct ?? 0))[0];
+  // ХУДШИЙ ПУТЬ ИЩЕТСЯ ТОЛЬКО СРЕДИ ДЕЙСТВУЮЩИХ. Замер 08.08 поймал этот дефект вживую: вердикт о живом
+  // правиле показывал пальцем на `no_book_ml` (66.7%) — путь, СНЯТЫЙ час назад, которого правило больше не
+  // производит. Обвинять действующее правило поведением снятого — тот же класс, что судить ветку, которая
+  // не исполнялась: адрес есть, но он ведёт в никуда, и «чинить» по нему нечего.
+  const liveSet = new Set<string>(PATHS);
+  const worst = [...paths].filter((p) => liveSet.has(p.path) && p.falseCutPct != null)
+    .sort((a, b) => (b.falseCutPct ?? 0) - (a.falseCutPct ?? 0))[0];
   return {
     at: nowIso, maturityMin: MATURITY_MIN, minMoveCents: FALSE_CUT_MIN_MOVE_CENTS,
     paths, totals, verdict, retro,
@@ -269,7 +275,8 @@ export function buildFalseCutReport(db: Database, nowIso: string): FalseCutRepor
         + ` — сторож пока ничего не утверждает о правиле #121 (ложных среди дозревших пока нет, но это НЕ вердикт)`
       : verdict === "clean"
         ? `чисто: ${totals.checked} срезов дозрело, ни один рынок не ожил (порог оживления ${FALSE_CUT_MIN_MOVE_CENTS}¢ от 50¢, допуск плоскости ${FLAT_TOL_CENTS}¢)`
-        : `ЛОЖНЫЕ СРЕЗЫ ЕСТЬ: ${totals.falseCuts} из ${totals.checked} проверенных — хуже всех «${worst?.path}» (${worst?.falseCutPct}%), отвечает ${worst?.threshold}.`
+        : `ЛОЖНЫЕ СРЕЗЫ ЕСТЬ: ${totals.falseCuts} из ${totals.checked} проверенных`
+          + (worst ? ` — хуже всех «${worst.path}» (${worst.falseCutPct}%), отвечает ${worst.threshold}.` : ` (виновный путь среди действующих не определён).`)
           + ` Автооткат НЕ делается: изменение порога идёт только через явную ратификацию.`,
   };
 }
