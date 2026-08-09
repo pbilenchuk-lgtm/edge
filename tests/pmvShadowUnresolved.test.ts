@@ -13,7 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb, initSchema } from "../src/lib/db.js";
 import * as R from "../src/lib/repo.js";
-import { buildPmvShadowCalibration, probePmvShadowManual, parseCf } from "../src/lib/tennisPmvShadow.js";
+import { buildPmvShadowCalibration, probePmvShadowManual, parseCf, resolvePmvShadowSignals } from "../src/lib/tennisPmvShadow.js";
 
 const NOW = "2026-08-07T00:00:00.000Z";
 const db0 = () => { const db = openDb(":memory:"); initSchema(db); return db; };
@@ -198,4 +198,41 @@ test("СНИМКА НЕТ ≠ МАТЧ НЕ ДОИГРАН: prune-съеденн
   const c = buildPmvShadowCalibration(db);
   assert.equal(c.manualProbe.probed, 0);
   assert.match(c.note, /причины: no_snapshot 1/);
+});
+
+// [08.08] НЕНАБЛЮДАЕМЫЙ ФИКС — ЭТО УТВЕРЖДЕНИЕ, А НЕ ПРОВЕРКА. Заморозка улики чинит утечку («144 из 144
+// = снимка нет»), но сама по себе невидима: её результат проявится месяцами позже и только отрицательно.
+// Счётчик покрытия существует затем, чтобы фикс можно было ОПРОВЕРГНУТЬ числом, а не принять на слово.
+test("покрытие заморозки: улика морозится ДО ветвления, значит и у manual-строк тоже", () => {
+  const db = db0();
+  sig(db, "a1", { status: "pending", label: "Total Sets: Under 2.5" });
+  finishedSnap(db, "m-a1", [[6, 4], [3, 6]]);   // 1-1, победителя нет → manual-ветка
+  resolvePmvShadowSignals(db, { now: () => NOW });
+  const row = db.prepare(`SELECT status, final_raw, final_frozen_at FROM pmv_shadow_signals WHERE id='a1'`).get() as { status: string; final_raw: string | null; final_frozen_at: string | null };
+  assert.equal(row.status, "unresolved", "ветка та самая, что раньше не сохраняла ничего");
+  assert.ok(row.final_raw, "улика заморожена ИМЕННО на manual-ветке");
+  assert.equal(row.final_frozen_at, NOW);
+  const fe = buildPmvShadowCalibration(db).frozenEvidence;
+  assert.deepEqual({ t: fe.terminal, f: fe.frozen, u: fe.unfrozen }, { t: 1, f: 1, u: 0 });
+  assert.match(fe.note, /прун их больше не достанет/);
+});
+
+test("ЗОНД ЧИТАЕТ ЗАМОРОЖЕННОЕ, когда живой снимок уже снесён пруном", () => {
+  const db = db0();
+  sig(db, "a1", { status: "pending", label: "Total Sets: Under 2.5" });
+  finishedSnap(db, "m-a1", [[6, 4], [3, 6]]);
+  resolvePmvShadowSignals(db, { now: () => NOW });
+  db.prepare(`DELETE FROM tennis_snapshots`).run();          // ← прун
+  const r = probePmvShadowManual(db);
+  assert.equal(r.skipped.no_snapshot, 0, "замороженная копия пережила источник");
+  assert.equal(r.probed, 1, "строка ПРОЙДЕНА зондом, а не потеряна");
+});
+
+test("дофиксовые строки НЕ выдаются за покрытые: недостача названа числом", () => {
+  const db = db0();
+  sig(db, "old", { status: "unresolved", note: "исход неизвестен (manual/нет детали финала)" }); // улики нет и не будет
+  const fe = buildPmvShadowCalibration(db).frozenEvidence;
+  assert.deepEqual({ t: fe.terminal, f: fe.frozen, u: fe.unfrozen }, { t: 1, f: 0, u: 1 });
+  assert.match(fe.note, /БЕЗ УЛИКИ 1/);
+  assert.ok(!/больше не достанет/.test(fe.note));
 });

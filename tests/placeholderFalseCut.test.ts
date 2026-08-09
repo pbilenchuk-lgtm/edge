@@ -44,13 +44,13 @@ test("ПРОВОДКА: срез оставляет строку, дозрева
   const db = db0();
   const markets = [
     mkt({ label: "Warsaw: A vs B", price: 80, ask_cents: 81 }),          // манилайн, перекос 30¢
-    mkt({ label: "Total Sets: Under 2.5", price: 50, ask_cents: null }), // нет аска
+    mkt({ label: "Total Sets: Under 2.5", price: 50, ask_cents: null, spread_cents: null }), // книги нет вовсе
   ];
   const v = structuralPlaceholders(markets);
   assert.equal(v.length, 1);
   assert.equal(recordPlaceholderCuts(db, "m1", v, markets, moneylineOf(markets), T0), 1);
   const row = db.prepare(`SELECT * FROM placeholder_cuts`).get() as any;
-  assert.equal(row.path, "no_ask");
+  assert.equal(row.path, "no_book");
   assert.equal(row.cut_cents, 50);
   assert.equal(row.ml_cents, 80, "манилайн заморожен вместе со срезом");
   assert.equal(row.false_cut, null, "до дозревания вердикта нет");
@@ -64,37 +64,39 @@ test("ПРОВОДКА: срез оставляет строку, дозрева
 
 test("незрелый срез не судится: раньше выдержки поздняя цена — та же цена", () => {
   const db = db0();
-  const markets = [mkt({ label: "X", price: 50, ask_cents: null })];
+  const markets = [mkt({ label: "X", price: 50, ask_cents: null, spread_cents: null })];
   recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
   board(db, "m1", later(5), [{ label: "X", price: 72 }]);
   assert.deepEqual(checkPlaceholderFalseCuts(db, { now: () => later(MATURITY_MIN - 1) }), { checked: 0, falseCuts: 0 });
 });
 
-test("ТРИ ПУТИ РАЗЛИЧИМЫ, включая UNQUOTED_SPREAD: подозрение адресуется КОНКРЕТНОМУ порогу", () => {
+test("ПУТИ РАЗЛИЧИМЫ, включая UNQUOTED_SPREAD: подозрение адресуется КОНКРЕТНОМУ порогу", () => {
   const db = db0();
   const markets = [
     mkt({ label: "Warsaw: A vs B", price: 80, ask_cents: 81 }),
-    mkt({ label: "no-ask", price: 50, ask_cents: null }),
+    mkt({ label: "no-book", price: 50, ask_cents: null, spread_cents: null }),
     mkt({ label: "wide", price: 50, ask_cents: 60, spread_cents: 25 }),   // спред 25 ≥ 20
     mkt({ label: "ml-says-no", price: 50, ask_cents: 51, spread_cents: 2 }), // книга котирована, но манилайн 80
   ];
   const v = structuralPlaceholders(markets);
-  assert.deepEqual(v.map((x) => x.path).sort(), ["moneyline_contradicts", "no_ask", "wide_spread"]);
+  assert.deepEqual(v.map((x) => x.path).sort(), ["moneyline_contradicts", "no_book", "wide_spread"]);
   recordPlaceholderCuts(db, "m1", v, markets, moneylineOf(markets), T0);
   const rep = buildFalseCutReport(db, T0);
-  assert.deepEqual(rep.paths.map((p) => [p.path, p.cuts]), [["no_ask", 1], ["wide_spread", 1], ["moneyline_contradicts", 1]]);
+  assert.deepEqual(rep.paths.map((p) => [p.path, p.cuts]),
+    [["no_book", 1], ["no_ask_ml", 0], ["wide_spread", 1], ["moneyline_contradicts", 1], ["no_ask", 0]],
+    "устаревший путь стоит в конце и виден даже пустым — он основание правки");
   // Порог назван поимённо — иначе «правило ошибается» не превращается в работу.
   assert.match(rep.paths.find((p) => p.path === "wide_spread")!.threshold, /UNQUOTED_SPREAD_CENTS = 20¢/);
   assert.match(rep.paths.find((p) => p.path === "moneyline_contradicts")!.threshold, /ML_SKEW_MIN_CENTS = 15¢/);
-  assert.match(rep.paths.find((p) => p.path === "no_ask")!.threshold, /нашего числа здесь нет/);
+  assert.match(rep.paths.find((p) => p.path === "no_book")!.threshold, /сам под наблюдением/);
 });
 
 test("СТОРОЖ СОБСТВЕННОЙ СЛЕПОТЫ: непроверенный путь даёт null, а не 0% — иначе он чище проверенного", () => {
   const db = db0();
-  const markets = [mkt({ label: "X", price: 50, ask_cents: null })];
+  const markets = [mkt({ label: "X", price: 50, ask_cents: null, spread_cents: null })];
   recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
   const rep = buildFalseCutReport(db, T0);
-  const p = rep.paths.find((x) => x.path === "no_ask")!;
+  const p = rep.paths.find((x) => x.path === "no_book")!;
   assert.equal(p.cuts, 1);
   assert.equal(p.checked, 0);
   assert.equal(p.falseCutPct, null, "доля без знаменателя не печатается");
@@ -106,19 +108,19 @@ test("СТОРОЖ СОБСТВЕННОЙ СЛЕПОТЫ: непроверенн
 test("«чисто» ДОСТИЖИМО: набрали выборку, ни один рынок не ожил — правило оправдано числом", () => {
   const db = db0();
   const labels = Array.from({ length: VERDICT_MIN_CHECKED }, (_, i) => `X${i}`);
-  const markets = labels.map((l) => mkt({ label: l, price: 50, ask_cents: null }));
+  const markets = labels.map((l) => mkt({ label: l, price: 50, ask_cents: null, spread_cents: null }));
   recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
   board(db, "m1", later(MATURITY_MIN + 5), labels.map((l) => ({ label: l, price: 52 })));  // не ожили: 2¢ < 10¢
   checkPlaceholderFalseCuts(db, { now: () => later(MATURITY_MIN + 10) });
   const rep = buildFalseCutReport(db, T0);
   assert.equal(rep.totals.checked, VERDICT_MIN_CHECKED);
   assert.equal(rep.verdict, "clean");
-  assert.equal(rep.paths.find((x) => x.path === "no_ask")!.falseCutPct, 0);
+  assert.equal(rep.paths.find((x) => x.path === "no_book")!.falseCutPct, 0);
 });
 
 test("рынок исчез с доски — это НЕ «срез верен»: строка ждёт дальше", () => {
   const db = db0();
-  const markets = [mkt({ label: "X", price: 50, ask_cents: null })];
+  const markets = [mkt({ label: "X", price: 50, ask_cents: null, spread_cents: null })];
   recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
   board(db, "m1", later(MATURITY_MIN + 5), [{ label: "ДРУГОЙ", price: 70 }]);
   assert.deepEqual(checkPlaceholderFalseCuts(db, { now: () => later(MATURITY_MIN + 10) }), { checked: 0, falseCuts: 0 });
@@ -127,10 +129,10 @@ test("рынок исчез с доски — это НЕ «срез верен�
 
 test("повторный срез не плодит строк и не пересчитывает замороженную цену", () => {
   const db = db0();
-  const markets = [mkt({ label: "X", price: 50, ask_cents: null })];
+  const markets = [mkt({ label: "X", price: 50, ask_cents: null, spread_cents: null })];
   const v = structuralPlaceholders(markets);
   recordPlaceholderCuts(db, "m1", v, markets, null, T0);
-  const drifted = [mkt({ label: "X", price: 50.4, ask_cents: null })];
+  const drifted = [mkt({ label: "X", price: 50.4, ask_cents: null, spread_cents: null })];
   recordPlaceholderCuts(db, "m1", structuralPlaceholders(drifted), drifted, null, later(20));
   const rows = db.prepare(`SELECT cut_cents, cut_at FROM placeholder_cuts`).all() as any[];
   assert.equal(rows.length, 1);
@@ -139,9 +141,9 @@ test("повторный срез не плодит строк и не пере�
 
 test("строка еженедельника печатает непроверенное словом, а не нулём", () => {
   const db = db0();
-  const markets = [mkt({ label: "X", price: 50, ask_cents: null })];
+  const markets = [mkt({ label: "X", price: 50, ask_cents: null, spread_cents: null })];
   recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
-  assert.match(falseCutLine(buildFalseCutReport(db, T0)), /no_ask 0\/— из 1/);
+  assert.match(falseCutLine(buildFalseCutReport(db, T0)), /no_book 0\/— из 1/);
 });
 
 // [ПОПРАВКА 08.08] Первый прод-замер дал checked=1, falseCuts=0 — и отчёт объявил «чисто». Вердикт на
@@ -149,7 +151,7 @@ test("строка еженедельника печатает непровер�
 // намеренная: оправдание требует выборки, обвинение — нет.
 test("«чисто» требует ВЫБОРКИ: один дозревший срез вердиктом не является", () => {
   const db = db0();
-  const markets = [mkt({ label: "X", price: 50, ask_cents: null })];
+  const markets = [mkt({ label: "X", price: 50, ask_cents: null, spread_cents: null })];
   recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
   board(db, "m1", later(MATURITY_MIN + 5), [{ label: "X", price: 52 }]);
   checkPlaceholderFalseCuts(db, { now: () => later(MATURITY_MIN + 10) });
@@ -162,11 +164,63 @@ test("«чисто» требует ВЫБОРКИ: один дозревший 
 
 test("ОБВИНЕНИЕ порога не имеет: один ложный срез называется сразу", () => {
   const db = db0();
-  const markets = [mkt({ label: "X", price: 50, ask_cents: null })];
+  const markets = [mkt({ label: "X", price: 50, ask_cents: null, spread_cents: null })];
   recordPlaceholderCuts(db, "m1", structuralPlaceholders(markets), markets, null, T0);
   board(db, "m1", later(MATURITY_MIN + 5), [{ label: "X", price: 72 }]);   // ожил
   checkPlaceholderFalseCuts(db, { now: () => later(MATURITY_MIN + 10) });
   const rep = buildFalseCutReport(db, T0);
   assert.equal(rep.verdict, "suspect", "улика не ждёт выборки");
   assert.match(rep.note, /ЛОЖНЫЕ СРЕЗЫ ЕСТЬ/);
+});
+
+// ============================================================
+// [08.08, РАТИФИЦИРОВАНО ПО УЛИКЕ СТОРОЖА] «АСКА НЕТ» ОДИН НЕ РЕЖЕТ.
+// Замер: путь `no_ask` дал 6 ложных из 36 проверенных (16.7%) на магистральных футбольных тоталах
+// (Under 3.5 / Over 3.5), позже ушедших от 50¢ дальше 10¢ — книга была живая. Отсутствие аска в НАШЕМ
+// снимке говорит о полноте наших данных, а не о книге биржи.
+// ============================================================
+
+test("ИМЕННОЙ СЛУЧАЙ ЗАМЕРА: тотал без аска, но со спредом и без перекоса — НЕ режется", () => {
+  const markets = [
+    mkt({ label: "Chelsea vs Arsenal", price: 52, ask_cents: 53 }),          // манилайн ровный: перекос 2¢ < 15¢
+    mkt({ label: "Under 3.5", price: 50, ask_cents: null, spread_cents: 3 }), // ровно тот случай, что срезался ложно
+    mkt({ label: "Over 3.5", price: 50, ask_cents: null, spread_cents: 3 }),
+  ];
+  assert.deepEqual(structuralPlaceholders(markets), [], "одного молчания аска мало — это факт нашей выгрузки, не рынка");
+});
+
+test("аск молчит, но манилайн перекошен — ВТОРАЯ улика есть, срез законен", () => {
+  const markets = [
+    mkt({ label: "Bayern vs Bochum", price: 88, ask_cents: 89 }),             // перекос 38¢ ≥ 15¢
+    mkt({ label: "Under 3.5", price: 50, ask_cents: null, spread_cents: 3 }),
+  ];
+  const v = structuralPlaceholders(markets);
+  assert.deepEqual(v.map((x) => x.path), ["no_ask_ml"]);
+  assert.match(v[0]!.note, /одного отсутствия аска мало/);
+});
+
+test("книги нет НИ ПО ОДНОМУ полю — единственное, что режет в одиночку, и оно под наблюдением", () => {
+  const markets = [mkt({ label: "Under 3.5", price: 50, ask_cents: null, spread_cents: null })];
+  const v = structuralPlaceholders(markets);
+  assert.deepEqual(v.map((x) => x.path), ["no_book"], "молчат оба поля — это уже не пробел одного");
+  // Поблажка НЕ обоснована замером, поэтому судится ОТДЕЛЬНЫМ путём: окажется ложной — будет видно числом.
+  const db = db0();
+  recordPlaceholderCuts(db, "m1", v, markets, null, T0);
+  assert.equal(buildFalseCutReport(db, T0).paths.find((p) => p.path === "no_book")!.cuts, 1);
+});
+
+test("ИСТОРИЯ НЕ СТИРАЕТСЯ: устаревший путь остаётся виден как основание правки", () => {
+  const db = db0();
+  // Строка, записанная СТАРЫМ правилом: путь `no_ask`, ложный срез.
+  db.prepare(`INSERT INTO placeholder_cuts(id,match_id,market_label,reason,path,cut_cents,cut_at,later_cents,later_at,false_cut)
+              VALUES(?,?,?,?,?,?,?,?,?,1)`).run(R.uid(), "m1", "Under 3.5", "unquoted_book", "no_ask", 50, T0, 72, later(60));
+  const rep = buildFalseCutReport(db, T0);
+  const legacy = rep.paths.find((p) => p.path === "no_ask")!;
+  assert.equal(legacy.cuts, 1, "строка старого правила НЕ выброшена из отчёта");
+  assert.match(legacy.threshold, /УСТАРЕЛ 08\.08/);
+  // …но вердикт о ДЕЙСТВУЮЩЕМ правиле она не выносит: иначе снятое правило вечно обвиняло бы живое.
+  assert.equal(rep.totals.cuts, 0);
+  assert.equal(rep.verdict, "unmeasured");
+  assert.equal(rep.totals.legacyFalseCuts, 1);
+  assert.match(falseCutLine(rep), /устар\. no_ask: 1 ложных из 1 — улика, по которой правило правили/);
 });

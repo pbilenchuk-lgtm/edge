@@ -10,10 +10,14 @@
 // Это тот же класс, что O15: наличие детали не есть работающий конвейер. Тест на чистую функцию
 // доказывает, что она посчитает верно, ЕСЛИ её позовут, и ничего не говорит о том, зовут ли.
 //
-// ПОЧЕМУ ТРИ ПУТИ, А НЕ ДВА. `reason` два, но `ML_SKEW_MIN_CENTS`, `UNQUOTED_SPREAD_CENTS` и «аска нет
-// вовсе» — три РАЗНЫХ утверждения, и ошибиться может любое по отдельности. Отсутствие аска это факт
-// котировки (спорить не с чем), а 20¢ и 15¢ — НАШИ числа. Сторож, считающий срезы одной кучей, не сможет
-// сказать, какой порог виноват, и «подправим правило» выродится в подгон вслепую.
+// ПОЧЕМУ ПУТИ РАЗВЕДЕНЫ. `reason` два, но утверждений несколько, и ошибиться может каждое по отдельности.
+// Разведение окупилось на ПЕРВОМ ЖЕ замере: `no_ask` дал 6 ложных из 36 (16.7%) на магистральных тоталах,
+// а два других пути не срезали ничего. Будь они слиты в один счётчик, подозрение легло бы на правило
+// целиком — и «подправим правило» без адреса выродилось бы в подгон вслепую.
+//
+// ЗАОДНО ЗАМЕР ОПРОВЕРГ КОММЕНТАРИЙ, СТОЯВШИЙ ЗДЕСЬ. Он утверждал: «отсутствие аска это факт котировки,
+// спорить не с чем». Нет: это факт ПОЛНОТЫ НАШЕЙ ВЫГРУЗКИ, а не свойство биржи, и он бывает ложным.
+// С 08.08 (ратифицировано) `no_ask` в одиночку не режет — нужна вторая улика.
 //
 // АВТООТКАТА НЕТ. Ложный срез только НАЗЫВАЕТСЯ. Правило, которое молча себя чинит, неотличимо от правила,
 // которое право; кроме того, откат по одному наблюдению — ровно та тихая подстройка порогов, которую
@@ -41,7 +45,17 @@ export const MATURITY_MIN = 45;
  */
 export const VERDICT_MIN_CHECKED = 20;
 
-export const PATHS: PlaceholderPath[] = ["no_ask", "wide_spread", "moneyline_contradicts"];
+/**
+ * Пути, ПРОИЗВОДИМЫЕ правилом сегодня.
+ *
+ * `no_ask` в этот список НЕ входит — с 08.08 он больше не режет в одиночку. Но в таблице лежат 42 его
+ * среза, из которых 6 ложных, и ИМЕННО ОНИ послужили уликой для правки. Выкинуть их из отчёта значило бы
+ * стереть основание собственного решения: через месяц «правило поменяли» стало бы неотличимо от «правило
+ * всегда было таким». История append-only и здесь — путь помечен УСТАРЕВШИМ, а не удалён.
+ */
+export const PATHS: PlaceholderPath[] = ["no_book", "no_ask_ml", "wide_spread", "moneyline_contradicts"];
+export const LEGACY_PATHS = ["no_ask"] as const;
+const ALL_PATHS = [...PATHS, ...LEGACY_PATHS] as readonly string[];
 
 /** Запись среза в момент среза. Цена ЗАМОРАЖИВАЕТСЯ: сторож, пересчитывающий вход из текущего состояния,
  *  судил бы себя по собственному следствию. Первый срез на (матч, рынок) побеждает. */
@@ -97,8 +111,12 @@ export function checkPlaceholderFalseCuts(db: Database, deps: EngineDeps = {}, m
   return { checked, falseCuts };
 }
 
+/** Путь в ОТЧЁТЕ шире, чем путь в правиле: отчёт обязан показывать и снятые пути, иначе улика,
+ *  по которой правило меняли, исчезает вместе с правилом. */
+export type ReportedPath = PlaceholderPath | (typeof LEGACY_PATHS)[number];
+
 export interface FalseCutPathRow {
-  path: PlaceholderPath; threshold: string;
+  path: ReportedPath; threshold: string;
   cuts: number; checked: number; falseCuts: number;
   falseCutPct: number | null;   // null = НЕ ПРОВЕРЕНО, а не «ноль ложных»
   sampleLabels: string[];
@@ -107,7 +125,7 @@ export interface FalseCutPathRow {
 export interface FalseCutReport {
   at: string; maturityMin: number; minMoveCents: number;
   paths: FalseCutPathRow[];
-  totals: { cuts: number; checked: number; falseCuts: number; unchecked: number };
+  totals: { cuts: number; checked: number; falseCuts: number; unchecked: number; legacyCuts: number; legacyFalseCuts: number };
   verdict: "clean" | "suspect" | "unmeasured";
   note: string;
 }
@@ -115,8 +133,13 @@ export interface FalseCutReport {
 const pct = (a: number, b: number) => (b ? Math.round((a / b) * 1000) / 10 : 0);
 
 /** Порог, за который отвечает путь — чтобы подозрение адресовалось ЧИСЛУ, а не «правилу вообще». */
-const THRESHOLD_OF: Record<PlaceholderPath, string> = {
-  no_ask: "аска нет (факт котировки, нашего числа здесь нет)",
+const THRESHOLD_OF: Record<string, string> = {
+  // УСТАРЕВШИЙ путь: строки остаются видимыми как основание правки 08.08.
+  no_ask: "УСТАРЕЛ 08.08 — резал в одиночку, дал 16.7% ложных; заменён на no_book + no_ask_ml",
+  // [08.08] Прежняя формулировка гласила «факт котировки, нашего числа здесь нет». Сторож её опроверг:
+  // 6 ложных из 36. Отсутствие аска — утверждение о полноте НАШЕЙ выгрузки, и оно бывает неверным.
+  no_book: "книги нет НИ ПО ОДНОМУ полю — единственный случай, где одного молчания книги достаточно (сам под наблюдением)",
+  no_ask_ml: `аска нет ПЛЮС перекос манилайна ≥ ${ML_SKEW_MIN_CENTS}¢ — одного отсутствия аска мало (16.7% ложных на замере 08.08)`,
   wide_spread: `UNQUOTED_SPREAD_CENTS = ${UNQUOTED_SPREAD_CENTS}¢`,
   moneyline_contradicts: `ML_SKEW_MIN_CENTS = ${ML_SKEW_MIN_CENTS}¢`,
 };
@@ -126,7 +149,7 @@ export function buildFalseCutReport(db: Database, nowIso: string): FalseCutRepor
   try {
     rows = db.prepare(`SELECT path, market_label, false_cut FROM placeholder_cuts`).all() as typeof rows;
   } catch { rows = []; }
-  const paths: FalseCutPathRow[] = PATHS.map((p) => {
+  const paths: FalseCutPathRow[] = ALL_PATHS.map((p) => {
     const mine = rows.filter((r) => r.path === p);
     const checkedRows = mine.filter((r) => r.false_cut != null);
     const bad = mine.filter((r) => r.false_cut === 1);
@@ -134,7 +157,7 @@ export function buildFalseCutReport(db: Database, nowIso: string): FalseCutRepor
     // выглядел бы чище проверенного, и сторож награждал бы собственную слепоту (тот же дефект, что O15).
     const falseCutPct = checkedRows.length ? pct(bad.length, checkedRows.length) : null;
     return {
-      path: p, threshold: THRESHOLD_OF[p],
+      path: p as ReportedPath, threshold: THRESHOLD_OF[p] ?? "путь УСТАРЕЛ — правилом больше не производится",
       cuts: mine.length, checked: checkedRows.length, falseCuts: bad.length, falseCutPct,
       sampleLabels: bad.slice(0, 4).map((r) => r.market_label),
       note: !mine.length ? "срезов по этому пути не было"
@@ -142,11 +165,17 @@ export function buildFalseCutReport(db: Database, nowIso: string): FalseCutRepor
           : `срезано ${mine.length}, проверено ${checkedRows.length}, ложных ${bad.length} (${falseCutPct}%) · отвечает порог: ${THRESHOLD_OF[p]}`,
     };
   });
+  // ВЕРДИКТ СЧИТАЕТСЯ ПО ДЕЙСТВУЮЩИМ ПУТЯМ. Устаревший `no_ask` держал бы `suspect` вечно — правило,
+  // которого уже нет, обвиняло бы правило, которое есть, и сторож перестал бы отвечать на свой вопрос.
+  // Но и молчать о нём нельзя: его строки печатаются в `paths` и суммируются в `legacy`.
+  const live = rows.filter((r) => (PATHS as readonly string[]).includes(r.path));
   const totals = {
-    cuts: rows.length,
-    checked: rows.filter((r) => r.false_cut != null).length,
-    falseCuts: rows.filter((r) => r.false_cut === 1).length,
-    unchecked: rows.filter((r) => r.false_cut == null).length,
+    cuts: live.length,
+    checked: live.filter((r) => r.false_cut != null).length,
+    falseCuts: live.filter((r) => r.false_cut === 1).length,
+    unchecked: live.filter((r) => r.false_cut == null).length,
+    legacyCuts: rows.length - live.length,
+    legacyFalseCuts: rows.filter((r) => !(PATHS as readonly string[]).includes(r.path) && r.false_cut === 1).length,
   };
   // Вердикт «чисто» имеет право прозвучать ТОЛЬКО когда проверено хоть что-то. Пустой сторож обязан
   // называть себя неизмеренным, а не оправдывать правило.
@@ -169,6 +198,10 @@ export function buildFalseCutReport(db: Database, nowIso: string): FalseCutRepor
 /** Строка еженедельника: три пути, каждый своим числом; непроверенное печатается словом, а не нулём. */
 export function falseCutLine(r: FalseCutReport): string {
   return `сторож ложных срезов #121: `
-    + r.paths.map((p) => `${p.path} ${p.falseCuts}/${p.checked || "—"} из ${p.cuts}`).join(" · ")
-    + ` · не дозрело ${r.totals.unchecked} · ${r.verdict}`;
+    + r.paths.filter((p) => p.cuts > 0 || !LEGACY.has(p.path)).map((p) => `${p.path} ${p.falseCuts}/${p.checked || "—"} из ${p.cuts}`).join(" · ")
+    + ` · не дозрело ${r.totals.unchecked} · ${r.verdict}`
+    // Устаревший путь печатается ОТДЕЛЬНО и всегда, когда его строки есть: он основание правки 08.08,
+    // и молчание о нём сделало бы «правило поменяли» неотличимым от «правило всегда было таким».
+    + (r.totals.legacyCuts ? ` · [устар. no_ask: ${r.totals.legacyFalseCuts} ложных из ${r.totals.legacyCuts} — улика, по которой правило правили]` : "");
 }
+const LEGACY = new Set<string>(LEGACY_PATHS);

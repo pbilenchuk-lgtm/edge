@@ -225,6 +225,13 @@ export interface PmvShadowCalibration {
   /** Ярлыки, которые резолвер не осилил, сгруппированные по семье — адресный список работы. */
   resolverGaps: { family: string; n: number; sampleLabels: string[] }[];
   /**
+   * [08.08] ПОКРЫТИЕ ЗАМОРОЖЕННОЙ УЛИКОЙ. Замер дал 144 из 144 неразрешённых с вердиктом «снимка нет»:
+   * прун снёс `tennis_snapshots`, на которые сигнал ссылался. Фикс копирует терминальную строку В САМ
+   * сигнал — но САМ ФИКС был бы НЕНАБЛЮДАЕМ, а ненаблюдаемый фикс это утверждение, а не проверка.
+   * `frozen` обязан расти вместе с `terminal`; расхождение означает, что мороз где-то не сработал.
+   */
+  frozenEvidence: { terminal: number; frozen: number; unfrozen: number; note: string };
+  /**
    * [07.08, ПОПРАВКА ПО ЗАМЕРУ] Первый замер разбора дал 144/144 в `manual_finish` и ПУСТОЙ `resolverGaps`,
    * а заметка объявила «восстановимых 0 — остальное ожиданием не лечится». Это было НЕОБОСНОВАННО: гейт
    * `if (fin.manual)` стоит первым и уходит в `unresolved` ДО вызова `finalSetsFromRaw`/`resolveTennisProp`.
@@ -360,6 +367,27 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
         + (unprobed ? ` · не зондировано ${unprobed}` : ""),
   };
 
+  // ── ПОКРЫТИЕ ЗАМОРОЖЕННОЙ УЛИКОЙ. Считаем по ТЕРМИНАЛЬНЫМ строкам: у `pending` матч ещё не кончился,
+  // морозить нечего, и класть их в знаменатель значило бы вечно показывать недобор.
+  let frozenEvidence: PmvShadowCalibration["frozenEvidence"];
+  try {
+    const fr = db.prepare(
+      `SELECT COUNT(*) t, SUM(CASE WHEN final_raw IS NOT NULL THEN 1 ELSE 0 END) f
+         FROM pmv_shadow_signals WHERE status <> 'pending'`,
+    ).get() as { t: number; f: number | null };
+    const terminal = Number(fr?.t ?? 0), frozen = Number(fr?.f ?? 0);
+    const unfrozen = Math.max(0, terminal - frozen);
+    frozenEvidence = { terminal, frozen, unfrozen,
+      note: !terminal ? "терминальных строк нет — морозить нечего"
+        : frozen === terminal ? `улика заморожена у всех ${terminal} терминальных строк — прун их больше не достанет`
+          : `заморожено ${frozen} из ${terminal}; БЕЗ УЛИКИ ${unfrozen} — это строки ДО фикса (их снимки уже снесены) либо мороз не сработал`
+            + `, и различить одно от другого можно только по дате: у дофиксовых нет final_frozen_at и не будет` };
+  } catch {
+    // Колонки может не быть на старой базе. Молчаливый ноль здесь означал бы «ничего не заморожено»,
+    // что неотличимо от «мы не смогли посмотреть» — поэтому говорим прямо.
+    frozenEvidence = { terminal: 0, frozen: 0, unfrozen: 0, note: "колонка улики недоступна — покрытие НЕ ИЗМЕРЕНО (не «ноль»)" };
+  }
+
   const verdict: PmvShadowCalibration["verdict"] = !matured ? "insufficient" : markovBeatsImplied ? "go" : "no_go";
   const note = !matured
     ? `копим: ${scored}/${NEED_N} разрешённых кейсов (это НЕ «немой ноль» — данные теперь реально приходят). unresolved=${c.unresolved}${terminal ? ` (${Math.round(100 * c.unresolved / terminal)}% терминальных)` : ""} — следи за долей, это диагностика конвейера.`
@@ -389,7 +417,7 @@ export function buildPmvShadowCalibration(db: Database): PmvShadowCalibration {
       "Brier марковских ≤ Brier implied на n≥40; implied из ЗАМОРОЖЕННОГО mid того же снапшота (модель против рынка в один момент).",
       "CLV не считаем (нет closing-книги по shadow) — только win%-vs-theo и Brier. Часы критерия с деплоя; текстовые flag_only задним числом не парсим.",
     ],
-    counts: c, scored, unresolvedBreakdown, resolverGaps, manualProbe,
+    counts: c, scored, unresolvedBreakdown, resolverGaps, manualProbe, frozenEvidence,
     unresolvedPct: terminal ? Math.round(1000 * c.unresolved / terminal) / 10 : null,
     winPctActual: outcomes.length ? Math.round(1000 * (mean(outcomes) ?? 0)) / 10 : null,
     theoMeanPct: scored ? Math.round(1000 * (mean(scoredRows.map((r) => r.t / 100)) ?? 0)) / 10 : null,
