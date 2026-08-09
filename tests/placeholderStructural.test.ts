@@ -63,12 +63,16 @@ test("нет аска ПЛЮС перекошенный манилайн — в�
   assert.equal(r[0]!.path, "no_ask_ml");
 });
 
-test("книги нет НИ ПО ОДНОМУ полю — режем и без манилайна", () => {
-  const r = structuralPlaceholders([mk(ML, 48), mk(PROP, 50, { ask: null, spread: null })]);
+// [ВТОРАЯ ПРАВКА 08.08, РАТИФИЦИРОВАНА] Ретро опровергло и это: поблажка `no_book` глотала ВСЕ случаи
+// (58 из 58 срезов, 0 избежавших ложных). Молчание книги — про полноту нашей выгрузки, не про биржу.
+test("книги нет ни по одному полю, манилайн ровный — НЕ режем: молчанию нужна корроборация", () => {
+  assert.deepEqual(structuralPlaceholders([mk(ML, 48), mk(PROP, 50, { ask: null, spread: null })]), []);
+});
+
+test("книга молчит ПЛЮС перекос манилайна — режем", () => {
+  const r = structuralPlaceholders([mk(ML, 88), mk(PROP, 50, { ask: null, spread: null })]);
   assert.equal(r.length, 1);
-  assert.equal(r[0]!.reason, "unquoted_book");
-  assert.equal(r[0]!.path, "no_book");
-  assert.match(r[0]!.note, /НИ ПО ОДНОМУ полю/);
+  assert.equal(r[0]!.path, "no_book_ml");
 });
 
 test("широкий спред (≥20¢) при цене 50¢ — двусторонней цены фактически нет", () => {
