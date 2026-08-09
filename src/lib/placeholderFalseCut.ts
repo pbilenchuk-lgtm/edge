@@ -53,8 +53,8 @@ export const VERDICT_MIN_CHECKED = 20;
  * стереть основание собственного решения: через месяц «правило поменяли» стало бы неотличимо от «правило
  * всегда было таким». История append-only и здесь — путь помечен УСТАРЕВШИМ, а не удалён.
  */
-export const PATHS: PlaceholderPath[] = ["wide_spread", "no_book_ml", "no_ask_ml", "moneyline_contradicts"];
-export const LEGACY_PATHS = ["no_ask", "no_book"] as const;
+export const PATHS: PlaceholderPath[] = ["no_book", "no_ask", "wide_spread", "moneyline_contradicts"];
+export const LEGACY_PATHS = ["no_book_ml", "no_ask_ml"] as const;
 const ALL_PATHS = [...PATHS, ...LEGACY_PATHS] as readonly string[];
 
 /** Запись среза в момент среза. Цена ЗАМОРАЖИВАЕТСЯ: сторож, пересчитывающий вход из текущего состояния,
@@ -157,13 +157,13 @@ const pct = (a: number, b: number) => (b ? Math.round((a / b) * 1000) / 10 : 0);
 /** Порог, за который отвечает путь — чтобы подозрение адресовалось ЧИСЛУ, а не «правилу вообще». */
 const THRESHOLD_OF: Record<string, string> = {
   // УСТАРЕВШИЙ путь: строки остаются видимыми как основание правки 08.08.
-  no_ask: "УСТАРЕЛ 08.08 — резал в одиночку, дал 16.7% ложных; заменён на no_book + no_ask_ml",
+  no_ask: "аска нет, спред известен — режет самостоятельно (поведение исходное, откат 08.08)",
   // [08.08] Прежняя формулировка гласила «факт котировки, нашего числа здесь нет». Сторож её опроверг:
   // 6 ложных из 36. Отсутствие аска — утверждение о полноте НАШЕЙ выгрузки, и оно бывает неверным.
-  no_book: "УСТАРЕЛ 08.08 (2-я правка) — молчание книги само по себе ложно в 17.2%; заменён на no_book_ml",
-  no_book_ml: `молчащая книга ПЛЮС перекос манилайна ≥ ${ML_SKEW_MIN_CENTS}¢ — одного молчания мало (10 ложных из 58)`,
-  no_ask_ml: `аска нет ПЛЮС перекос манилайна ≥ ${ML_SKEW_MIN_CENTS}¢ — одного отсутствия аска мало (16.7% ложных на замере 08.08)`,
-  wide_spread: `UNQUOTED_SPREAD_CENTS = ${UNQUOTED_SPREAD_CENTS}¢ — ЕДИНСТВЕННАЯ самостоятельная улика: книга ОТВЕТИЛА, ответ плохой. Наблюдений пока ноль`,
+  no_book: "книга молчит по всем полям — режет самостоятельно; ИЗМЕРЕННАЯ цена 17.2% ложных принята сознательно",
+  no_book_ml: "УСТАРЕЛ 08.08 — корроборация манилайном не разделяла брак (18.2% против 17.2%), правка откачена",
+  no_ask_ml: "УСТАРЕЛ 08.08 — та же откаченная корроборация",
+  wide_spread: `UNQUOTED_SPREAD_CENTS = ${UNQUOTED_SPREAD_CENTS}¢ — наблюдений пока ноль`,
   moneyline_contradicts: `ML_SKEW_MIN_CENTS = ${ML_SKEW_MIN_CENTS}¢`,
 };
 
@@ -172,10 +172,9 @@ export function newPathOf(r: { ask_cents: number | null; spread_cents: number | 
   const noAsk = r.ask_cents == null;
   const spread = r.spread_cents == null ? null : Number(r.spread_cents);
   const mlSkewed = r.ml_cents != null && Math.abs(Number(r.ml_cents) - 50) >= ML_SKEW_MIN_CENTS;
+  if (noAsk) return spread == null ? "no_book" : "no_ask";
   if (spread != null && spread >= UNQUOTED_SPREAD_CENTS) return "wide_spread";
-  if (!mlSkewed) return "";                       // корроборации нет — не режем вовсе
-  if (noAsk && spread == null) return "no_book_ml";
-  return noAsk ? "no_ask_ml" : "moneyline_contradicts";
+  return mlSkewed ? "moneyline_contradicts" : "";
 }
 
 /** Срезало ли БЫ действующее правило эту строку — по ЗАМОРОЖЕННЫМ полям среза, а не по текущим. */
@@ -183,8 +182,9 @@ export function wouldCutUnderCurrentRule(r: { ask_cents: number | null; spread_c
   const noAsk = r.ask_cents == null;
   const spread = r.spread_cents == null ? null : Number(r.spread_cents);
   const mlSkewed = r.ml_cents != null && Math.abs(Number(r.ml_cents) - 50) >= ML_SKEW_MIN_CENTS;
-  if (spread != null && spread >= UNQUOTED_SPREAD_CENTS) return true; // wide_spread — единственный самостоятельный
-  return mlSkewed;   // всё остальное требует корроборации перекошенным манилайном
+  if (noAsk) return true;                                             // no_book / no_ask
+  if (spread != null && spread >= UNQUOTED_SPREAD_CENTS) return true; // wide_spread
+  return mlSkewed;                                                    // moneyline_contradicts
 }
 
 export function buildFalseCutReport(db: Database, nowIso: string): FalseCutReport {
@@ -281,7 +281,7 @@ export function falseCutLine(r: FalseCutReport): string {
     + ` · не дозрело ${r.totals.unchecked} · ${r.verdict}`
     // Устаревший путь печатается ОТДЕЛЬНО и всегда, когда его строки есть: он основание правки 08.08,
     // и молчание о нём сделало бы «правило поменяли» неотличимым от «правило всегда было таким».
-    + (r.totals.legacyCuts ? ` · [устар. no_ask: ${r.totals.legacyFalseCuts} ложных из ${r.totals.legacyCuts} — улика, по которой правило правили]` : "")
+    + (r.totals.legacyCuts ? ` · [устар. пути: ${r.totals.legacyFalseCuts} ложных из ${r.totals.legacyCuts} — следы снятых правок]` : "")
     // Ретро печатается ВСЕГДА, когда есть на чём считать: выгода правки без её цены — реклама, не замер.
     + (r.retro ? ` · ретро: избежали ${r.retro.avoidedFalse} ложных ценой ${r.retro.lostTrue} верных` : "");
 }
