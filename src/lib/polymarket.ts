@@ -692,6 +692,25 @@ export function eventToMarketSnapshots(event: PolyEvent, snapshotAt: string): Ma
  * full-time totals, BTTS, moneyline and handicaps). Attaching these would flood
  * the UI and create bets that never settle — so we drop them by default.
  */
+/**
+ * ОРАКУЛ ЗАВЕРШЕНИЯ МАТЧА — рынок «Completed Match: A vs B». Нужен нам как УЛИКА (доигран/форфейт), а не
+ * как сделка, и потому обязан пережить фильтры, написанные для ТОРГУЕМОСТИ.
+ *
+ * [ЗАМЕР 10.08] Оракул нашёлся лишь у 2 матчей из 12 дочитанных (17%). Причина — рельсовый отсев:
+ * `isRailCents` роняет цены ≤1¢ и ≥99¢, а «матч доиграют нормально» — событие почти достоверное, поэтому
+ * оракул почти всегда стоит ровно там. Единственный матч, где он у нас ЕСТЬ, держал его на 50/50, то есть
+ * незаполненным плейсхолдером.
+ *
+ * ПОЛУЧАЕТСЯ ИДЕАЛЬНАЯ ИНВЕРСИЯ: мы завозили оракул ровно тогда, когда он молчит, и выбрасывали всякий
+ * раз, когда он говорит. Фильтр торгуемости, применённый к улике, отбирает бесполезное.
+ *
+ * (Прошлая проверка «рельс ни при чём» была КРУГОВОЙ: я искал рельсовые рынки среди тех, что пережили
+ * рельсовый фильтр. Разумеется, там их не было.)
+ */
+export function isCompletionOracle(label: string): boolean {
+  return /completed match/i.test(label);
+}
+
 export function isNoiseMarket(label: string): boolean {
   const l = label.toLowerCase();
   return (
@@ -719,9 +738,11 @@ export function matchMarketSnapshots(
     for (const m of ev.markets) {
       if (!m.label) continue;
       if (dropNoise && isNoiseMarket(m.label)) continue;
+      // Оракул завершения — улика, а не сделка: рельсовый отсев к нему не применяется (см. isCompletionOracle).
+      const oracle = isCompletionOracle(m.label);
       for (const side of marketSides(m)) {
         if (side.price == null) continue;
-        if (dropNoise && isRailCents(side.price)) continue; // effectively-resolved / dead line
+        if (dropNoise && !oracle && isRailCents(side.price)) continue; // effectively-resolved / dead line
         const key = side.label.toLowerCase().trim();
         if (seen.has(key)) continue;
         seen.add(key);
@@ -729,8 +750,14 @@ export function matchMarketSnapshots(
       }
     }
   }
-  rows.sort((a, b) => b.liq - a.liq);
-  return rows.slice(0, cap).map(({ liq, ...s }) => s);
+  // ОРАКУЛ НЕ КОНКУРИРУЕТ ЗА КЭП С ТОРГУЕМЫМИ. Он сортируется по ликвидности как все, а ликвидности у него
+  // нет — значит уедет в хвост и выпадет из кэпа ровно так же незаметно, как выпадал из рельса. Улику
+  // отбираем ОТДЕЛЬНО и добавляем сверх кэпа: она стоит копейки места и отвечает на вопрос, который
+  // торгуемые рынки не отвечают вовсе.
+  const oracles = rows.filter((r) => isCompletionOracle(r.label));
+  const rest = rows.filter((r) => !isCompletionOracle(r.label));
+  rest.sort((a, b) => b.liq - a.liq);
+  return [...rest.slice(0, cap), ...oracles].map(({ liq, ...s }) => s);
 }
 
 /**

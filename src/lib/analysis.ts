@@ -32,6 +32,7 @@ import { captureShadowDepth } from "./bookDepthCapture.js";
 import { sameMarketLabel, tokenSet, numTokens, extraAllFiller } from "./marketLabel.js";
 import { structuralPlaceholders, placeholderFunnelLine, executableImplied, moneylineOf } from "./placeholderStructural.js";
 import { recordPlaceholderCuts } from "./placeholderFalseCut.js";
+import { isCompletionOracle } from "./polymarket.js";
 import { blockedByCoherence, blocksLabel } from "./sideCoherence.js";
 import { checkPickBranches, branchContradictionNote } from "./pickBranchCoherence.js";
 
@@ -291,7 +292,12 @@ export async function runStrategists(
   })();
   const structuralLabels = new Set(structural.map((x) => x.label));
   const placeheld = structural.length ? allMarkets.filter((m) => structuralLabels.has(m.label)) : [];
-  const hidden = new Set([...railed, ...mirrored, ...placeheld]);
+  // ОРАКУЛ ЗАВЕРШЕНИЯ СКРЫТ ОТ СТРАТЕГА БЕЗУСЛОВНО. Он завозится как УЛИКА (доигран/форфейт), и с 10.08
+  // освобождён от рельсового отсева — значит может лежать на доске с ценой 99¢. Для стратега такая строка
+  // выглядит бесплатными деньгами, а `railed` его не поймает: после стартового свистка `railed` пуст.
+  // Улика, ставшая торговым кандидатом, — это худший исход правки, и он закрывается здесь, а не надеждой.
+  const oracleMarkets = allMarkets.filter((m) => isCompletionOracle(m.label));
+  const hidden = new Set([...railed, ...mirrored, ...placeheld, ...oracleMarkets]);
   const freshMarkets = hidden.size ? allMarkets.filter((m) => !hidden.has(m)) : allMarkets;
   if (structural.length) {
     try {
