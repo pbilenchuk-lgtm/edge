@@ -181,6 +181,15 @@ export async function GET(req: Request) {
       const r = buildFalseCutReport(db, new Date().toISOString());
       return NextResponse.json({ ok: true, report: r, line: falseCutLine(r) });
     }
+    // ?report=placeholder_feature_sweep → поиск РАЗДЕЛЯЮЩЕГО признака для ложных срезов #121. Две правки
+    // порога уже откачены: обе стояли на перекосе манилайна, а он брак не разделяет. Отчёт ничего не
+    // предлагает — он раскладывает записанные срезы по признакам и честно говорит, если разделения нет.
+    // Лучший из перебора называется КАНДИДАТОМ и требует перепроверки на свежих строках. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "placeholder_feature_sweep") {
+      const { buildFeatureSweep, featureSweepLine } = await import("@/lib/placeholderFeatureSweep");
+      const r = buildFeatureSweep(db, new Date().toISOString());
+      return NextResponse.json({ ok: true, report: r, line: featureSweepLine(r) });
+    }
     // ?report=set_handicap_convention → T3: проверка конвенции ±1.5 по РАЗРЕШИВШИМСЯ рынкам против
     // фактического счёта. Контроль — манилайн (проверяет инструмент: цену→исход и ориентацию подписи),
     // тест — гандикапы. Флага не касается: снятие блока — решение владельца по этим числам. Read-only.
