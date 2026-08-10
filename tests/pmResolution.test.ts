@@ -67,7 +67,13 @@ test("rule 3: closed=true with a non-resolving price → market VOID (settled_by
   assert.equal(r.marketVoid, 1);
   const b = R.getBet(db, "v1")!;
   assert.equal(b.status, "settled_void"); assert.equal(b.settled_by, "void");
-  assert.equal(b.payout, b.stake, "stake refunded, P&L 0");
+  // [09.08, РАТИФИЦИРОВАНО] Здесь стояло «stake refunded, P&L 0». Правила рынка (Gamma description,
+  // проверено на 11 матчах) говорят «resolve 50-50», и биржа гасит ОБА токена по 0.5 за акцию:
+  // payout = stake × 50 / entry, а не stake. При входе 55¢ это $45.45 на ставку $50, то есть P&L −$4.55.
+  // Старая формула давала ноль ВСЕГДА — и была невидима именно на 50¢, где voidов больше всего.
+  assert.ok(Math.abs((b.payout ?? 0) - (b.stake ?? 0) * 50 / 55) < 0.01,
+    `сплит 0.5/акция: ожидали $${((b.stake ?? 0) * 50 / 55).toFixed(2)}, получили $${b.payout}`);
+  assert.notEqual(b.payout, b.stake, "возврат ставки — НЕ семантика void на Polymarket");
 });
 
 test("rule 1 fallback: no closed flag → a resolving price must be STABLE across two polls ≥30 min apart", async () => {
