@@ -1138,3 +1138,26 @@ CREATE TABLE IF NOT EXISTS settlement_corrections (
   UNIQUE(bet_id)                   -- одна правка на ставку; повтор не удваивает деньги
 );
 CREATE INDEX IF NOT EXISTS idx_settle_corr_applied ON settlement_corrections(applied, planned_at);
+
+-- ── ДОЧИТЫВАНИЕ РЕЗОЛЮЦИИ ПОСЛЕ ФИНАЛА (Р3, часть 1) ───────────────────────
+-- Замер 09.08: рынок `Completed Match` у сыгранного матча стоял в нашей базе на 50/50, хотя на бирже давно
+-- `['0','1'], closed:true`. Причина структурная: `refreshActiveOdds` обновляет НЕзавершённые матчи — для
+-- торговли это верно (зачем котировать сыгранное), для УЛИКИ ровно наоборот: резолюция появляется ТОЛЬКО
+-- после финала. Снимок замирал раньше факта.
+--
+-- ПОЧЕМУ ОТДЕЛЬНАЯ ТАБЛИЦА, А НЕ НОВЫЙ СНИМОК В `markets`. Дописать резолюцию в `markets` значило бы
+-- поменять смысл `latestMarkets` для сыгранных матчей: у всякого потребителя «текущая цена» тихо стала бы
+-- «исходом». На этом уже обжигались — калибровка по «текущим ценам» сыгранных матчей давала 92% попаданий,
+-- потому что цена И БЫЛА исходом. Торговый снимок и факт резолюции — разные вопросы, и у каждого свой стол.
+CREATE TABLE IF NOT EXISTS market_resolutions (
+  id            TEXT PRIMARY KEY,
+  match_id      TEXT NOT NULL,
+  market_label  TEXT NOT NULL,
+  token         TEXT NOT NULL,
+  price_cents   REAL,              -- цена погашения токена: 0 / 100 / 50 (сплит) / NULL — не прочли
+  closed        INTEGER NOT NULL,  -- закрыт ли рынок на бирже
+  src           TEXT NOT NULL,     -- gamma_token_resolution
+  fetched_at    TEXT NOT NULL,
+  UNIQUE(match_id, market_label)   -- один факт на рынок; повтор не плодит строк
+);
+CREATE INDEX IF NOT EXISTS idx_market_res_match ON market_resolutions(match_id);

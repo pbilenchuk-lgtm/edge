@@ -58,6 +58,7 @@ import { sweepAbandonedMatches } from "./staleSweep.js";
 import { tennisPmvTick, settleTennisPmvBets } from "./tennisPmv.js";
 import { resolvePmvShadowSignals, probePmvShadowManual } from "./tennisPmvShadow.js";
 import { checkPlaceholderFalseCuts } from "./placeholderFalseCut.js";
+import { backfillResolutions } from "./resolutionBackfill.js";
 import { resolveFamilyShadowSignals } from "./familyShadow.js";
 import { resolveSvShadowSignals } from "./tennisSetValueShadow.js";
 import { backfillEspnEventDates, markLegGapSuspect } from "./footballIntegrity.js";
@@ -2890,6 +2891,10 @@ export async function runAutoCycle(
   // Срез #121 ДОЗРЕВАЕТ: поздняя цена того же рынка судит, был ли срез ложным. Без этого шага `falseCut`
   // остаётся чистой функцией под зелёным тестом, которую никто не зовёт, — чем она и была с деплоя #121.
   stepSync("placeholderFalseCut", () => checkPlaceholderFalseCuts(db, deps).checked, 0);
+  // Р3: дочитывание резолюции ПОСЛЕ финала. `refreshActiveOdds` обновляет незавершённые матчи — для
+  // торговли верно, для улики наоборот: резолюция появляется ровно тогда, когда обновление выключается.
+  // Асинхронный шаг: сеть, поэтому под `step`, а не `stepSync`.
+  await step("resolutionBackfill", async () => (await backfillResolutions(db, deps)).resolved, 0);
   stepSync("familyShadowResolve", () => { const r = resolveFamilyShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // [Phase 1.1] score demoted-family would-be entries post-match (no money)
   stepSync("refusalShadowResolve", () => { const r = resolveRefusalShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // [R5] score the markets the strategist walked away from
   stepSync("svShadowResolve", () => { const r = resolveSvShadowSignals(db, deps); return r.resolved + r.unresolved; }, 0); // score set_value flag-only would-be entries post-match (no money)
