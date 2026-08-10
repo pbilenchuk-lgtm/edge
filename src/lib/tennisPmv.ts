@@ -73,6 +73,9 @@ const PMV_COMPLETE_PROB = Math.min(1, Math.max(0.5, num(process.env.TENNIS_PMV_C
 // WAS the bug: TENNIS_PAPER_BUDGET_USD=$1M for the PMV sim also sized Set-Value bets at $7k+ on a $1k
 // account, showing $29k «в игре» on a $4.7k balance. PMV no longer reads the shared paper budget.
 const PMV_BUDGET = (() => { const n = Number(process.env.TENNIS_PMV_SIM_BUDGET_USD); return Number.isFinite(n) && n > 0 ? n : 1000; })();
+// [09.08] Эталон бэкстопа — СВОЯ переменная, не PMV_BUDGET: сторож, сверяющийся с проверяемым числом,
+// молчит ровно тогда, когда оно испорчено. Та же правка, что на путях Set-Value/Overreaction.
+const PMV_BANK_USD = (() => { const n = Number(process.env.TENNIS_PMV_BANK_USD); return Number.isFinite(n) && n > 0 ? n : 1000; })();
 // S9 (R0.3): tennis-PMV goes from flag-only to PAPER — a fresh, self-describing epoch so its bets segment
 // cleanly away from the legacy sim-v1 money that polluted signal_stats. Micro-caps for the first-20 review.
 export const PMV_PAPER_EPOCH = process.env.TENNIS_PMV_PAPER_EPOCH || "tpmv-paper-m1";
@@ -762,7 +765,7 @@ export async function tennisPmvTick(db: Database, deps: EngineDeps = {}): Promis
         for (const profile of profilesAll) {
           const cfg = getProfileConfig(db, profile);
           const held = heldByProfile(profile).reduce((s, b) => s + (b.stake ?? 0), 0);
-          const r = sizePrematch({ ourProb, priceCents: cand.midCents, implied, calibration: pmvCalibration, liquidity: cand.bookUsd, budget: PMV_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: false, bankCeiling: PMV_BUDGET });
+          const r = sizePrematch({ ourProb, priceCents: cand.midCents, implied, calibration: pmvCalibration, liquidity: cand.bookUsd, budget: PMV_BUDGET, matchExposure: held, compExposure: held, cfg, allowLargeEdge: false, bankCeiling: PMV_BANK_USD });
           if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: PMV_STRATEGY, minute: "предматч", type: "skip", text: `[${profile}] «${cand.label}» dev +${cand.deviation}¢, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
           // Thin-book cap: never stake more than 25% of the prop's book depth. S9: + a micro-cap ($/prop)
           // for the first-20-signal paper review — deliberately tiny while the paid contour is validated.
