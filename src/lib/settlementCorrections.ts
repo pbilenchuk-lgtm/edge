@@ -155,6 +155,42 @@ export function applyCorrections(db: Database, plan: CorrectionPlan, nowIso: str
   return { written, skipped };
 }
 
+/**
+ * ВЫГРУЗКА ДЛЯ СБОРА УЛИК. Связывать нашу ставку с рынком биржи ПО ИМЕНИ нельзя: имена мы сами и
+ * нормализуем, и совпадение имени — это наше утверждение о себе, а не о бирже. Связь идёт по CLOB-ТОКЕНУ:
+ * `external_ref` = токен outcomes[0], `token_second` = токен outcomes[1]. Gamma отдаёт `clobTokenIds` и
+ * `outcomes` в ОДНОМ порядке, поэтому совпадение токена даёт ИНДЕКС нашей стороны без единой догадки.
+ * Строка без токена уедет в отказ — и это правильный отказ, а не повод угадать по подписи.
+ */
+export interface VoidEvidenceKitRow {
+  betId: string; matchId: string; matchLabel: string; marketLabel: string;
+  stake: number; entryCents: number | null; payout: number | null;
+  tokenFirst: string | null; tokenSecond: string | null; outcomeFirst: string | null;
+  isArtifact: boolean;
+}
+export function buildVoidEvidenceKit(db: Database): { rows: VoidEvidenceKitRow[]; note: string } {
+  const rows: VoidEvidenceKitRow[] = [];
+  for (const b of R.allBets(db)) {
+    if (b.status !== "settled_void") continue;
+    const m = R.getMatch(db, b.match_id);
+    let tokenFirst: string | null = null, tokenSecond: string | null = null, outcomeFirst: string | null = null;
+    try {
+      const mk = R.latestMarkets(db, b.match_id).find((x) => x.label === b.market_label);
+      tokenFirst = mk?.external_ref ?? null;
+      tokenSecond = (mk as { token_second?: string | null } | undefined)?.token_second ?? null;
+      outcomeFirst = (mk as { outcome_first?: string | null } | undefined)?.outcome_first ?? null;
+    } catch { /* доски может не быть — уедет в отказ с названной причиной */ }
+    rows.push({
+      betId: b.id, matchId: b.match_id, matchLabel: m ? `${m.home} — ${m.away}` : b.match_id,
+      marketLabel: b.market_label, stake: b.stake ?? 0, entryCents: b.entry_price ?? null, payout: b.payout ?? null,
+      tokenFirst, tokenSecond, outcomeFirst, isArtifact: (b.stake ?? 0) > ARTIFACT_STAKE_USD,
+    });
+  }
+  const withToken = rows.filter((r) => r.tokenFirst).length;
+  return { rows, note: `${rows.length} строк void · с токеном ${withToken} · артефактов ${rows.filter((r) => r.isArtifact).length}`
+    + ` · связь по ТОКЕНУ, не по имени: совпадение имени — наше утверждение о себе, а не о бирже` };
+}
+
 export interface CorrectionsLedger {
   at: string; rows: number; deltaUsd: number;
   byKind: { kind: string; n: number; deltaUsd: number }[];

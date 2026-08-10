@@ -190,6 +190,12 @@ export async function GET(req: Request) {
       const r = buildFeatureSweep(db, new Date().toISOString());
       return NextResponse.json({ ok: true, report: r, line: featureSweepLine(r) });
     }
+    // ?report=void_evidence_kit → выгрузка для СБОРА УЛИК по void-строкам: токены CLOB, по которым
+    // ставка связывается с рынком биржи БЕЗ угадывания по имени. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "void_evidence_kit") {
+      const { buildVoidEvidenceKit } = await import("@/lib/settlementCorrections");
+      return NextResponse.json({ ok: true, report: buildVoidEvidenceKit(db) });
+    }
     // ?report=settlement_corrections → леджер корректирующих проводок расчёта (T4). Книга читается как
     // ИСХОДНАЯ + ПРАВКИ, а не как переписанная: сумма правок видна отдельным числом, исходные строки
     // остаются нетронутыми, и «посчитали честно тогда» отличимо от «поправили потом». Read-only.

@@ -21,6 +21,27 @@ export async function POST(req: Request) {
     try { body = await req.json(); } catch { return NextResponse.json({ ok: false, error: "невалидный JSON в теле запроса" }, { status: 400 }); }
 
     switch (body.action) {
+      // ═══ T4: ПРОГОН И ПРИМЕНЕНИЕ ПРАВОК РАСЧЁТА — РАЗНЫЕ ДЕЙСТВИЯ ═══
+      //
+      // Разделены НАМЕРЕННО. Одно действие, которое «посчитает и сразу применит», делает сухой прогон
+      // необязательным шагом, а необязательный шаг пропускают. Улики передаются в теле запроса и
+      // приходят СНАРУЖИ (фактические цены погашения токенов) — вывести их из наших же данных значило бы
+      // чинить неверное неверным.
+      case "planSettlementCorrections": {
+        const { planCorrections } = await import("@/lib/settlementCorrections");
+        const evidence = Array.isArray(body?.evidence) ? body.evidence : [];
+        return NextResponse.json({ ok: true, plan: planCorrections(db, evidence, new Date().toISOString()) });
+      }
+      case "applySettlementCorrections": {
+        const { planCorrections, applyCorrections } = await import("@/lib/settlementCorrections");
+        const evidence = Array.isArray(body?.evidence) ? body.evidence : [];
+        const now = new Date().toISOString();
+        const plan = planCorrections(db, evidence, now);
+        // Применяем ТОТ ЖЕ план, что вернул бы прогон: считать дважды разными путями значило бы завести
+        // два авторитета на одно решение.
+        const res = applyCorrections(db, plan, now);
+        return NextResponse.json({ ok: true, applied: res, plan });
+      }
       case "reassess": {
         const match = R.getMatch(db, body.matchId);
         if (!match) return NextResponse.json({ ok: false, error: "матч не найден" }, { status: 404 });
