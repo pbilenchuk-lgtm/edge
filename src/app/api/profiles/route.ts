@@ -190,6 +190,12 @@ export async function GET(req: Request) {
       const r = buildFeatureSweep(db, new Date().toISOString());
       return NextResponse.json({ ok: true, report: r, line: featureSweepLine(r) });
     }
+    // ?report=resolution_coverage → покрытие ДОЧИТЫВАНИЯ резолюции после финала (Р3). Отвечает на два
+    // РАЗНЫХ вопроса, которые нельзя сливать: «дочитали ли мы» и «разрешён ли рынок». Read-only.
+    if (new URL(req.url).searchParams.get("report") === "resolution_coverage") {
+      const { buildResolutionCoverage } = await import("@/lib/resolutionBackfill");
+      return NextResponse.json({ ok: true, report: buildResolutionCoverage(db, new Date().toISOString()) });
+    }
     // ?report=void_evidence_kit → выгрузка для СБОРА УЛИК по void-строкам: токены CLOB, по которым
     // ставка связывается с рынком биржи БЕЗ угадывания по имени. Read-only.
     if (new URL(req.url).searchParams.get("report") === "void_evidence_kit") {
