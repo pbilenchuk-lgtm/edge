@@ -93,8 +93,15 @@ export interface ResolutionCoverage {
   at: string;
   finishedMatches: number; withAnyResolution: number; coveragePct: number | null;
   resolvedMarkets: number; unresolvedMarkets: number; unreadMarkets: number;
-  /** Оракул `Completed Match`: сколько сыгранных матчей его имеют и у скольких он уже РАЗРЕШЁН. */
-  oracle: { present: number; resolved: number; note: string };
+  /**
+   * Оракул `Completed Match`: сколько дочитанных матчей его имеют и у скольких он РАЗРЕШЁН.
+   *
+   * [ПОПРАВКА 10.08, первый же прогон] Строка печатала «есть у 2 матчей, разрешён у 4» — 4 из 2. Числа
+   * были в РАЗНЫХ ЕДИНИЦАХ: `present` считал матчи, `resolved` — СТРОКИ, а у оракула их две на матч
+   * (Yes и No). Тот самый класс «единица измерения», выданный моим же новым отчётом на первом запуске.
+   * Теперь оба числа — МАТЧИ, и знаменатель назван в самом имени поля.
+   */
+  oracle: { matchesWithOracle: number; matchesResolved: number; oracleRows: number; note: string };
   note: string;
 }
 
@@ -113,17 +120,23 @@ export function buildResolutionCoverage(db: Database, nowIso: string): Resolutio
   for (const r of mk as unknown as { closed: number; unread: number; n: number }[]) {
     if (r.unread) unread += r.n; else if (r.closed) resolved += r.n; else unresolved += r.n;
   }
-  const orc = q<{ n: number; res: number }>(
-    `SELECT COUNT(DISTINCT match_id) n, SUM(CASE WHEN closed=1 THEN 1 ELSE 0 END) res
+  // ОБА ЧИСЛА В МАТЧАХ. Считать одно в матчах, другое в строках и печатать рядом — значит выдать
+  // «4 из 2»; у оракула две строки на матч (Yes и No), и это ловушка на ровном месте.
+  const orc = q<{ n: number; res: number; rows: number }>(
+    `SELECT COUNT(DISTINCT match_id) n,
+            COUNT(DISTINCT CASE WHEN closed=1 THEN match_id END) res,
+            COUNT(*) rows
        FROM market_resolutions WHERE market_label LIKE '%Completed Match%'`,
-  )[0] ?? { n: 0, res: 0 };
+  )[0] ?? { n: 0, res: 0, rows: 0 };
   const coveragePct = fin ? Math.round((withRes / fin) * 1000) / 10 : null;
   return {
     at: nowIso, finishedMatches: fin, withAnyResolution: withRes, coveragePct,
     resolvedMarkets: resolved, unresolvedMarkets: unresolved, unreadMarkets: unread,
-    oracle: { present: Number(orc.n) || 0, resolved: Number(orc.res) || 0,
+    oracle: {
+      matchesWithOracle: Number(orc.n) || 0, matchesResolved: Number(orc.res) || 0, oracleRows: Number(orc.rows) || 0,
       note: !orc.n ? "оракула Completed Match нет ни у одного дочитанного матча — читать пока нечего"
-        : `оракул есть у ${orc.n} матчей, разрешён у ${orc.res}` },
+        : `оракул есть у ${orc.n} матчей из ${withRes} дочитанных, разрешён у ${orc.res} (строк ${orc.rows}: у оракула их две на матч)`
+          + (withRes && orc.n < withRes ? ` — покрытие ${Math.round((orc.n / withRes) * 1000) / 10}%, остальное Р3 ч.2` : "") },
     note: !fin ? "сыгранных матчей нет"
       : `дочитано ${withRes} из ${fin} сыгранных (${coveragePct}%) · рынков: разрешено ${resolved}, ещё открыто ${unresolved}, не прочитано ${unread}`
         + ` · «не прочитано» — НАША слепота, а не свойство биржи, и лечится повтором, а не ожиданием`,
