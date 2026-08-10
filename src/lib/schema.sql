@@ -1110,3 +1110,31 @@ CREATE TABLE IF NOT EXISTS placeholder_cuts (
   UNIQUE(match_id, market_label)   -- первый срез замораживается; повтор не плодит строк
 );
 CREATE INDEX IF NOT EXISTS idx_ph_cuts_open ON placeholder_cuts(false_cut, cut_at);
+
+-- ── КОРРЕКТИРУЮЩИЕ ПРОВОДКИ РАСЧЁТА (T4, ратифицировано 09.08) ──────────────
+-- ИСТОРИЯ НЕ ПЕРЕПИСЫВАЕТСЯ. Разбор void-книги нашёл два класса ошибок расчёта: 7 матчей помечены `void`,
+-- хотя биржа разрешила их БИНАРНО (мы вернули ставку вместо выигрыша/проигрыша), и 4 настоящих void
+-- недоплачены — Polymarket гасит оба токена по 0.5/акцию, а мы книжили возврат ставки.
+-- Правка НЕ трогает исходную строку ставки: иначе «мы посчитали честно тогда» стало бы неотличимо от
+-- «мы поправили потом». Каждая правка — ОТДЕЛЬНАЯ строка со ссылкой на исходный bet_id.
+--
+-- ПРОВЕНАНС ОБЯЗАТЕЛЕН НА УРОВНЕ СХЕМЫ (NOT NULL): проводка без улики физически не записывается. Правка
+-- расчёта без доказательства — это и есть тот фантом, ради борьбы с которым всё затевалось.
+--
+-- PLAN И APPLY РАЗДЕЛЕНЫ ПОЛЕМ `applied`: «мы намерены» и «мы сделали» обязаны быть различимы в базе, а
+-- не только в чьей-то памяти. Сухой прогон — полноправное состояние, а не черновик в голове.
+CREATE TABLE IF NOT EXISTS settlement_corrections (
+  id            TEXT PRIMARY KEY,
+  bet_id        TEXT NOT NULL,     -- исходная ставка; она остаётся КАК ЕСТЬ
+  kind          TEXT NOT NULL,     -- false_void_binary | true_void_underpaid
+  old_status    TEXT, old_payout REAL,
+  new_status    TEXT, new_payout REAL,
+  delta_usd     REAL NOT NULL,     -- сколько проводка добавляет к книге (может быть отрицательной)
+  evidence      TEXT NOT NULL,     -- ЧЕМ доказано: рынок, его outcomePrices, Completed Match
+  evidence_src  TEXT NOT NULL,     -- gamma_outcome_prices | ...
+  applied       INTEGER NOT NULL DEFAULT 0,
+  planned_at    TEXT NOT NULL,
+  applied_at    TEXT,
+  UNIQUE(bet_id)                   -- одна правка на ставку; повтор не удваивает деньги
+);
+CREATE INDEX IF NOT EXISTS idx_settle_corr_applied ON settlement_corrections(applied, planned_at);

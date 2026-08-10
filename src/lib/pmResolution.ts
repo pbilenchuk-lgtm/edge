@@ -186,10 +186,30 @@ export async function settlePmResolutionBets(
   const voidBet = (betId: string, tag: "void" | "void_timeout", detail: string, via: VoidVia) => {
     const b = R.getBet(db, betId); if (!b) return;
     if (b.status !== "open") { res.alreadySettled++; return; }   // та же защита: возврат не переписывает расчёт
-    R.updateBet(db, betId, { status: "settled_void", result: null, payout: b.stake ?? 0, settled_at: now, closing_price: b.current_price ?? b.entry_price ?? null, settled_by: tag, settled_via: via });
+    // ═══ [09.08, РАТИФИЦИРОВАНО] VOID — ЭТО НЕ ВОЗВРАТ СТАВКИ ═══
+    //
+    // Правила рынка (Gamma `description`, проверено на 11 матчах) говорят «resolve 50-50», и биржа гасит
+    // ОБА токена по 0.5 за акцию. Значит выплата = shares × 0.5 = stake × 50 / entry, а НЕ stake.
+    // Вход 30¢ → +67% к ставке; вход 80¢ → −37.5%. Мы книжили возврат, то есть P&L ровно ноль всегда.
+    //
+    // ПОЧЕМУ ЭТО ЖИЛО ТАК ДОЛГО: на входе ровно 50¢ ошибка РАВНА НУЛЮ (stake×50/50 = stake). А 50¢ —
+    // плейсхолдерная цена, где voidов больше всего. Дефект был невидим именно там, где чаще всего
+    // срабатывал. Классический случай «ошибка прячется в самой частой точке».
+    //
+    // Прошлые строки этим НЕ переписываются: они правятся отдельным леджером (settlement_corrections),
+    // где каждая правка несёт провенанс. Здесь чинится только будущее.
+    const voidPayout = (() => {
+      const st = b.stake ?? 0, e = b.entry_price ?? 0;
+      if (!(st > 0) || !(e > 0) || e >= 100) return st;   // цену не прочли — возвращаем ставку, как раньше
+      return Math.round(st * 50 / e * 100) / 100;
+    })();
+    R.updateBet(db, betId, { status: "settled_void", result: null, payout: voidPayout, settled_at: now, closing_price: b.current_price ?? b.entry_price ?? null, settled_by: tag, settled_via: via });
     try { shadowOnExit(db, betId, 1, shadowCfg, now); } catch { /* observe-only */ }
     try { R.metaDelete(db, `${PMRES_OBS}${betId}`); } catch { /* best-effort */ }
-    R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: "финал", type: "settle", text: `${b.market_label}: ${detail} — возврат ставки $${(b.stake ?? 0).toFixed(2)} (P&L $0) [${tag}]`, created_at: now });
+    R.insertTradeLog(db, { id: R.uid(), match_id: b.match_id, strategy_id: b.strategy_id, minute: "финал", type: "settle", // Р5: причина-строка — ТОЖЕ ФАКТ, и обязана нести провенанс: какой путь её выпустил и на каком
+      // основании. Замер 08.08 поймал строку «недоигран/ретайр по клаузе» на матче, где ретайра НЕ БЫЛО
+      // (Completed Match = Yes) — причина соврала, и проверить её было нечем.
+      text: `${b.market_label}: ${detail} — сплит 0.5/акция: выплата $${voidPayout.toFixed(2)} при ставке $${(b.stake ?? 0).toFixed(2)} @ ${b.entry_price ?? "?"}¢ (P&L ${(voidPayout - (b.stake ?? 0)).toFixed(2)}) [${tag}·via=${via}·провенанс: путь pmResolution.voidBet, основание — ${via}]`, created_at: now });
     tag === "void" ? res.marketVoid++ : res.voidTimeout++;
     res.reservesFreedUsd += b.stake ?? 0; // a refund frees the reserve; P&L 0 → no bankDelta
   };

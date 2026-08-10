@@ -190,6 +190,13 @@ export async function GET(req: Request) {
       const r = buildFeatureSweep(db, new Date().toISOString());
       return NextResponse.json({ ok: true, report: r, line: featureSweepLine(r) });
     }
+    // ?report=settlement_corrections → леджер корректирующих проводок расчёта (T4). Книга читается как
+    // ИСХОДНАЯ + ПРАВКИ, а не как переписанная: сумма правок видна отдельным числом, исходные строки
+    // остаются нетронутыми, и «посчитали честно тогда» отличимо от «поправили потом». Read-only.
+    if (new URL(req.url).searchParams.get("report") === "settlement_corrections") {
+      const { buildCorrectionsLedger } = await import("@/lib/settlementCorrections");
+      return NextResponse.json({ ok: true, report: buildCorrectionsLedger(db, new Date().toISOString()) });
+    }
     // ?report=set_handicap_convention → T3: проверка конвенции ±1.5 по РАЗРЕШИВШИМСЯ рынкам против
     // фактического счёта. Контроль — манилайн (проверяет инструмент: цену→исход и ориентацию подписи),
     // тест — гандикапы. Флага не касается: снятие блока — решение владельца по этим числам. Read-only.
