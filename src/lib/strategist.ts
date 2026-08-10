@@ -190,6 +190,17 @@ export interface SizeInput {
    *  on a $1k bank) slips past a budget-relative cap — a ceiling anchored to the TRUE bank catches it.
    *  Omit → no insanity check (football keeps its existing exposure caps; opt-in per caller). */
   bankCeiling?: number;
+  /**
+   * АБСОЛЮТНЫЙ потолок одной ставки ($) — число, а не доля. Существует ровно потому, что все прочие кэпы
+   * процентные: процент от испорченного знаменателя не срабатывает никогда. Замер 09.08 показал, что
+   * `bankCeiling` на теннисных путях брался ИЗ ТОЙ ЖЕ переменной, что и `budget`, — то есть сторож,
+   * построенный против порчи бюджета, сверялся с испорченным бюджетом. Абсолютное число такой подмене не
+   * подвержено: его не из чего вывести.
+   *
+   * БЛОКИРУЕТ, А НЕ ПОДРЕЗАЕТ. Ставка в 100 раз выше нормы означает, что что-то сломано, а не что надо
+   * тихо купить поменьше: молчаливый трим спрятал бы порчу ровно тогда, когда её надо увидеть.
+   */
+  absoluteMaxStakeUsd?: number;
 }
 
 /** HARD liquidity floor ($): a market whose known depth is below this is
@@ -311,6 +322,10 @@ export function sizePrematch(inp: SizeInput): SizeResult {
   // PMV-sim leak → $7k Set-Value bet on a $1k bank). Loud flag, never a silent trim.
   if (inp.bankCeiling != null && inp.bankCeiling > 0 && stake > inp.bankCeiling * SIZING_INSANITY_SHARE)
     return flag(`sizing_insanity: размер $${stake} > $${Math.round(inp.bankCeiling * SIZING_INSANITY_SHARE)} (${(SIZING_INSANITY_SHARE * 100).toFixed(0)}% банка $${Math.round(inp.bankCeiling)}) — вероятно повреждён бюджет/кэп, ставка ЗАБЛОКИРОВАНА`);
+  // АБСОЛЮТНЫЙ ПОТОЛОК — последняя линия, не выводимая ни из бюджета, ни из банка. Всё выше по этой
+  // функции — проценты, и любой из них молчит, если его знаменатель испорчен. Это число испортить нечем.
+  if (inp.absoluteMaxStakeUsd != null && inp.absoluteMaxStakeUsd > 0 && stake > inp.absoluteMaxStakeUsd)
+    return flag(`stake_over_absolute_cap: размер $${stake} > абсолютного потолка $${Math.round(inp.absoluteMaxStakeUsd)} — потолок задан ЧИСЛОМ, а не долей, и не зависит от бюджета; ставка ЗАБЛОКИРОВАНА`);
 
   return { status: "enter", stake, fraction: stake / budget, edge, implied, kellyFraction: kFrac, reason: `вход: edge ${(edge * 100).toFixed(1)}%, Kelly×${kFrac.toFixed(2)}, ${(stake / budget * 100).toFixed(1)}% бюджета` };
 }

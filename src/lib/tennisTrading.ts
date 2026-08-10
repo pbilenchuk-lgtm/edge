@@ -1044,6 +1044,26 @@ export function tennisEntryMeta(o: { favPrice: number; prePrice: number; edge: n
 // these are active $1k-scale hypotheses measured for clean cycles, NOT the isolated PMV sim. Do NOT set
 // this to the PMV sim size — that leak sized Set-Value bets at $7k+ on a $1k account.
 const TENNIS_PAPER_BUDGET = (() => { const n = Number(process.env.TENNIS_PAPER_BUDGET_USD); return Number.isFinite(n) && n > 0 ? n : 1000; })();
+// ═══ [09.08, РАТИФИЦИРОВАНО] ЭТАЛОН СТОРОЖА — ИЗ ДРУГОГО ИСТОЧНИКА, ЧЕМ ПРОВЕРЯЕМОЕ ═══
+//
+// Разбор восьми гигантских строк (17.07: $28 291 и $7 386 при банке $1k) назвал причину: общая переменная
+// `TENNIS_PAPER_BUDGET_USD` стояла в $1M ради PMV-симуляции, а Set-Value читал ЕЁ ЖЕ. Переменные потом
+// развели — но бэкстоп `sizing_insanity`, построенный ПРОТИВ этой самой аварии, на обеих теннисных точках
+// получал `bankCeiling: TENNIS_PAPER_BUDGET`, то есть сверялся с испорченным числом. Его собственный
+// контракт требует источника, НЕЗАВИСИМОГО от бюджета; футбол так и делает, теннис — нет.
+//
+// Верни переменную в $1M — и порог стал бы $500 000, а $28 291 прошёл бы насквозь, как прошёл тогда.
+// Сторож молчал бы во второй раз по той же причине, по какой молчал в первый.
+//
+// ЦЕНА РАЗДЕЛЕНИЯ НАЗВАНА ЧЕСТНО: теперь большой сим требует ДВУХ независимых заявлений — бюджета и
+// банка. Одного неверного значения больше не хватает, чтобы навредить молча, и это ровно то, чего мы
+// хотим: два авторитета на одно решение здесь не дефект, а защита.
+const TENNIS_BANK_USD = (() => { const n = Number(process.env.TENNIS_BANK_USD); return Number.isFinite(n) && n > 0 ? n : 1000; })();
+// Абсолютный потолок ОДНОЙ ставки. Число, а не доля: процент от испорченного знаменателя не сработает
+// никогда. $250 выбран так, чтобы НЕ связывать при санкционированном банке (самый крупный профиль `max`
+// сайзит $115 на $1k), но ловить всё, что на порядок выше. У PMV такой потолок есть с самого начала —
+// обжёгся как раз путь, у которого его не было.
+const TENNIS_MAX_STAKE_USD = (() => { const n = Number(process.env.TENNIS_MAX_STAKE_USD); return Number.isFinite(n) && n > 0 ? n : 250; })();
 
 const ACTED = "tennis_acted:"; // per (match, break) idempotency marker
 // п.1 (batch-4): re-arm policy. A 2nd break after a TAKE is a ratified new episode (fresh panic → re-enter).
@@ -1336,7 +1356,7 @@ export async function tennisTradingTick(db: Database, deps: EngineDeps = {}): Pr
       // allowLargeEdge OFF: a huge tennis moneyline edge is still the phantom signature. B2: the ceiling
       // is TENNIS_ABSURD_EDGE_BLOCK (40%, was the shared 25%) — the real phantom sources are cut upstream
       // (token invariant / thin_real_book / frozen_favourite), so the net widens to admit deep-but-real snapbacks.
-      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, absurdEdgeBlock: TENNIS_ABSURD_EDGE_BLOCK, bankCeiling: TENNIS_PAPER_BUDGET });
+      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, absurdEdgeBlock: TENNIS_ABSURD_EDGE_BLOCK, bankCeiling: TENNIS_BANK_USD, absoluteMaxStakeUsd: TENNIS_MAX_STAKE_USD });
       if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: TENNIS_STRATEGY, minute: `сет ${br.setNum}`, type: "skip", text: `[${profile}] overreaction подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
       // B2 cohort tag: an entry whose edge sits in the newly-opened 25–40% band USED to be auto-blocked.
       // Tag it (appended to the enter log below) so the raised ceiling can be validated from the clean distribution.
@@ -1618,7 +1638,7 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
       // allowLargeEdge OFF (same phantom-guard reasoning as Overreaction): a Set-Value edge is
       // comebackProb(0.5) − price, ≤20% inside the 30-45¢ band, so the 25% absurd_edge_block never
       // catches a legitimate entry — it only backstops a bad-quote / mislabelled-favourite artifact.
-      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, bankCeiling: TENNIS_PAPER_BUDGET });
+      const r = sizePrematch({ ourProb, priceCents: entryCents, implied, calibration: 0.6, liquidity: ml.liquidity || null, budget: TENNIS_PAPER_BUDGET, matchExposure: held, compExposure: held, cfg, bankCeiling: TENNIS_BANK_USD, absoluteMaxStakeUsd: TENNIS_MAX_STAKE_USD });
       if (r.status !== "enter") { R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `[${profile}] конкурентный сет подтверждён, но сайзинг отклонил: ${r.reason}`, created_at: now }); continue; }
       // book-fill-m1: fill against the LIVE moneyline book. On ≥$10k-declared moneylines the skip rate
       // should be LOW — a high no_book_liquidity rate here points at OUR book mapping first (tokenId /
