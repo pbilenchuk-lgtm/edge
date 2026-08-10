@@ -100,8 +100,8 @@ test("покрытие различает «не дочитали» и «не р
   const c = buildResolutionCoverage(db, NOW);
   assert.equal(c.finishedMatches, 2);
   assert.equal(c.withAnyResolution, 1, "второй матч НЕ дочитан — это не «не разрешён»");
-  assert.equal(c.oracle.present, 1);
-  assert.equal(c.oracle.resolved, 1);
+  assert.equal(c.oracle.matchesWithOracle, 1);
+  assert.equal(c.oracle.matchesResolved, 1);
   assert.match(c.note, /НАША слепота, а не свойство биржи/);
 });
 
@@ -110,4 +110,22 @@ test("оракула нет — сказано прямо, а не показа�
   match(db, "m1", "finished", OLD);
   const c = buildResolutionCoverage(db, NOW);
   assert.match(c.oracle.note, /читать пока нечего/);
+});
+
+// [ПОПРАВКА 10.08] Первый же прод-прогон напечатал «оракул есть у 2 матчей, разрешён у 4» — 4 из 2.
+// Числа были в РАЗНЫХ единицах: одно матчи, другое строки, а у оракула их две на матч (Yes и No).
+// Класс «единица измерения», выданный моим же новым отчётом на первом запуске.
+test("ЕДИНИЦА ИЗМЕРЕНИЯ: «разрешён у N» не может превысить «есть у M» — оба числа в МАТЧАХ", async () => {
+  const db = db0();
+  match(db, "m1", "finished", OLD);
+  mkt(db, "m1", "Completed Match — Yes", "T1");
+  mkt(db, "m1", "Completed Match — No", "T2");
+  await backfillResolutions(db, { now: () => NOW,
+    resolveTokens: resolver({ T1: { priceCents: 100, closed: true }, T2: { priceCents: 0, closed: true } }) } as never);
+  const o = buildResolutionCoverage(db, NOW).oracle;
+  assert.equal(o.matchesWithOracle, 1);
+  assert.equal(o.matchesResolved, 1, "ОДИН матч, а не две строки");
+  assert.equal(o.oracleRows, 2, "строк действительно две — и они названы отдельно");
+  assert.ok(o.matchesResolved <= o.matchesWithOracle, "разрешённых не может быть больше, чем имеющихся");
+  assert.match(o.note, /у оракула их две на матч/);
 });
