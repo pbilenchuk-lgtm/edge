@@ -190,6 +190,13 @@ export async function GET(req: Request) {
       const r = buildFeatureSweep(db, new Date().toISOString());
       return NextResponse.json({ ok: true, report: r, line: featureSweepLine(r) });
     }
+    // ?report=void_clause_audit → согласен ли наш зашитый семейный void-код с ТЕКСТОМ правил рынка (Р4).
+    // На выборке 09.08 расхождений 0 из 14 — код прав, но был прав БЕЗ доказательства. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "void_clause_audit") {
+      const { buildClauseAudit, clauseAuditLine } = await import("@/lib/voidClauseAudit");
+      const r = buildClauseAudit(db, new Date().toISOString());
+      return NextResponse.json({ ok: true, report: r, line: clauseAuditLine(r) });
+    }
     // ?report=resolution_coverage → покрытие ДОЧИТЫВАНИЯ резолюции после финала (Р3). Отвечает на два
     // РАЗНЫХ вопроса, которые нельзя сливать: «дочитали ли мы» и «разрешён ли рынок». Read-only.
     if (new URL(req.url).searchParams.get("report") === "resolution_coverage") {
