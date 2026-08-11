@@ -392,7 +392,11 @@ test("polymarket: eventToMarketSnapshots drops priceless markets", () => {
   // [T3-корень 06.08] И ОБА ИМЕНИ. Эта подпись — ровно тот случай, на котором терялась ориентация ±1.5:
   // она называет ОБОИХ игроков, эвристика «подпись уже называет исход» срабатывает, рынок остаётся одной
   // строкой — и знание о том, ЧЬЮ сторону несёт цена (62¢ = P(Connor Doig)), прежде выбрасывалось.
-  assert.deepEqual(snaps.find((s) => s.label === "Connor Doig vs Eudald Gonzalez"), { label: "Connor Doig vs Eudald Gonzalez", price: 62, external_ref: "tok-a", tokenSecond: "tok-b", liquidity: "1234", askCents: null, spreadCents: null, outcomeFirst: "Connor Doig", outcomeSecond: "Eudald Gonzalez" });
+  assert.deepEqual(snaps.find((s) => s.label === "Connor Doig vs Eudald Gonzalez"), { label: "Connor Doig vs Eudald Gonzalez", price: 62, external_ref: "tok-a", tokenSecond: "tok-b", liquidity: "1234",
+    // [Р4 10.08] Текст правил рынка теперь едет вместе со снимком: клауза void — ФАКТ конкретного рынка,
+    // и без завоза текста «читать клаузу из рынка» осталось бы лозунгом. В фикстуре его нет → null.
+    description: null,
+    askCents: null, spreadCents: null, outcomeFirst: "Connor Doig", outcomeSecond: "Eudald Gonzalez" });
   assert.ok(labels.includes("Total Sets: Over 2.5") && labels.includes("Total Sets: Under 2.5")); // both sides of the total
 });
 

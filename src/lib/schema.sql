@@ -1161,3 +1161,17 @@ CREATE TABLE IF NOT EXISTS market_resolutions (
   UNIQUE(match_id, market_label)   -- один факт на рынок; повтор не плодит строк
 );
 CREATE INDEX IF NOT EXISTS idx_market_res_match ON market_resolutions(match_id);
+
+-- ── ТЕКСТ ПРАВИЛ РЫНКА: ИСТОЧНИК КЛАУЗЫ VOID (Р4) ──────────────────────────
+-- Сверка с Gamma: ретайр-клауза РАЗНАЯ у семей ОДНОГО матча — манилайн платит проходящему, сетовый тотал
+-- воидится по незавершению СЕТА, Completed Match уходит в «No». Одного «общего правила voidов» физически
+-- не существует, и держать его в коде — значит хранить нашу ПАМЯТЬ о правилах вместо самих правил.
+-- Текст статичен, поэтому пишется один раз на (матч, рынок) и не перезаписывается.
+CREATE TABLE IF NOT EXISTS market_clauses (
+  id            TEXT PRIMARY KEY,
+  match_id      TEXT NOT NULL,
+  market_label  TEXT NOT NULL,
+  description   TEXT NOT NULL,
+  fetched_at    TEXT NOT NULL,
+  UNIQUE(match_id, market_label)
+);

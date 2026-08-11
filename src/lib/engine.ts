@@ -1072,6 +1072,14 @@ export async function importPolymarketMatches(
       if (s.external_ref ? haveTokens.has(s.external_ref) : haveLabels.has(s.label)) continue;
       if (isDust(liqOf(s.liquidity))) continue; // orphan/degenerate dust listing — don't surface it
       R.insertMarket(db, { id: R.uid(), match_id: match.id, label: s.label, price: s.price, ai_prob: null, liquidity: s.liquidity, external_ref: s.external_ref, token_second: s.tokenSecond ?? null, outcome_first: s.outcomeFirst ?? null, outcome_second: s.outcomeSecond ?? null, snapshot_at: now, is_closing: false });
+      // [Р4] Текст правил — рядом, но НЕ в `markets`: снимок котировки живёт тиками, а правила статичны.
+      // Смешав их, мы бы переписывали неизменный факт при каждом обновлении цены.
+      if (s.description) {
+        try {
+          db.prepare(`INSERT INTO market_clauses (id, match_id, market_label, description, fetched_at) VALUES (?,?,?,?,?) ON CONFLICT(match_id, market_label) DO NOTHING`)
+            .run(R.uid(), match.id, s.label, s.description, now);
+        } catch { /* улика не имеет права ломать импорт */ }
+      }
     }
     out.push({ sport, match: `${d.home}–${d.away}`, created, markets: d.markets.length });
   }

@@ -278,6 +278,8 @@ export async function getQuotes(
 export interface PolyMarketRow {
   /** display label, e.g. "Under 2.5" or "Alcaraz vs Sinner" */
   label: string;
+  /** [Р4] Текст правил рынка — источник клаузы void. Читать надо ЕГО, а не нашу память о правилах. */
+  description?: string | null;
   outcomes: string[]; // ["Alcaraz","Sinner"] | ["Over","Under"]
   /** price of the FIRST outcome, in cents 0..100 */
   priceCents: number | null;
@@ -345,6 +347,9 @@ export function normalizeEvent(raw: any): PolyEvent {
     const toCents = (v: unknown): number | null => { const n = v == null || v === "" ? NaN : Number(v); return isFinite(n) ? round1(n * 100) : null; };
     return {
       label: m.groupItemTitle || m.question || "",
+      // [Р4] ТЕКСТ ПРАВИЛ РЫНКА. Клауза void — ФАКТ конкретного рынка, и живёт она здесь. Без завоза
+      // текста «читать клаузу из рынка» остаётся лозунгом: читать нечего.
+      description: typeof m.description === "string" ? m.description : null,
       outcomes,
       priceCents: cents[0] ?? null,
       prices: cents,
@@ -667,6 +672,8 @@ export async function discoverSportMatches(
 
 export interface MarketSnapshot {
   label: string; price: number; external_ref: string | null; liquidity: string | null;
+  /** [Р4] Текст правил рынка (Gamma `description`) — источник клаузы void. Null, если биржа его не дала. */
+  description?: string | null;
   /** CLOB token of the COMPLEMENTARY outcome (the other side of a 2-outcome market). Persisted so a
    *  consumer can trade the second side's own token — the token-fix-m1 orientation fix. Null on a
    *  genuinely single-sided listing. */
@@ -746,7 +753,7 @@ export function matchMarketSnapshots(
         const key = side.label.toLowerCase().trim();
         if (seen.has(key)) continue;
         seen.add(key);
-        rows.push({ label: side.label, price: side.price, external_ref: side.token, tokenSecond: side.token2, liquidity: m.liquidity, liq: Number(m.liquidity ?? 0) || 0, askCents: side.askCents, spreadCents: side.spreadCents, outcomeFirst: side.outcomeFirst, outcomeSecond: side.outcomeSecond });
+        rows.push({ label: side.label, price: side.price, external_ref: side.token, tokenSecond: side.token2, liquidity: m.liquidity, description: m.description ?? null, liq: Number(m.liquidity ?? 0) || 0, askCents: side.askCents, spreadCents: side.spreadCents, outcomeFirst: side.outcomeFirst, outcomeSecond: side.outcomeSecond });
       }
     }
   }
