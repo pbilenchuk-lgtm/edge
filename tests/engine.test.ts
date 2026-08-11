@@ -795,6 +795,14 @@ test("refreshMatchOdds writes a snapshot, marks to market, and triggers on a big
   // is sizeable, which is exactly the point: a thin-market position isn't overstated.
   assert.ok(edgeOver.current_price != null && edgeOver.current_price > 0 && edgeOver.current_price < 50, `liquidation MTM below mid, got ${edgeOver.current_price}`);
   assert.ok(res.triggers.some((t) => t.created), "price_move reassessment fired");
+  // [T8(а)] ПОЛНОТА PAYLOAD — ПРОВЕРЯЕТСЯ НА ЗАПИСАННОМ ТЕКСТЕ, А НЕ НА СИГНАТУРЕ.
+  // Раньше сюда доезжало слово «price_move» без единого числа, и нарратив писал строку, верную при
+  // любом движении любого рынка. Теперь повод обязан быть в теле переоценки: рынок и обе цены.
+  const fired = R.reassessmentsForMatch(db, "m-live").filter((r) => r.trigger === "price_move");
+  assert.ok(fired.length, "price_move reassessment stored");
+  const withFact = fired.filter((r) => /62¢ → 50¢/.test(r.body ?? "") && /Over 1\.5/.test(r.body ?? ""));
+  assert.ok(withFact.length, `повод доехал до тела переоценки, got: ${fired.map((r) => r.body).join(" | ")}`);
+  assert.ok(!fired.some((r) => (r.body ?? "").includes("ПОВОД НЕ ПЕРЕДАН")), "ни одна переоценка не осталась без повода");
 });
 
 test("refreshMatchOdds marks to market but fires NO price_move trigger pre-match (not live)", async () => {

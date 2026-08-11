@@ -1515,7 +1515,12 @@ export async function tennisSetValueTick(db: Database, deps: EngineDeps = {}): P
       const cov = classifyScoutCoverage(db, m, now);
       const mark = `no_score_data_skip[${cov.verdict}]`;
       const warned = R.tradeLogForMatch(db, m.id).some((l) => l.strategy_id === SET_VALUE_STRATEGY && (l.text ?? "").includes(mark));
-      if (!warned) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `${mark}: счёт не подтверждён, триггер НЕ армится (fail-closed). ${cov.note}`, created_at: now });
+      // [T8(в)] СТРОКА НАЗЫВАЕТ МОМЕНТ, НА КОТОРЫЙ ФАКТ БЫЛ ВЕРЕН. Нота классификатора говорит
+      // относительным временем («старт прошёл 1.5ч назад»), а строка лога живёт месяцами и читается
+      // как текущее состояние. Плюс throttle `warned` пишет её ОДИН раз на причину — значит это
+      // ПЕРВОЕ срабатывание, а не то, что происходит сейчас. Обе оговорки — в самой строке, потому
+      // что читатель у неё будет один и через месяц.
+      if (!warned) R.insertTradeLog(db, { id: R.uid(), match_id: m.id, strategy_id: SET_VALUE_STRATEGY, minute: "сет 2", type: "skip", text: `${mark}: счёт не подтверждён, триггер НЕ армится (fail-closed). ${cov.note} · факт зафиксирован ${cov.asOf} (ПЕРВОЕ срабатывание этой причины; строка не переписывается, текущим состоянием НЕ является)`, created_at: now });
       continue; // do NOT mark acted — a fresh snapshot may arrive next tick
     }
     const players = { p1: last.p1 ?? "", p2: last.p2 ?? "" };

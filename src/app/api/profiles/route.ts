@@ -231,6 +231,14 @@ export async function GET(req: Request) {
     // не в фиде / устарел / просрочен / завершён у провайдера / до начала. Прежняя диагностика
     // (`no_score_data_skip (15м > 15м)`) печатала возраст на первом же пересечении порога — число,
     // которое не могло быть другим, и из которого я вывел несуществующий дедлок каденции. Read-only.
+    // ?report=no_score_skip_cost → T7: во что обходится СЛЕПОТА СКАУТА. Матч с отказом
+    // `no_score_data_skip` против остальных теннисных: ставки, оборот, P&L, доля побед — с разрезом по
+    // стратегии-ОТКРЫВАТЕЛЮ, потому что сам отказ fail-closed и ничего не открывает. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "no_score_skip_cost") {
+      const { buildNoScoreSkipCost, noScoreSkipCostLine } = await import("@/lib/noScoreSkipCost");
+      const r = buildNoScoreSkipCost(db, new Date().toISOString());
+      return NextResponse.json({ ok: true, report: r, line: noScoreSkipCostLine(r) });
+    }
     if (new URL(req.url).searchParams.get("report") === "scout_coverage") {
       const { buildScoutCoverage, scoutCoverageLine } = await import("@/lib/scoutCoverage");
       const r = buildScoutCoverage(db);
