@@ -53,6 +53,48 @@ export function saveBookDepth(db: Database, t: BookTarget, book: { bids: { price
     JSON.stringify(bids.map((l) => [l.priceCents, l.size])), JSON.stringify(asks.map((l) => [l.priceCents, l.size])), nowIso);
 }
 
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// ЗАХВАТ КНИГИ НА ФИЛЛЕ — НЕСМЕЩЁННАЯ ВЫБОРКА В МОМЕНТ РЕАЛЬНОГО РЕШЕНИЯ
+//
+// Периодический захват выше берёт ЖИВЫЕ матчи по объявленной ликвидности каждые N минут. Для вопроса
+// «какая книга бывает» этого хватает; для вопроса «какая книга была В МОМЕНТ, КОГДА МЫ ВХОДИЛИ» — нет,
+// и смещение здесь не случайное: вход Overreaction происходит в момент паники, то есть ровно там, где
+// стакан не такой, как в среднем по матчу. Мерить ёмкость входа по средней книге матча значит отвечать
+// на соседний вопрос.
+//
+// Стоимость нулевая: книга на этом пути УЖЕ запрошена и лежит в кеше цикла — мы её только сохраняем.
+// Дедуп по (источник × токен) в пределах цикла: близнецы двух профилей делят одну книгу, и записать её
+// дважды значило бы удвоить вес одного факта.
+//
+// ГРАНИЦА ЧЕСТНОСТИ ТА ЖЕ, ЧТО У ПЕРИОДИЧЕСКОГО: пустая книга — ФАКТ ёмкости («налить было нечем»),
+// пишется нулём; НЕДОСТУПНАЯ — наша слепота, не свойство рынка, и не пишется вовсе.
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+
+export interface FillCaptureCtx { db: Database; nowIso: string; seen: Set<string> }
+
+/** Контекст захвата на один цикл — живёт ровно столько же, сколько кеш книг рядом с ним. */
+export function makeFillCapture(db: Database, nowIso: string): FillCaptureCtx {
+  return { db, nowIso, seen: new Set() };
+}
+
+export function captureFillBook(
+  ctx: FillCaptureCtx | undefined,
+  t: { matchId: string; token: string | null; label: string },
+  bookRes: { status: string; book?: { bids: { priceCents: number; size: number }[]; asks: { priceCents: number; size: number }[] } },
+  source: string,
+): void {
+  if (!ctx || !t.token) return;
+  const key = `${source}|${t.token}`;
+  if (ctx.seen.has(key)) return;
+  ctx.seen.add(key);
+  // Измерение не имеет права уронить путь решения — но и молчать о себе оно здесь не обязано:
+  // объём выборки виден отдельным отчётом, а не по этой строке.
+  try {
+    if (bookRes.status === "ok" && bookRes.book) saveBookDepth(ctx.db, { matchId: t.matchId, token: t.token, label: t.label }, bookRes.book, source, ctx.nowIso);
+    else if (bookRes.status === "empty") saveBookDepth(ctx.db, { matchId: t.matchId, token: t.token, label: t.label }, { bids: [], asks: [] }, `${source}_empty`, ctx.nowIso);
+  } catch { /* захват улики никогда не ломает сделку */ }
+}
+
 export async function captureBookDepth(db: Database, deps: EngineDeps = {}, nowMs = Date.now()): Promise<number> {
   const env = deps.env ?? process.env;
   const poly = deps.polymarket ?? loadPolymarketConfig(env);

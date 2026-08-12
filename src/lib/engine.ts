@@ -15,7 +15,7 @@ import type { Database } from "./db.js";
 import * as R from "./repo.js";
 import type { Bet, Competition, Match, MatchState } from "./types.js";
 import type { SportsMatchStatus } from "./sports.js";
-import { reassessNarrative, effectiveEnv } from "./llm.js";
+import { reassessNarrative, effectiveEnv, type PriceMoveFact } from "./llm.js";
 import { settleBet, resolveFootballMarket, matchPhase, isResolutionSettle } from "./settlement.js";
 import { classifySuspect, bookTotals, CLASSIFY_VERSION, type BookTotals } from "./suspectBreakdown.js";
 import { isFtBlindBet } from "./betMeta.js";
@@ -88,11 +88,11 @@ export interface ReassessResult { strategyId: string; created: boolean; reason?:
 
 export async function triggerReassessment(
   db: Database,
-  args: { match: Match; strategyId: string; trigger: "goal" | "red_card" | "price_move" | "time" | "manual"; minute: number | null },
+  args: { match: Match; strategyId: string; trigger: "goal" | "red_card" | "price_move" | "time" | "manual"; minute: number | null; move?: PriceMoveFact },
   deps: EngineDeps = {},
 ): Promise<ReassessResult> {
   const cfg = deps.config ?? loadEngineConfig(deps.env);
-  const { match, strategyId, trigger, minute } = args;
+  const { match, strategyId, trigger, minute, move } = args;
   if (trigger !== "manual" && !canReassess(db, match.id, strategyId, minute, cfg.reassessGapMinutes)) {
     return { strategyId, created: false, reason: "rate-limited (§9.7)" };
   }
@@ -105,6 +105,9 @@ export async function triggerReassessment(
       match: `${match.home}–${match.away}`, minute, trigger,
       scoreHome: match.score_home, scoreAway: match.score_away,
       strategyName: strat.name, strategyPrompt: strat.prompt,
+      // [T8(а)] Повод едет вместе с триггером. Раньше `price_move` приходил сюда голым словом, и
+      // нарратив был обязан говорить о движении, ничего о нём не зная.
+      move,
     },
     strat.model,
     { fetchImpl: deps.fetchImpl, env },
@@ -201,7 +204,11 @@ export async function refreshMatchOdds(
     if (match.state === "live" && Math.abs(price - m.price) >= cfg.priceMoveThreshold) {
       for (const sid of strategiesWithOpenBets(db, matchId)) {
         if (R.betsForMatch(db, matchId, sid).some((b) => b.status === "open" && b.market_label === m.label)) {
-          triggers.push(await triggerReassessment(db, { match, strategyId: sid, trigger: "price_move", minute: match.minute }, deps));
+          // Повод берётся ЗДЕСЬ, где он и известен: `m.price` — цена предыдущего снимка, `price` — новая,
+          // порог — тот самый, по которому мы только что решили, что движение значимо. Собирать его
+          // где-то ниже пришлось бы догадкой по котировкам, то есть вторым авторитетом на один факт.
+          const move: PriceMoveFact = { label: m.label, fromCents: m.price, toCents: price, thresholdCents: cfg.priceMoveThreshold };
+          triggers.push(await triggerReassessment(db, { match, strategyId: sid, trigger: "price_move", minute: match.minute, move }, deps));
         }
       }
     }

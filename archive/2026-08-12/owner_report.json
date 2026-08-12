@@ -1,0 +1,1231 @@
+{
+ "meta": {
+  "generatedAt": "2026-08-12T20:05Z",
+  "source": "прод https://edge-lab-oncj.onrender.com — отчёты /api/profiles?report=… + выгрузка /api/profiles-export?type=bets-json + /api/app",
+  "units": {
+   "signal": "matchId × канон-рынок × стратегия × день кикоффа (R0.1). Все вердиктные числа — на сигналах, не на записях: одна ставка ветвится на 4 риск-профиля.",
+   "cleanEpoch": "вход ≥ e5 И выход в той же эпохе (без cross-epoch сеттла)",
+   "money": "USD, paper (симуляция). Реальных денег в системе нет."
+  },
+  "scopeCaveat": "выгрузка ставок содержит 1256 строк (1232 расчётных) за 14.07–11.08; книга прода показывает 1710 расчётных. Все числа, посчитанные из выгрузки, покрывают только этот срез и помечены source=export.",
+  "noVerdicts": "отчёт не содержит рекомендаций и вердиктов о продолжении — только числа и их единицы."
+ },
+ "block1_edge": {
+  "1a_golden_cell": {
+   "cell": "prematch_value × totals × origin=prematch × чистая эпоха (e5+)",
+   "source": "report=signal_stats&strategyId=prematch_value&family=totals&phase=prematch (воспроизведено локально из выгрузки — совпало до знака)",
+   "nSignals": 55,
+   "nRecords": 148,
+   "recordsPerSignal": 2.69,
+   "nDecided": 55,
+   "winPct": 70.9,
+   "meanImpliedPct": 53.0,
+   "binomP": 0.0038,
+   "binomTest": "Пуассон-бином по СОБСТВЕННОМУ implied каждого сигнала",
+   "clvMeanCents": 16.1,
+   "clvT": 2.9,
+   "clvP": 0.0054,
+   "clvN": 54,
+   "clvCoverage": {
+    "decidedRecords": 148,
+    "withLine": 145,
+    "naStale": 3,
+    "naNoSnapshot": 0,
+    "legUnverified": false,
+    "note": "нога CLV НЕ помечена n/a: линия есть у 145 из 148 записей"
+   },
+   "pnlBookUsd": 968.67,
+   "pnlGrossUsd": 901.57,
+   "bootP": 0.054,
+   "pnlLegSignificant": false,
+   "turnoverUsd": 5210.76,
+   "roiOnTurnoverPct": 17.3,
+   "avgStakePerSignalUsd": 94.74,
+   "meanEntryCents": 54.9,
+   "top3ShareOfGrossPct": 22.9,
+   "contributors": 49,
+   "concentrationRobust": true,
+   "legsAgreeing": "2 из 3 (CLV ✓, win-vs-implied ✓, P&L ✗ при bootP 0.054)",
+   "reportVerdictLabel": "mixed"
+  },
+  "1a_populations_separate": {
+   "catch_up": {
+    "signalsInGoldenCell": 0,
+    "note": "в золотой ячейке НЕТ ни одной catch_up-ставки; по всей когорте prematch_value — 1 сигнал, P&L −$2.21"
+   },
+   "unmarked_book": {
+    "signalsInGoldenCell": 0,
+    "note": "в золотой ячейке НЕТ ставок с флагом unmarked_book"
+   },
+   "ft_blind": {
+    "bets": 16,
+    "signals": 8,
+    "decided": 8,
+    "winPct": 62.5,
+    "meanImpliedPct": 58.1,
+    "clvMeanCents": 1.5,
+    "clvT": 0.09,
+    "pnlUsd": -31.43,
+    "turnoverUsd": 706.0,
+    "roiOnTurnoverPct": -4.45,
+    "note": "половинный размер, без живого руля, сеттл через PM-резолюцию — отдельная когорта риска, в золотую ячейку не смешана"
+   }
+  },
+  "1a_whole_prematch_value_cohort": {
+   "note": "вся стратегия (все семьи и фазы), чистая эпоха — для сравнения с ячейкой",
+   "nSignals": 235,
+   "nRecords": 801,
+   "nDecided": 182,
+   "winPct": 58.2,
+   "meanImpliedPct": 48.2,
+   "binomP": 0.0028,
+   "clvMeanCents": 9.4,
+   "clvT": 2.5,
+   "clvP": 0.0137,
+   "clvN": 128,
+   "pnlUsd": 429.36,
+   "bootP": 0.374,
+   "top3ShareOfGrossPct": 10.1,
+   "contributors": 171
+  },
+  "1b_tennis_pmv": {
+   "shadow_brier": {
+    "scored": 179,
+    "needN": 40,
+    "matured": true,
+    "brierMarkov": 0.183,
+    "brierImplied": 0.202,
+    "markovBeatsImplied": true,
+    "winPctActual": 72.1,
+    "theoMeanPct": 69.3,
+    "verdict": "go",
+    "unresolved": 144,
+    "unresolvedPct": 42.6,
+    "unresolvedCause": "все 144 — skip_no_snapshot (снимки съел прун); зонд прочитал 0 из 144, поэтому «восстановимых нет» НЕ УСТАНОВЛЕНО",
+    "frozenEvidence": {
+     "terminal": 338,
+     "frozen": 40,
+     "unfrozen": 298
+    },
+    "clv": "n/a — closing-книга по shadow не пишется"
+   },
+   "paper_watch": {
+    "signals": 25,
+    "needSignals": 25,
+    "paperPnlUsd": 405.33,
+    "tripleAgreement": true,
+    "realEligible": false,
+    "stage": "paper (микро-кэп)",
+    "note": "промоушен в реал требует явной ратификации владельца; авто-промоушена нет"
+   },
+   "live_gate_cuts": {
+    "netEvGate": {
+     "evaluated": 104,
+     "wouldCut": 41,
+     "cutPct": 39.4,
+     "liveEvaluated": 100,
+     "liveCut": 39,
+     "window": "2026-08-05…2026-08-12",
+     "status": "ЖИВОЙ"
+    }
+   },
+   "signal_ruler": {
+    "nSignals": 67,
+    "nDecided": 16,
+    "winPct": 75.0,
+    "meanImpliedPct": 61.5,
+    "binomP": 0.1969,
+    "clvMeanCents": -11.7,
+    "clvT": -2.38,
+    "clvP": 0.0363,
+    "clvN": 12,
+    "pnlUsd": 128.51,
+    "bootP": 0.255,
+    "label": "legacy_diagnostic",
+    "note": "решённых всего 16 из 67 сигналов — большинство ещё не разрешено"
+   }
+  },
+  "1c_ft_blind_cohort": {
+   "bets": 16,
+   "signals": 8,
+   "decided": 8,
+   "pnlUsd": -31.43,
+   "turnoverUsd": 706.0,
+   "voidBets": 0,
+   "voidSharePct": 0.0,
+   "settledBy": {
+    "pm_resolution": 16
+   },
+   "voidVerification": "по ft_blind верифицировать нечего — voidов ноль. Общая void-верификация ПРОВЕДЕНА (settlement_corrections: 24 корректирующих проводки, Δ книги −$105.86); все 36 voidов в выгрузке — теннисные (tennis_pmv 28, tennis_set_value 8)"
+  },
+  "1d_overreaction_gate": {
+   "nSignals": 25,
+   "needN": 25,
+   "nDecided": 25,
+   "gateMet": true,
+   "legs": {
+    "winVsImplied": {
+     "winPct": 52.0,
+     "meanImpliedPct": 41.3,
+     "binomP": 0.1597,
+     "significant": false
+    },
+    "clv": {
+     "meanCents": 6.7,
+     "t": 0.85,
+     "p": 0.4046,
+     "n": 23,
+     "significant": false
+    },
+    "pnl": {
+     "usd": 524.95,
+     "bootP": 0.254,
+     "significant": false
+    }
+   },
+   "top3ShareOfGrossPct": 48.2,
+   "contributors": 24,
+   "reportVerdictLabel": "mixed",
+   "liveness": {
+    "lastFillAt": "2026-08-01T01:32:30Z",
+    "daysSinceLastFill": 11,
+    "epochsWithFills": {
+     "e5": 54,
+     "e9": 19,
+     "e8": 6,
+     "(none)": 16
+    },
+    "betsOnCurrentEpoch_e11": 0,
+    "capacityVerdictSegment": "null — «Нет расчётных ставок Overreaction на эпохе e11»"
+   }
+  },
+  "1e_maturation_counters": [
+   {
+    "cohort": "family_shadow prematch_value|btts (shadow)",
+    "n": 3,
+    "threshold": 25,
+    "status": "insufficient",
+    "clvLeg": "n/a — линии нет ни у одной из 3"
+   },
+   {
+    "cohort": "family_shadow overreaction|btts",
+    "n": 5,
+    "threshold": 25,
+    "status": "insufficient"
+   },
+   {
+    "cohort": "family_shadow overreaction|draw",
+    "n": 7,
+    "threshold": 25,
+    "status": "insufficient"
+   },
+   {
+    "cohort": "family_shadow overreaction|handicap",
+    "n": 4,
+    "threshold": 25,
+    "status": "insufficient"
+   },
+   {
+    "cohort": "family_shadow overreaction|other",
+    "n": 5,
+    "threshold": 25,
+    "status": "insufficient"
+   },
+   {
+    "cohort": "family_shadow overreaction|totals",
+    "n": 5,
+    "threshold": 25,
+    "status": "insufficient"
+   },
+   {
+    "cohort": "family_shadow tennis_overreaction|other",
+    "n": 12,
+    "threshold": 25,
+    "status": "insufficient"
+   },
+   {
+    "cohort": "family_shadow prematch_value|totals",
+    "n": 78,
+    "threshold": 25,
+    "status": "positive"
+   },
+   {
+    "cohort": "family_shadow tennis_set_value|other",
+    "n": 25,
+    "threshold": 25,
+    "status": "negative (killed)"
+   },
+   {
+    "cohort": "refusal_shadow",
+    "n": 160,
+    "nDenominator": 572,
+    "threshold": 25,
+    "status": "matured / screw_too_tight",
+    "detail": "160 из 572 решённых сигналов подтверждённо исполнимы (28%); 64 неисполнимы; 348 без снимка в окне ±12м. win 50.0% vs implied 41.5%, Пуассон-бином p=0.011, would-be P&L $3783.9 на плоских $100"
+   },
+   {
+    "cohort": "sv_shadow_calibration (крупнейший бин)",
+    "n": 18,
+    "threshold": 40,
+    "status": "insufficient"
+   },
+   {
+    "cohort": "sv_shadow_calibration (всего)",
+    "n": 56,
+    "threshold": 80,
+    "status": "insufficient"
+   },
+   {
+    "cohort": "sv_cohort forward",
+    "n": 67,
+    "perWeek": 23,
+    "biggestBinN": 19,
+    "threshold": 40,
+    "weeksToThreshold": 0.9
+   },
+   {
+    "cohort": "honest_calibration (Brier против цены момента решения)",
+    "n": 0,
+    "threshold": 30,
+    "status": "ряд пуст, начат 07.08; строк решения в журнале 4"
+   },
+   {
+    "cohort": "stale_proposal shadow",
+    "n": null,
+    "threshold": null,
+    "status": "НЕТ ДАННЫХ: отдельного отчёта нет в списке /api/profiles?report=…, счётчик когорты снаружи не читается"
+   }
+  ]
+ },
+ "block2_bug_trajectory": {
+  "2a_weekly_bug_counts": {
+   "status": "НЕТ ДАННЫХ",
+   "why": "в системе нет реестра ДЕНЕЖНЫХ багов с датой обнаружения и признаком «живая эпоха / археология». Git-история ЭТОГО репозитория начинается 2026-07-30 (13 дней) и не совпадает с началом проекта (данные ставок идут с 14.07, эпохи с e5). Считать баги по коммитам значило бы выдать частичное окно за полное.",
+   "nearestProxy": {
+    "registry": "report=ratifications",
+    "total": 17,
+    "deployed": 16,
+    "pending": 1,
+    "meanLateDays": 2.5,
+    "caveat": "это РАТИФИКАЦИИ, а не баги: пересечение частичное, метрика не та"
+   }
+  },
+  "2b_money_attributable_to_bugs": {
+   "sizing_corrupt": {
+    "bets": 8,
+    "strategy": "tennis_set_value",
+    "notionalUsd": 142708.0,
+    "maxSingleStakeUsd": 28291.0,
+    "pnlImpactUsd": 0.0,
+    "criterion": "stake > $1000 (заявленный банк) — размер невозможен под кэпами",
+    "note": "экспозиция огромная, но ВСЕ 8 строк закрыты как void → P&L не сдвинут ни на цент"
+   },
+   "settle_suspect_quarantine": {
+    "total": 59,
+    "permanentlyUnprovable": 51,
+    "pipelineDoesNotTake": 8,
+    "releasableNow": 0,
+    "pnlImpactUsd": null,
+    "note": "деньги этих строк не пересчитаны и пересчитаны не будут: привязка недоказуема"
+   },
+   "settlement_corrections": {
+    "rows": 24,
+    "bookDeltaUsd": -105.86,
+    "note": "исходные строки не переписаны; книга = исходная + правки"
+   },
+   "cost_parity_undercharge": {
+    "tennisUsd": 1679.48,
+    "footballUsd": 73.23,
+    "totalUsd": 1752.71,
+    "ledgerCoverage": {
+     "tennis": "37/783 (4.7%)",
+     "football": "426/1115 (38.2%)"
+    },
+    "note": "НЕ списанные издержки ЗАВЫШАЮТ показанный P&L на эту сумму; история не переписана, расхождение названо числом"
+   },
+   "totals": {
+    "exportPnlUsd": 1538.26,
+    "cleanEpochPnlUsd": 542.02,
+    "honestReading": "показанный P&L выгрузки $1538.26 включает $1752.71 несписанных издержек — то есть по модели издержек он отрицателен; это АРИФМЕТИКА двух измеренных чисел, а не переоценка книги"
+   }
+  },
+  "2c_bug_lifetime": {
+   "status": "НЕТ ДАННЫХ",
+   "why": "нет поля «когда дефект внесён» ни у одной сущности; медиану «внесён → обнаружен» построить не из чего. Есть только «ратифицировано → задеплоено» (meanLateDays 2.5), а это другая величина."
+  }
+ },
+ "block3_unit_economics": {
+  "3a_llm_and_infra": {
+   "llmCallsMeasured": {
+    "since": "2026-07-23T00:22:18Z",
+    "calls": 2273,
+    "days": 20.8,
+    "callsPerDay": 109.3,
+    "gateSkips": 90471,
+    "gateSkipRatioPct": 97.55,
+    "callsPerTradedMatch": 36.66,
+    "baseline": "26–42",
+    "verdict": "within_baseline",
+    "scope": "ТОЛЬКО переоценки живого цикла; вызовы предматчевой аналитики сюда не входят"
+   },
+   "llmWeeklySeries": {
+    "status": "НЕТ ДАННЫХ",
+    "why": "счётчик кумулятивный от якоря, разбивки по неделям отчёт не отдаёт"
+   },
+   "llmCostUsd": {
+    "status": "НЕТ ДАННЫХ",
+    "why": "в системе не хранятся ни токены, ни цена вызова — стоимость не измеряется, а оценка «на глаз» здесь запрещена условием"
+   },
+   "infraCostUsd": {
+    "status": "НЕТ ДАННЫХ",
+    "why": "счёт Render системе недоступен; из кода читается только факт хостинга"
+   }
+  },
+  "3b_weekly_paper_pnl_clean_epoch": {
+   "byWeekByStrategy": {
+    "2026-07-13": {
+     "overreaction": -0.1,
+     "prematch_value": 844.83,
+     "tennis_overreaction": -182.85,
+     "tennis_pmv": -101.0,
+     "tennis_set_value": 102.65
+    },
+    "2026-07-20": {
+     "overreaction": 1489.69,
+     "prematch_value": -286.94,
+     "tennis_set_value": -1124.12
+    },
+    "2026-07-27": {
+     "overreaction": -474.52,
+     "prematch_value": -139.99
+    },
+    "2026-08-03": {
+     "prematch_value": 184.86,
+     "tennis_pmv": 177.85
+    },
+    "2026-08-10": {
+     "tennis_pmv": 51.66
+    }
+   },
+   "betsByWeek": {
+    "2026-07-13": {
+     "overreaction": 41,
+     "prematch_value": 119,
+     "tennis_overreaction": 45,
+     "tennis_pmv": 31,
+     "tennis_set_value": 64
+    },
+    "2026-07-20": {
+     "overreaction": 18,
+     "prematch_value": 102,
+     "tennis_set_value": 75
+    },
+    "2026-07-27": {
+     "overreaction": 16,
+     "prematch_value": 37
+    },
+    "2026-08-03": {
+     "prematch_value": 17,
+     "tennis_pmv": 56
+    },
+    "2026-08-10": {
+     "tennis_pmv": 28
+    }
+   },
+   "note": "недели по дате ВХОДА; только чистая эпоха. Пустая клетка = линия в эту неделю не входила."
+  },
+  "3c_projection": {
+   "signalsPerWeek": 7.0,
+   "signalsPerMonth": 30.0,
+   "roiUsedPct": 17.3,
+   "cUsedPer1k": 15.9,
+   "scenarios": [
+    {
+     "bankUsd": 500,
+     "maxPositionPct": 0.05,
+     "sizePerSignalUsd": 25.0,
+     "slippageCentsAtSize": 0.4,
+     "edgeRemainingPct": 95.8,
+     "turnoverPerMonthUsd": 750.0,
+     "grossPerMonthUsd": 124.32,
+     "bindingConstraint": "банк"
+    },
+    {
+     "bankUsd": 2000,
+     "maxPositionPct": 0.05,
+     "sizePerSignalUsd": 100.0,
+     "slippageCentsAtSize": 1.59,
+     "edgeRemainingPct": 83.2,
+     "turnoverPerMonthUsd": 3000.0,
+     "grossPerMonthUsd": 432.04,
+     "bindingConstraint": "банк"
+    },
+    {
+     "bankUsd": 10000,
+     "maxPositionPct": 0.05,
+     "sizePerSignalUsd": 500.0,
+     "slippageCentsAtSize": 7.95,
+     "edgeRemainingPct": 16.2,
+     "turnoverPerMonthUsd": 15000.0,
+     "grossPerMonthUsd": 421.11,
+     "bindingConstraint": "ёмкость"
+    }
+   ],
+   "note": "АРИФМЕТИКА из измеренных входов, НЕ прогноз. ROI взят из золотой ячейки, чья P&L-нога сама НЕ значима (bootP 0.054). max_position_pct=5% — пресет medium."
+  },
+  "3c_inputs": {
+   "records": 148,
+   "signals": 55,
+   "meanEntryCents": 54.9,
+   "meanModelEdgeCents": 9.4,
+   "turnoverUsd": 5210.76,
+   "grossPnlUsd": 901.57,
+   "roiPct": 17.3,
+   "avgStakePerSignalUsd": 94.74,
+   "realizedEdgeCentsPerShare": 9.49
+  },
+  "3c_breakpoints": {
+   "cSource": "capacity segment prematch_value·e5, cN=43, cSource=own, модельные (не-book) филлы исключены по режиму",
+   "cMedPer1k": 15.9,
+   "cIqrPer1k": [
+    4.7,
+    212.4
+   ],
+   "atMedianC": {
+    "cPer1k": 15.9,
+    "halfEdgeSizeUsd": 298.0,
+    "fullEdgeSizeUsd": 597.0
+   },
+   "atLowC": {
+    "cPer1k": 4.7,
+    "halfEdgeSizeUsd": 1010.0,
+    "fullEdgeSizeUsd": 2019.0
+   },
+   "atHighC": {
+    "cPer1k": 212.4,
+    "halfEdgeSizeUsd": 22.0,
+    "fullEdgeSizeUsd": 45.0
+   },
+   "note": "разброс c огромен (4.7…212.4¢ на $1k) — точка слома по медиане и по краям расходится в 45 раз. Это ширина знания, а не кривая."
+  },
+  "3c_capacity_curve_measured": {
+   "status": "НЕ ПОСТРОЕНА",
+   "why": "вердиктный сегмент кривой (Overreaction × текущая эпоха) ПУСТ: 0 расчётных ставок на e11, последний филл 01.08. Пере-VWAP-ить по реальной книге нечего — не хватает не глубины, а сделок.",
+   "bookVolumeCheck": "инструмент готовности (report=book_depth_volume) написан, но ещё не задеплоен; косвенно: unfillable_edge спарил 170 из 189 футбольных сигналов с книгой в окне ±12м (90%)"
+  },
+  "3c_depth_distribution": {
+   "byTierFamily": [
+    {
+     "tier": "tennis",
+     "family": "totals",
+     "n": 343,
+     "p10": 566.0,
+     "median": 1522.0,
+     "p90": 5869.0,
+     "max": 21643.0
+    },
+    {
+     "tier": "tennis",
+     "family": "other",
+     "n": 196,
+     "p10": 3328.2,
+     "median": 12620.5,
+     "p90": 105235.5,
+     "max": 229566.5
+    },
+    {
+     "tier": "minor",
+     "family": "totals",
+     "n": 181,
+     "p10": 123.7,
+     "median": 463.0,
+     "p90": 1831.8,
+     "max": 6183.9
+    },
+    {
+     "tier": "top_euro",
+     "family": "btts",
+     "n": 42,
+     "p10": 226.6,
+     "median": 3454.8,
+     "p90": 13735.7,
+     "max": 108541.2
+    },
+    {
+     "tier": "minor",
+     "family": "btts",
+     "n": 40,
+     "p10": 246.9,
+     "median": 3146.8,
+     "p90": 5403.0,
+     "max": 5403.0
+    },
+    {
+     "tier": "top_euro",
+     "family": "totals",
+     "n": 21,
+     "p10": 105.1,
+     "median": 1479.9,
+     "p90": 3672.9,
+     "max": 3672.9
+    },
+    {
+     "tier": "top_euro",
+     "family": "other",
+     "n": 21,
+     "p10": 96.6,
+     "median": 4511.7,
+     "p90": 227285.9,
+     "max": 227285.9
+    },
+    {
+     "tier": "minor",
+     "family": "draw",
+     "n": 21,
+     "p10": 312.0,
+     "median": 797.5,
+     "p90": 4061.7,
+     "max": 6527.8
+    },
+    {
+     "tier": "top_euro",
+     "family": "handicap",
+     "n": 13,
+     "p10": 1845.1,
+     "median": 4100.5,
+     "p90": 10587.7,
+     "max": 10587.7
+    },
+    {
+     "tier": "tennis",
+     "family": "handicap",
+     "n": 12,
+     "p10": 1430.0,
+     "median": 4995.0,
+     "p90": 5363.0,
+     "max": 5363.0
+    },
+    {
+     "tier": "top_euro",
+     "family": "draw",
+     "n": 5,
+     "p10": 229.3,
+     "median": 7300.6,
+     "p90": 7300.6,
+     "max": 7300.6
+    },
+    {
+     "tier": "minor",
+     "family": "other",
+     "n": 4,
+     "p10": 1799.4,
+     "median": 1799.4,
+     "p90": 1799.4,
+     "max": 1799.4
+    },
+    {
+     "tier": "minor",
+     "family": "handicap",
+     "n": 3,
+     "p10": 1958.3,
+     "median": 1958.3,
+     "p90": 1958.3,
+     "max": 1958.3
+    }
+   ],
+   "note": "thinnessUsd = ОБЪЯВЛЕННАЯ глубина книги в момент решения, а не пере-VWAP по уровням. Распределение по уровням стакана не строится: отчёта нет."
+  }
+ },
+ "block4_time_to_verdict": {
+  "signalRate14d": {
+   "windowFrom": "2026-07-28",
+   "windowTo": "2026-08-11",
+   "byStrategy": {
+    "overreaction": {
+     "signals14d": 2,
+     "decided14d": 2,
+     "perWeek": 1.0
+    },
+    "prematch_value": {
+     "signals14d": 14,
+     "decided14d": 14,
+     "perWeek": 7.0
+    },
+    "tennis_overreaction": {
+     "signals14d": 0,
+     "decided14d": 0,
+     "perWeek": 0.0
+    },
+    "tennis_pmv": {
+     "signals14d": 21,
+     "decided14d": 15,
+     "perWeek": 10.5
+    },
+    "tennis_set_value": {
+     "signals14d": 0,
+     "decided14d": 0,
+     "perWeek": 0.0
+    }
+   }
+  },
+  "cleanHistoryShare": {
+   "betsTotal": 1256,
+   "betsCleanEpoch": 649,
+   "pct": 51.7,
+   "note": "чистая эпоха = вход ≥ e5 И выход в той же эпохе (без cross-epoch сеттла)"
+  },
+  "eta": [
+   {
+    "counter": "золотая ячейка → n≥40 устойчивый",
+    "have": 55,
+    "need": 40,
+    "status": "ПОРОГ УЖЕ ПРОЙДЕН; не хватает не n, а согласия третьей ноги (bootP 0.054)"
+   },
+   {
+    "counter": "overreaction гейт n/25",
+    "have": 25,
+    "need": 25,
+    "status": "ПОРОГ ПРОЙДЕН; при темпе 1 сигнал/нед следующие 25 — 25 недель"
+   },
+   {
+    "counter": "sv_cohort крупнейший бин",
+    "have": 19,
+    "need": 40,
+    "perWeek": 23,
+    "etaWeeks": 0.9
+   },
+   {
+    "counter": "sv_shadow крупнейший бин",
+    "have": 18,
+    "need": 40,
+    "perWeek": null,
+    "etaWeeks": null,
+    "status": "НЕТ ДАННЫХ по темпу этой когорты отдельно"
+   },
+   {
+    "counter": "family_shadow overreaction|* (5 семей)",
+    "have": "4–7",
+    "need": 25,
+    "perWeek": 1.0,
+    "etaWeeks": "18–21 при текущем темпе overreaction 1 сигнал/нед НА ВСЕ семьи вместе — то есть ещё дольше"
+   },
+   {
+    "counter": "family_shadow prematch_value|btts",
+    "have": 3,
+    "need": 25,
+    "perWeek": null,
+    "status": "НЕТ ДАННЫХ по темпу shadow-семьи отдельно; общий темп prematch_value 7 сигналов/нед на все семьи"
+   },
+   {
+    "counter": "honest_calibration",
+    "have": 0,
+    "need": 30,
+    "status": "ряд пуст, темп не измерен"
+   }
+  ]
+ },
+ "block5_operational_health": {
+  "rows": [
+   {
+    "metric": "пульс джоб (30-мин тик)",
+    "value": "54/54 отработали в срок",
+    "stale": 0,
+    "neverRan": 0,
+    "source": "job_heartbeat"
+   },
+   {
+    "metric": "пульс живого тика",
+    "value": "21/21 в такт, якорь 5 мин назад",
+    "lagging": 0,
+    "neverRan": 0,
+    "source": "live_job_heartbeat"
+   },
+   {
+    "metric": "невязка воронки входа",
+    "value": "77 отказов не отнесены ни к одной причине словаря",
+    "alert": true,
+    "sample": "zombie_quarantine:stale_book — путь пишет причину, которой словарь не знает",
+    "source": "entry_funnel"
+   },
+   {
+    "metric": "воронка: разобрано против медианы 7д",
+    "value": "4 против 23 (−82.6%) при живом календаре",
+    "alert": true,
+    "source": "entry_funnel"
+   },
+   {
+    "metric": "дыры крона за окно",
+    "value": "88 гэпов, самый длинный 1189с (19.8м); последний 461с ПРИ ЖИВОМ МАТЧЕ",
+    "source": "schedule_gaps",
+    "shareOfTradingTime": {
+     "status": "НЕТ ДАННЫХ",
+     "why": "отчёт отдаёт список гэпов и длиннейший, но не долю от торгового времени за 2 недели; знаменатель «торговое время» нигде не считается"
+    }
+   },
+   {
+    "metric": "repricing после гэпа",
+    "value": "использовано 2, восстановлено 0, истекло 2, медианная дельта +0¢",
+    "source": "schedule_gaps"
+   },
+   {
+    "metric": "void-вахта: аудит клауз против нашего кода",
+    "value": "4000 текстов, распознано 3821, согласий 3794, РАСХОЖДЕНИЙ 27, не распознано 179",
+    "source": "void_clause_audit"
+   },
+   {
+    "metric": "дочитывание резолюции",
+    "value": "432 из 2457 сыгранных (17.6%); оракул Completed Match у 117 из 432 (27.1%), разрешён у 117",
+    "source": "resolution_coverage"
+   },
+   {
+    "metric": "drift риск-профилей",
+    "value": "0 профилей / 0 полей разошлись с кодом",
+    "source": "profile_drift"
+   },
+   {
+    "metric": "gate_pulse: мёртвые ветки",
+    "value": "1 гейт (piece_relabel) — 9 проверок за 3д, 0 срабатываний при 180 ставках → РАССЛЕДОВАТЬ",
+    "source": "gate_pulse"
+   },
+   {
+    "metric": "pending-ратификации старше 7д",
+    "value": "1 (d3b-group-intervention, 9 дней)",
+    "source": "ratifications"
+   },
+   {
+    "metric": "карантин сеттла",
+    "value": "59 строк; 51 навсегда недоказуемы, 8 конвейер не берёт, 0 готовы к снятию",
+    "source": "settle_suspect"
+   },
+   {
+    "metric": "покрытие евро-фикстур у кикоффа",
+    "value": "89 из 129 (69.0%) при цели 85% — не хватает 21 привязки",
+    "source": "coverage_sprint"
+   },
+   {
+    "metric": "funded-футбол без привязки после кикоффа",
+    "value": "19 матчей (live 17)",
+    "source": "blind_funded"
+   }
+  ]
+ },
+ "block6_edge_nature": {
+  "6a_decomposition": {
+   "byLeagueTier": {
+    "dimension": "лига-тир (грубо: евро-кубки+топ-дивизионы vs остальное)",
+    "buckets": [
+     {
+      "signals": 46,
+      "decided": 46,
+      "wins": 31,
+      "winPct": 67.4,
+      "meanImpliedPct": 52.6,
+      "clvMeanCents": 13.2,
+      "clvN": 45,
+      "clvT": 2.13,
+      "stakeUsd": 3985.76,
+      "pnlUsd": 81.84,
+      "roiOnTurnoverPct": 2.05,
+      "bucket": "minor"
+     },
+     {
+      "signals": 9,
+      "decided": 9,
+      "wins": 8,
+      "winPct": 88.9,
+      "meanImpliedPct": 55.3,
+      "clvMeanCents": 30.7,
+      "clvN": 9,
+      "clvT": 2.57,
+      "stakeUsd": 1225.0,
+      "pnlUsd": 819.73,
+      "roiOnTurnoverPct": 66.92,
+      "bucket": "top_euro"
+     }
+    ]
+   },
+   "byBookDepthQuartile": {
+    "dimension": "квартиль глубины книги (thinnessUsd, границы [216.6499, 467.2591, 1531.4425])",
+    "buckets": [
+     {
+      "signals": 13,
+      "decided": 13,
+      "wins": 12,
+      "winPct": 92.3,
+      "meanImpliedPct": 55.5,
+      "clvMeanCents": 35.7,
+      "clvN": 13,
+      "clvT": 5.11,
+      "stakeUsd": 623.38,
+      "pnlUsd": 328.75,
+      "roiOnTurnoverPct": 52.74,
+      "bucket": "Q4_глубокая"
+     },
+     {
+      "signals": 12,
+      "decided": 12,
+      "wins": 7,
+      "winPct": 58.3,
+      "meanImpliedPct": 52.2,
+      "clvMeanCents": 4.2,
+      "clvN": 12,
+      "clvT": 0.34,
+      "stakeUsd": 1175.96,
+      "pnlUsd": -280.72,
+      "roiOnTurnoverPct": -23.87,
+      "bucket": "Q2"
+     },
+     {
+      "signals": 11,
+      "decided": 11,
+      "wins": 6,
+      "winPct": 54.5,
+      "meanImpliedPct": 47.1,
+      "clvMeanCents": 7.4,
+      "clvN": 11,
+      "clvT": 0.55,
+      "stakeUsd": 760.63,
+      "pnlUsd": -77.31,
+      "roiOnTurnoverPct": -10.16,
+      "bucket": "Q1_тонкая"
+     },
+     {
+      "signals": 9,
+      "decided": 9,
+      "wins": 5,
+      "winPct": 55.6,
+      "meanImpliedPct": 53.2,
+      "clvMeanCents": -4.4,
+      "clvN": 8,
+      "clvT": -0.23,
+      "stakeUsd": 1024.34,
+      "pnlUsd": 216.31,
+      "roiOnTurnoverPct": 21.12,
+      "bucket": "Q3"
+     }
+    ]
+   },
+   "byLeadTimeToKickoff": {
+    "dimension": "время входа до кикоффа",
+    "buckets": [
+     {
+      "signals": 54,
+      "decided": 54,
+      "wins": 38,
+      "winPct": 70.4,
+      "meanImpliedPct": 52.9,
+      "clvMeanCents": 15.6,
+      "clvN": 53,
+      "clvT": 2.78,
+      "stakeUsd": 5166.55,
+      "pnlUsd": 879.03,
+      "roiOnTurnoverPct": 17.01,
+      "bucket": "<1ч"
+     },
+     {
+      "signals": 1,
+      "decided": 1,
+      "wins": 1,
+      "winPct": 100.0,
+      "meanImpliedPct": 60.5,
+      "clvMeanCents": 39.8,
+      "clvN": 1,
+      "clvT": null,
+      "stakeUsd": 44.21,
+      "pnlUsd": 22.54,
+      "roiOnTurnoverPct": 50.98,
+      "bucket": "1-6ч"
+     }
+    ]
+   },
+   "byFamily": {
+    "dimension": "семья рынка (prematch_value × prematch × чистая эпоха)",
+    "buckets": [
+     {
+      "signals": 55,
+      "decided": 55,
+      "wins": 39,
+      "winPct": 70.9,
+      "meanImpliedPct": 53.0,
+      "clvMeanCents": 16.1,
+      "clvN": 54,
+      "clvT": 2.9,
+      "stakeUsd": 5210.76,
+      "pnlUsd": 901.57,
+      "roiOnTurnoverPct": 17.3,
+      "bucket": "totals"
+     },
+     {
+      "signals": 15,
+      "decided": 15,
+      "wins": 10,
+      "winPct": 66.7,
+      "meanImpliedPct": 40.6,
+      "clvMeanCents": 16.3,
+      "clvN": 14,
+      "clvT": 1.23,
+      "stakeUsd": 1638.59,
+      "pnlUsd": -143.19,
+      "roiOnTurnoverPct": -8.74,
+      "bucket": "btts"
+     },
+     {
+      "signals": 4,
+      "decided": 4,
+      "wins": 2,
+      "winPct": 50.0,
+      "meanImpliedPct": 63.4,
+      "clvMeanCents": -15.5,
+      "clvN": 4,
+      "clvT": null,
+      "stakeUsd": 592.5,
+      "pnlUsd": -112.07,
+      "roiOnTurnoverPct": -18.91,
+      "bucket": "other"
+     },
+     {
+      "signals": 2,
+      "decided": 2,
+      "wins": 2,
+      "winPct": 100.0,
+      "meanImpliedPct": 67.5,
+      "clvMeanCents": 31.8,
+      "clvN": 2,
+      "clvT": null,
+      "stakeUsd": 293.25,
+      "pnlUsd": 164.39,
+      "roiOnTurnoverPct": 56.06,
+      "bucket": "draw"
+     },
+     {
+      "signals": 1,
+      "decided": 1,
+      "wins": 0,
+      "winPct": 0.0,
+      "meanImpliedPct": 66.5,
+      "clvMeanCents": -67.1,
+      "clvN": 1,
+      "clvT": null,
+      "stakeUsd": 127.0,
+      "pnlUsd": -82.18,
+      "roiOnTurnoverPct": -64.71,
+      "bucket": "handicap"
+     }
+    ]
+   },
+   "concentrationFact": "9 сигналов топ-евро дали $819.73 из $901.57 валового P&L ячейки (90.9%) при 46 сигналах минорки, давших $81.84",
+   "leadTimeCaveat": "измерения НЕТ: 54 из 55 сигналов лежат в одном ведре «<1ч до кикоффа», сравнивать не с чем"
+  },
+  "6b_clv_decay": {
+   "status": "НЕТ ДАННЫХ",
+   "why": "кривая требует ряда котировок токена ПОСЛЕ нашего входа с шагом в минуты. Снимки markets пишутся, но наружу временной ряд по токену не отдаётся ни одним отчётом, и модуля, который его сворачивает в декей, нет."
+  },
+  "6c_microstructure_vs_model": {
+   "flaggedPopulationsCleanEpoch": {
+    "betsFlagged": 4,
+    "unmarkedBook": 0,
+    "catchUp": 4,
+    "ftBlind": 16,
+    "pnlFlaggedUsd": -33.79,
+    "pnlCleanTotalUsd": 542.02
+   },
+   "reading": "на чистой эпохе флаги микроструктуры несут −$33.79 из +$542.02 общего P&L; unmarked_book — 0 ставок, catch_up — 4 ставки. То есть измеренный edge НЕ лежит в этих популяциях.",
+   "notMeasurable": {
+    "status": "НЕТ ДАННЫХ",
+    "why": "комплемент-механика и резолюционные особенности PM флагом на ставке не помечаются — отделить их вклад от модельного прогноза нечем. Числа выше покрывают только те три популяции, у которых флаг есть."
+   }
+  },
+  "6d_other_venues": {
+   "edgeEstimates": "НЕ ДАЁТСЯ — по условию отчёта и потому, что данных с других площадок в системе нет ни одной строки",
+   "portabilityParameters": [
+    {
+     "parameter": "где живёт измеренный edge",
+     "measured": "90.9% валового P&L ячейки — 9 сигналов топ-евро; минорка 46 сигналов дала $81.84 при ROI 2.05%"
+    },
+    {
+     "parameter": "зависимость от глубины книги",
+     "measured": "квартиль Q4 (глубокая) — win 92.3%, CLV +35.7¢, ROI 52.7%; Q1 (тонкая) — win 54.5%, CLV +7.4¢, ROI −10.2%"
+    },
+    {
+     "parameter": "зависимость от времени до кикоффа",
+     "measured": "не измеряется (54/55 в одном ведре)"
+    },
+    {
+     "parameter": "скорость закрытия мисprайса",
+     "measured": "НЕТ ДАННЫХ (см. 6b)"
+    },
+    {
+     "parameter": "доля edge из PM-микроструктуры",
+     "measured": "по трём флагам — отрицательная и близкая к нулю; остальное неизмеримо (см. 6c)"
+    }
+   ],
+   "whatWouldNeedPiloting": [
+    {
+     "item": "ряд котировок после входа для кривой CLV-декея",
+     "need": "писать снимок токена каждые N минут после входа + модуль свёртки",
+     "weeksOfData": "2–4 недели наблюдений после деплоя"
+    },
+    {
+     "item": "глубина книги по уровням на моментах входа",
+     "need": "захват на филле (в этом круге написан, не задеплоен)",
+     "weeksOfData": "2 недели (ретеншн книги 14 дней)"
+    },
+    {
+     "item": "параметры площадки-кандидата",
+     "need": "латентность, комиссионная модель, лимиты аккаунта, формат резолюции",
+     "weeksOfData": "не измеряется без доступа к площадке"
+    }
+   ],
+   "explicitDoubleReading": "медленный декей на PM допускает ДВА чтения, и данные их не различают: (1) структурная медлительность площадки — тогда edge может быть портируем на такие же медленные площадки; (2) отсутствие острых маркетмейкеров — тогда на Betfair/Pinnacle того же edge может не быть вовсе. Числа для выбора между чтениями отсутствуют (6b = нет данных)."
+  }
+ },
+ "block7_known_levers_usd": {
+  "baselineNow": {
+   "grossPerMonthUsd": 432.04,
+   "basis": "банк $2000, 30 сигналов/мес золотой ячейки, ROI 17.3%, слиппедж по медианному c",
+   "confidence": "экстраполировано"
+  },
+  "levers": [
+   {
+    "lever": "покрытие: евро-фикстуры до цели 85%",
+    "measured": {
+     "coveredNow": 89,
+     "total": 129,
+     "bindsNeeded": 21
+    },
+    "usdPerMonth": "нет данных о ROI на недоставленных фикстурах; при переносе ROI ячейки (17.3%) и среднем размере $100 — 21 фикстура ≈ +$363/мес разово по окну, устойчивый темп не измерен",
+    "confidence": "экстраполировано"
+   },
+   {
+    "lever": "funded-футбол без привязки (blind_funded)",
+    "measured": {
+     "matches": 19
+    },
+    "usdPerMonth": "нет данных: сколько из 19 дали бы сигнал ячейки — не измерялось",
+    "confidence": "гипотеза"
+   },
+   {
+    "lever": "ft_blind-канал",
+    "measured": {
+     "bets": 16,
+     "signals": 8,
+     "pnlUsd": -31.43,
+     "roiPct": -4.45,
+     "tamFixtures": 17
+    },
+    "usdPerMonth": "на измеренных числах канал ОТРИЦАТЕЛЕН (−$31.43 на 8 сигналах); при n=8 это не вердикт",
+    "confidence": "измерено, но n=8"
+   },
+   {
+    "lever": "семьи в тени (BTTS/1X2/draw/handicap)",
+    "measured": {
+     "btts_shadow_n": 3,
+     "overreaction_families_n": "4–7",
+     "threshold": 25
+    },
+    "usdPerMonth": "вилка: если когорты дозреют положительно — потенциал равен доле их сигналов от общего потока (сейчас btts даёт 15 сигналов на 55 сигналов totals, то есть до +27% объёма); если отрицательно — $0",
+    "confidence": "гипотеза"
+   },
+   {
+    "lever": "refusal_shadow (ослабление анти-фантомного порога)",
+    "measured": {
+     "fillableSignals": 160,
+     "wouldBePnlUsd": 3783.9,
+     "basis": "плоские $100",
+     "winPct": 50.0,
+     "impliedPct": 41.5,
+     "binomP": 0.011
+    },
+    "usdPerMonth": "$3783.9 накоплено за окно наблюдений; при том же темпе и размере — порядка $900–1200/мес, но это would-be при плоской ставке $100, а не под кэпами банка",
+    "confidence": "измерено (would-be), не исполнено"
+   },
+   {
+    "lever": "теннис PMV при масштабировании кэпа с $15",
+    "measured": {
+     "paperSignals": 25,
+     "paperPnlUsd": 405.33,
+     "capUsd": 15
+    },
+    "usdPerMonth": "нет данных: теннисные книги тоньше, а измеренного c для теннисных сегментов нет (cN=0 у всех теннисных сегментов кривой) — масштаб без коэффициента не считается",
+    "confidence": "нет данных"
+   },
+   {
+    "lever": "exit-рычаги: take-лесенка",
+    "measured": {
+     "pieces": 2098,
+     "shortfallUsd": 632.66,
+     "shortfallPct": 1.42,
+     "threshold": 15,
+     "verdict": "ladder_justified"
+    },
+    "usdPerMonth": "$0 — вопрос закрыт замером: недобор 1.42% оборота ниже порога 15%",
+    "confidence": "измерено"
+   },
+   {
+    "lever": "exit-рычаги: netHoldBenefit (D1)",
+    "measured": {
+     "weeks": 1,
+     "lastWeekUsd": 142.75,
+     "n": 9,
+     "tookUsd": 143.5,
+     "gaveUsd": 0.75
+    },
+    "usdPerMonth": "первое и единственное недельное число +$142.75; тренда нет — одна неделя",
+    "confidence": "измерено, n=1 неделя"
+   },
+   {
+    "lever": "catch_up-канал",
+    "measured": {
+     "signalsCleanEpoch": 4,
+     "pnlUsd": -33.79
+    },
+    "usdPerMonth": "на измеренных числах отрицателен; n=4",
+    "confidence": "измерено, n=4"
+   }
+  ],
+  "totalNowToFull": {
+   "status": "ЧАСТИЧНО НЕТ ДАННЫХ",
+   "why": "сложить «$X сейчас → $Y при полном сборе» нельзя честно: у четырёх из девяти рычагов ($/мес) стоит «нет данных» или «гипотеза», а два измеренных рычага (ft_blind, catch_up) ОТРИЦАТЕЛЬНЫ. Сумма из трёх посчитанных и шести непосчитанных была бы не оценкой, а видимостью.",
+   "whatIsCountable": {
+    "baselineUsdPerMonth": 432.04,
+    "refusalShadowWouldBeUsdPerMonth": "900–1200 (would-be, плоские $100, не под кэпами)",
+    "takeLadderUsdPerMonth": 0.0,
+    "holdBenefitUsdPerMonth": 142.75
+   }
+  }
+ },
+ "block8_second_venue_cost": {
+  "codeShare": {
+   "locTotal": 46816,
+   "filesTotal": 170,
+   "narrowManual": {
+    "files": 33,
+    "loc": 6004,
+    "pctOfCodebase": 12.8,
+    "rule": "модули, чей ПРЕДМЕТ — механика Polymarket: CLOB-исполнение (executor/*), резолюция, комплементы, плейсхолдеры, void-клаузы, издержки биржи, захват книги"
+   },
+   "mechanicalUpperBound": {
+    "files": 48,
+    "loc": 25605,
+    "pctOfCodebase": 54.7,
+    "rule": "любой файл, где встречается маркер PM (импорт polymarket.js, CLOB/gamma/clobTokenIds/umaResolution/external_ref) или путь executor/",
+    "caveat": "ЗАВЫШЕНО: сюда попадают lifecycle.ts, repo.ts, engine.ts и UI, которые лишь ПЕРЕДАЮТ токен. Истинная доля лежит между 12.8% и 54.7%; сузить её можно только ручной разметкой по функциям, а не по файлам"
+   },
+   "platformNeutral": "скаут (tennisScout, providers, sports), модели (poisson, liveProb, edge, strategist), гейты риска (riskConfig, riskProfiles, money), аналитика и отчётность — по узкой разметке это остальные 87.2% строк"
+  },
+  "portingWeeks": {
+   "status": "ОЦЕНКА, НЕ ЗАМЕР",
+   "note": "числа ниже — инженерная прикидка по объёму узкой доли (6004 строк) и числу точек интеграции; замером они не являются и в машиночитаемую часть отчёта включены с этой меткой",
+   "abstractExchangeApiWeeks": "3–5 недель на слой исполнения + резолюции (executor-контракт уже отделён интерфейсом Executor: place/cancel/fills/positions/balance/health)",
+   "assumptionsThatBreak": [
+    "латентность: PM-цикл 20с живого тика и 30-мин общий; биржа Betfair-класса требует суб-секундной реакции — весь троттлинг и кеш книги спроектированы под медленный цикл",
+    "комиссионная модель: у PM комиссия биномиальная (rate·p·(100−p)/100 на акцию), у Betfair — процент с ВЫИГРЫША; формула издержек в execution.ts переписывается целиком, а не параметризуется",
+    "лимиты аккаунта: у PM ограничение — глубина книги; у букмекера — персональный лимит и риск закрытия счёта, которого в модели нет вообще",
+    "резолюция: у PM — UMA/оракул с текстом клаузы (voidClause читает description); у биржи — свои правила void/dead-heat, и dead-heat как класс у нас не реализован",
+    "комплементы: механика «две стороны одного токена» PM-специфична; на бирже back/lay — другая алгебра, complementMarket не переносится",
+    "плейсхолдеры: полоса 50¢ без книги — свойство PM-листинга; на бирже эквивалента нет, весь placeholderStructural становится ненужным (это экономия, а не затрата)"
+   ],
+   "noRevenueEstimate": "доходность второй площадки не оценивается — см. блок 6d"
+  }
+ }
+}

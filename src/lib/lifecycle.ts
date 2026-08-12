@@ -73,7 +73,7 @@ import { chaseBoundNoScore, chaseLine } from "./boundNoScoreChase.js";
 import { relabelPiecesByMarket } from "./pieceRelabel.js";
 import { recordStaleProposalShadow, resolveStaleProposalShadow } from "./staleProposalShadow.js";
 import { persistNoFeedCoverage } from "./noFeedCoverage.js";
-import { captureBookDepth } from "./bookDepthCapture.js";
+import { captureBookDepth, makeFillCapture, captureFillBook, type FillCaptureCtx } from "./bookDepthCapture.js";
 import { overreactionGate } from "./reassessGate.js";
 import { loadAnalysisDuel, analysisModelTag } from "./analysisDuel.js";
 import type { Confidence, ReassessTrigger } from "./types.js";
@@ -749,12 +749,17 @@ async function executeEntry(
   b: Bet, mk: Market | undefined, quoteCents: number, proposedUsd: number,
   poly: PolymarketConfig, deps: EngineDeps,
   bookCache?: Map<string, OrderBookFetch>,
+  capture?: FillCaptureCtx,
 ): Promise<EntryExec> {
   if (!poly.enabled) return { skip: false, priceCents: quoteCents, stake: proposedUsd }; // execution model off → quote fill
   const fairCents = (b.ai_prob ?? 0) * 100;
   const token = mk?.external_ref ?? null;
   const ref = b.proposed_price ?? quoteCents; // strategist-evaluated price → phantom reference
   const bookRes = await classifyOrderBook(token, poly, deps, bookCache);
+  // Книга уже в руках — сохраняем её В МОМЕНТ ВХОДА. Это ЕДИНСТВЕННАЯ несмещённая выборка для замера
+  // ёмкости: периодический захват берёт среднюю книгу матча, а вход происходит в моменте паники.
+  // Пишем ДО ветвления на skip: «сколько мы НЕ смогли бы налить» — тоже факт ёмкости, и самый ценный.
+  captureFillBook(capture, { matchId: b.match_id, token, label: b.market_label }, bookRes, "fill_entry");
   return paperBuyFill(bookRes, proposedUsd, fairCents, ref, quoteCents, poly.exec, ENTRY_PHANTOM_DIVERGENCE);
 }
 
@@ -771,6 +776,7 @@ async function sellVwapCents(
   poly: PolymarketConfig, deps: EngineDeps, quoteCents: number,
   bookCache?: Map<string, OrderBookFetch>,
   cluster?: ExitClusterCtx,
+  capture?: FillCaptureCtx,
 ): Promise<SellFillResult> {
   if (!poly.enabled) return { cents: quoteCents, fromBook: false, filledShares: 0, requestedShares: 0 };
   const token = mk?.external_ref ?? null;
@@ -802,6 +808,9 @@ async function sellVwapCents(
   // SAME single-source classification as the entry gate, so "no real book" is decided
   // identically on both sides of a position (the book is per-TOKEN — cache shared).
   const bookRes: OrderBookFetch = aggShares > 0 ? await classifyOrderBook(token, poly, deps, bookCache) : { status: "empty" };
+  // Выходная сторона книги (биды) — вторая половина ёмкости: крупная позиция дороже НЕ только на входе.
+  // `cluster` даёт matchId; без него запись пропускается, а не пишется с угаданным матчем.
+  if (cluster) captureFillBook(capture, { matchId: cluster.matchId, token, label: cluster.marketLabel }, bookRes, "fill_exit");
   const liq = Number(mk?.liquidity ?? 0) || 0;
   const agg = paperSellFill(bookRes, aggShares, aggBasis, quoteCents, liq, poly.exec);
   if (key) cluster!.cache.set(key, agg);
@@ -929,6 +938,8 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
   // Per-token order-book cache for the whole entry cycle: two profiles of one strategy
   // filling the same market must not each hit the (uncached) CLOB endpoint.
   const bookCache = new Map<string, OrderBookFetch>();
+  // Захват книги НА ФИЛЛЕ живёт ровно столько же, сколько кеш книг рядом: один цикл, один дедуп.
+  const fillCapture = makeFillCapture(db, now);
   // Shadow allocator: collect this cycle's real fills, then evaluate them as ONE batch
   // against the shared limited bank (observe-only — never changes what actually filled).
   const shadowReqs: ShadowEntryRequest[] = [];
@@ -1081,7 +1092,7 @@ export async function autoEnter(db: Database, deps: EngineDeps = {}): Promise<Au
       // far (market impact). This is what stops a big stake from eating its own
       // edge on a thin market. Falls back to a parametric model, or (execution off)
       // the quote itself.
-      const ex = await executeEntry(b, mk, quote, proposed, poly, deps, bookCache);
+      const ex = await executeEntry(b, mk, quote, proposed, poly, deps, bookCache, fillCapture);
       // retry: a TRANSIENT reason not to fill (order book momentarily unavailable / no ask
       // offers) — leave the proposal untouched so the next cycle re-attempts it. A plain
       // skip is TERMINAL (phantom fill, edge gone, placeholder market) → mark not_filled.
@@ -1286,7 +1297,7 @@ function closeBetPortion(db: Database, bet: any, fraction: number, currentPriceC
  * the gap-bottom wake price so the window self-measures its own verdict. B8 preserved: no slippage cap on the
  * protective fill — we give the book ONE short chance to unclench, we don't cap the price.
  */
-async function gapRepriceSweep(db: Database, deps: EngineDeps, poly: PolymarketConfig, bookCache: Map<string, OrderBookFetch>, exitCache: Map<string, SellFillResult>, nowMs: number, now: string): Promise<ExitItem[]> {
+async function gapRepriceSweep(db: Database, deps: EngineDeps, poly: PolymarketConfig, bookCache: Map<string, OrderBookFetch>, exitCache: Map<string, SellFillResult>, nowMs: number, now: string, capture?: FillCaptureCtx): Promise<ExitItem[]> {
   const out: ExitItem[] = [];
   const watches = R.openGapReprices(db);
   if (!watches.length) return out;
@@ -1301,7 +1312,7 @@ async function gapRepriceSweep(db: Database, deps: EngineDeps, poly: PolymarketC
     if (!m) continue;
     const mk = R.latestMarkets(db, m.id).find((x) => x.label === b.market_label);
     if (!mk || mk.price == null || b.entry_price == null) continue;
-    const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price, bookCache, exitCluster(db, b, exitCache));
+    const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price, bookCache, exitCluster(db, b, exitCache), capture);
     const minNum = m.minute != null ? m.minute : (isIsoTs(m.kickoff_at) ? Math.max(0, Math.floor((nowMs - Date.parse(m.kickoff_at as string)) / 60_000)) : 0);
     const strat = R.getStrategy(db, b.strategy_id);
     const prof = b.risk_profile_id ?? "medium";
@@ -1360,12 +1371,13 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
   const touched = new Set<string>();
   // One order-book fetch per TOKEN per cycle — shared by the gap-wake sweep and the main loop.
   const bookCacheShared = new Map<string, OrderBookFetch>();
+  const fillCapture = makeFillCapture(db, now);
   // [N5-агрегация] Кэш ордера кластера — ОДИН на весь тик, общий со свипом: близнецы одного рынка
   // выходят одним ордером независимо от того, каким циклом их принесло.
   const exitCacheShared = new Map<string, SellFillResult>();
   // P0.6: resolve any gap-wake deferrals FIRST (execute expired / clear recovered), so a position the sweep
   // just closed is skipped by the main loop below.
-  out.push(...await gapRepriceSweep(db, deps, poly, bookCacheShared, exitCacheShared, Date.parse(now) || Date.now(), now));
+  out.push(...await gapRepriceSweep(db, deps, poly, bookCacheShared, exitCacheShared, Date.parse(now) || Date.now(), now, fillCapture));
   // Degraded-mode: when the strategist layer is in an active outage, the price-stop exemption
   // for melting-option markets is UNSAFE (nothing else manages those positions) — restore the
   // stop for this pass. Computed once per cycle. See strategistDegraded / the OPTIONALITY GATE.
@@ -1400,7 +1412,7 @@ export async function evaluateExits(db: Database, deps: EngineDeps = {}): Promis
       // strategist re-entered and it churned). Deciding on the same value we then fill
       // at removes the phantom trigger at the source. Fetch ONCE, reuse for the fill.
       // (poly off → sellVwapCents returns the quote, so the decision falls back to mid.)
-      const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price, bookCache, exitCluster(db, b, exitCacheShared));
+      const sell = await sellVwapCents(mk, b.entry_price, b.stake ?? 0, poly, deps, mk.price, bookCache, exitCluster(db, b, exitCacheShared), fillCapture);
       // The live match minute (provider, else the timer estimate) — a deterministic FACT,
       // shared by the time_stop and the optionality-gate floor below.
       const minNum = m.minute != null ? m.minute
@@ -1954,6 +1966,9 @@ export async function strategistReassess(
   // [N5-агрегация] Кэш ордера кластера на этот проход: стратег-выходы близнецов одного рынка тоже идут
   // одним ордером, а не серией заявок, съедающих книгу друг у друга.
   const exitCacheReassess = new Map<string, SellFillResult>();
+  // Один захват на весь проход — иначе дедуп по (источник × токен) не работает, и книга близнецов
+  // одного рынка записалась бы дважды, удвоив вес одного факта в замере ёмкости.
+  const fillCaptureReassess = makeFillCapture(db, now);
   let calls = 0;
   // Process on-pitch event triggers (goal / red card — anything NOT labelled
   // "time") BEFORE the periodic heartbeat matches, so an urgent reaction to a
@@ -2367,7 +2382,7 @@ export async function strategistReassess(
           }
           // Fill the (partial) close against the real bid book — exit slippage into P&L.
           const basis = (b.stake ?? 0) * Math.min(ex.fraction, 1);
-          const sell = await sellVwapCents(mk, b.entry_price, basis, poly, deps, mk.price, undefined, exitCluster(db, b, exitCacheReassess));
+          const sell = await sellVwapCents(mk, b.entry_price, basis, poly, deps, mk.price, undefined, exitCluster(db, b, exitCacheReassess), fillCaptureReassess);
           // T1.1 STATE↔PRICE contradiction, SYMMETRIC with evaluateExits: a strategist DEFENSIVE exit must
           // not dump a position that is currently WINNING by the score into a phantom-low bid far below its
           // entry (or an already-won melting option) — the book is a zombie, not a broken thesis. Only for a

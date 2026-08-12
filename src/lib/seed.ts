@@ -1072,6 +1072,11 @@ export function migrateSharesAllPairs(db: Database, now: string): void {
 // makes «I added a profile → put it on every strategy in every category, equal
 // budget» happen automatically.
 const GRID_MARK = "shares_grid_signature";
+// [T8(г)] ОТКУДА $8000 НА ФУТБОЛЬНОЙ КАТЕГОРИИ. Это НЕ выбранный бюджет — это ПРОИЗВОДНОЕ число:
+// `layFootballGrid` ставит `budget = (стратеги × профили) × PER_PAIR_USD`. Вне ЧМ стратегов двое
+// (live_xg включается только там, где есть live-xG фид), профилей четыре → 8 пар × $1000 = $8000.
+// На ЧМ стратегов трое → 12 пар → $12000. Число меняется САМО, стоит добавить или убрать риск-профиль,
+// и потому его нельзя читать как решение о размере ставки в лиге: единица здесь — ПАРА, а не категория.
 const PER_PAIR_USD = 1000; // every (strategy, profile) pair is funded with this, on every football category
 // Categories with a live-xG feed (Sportmonks). Live xG Momentum only makes sense
 // where this data exists — elsewhere it just burns LLM calls emitting "inactive".

@@ -1,0 +1,1 @@
+{"ok":true,"report":{"since":"2026-07-23T00:22:18.379Z","llmCalls":2273,"gateSkips":90471,"gateSkipRatioPct":97.55,"tradedMatches":62,"callsPerTradedMatch":36.66,"baseline":{"min":26,"max":42},"verdict":"within_baseline","note":"calls/traded-match vs база 26–42. below_baseline = P0.4 gate снизил мельницу. Знаменатель — футбольные входы с момента anchor."}}

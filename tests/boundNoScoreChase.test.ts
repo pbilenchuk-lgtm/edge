@@ -174,6 +174,54 @@ test("(б) счёт, спорящий с состоявшимся сеттлом
   assert.equal(r.bookDeltaUsd, 0);
 });
 
+// ── [T8(б)] ИДЕМПОТЕНТНОСТЬ ПРОХОДА — ПРИБОРОМ, А НЕ РАССУЖДЕНИЕМ.
+//
+// «Повтор безопасен» держалось на аргументе «дожатый матч перестаёт быть кандидатом». Для дожатых —
+// правда. Для КАРАНТИННЫХ — нет: счёт там не пишется НАМЕРЕННО, значит матч остаётся кандидатом всегда,
+// и каждый следующий проход снова печатал «в карантин 1 матч / 2 ставки» — число, неотличимое от нового
+// инцидента. Тест гоняет проход ДВАЖДЫ по одной базе и требует, чтобы второй прогон не записал НИЧЕГО.
+test("[T8(б)] карантинный матч остаётся кандидатом навсегда — но повтор не пишет ничего и говорит это числом", async () => {
+  const db = world();
+  boundNoScoreMatch(db, "m1", "Inter Miami CF", "FC Cincinnati", "e1");
+  settledBet(db, "b1", "m1", "Inter Miami CF", "lost", 0);
+  settledBet(db, "b2", "m1", "Over 1.5", "won", 20);
+
+  const first = await chaseBoundNoScore(db, provider({ e1: ev({}) }), {});
+  assert.equal(first.quarantined, 1);
+  assert.equal(first.newlyQuarantinedBets, 2);   // обе поставлены ЭТИМ проходом
+  assert.equal(first.alreadyQuarantinedBets, 0);
+  assert.equal(first.noWrites, false);
+
+  const second = await chaseBoundNoScore(db, provider({ e1: ev({}) }), {});
+  // Матч ОСТАЁТСЯ кандидатом и снова уходит в карантин — это не баг, а следствие правила «счёт не пишем».
+  assert.equal(second.scanned, 1);
+  assert.equal(second.quarantined, 1);
+  assert.equal(second.quarantinedBets, 2);
+  // Но записей нет ни одной, и отчёт это ГОВОРИТ, а не подразумевает.
+  assert.equal(second.newlyQuarantinedBets, 0);
+  assert.equal(second.alreadyQuarantinedBets, 2);
+  assert.equal(second.scoreWrites, 0);
+  assert.equal(second.noWrites, true);
+  assert.ok(second.note.includes("ПОВТОР БЕЗОПАСЕН"));
+  assert.ok(chaseLine(second).includes("ВСЁ СТАРОЕ"));
+  assert.equal(second.bookDeltaUsd, 0);
+});
+
+// Обратная сторона того же прибора: там, где проход РЕАЛЬНО работает, `noWrites` обязан быть false —
+// иначе «повтор безопасен» стал бы печататься всегда и перестал бы что-либо значить.
+test("[T8(б)] удачное дожатие даёт запись — повтор после него уже пустой, и кандидат исчезает", async () => {
+  const db = world();
+  boundNoScoreMatch(db, "m1", "Inter Miami CF", "FC Cincinnati", "e1");
+  settledBet(db, "b1", "m1", "Inter Miami CF", "won", 20);
+  const first = await chaseBoundNoScore(db, provider({ e1: ev({}) }), {});
+  assert.equal(first.scoreWrites, 1);
+  assert.equal(first.noWrites, false);
+  const second = await chaseBoundNoScore(db, provider({ e1: ev({}) }), {});
+  assert.equal(second.scanned, 0);          // дожатый матч из кандидатов ушёл
+  assert.equal(second.scoreWrites, 0);
+  assert.equal(second.noWrites, true);
+});
+
 test("(б) согласный сеттл дожатию не мешает — счёт пишется, карантина нет", async () => {
   const db = world();
   boundNoScoreMatch(db, "m1", "Inter Miami CF", "FC Cincinnati", "e1");

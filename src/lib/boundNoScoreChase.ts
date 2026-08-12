@@ -63,6 +63,25 @@ export interface ChaseRow {
 
 export interface ChaseResult {
   scanned: number; filled: number; quarantined: number; quarantinedBets: number;
+  /**
+   * [T8(б)] ИДЕМПОТЕНТНОСТЬ — ИЗМЕРЕНА, А НЕ ОБЪЯВЛЕНА.
+   *
+   * «Проход идемпотентен» держалось на рассуждении: дожатый матч перестаёт быть кандидатом, потому что
+   * `final_score` заполнен. Для ветки `filled`/`local_repair` это верно. Для КАРАНТИНА — нет: счёт там
+   * НЕ пишется намеренно, значит матч остаётся кандидатом навсегда, и каждый следующий проход снова
+   * ставит `settle_suspect=1` тем же ставкам и снова печатает «в карантин 1 матч / 14 ставок». Число,
+   * неотличимое от нового инцидента, — ровно тот класс, что мы ловим у других.
+   *
+   * Поэтому счётчик расщеплён по ФАКТУ ЗАПИСИ: `newlyQuarantinedBets` считает строки, которые проход
+   * действительно изменил (UPDATE вернул changes>0), `alreadyQuarantinedBets` — те, что уже стояли под
+   * флагом. Второй прогон обязан дать `newlyQuarantinedBets = 0` при том же `quarantined`, и это
+   * проверяемо снаружи, а не на слово.
+   */
+  newlyQuarantinedBets: number; alreadyQuarantinedBets: number;
+  /** Сколько строк матчей проход РЕАЛЬНО переписал (счёт). Второй прогон обязан дать 0. */
+  scoreWrites: number;
+  /** Прогон ничего не записал: ни счёта, ни новых флагов. Это и есть «повтор безопасен», числом. */
+  noWrites: boolean;
   rows: ChaseRow[];
   bookBefore: BookTotals; bookAfter: BookTotals; bookDeltaUsd: number;
   at: string; note: string;
@@ -116,6 +135,7 @@ export async function chaseBoundNoScore(
   const rows: ChaseRow[] = [];
   const cands = boundNoScoreCandidates(db);
   let filled = 0, quarantined = 0, quarantinedBets = 0;
+  let newlyQuarantinedBets = 0, alreadyQuarantinedBets = 0, scoreWrites = 0;
 
   for (const c of cands) {
     const m = R.getMatch(db, c.id);
@@ -145,13 +165,22 @@ export async function chaseBoundNoScore(
       return out;
     };
     const quarantineGroup = (score: string, contradictions: ChaseContradiction[]) => {
+      let fresh = 0, already = 0;
       for (const b of settled) {
-        try { db.prepare(`UPDATE bets SET settle_suspect=1 WHERE id=?`).run(b.id); quarantinedBets++; } catch { /* строка не должна ронять проход */ }
+        // `AND settle_suspect IS NOT 1` — не косметика, а ПРИБОР: без него UPDATE всегда «успешен», и
+        // отличить первый карантин от сотого повтора нечем. Условие делает changes>0 фактом записи.
+        try {
+          const w = db.prepare(`UPDATE bets SET settle_suspect=1 WHERE id=? AND settle_suspect IS NOT 1`).run(b.id);
+          if ((w.changes ?? 0) > 0) fresh++; else already++;
+        } catch { /* строка не должна ронять проход */ }
       }
+      quarantinedBets += settled.length; newlyQuarantinedBets += fresh; alreadyQuarantinedBets += already;
       quarantined++;
       rows.push({
         ...base, verdict: "contradicts_settled", score, contradictions,
-        note: `счёт ${score} спорит с ${contradictions.length} из ${settled.length} состоявшихся сеттлов — счёт НЕ записан, вся группа (${settled.length}) в settle_suspect`,
+        note: `счёт ${score} спорит с ${contradictions.length} из ${settled.length} состоявшихся сеттлов — счёт НЕ записан, вся группа (${settled.length}) в settle_suspect`
+          + ` · поставлено этим проходом ${fresh}, уже стояло ${already}`
+          + (fresh === 0 ? " — ПОВТОР известного инцидента, не новый" : ""),
       });
     };
 
@@ -165,7 +194,7 @@ export async function chaseBoundNoScore(
       const contra = contradictionsFor(m.score_home, m.score_away);
       if (contra.length) { quarantineGroup(score, contra); continue; }
       R.updateMatch(db, m.id, { final_score: score });
-      filled++;
+      filled++; scoreWrites++;
       rows.push({ ...base, verdict: "local_repair", score, note: `счёт ${score} УЖЕ был в базе по сторонам — дописана только строка final_score, наружу не ходили` });
       continue;
     }
@@ -203,7 +232,7 @@ export async function chaseBoundNoScore(
     const contradictions = contradictionsFor(sh, sa);
     if (contradictions.length) { quarantineGroup(score, contradictions); continue; }
     R.updateMatch(db, m.id, { score_home: sh, score_away: sa, final_score: score });
-    filled++;
+    filled++; scoreWrites++;
     rows.push({ ...base, verdict: "filled", score, note: `счёт ${score} записан; ${settled.length} сеттл(ов) ему не противоречат` });
   }
 
@@ -211,12 +240,19 @@ export async function chaseBoundNoScore(
   // Дельта по ВСЕМ агрегатам, а не по одному: совпадение P&L при разошедшихся stake/payout — тоже расхождение.
   const bookDeltaUsd = Math.round((bookAfter.pnlSum - bookBefore.pnlSum) * 100) / 100;
   const aggregatesMoved = (["settledBets", "stakeSum", "payoutSum", "pnlSum"] as const).filter((k) => bookAfter[k] !== bookBefore[k]);
+  const noWrites = scoreWrites === 0 && newlyQuarantinedBets === 0;
   return {
-    scanned: cands.length, filled, quarantined, quarantinedBets, rows,
+    scanned: cands.length, filled, quarantined, quarantinedBets,
+    newlyQuarantinedBets, alreadyQuarantinedBets, scoreWrites, noWrites, rows,
     bookBefore, bookAfter, bookDeltaUsd, at,
     note: `bound_no_score: просмотрено ${cands.length}, дожато ${filled}, в карантин ${quarantined} матч(ей)/${quarantinedBets} ставок`
+      + ` (из них ПОСТАВЛЕНО ЭТИМ ПРОХОДОМ ${newlyQuarantinedBets}, уже стояло ${alreadyQuarantinedBets})`
+      + ` · записей счёта ${scoreWrites}`
       + ` · Δ книги = $${bookDeltaUsd.toFixed(2)} (ИЗМЕРЕНО из базы, все 4 агрегата)`
-      + (aggregatesMoved.length ? ` — СДВИНУЛОСЬ ${aggregatesMoved.join("/")}: проход не двигает деньги по построению, значит это БАГ ПРОХОДА. Разбирать, а не объяснять.` : ""),
+      + (aggregatesMoved.length ? ` — СДВИНУЛОСЬ ${aggregatesMoved.join("/")}: проход не двигает деньги по построению, значит это БАГ ПРОХОДА. Разбирать, а не объяснять.` : "")
+      // Идемпотентность печатается КАЖДЫЙ раз, включая «ничего не записано»: именно этот случай раньше
+      // был неотличим от «отработал и записал», потому что карантин переставлял флаг вхолостую.
+      + (noWrites ? " · ПОВТОР БЕЗОПАСЕН: проход не записал ничего (ни счёта, ни новых флагов)" : ""),
   };
 }
 
@@ -226,6 +262,11 @@ export function chaseLine(r: ChaseResult): string {
   for (const row of r.rows) by.set(row.verdict, (by.get(row.verdict) ?? 0) + 1);
   const tail = [...by.entries()].filter(([v]) => v !== "filled").map(([v, n]) => `${v} ${n}`).join(", ");
   return `bound_no_score: ${r.filled}/${r.scanned} дожато`
-    + (r.quarantined ? ` · ⚠ карантин ${r.quarantined} матч(ей)/${r.quarantinedBets} ставок (счёт спорит с сеттлом)` : "")
+    + (r.quarantined
+        ? ` · ⚠ карантин ${r.quarantined} матч(ей)/${r.quarantinedBets} ставок (счёт спорит с сеттлом)`
+          // Без этой скобки повтор старого инцидента читался как новый — и читался бы так вечно,
+          // потому что карантинный матч по построению остаётся кандидатом навсегда.
+          + (r.newlyQuarantinedBets === 0 ? " — ВСЁ СТАРОЕ, нового ноль" : `, из них НОВЫХ ${r.newlyQuarantinedBets}`)
+        : "")
     + (tail ? ` · не взято: ${tail}` : "");
 }

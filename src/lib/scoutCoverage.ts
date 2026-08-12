@@ -55,9 +55,24 @@ export interface CoverageRow {
   /** Решение привязки, если провайдер этот матч вообще видел: вердикт, счёт и имена ЕГО стороны. */
   mapVerdict: string | null; mapScore: number | null; providerPlayers: string | null;
   verdict: CoverageVerdict; note: string;
+  /**
+   * [T8(в)] МОМЕНТ, НА КОТОРЫЙ ФАКТ БЫЛ ВЕРЕН.
+   *
+   * Все ноты этого классификатора говорят ОТНОСИТЕЛЬНЫМ временем: «старт прошёл 1.5ч назад», «последний
+   * снимок 20м назад». В отчёте, который рисуется сейчас, это правда. В строке торгового лога, которая
+   * лежит в базе месяцами, это ложь с первой же минуты после записи — и ложь правдоподобная, потому что
+   * выглядит как измерение.
+   *
+   * Один и тот же классификатор кормит оба потребителя (так и задумано — один авторитет), поэтому якорь
+   * ставится ЗДЕСЬ, в самом факте: `asOf` — момент, на который относительные числа посчитаны. Живой
+   * отчёт печатает его как «состояние на», замороженная строка — как дату факта.
+   */
+  asOf: string;
 }
 export interface ScoutCoverageReport {
   staleMin: number; rows: CoverageRow[];
+  /** Момент отчёта. Все относительные числа внутри — на него, и ни на какой другой. */
+  asOf: string;
   /** Только те, что чинятся: привязка не сошлась / фид не даёт / запись просрочена. */
   actionable: CoverageRow[];
   covered: number; measured: number;
@@ -109,7 +124,7 @@ export function classifyScoutCoverage(db: Database, m: Match, nowIso = new Date(
     snapshots: agg.n, lastAt: agg.lastAt, ageMin, lastStatus: agg.lastStatus,
     mapVerdict: dec?.verdict ?? null, mapScore: dec?.score ?? null, providerPlayers: dec?.players ?? null,
   };
-  const mk = (verdict: CoverageVerdict, note: string): CoverageRow => ({ ...base, verdict, note });
+  const mk = (verdict: CoverageVerdict, note: string): CoverageRow => ({ ...base, verdict, note, asOf: nowIso });
 
   // ДО НАЧАЛА идёт ПЕРВЫМ: живой фид несёт только in-play, и «нет данных» тут ничего не утверждает.
   if (!started) return mk("ДО НАЧАЛА", `старт ${m.kickoff_at ?? "не назначен"} ещё не наступил — живой фид несёт только идущие матчи, отсутствие снимков здесь НИЧЕГО не значит`);
@@ -154,16 +169,18 @@ export function buildScoutCoverage(db: Database, nowIso = new Date().toISOString
   for (const r of rows) byVerdict.set(r.verdict, (byVerdict.get(r.verdict) ?? 0) + 1);
 
   return {
-    staleMin: SV_SNAP_STALE_MIN, rows, actionable, covered, measured,
-    note: !rows.length ? "незавершённых теннисных матчей нет — измерять нечего"
+    staleMin: SV_SNAP_STALE_MIN, rows, actionable, covered, measured, asOf: nowIso,
+    note: `[состояние на ${nowIso}; все «Nм назад» — относительно этого момента] `
+      + (!rows.length ? "незавершённых теннисных матчей нет — измерять нечего"
       : !measured ? `${rows.length} матч(ей), но ни один не в измеряемом состоянии (все до начала / завершены у провайдера) — это ОТСУТСТВИЕ ЗАМЕРА, а не 100% покрытие`
-      : `покрытие ${covered}/${measured} (в знаменателе только те, где данные ДОЛЖНЫ быть) · ${[...byVerdict].map(([v, n]) => `${v}:${n}`).join(" · ")}`,
+      : `покрытие ${covered}/${measured} (в знаменателе только те, где данные ДОЛЖНЫ быть) · ${[...byVerdict].map(([v, n]) => `${v}:${n}`).join(" · ")}`),
   };
 }
 
 /** Строка для еженедельника. Причина названа поимённо — иначе «нет счёта» опять станет одним словом. */
 export function scoutCoverageLine(r: ScoutCoverageReport): string {
-  if (!r.measured) return `scout_coverage: НЕ ИЗМЕРЯЕТСЯ — измеряемых матчей нет (${r.rows.length} до начала / завершены)`;
+  const at = ` [на ${r.asOf}]`;
+  if (!r.measured) return `scout_coverage${at}: НЕ ИЗМЕРЯЕТСЯ — измеряемых матчей нет (${r.rows.length} до начала / завершены)`;
   const worst = r.actionable.slice(0, 3).map((x) => `${x.players} → ${x.verdict}`);
-  return `scout_coverage: ${r.covered}/${r.measured} покрыто${r.actionable.length ? ` · ⚠ ${r.actionable.length} с причиной: ${worst.join("; ")}${r.actionable.length > 3 ? " …" : ""}` : ""}`;
+  return `scout_coverage${at}: ${r.covered}/${r.measured} покрыто${r.actionable.length ? ` · ⚠ ${r.actionable.length} с причиной: ${worst.join("; ")}${r.actionable.length > 3 ? " …" : ""}` : ""}`;
 }

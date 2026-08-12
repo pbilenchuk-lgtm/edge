@@ -384,6 +384,27 @@ export interface ReassessContext {
   match: string; minute: number | null; trigger: string;
   scoreHome: number | null; scoreAway: number | null;
   strategyName: string; strategyPrompt: string;
+  /**
+   * [T8(а)] ФАКТ, ПОРОДИВШИЙ ТРИГГЕР, ЕДЕТ ВМЕСТЕ С ТРИГГЕРОМ.
+   *
+   * У `goal`/`red_card` повод самоочевиден из счёта и минуты, которые в payload уже есть. У `price_move`
+   * повода в payload НЕ БЫЛО ВОВСЕ: ни какой рынок сдвинулся, ни откуда куда, ни на сколько при каком
+   * пороге. Стратег получал слово «движение» — и писал про движение ровно то, что мог написать, ничего
+   * не зная: строка «значимое движение цены» верна при любых числах и потому не несёт информации.
+   *
+   * Это тот же класс, что Р5 (reason-строка обязана нести провенанс), только на входе, а не на выходе:
+   * решение принимается по факту, значит факт обязан доехать до принимающего.
+   */
+  move?: PriceMoveFact;
+}
+/** Повод для `price_move`: какой рынок, откуда куда, при каком пороге. Все поля обязательны — «частичный
+ *  повод» здесь означал бы ту же дыру, только уже с видимостью заполненности. */
+export interface PriceMoveFact { label: string; fromCents: number; toCents: number; thresholdCents: number }
+
+/** Человеческая запись повода. Одна на оба пути (LLM-промпт и эвристика) — авторитет один. */
+export function priceMoveLine(mv: PriceMoveFact): string {
+  const d = Math.round((mv.toCents - mv.fromCents) * 10) / 10;
+  return `рынок «${mv.label}» ${mv.fromCents}¢ → ${mv.toCents}¢ (${d > 0 ? "+" : ""}${d}¢ при пороге ${mv.thresholdCents}¢)`;
 }
 
 /**
@@ -398,12 +419,25 @@ export async function reassessNarrative(
     const res = await callLLM({
       model,
       system: "Ты стратег ставок. По событию матча дай краткую переоценку (2–3 предложения): держать/добавить/фиксировать и почему. Учитывай правила стратегии.",
-      prompt: `Матч ${ctx.match}, ${ctx.minute ?? "?"}', счёт ${ctx.scoreHome ?? "?"}:${ctx.scoreAway ?? "?"}. Триггер: ${ctx.trigger}. Стратегия «${ctx.strategyName}»: ${ctx.strategyPrompt}`,
+      prompt: `Матч ${ctx.match}, ${ctx.minute ?? "?"}', счёт ${ctx.scoreHome ?? "?"}:${ctx.scoreAway ?? "?"}. Триггер: ${ctx.trigger}${triggerFactLine(ctx)}. Стратегия «${ctx.strategyName}»: ${ctx.strategyPrompt}`,
       maxTokens: 200,
     }, deps);
     if (res.ok) return { body: res.text, confidence: "средняя", source: "llm" };
   }
   return { body: heuristicReassess(ctx), confidence: "средняя", source: "heuristic" };
+}
+
+/**
+ * Повод триггера словами — или ЧЕСТНОЕ признание, что повод до нас не доехал.
+ *
+ * Молчание здесь было бы худшим из вариантов: читатель (и стратег) принял бы отсутствие повода за
+ * отсутствие деталей у рынка, а не за дыру в нашем конвейере. Поэтому пустой `move` у `price_move`
+ * печатается ИМЕНЕМ ДЕФЕКТА, а не пропускается.
+ */
+export function triggerFactLine(ctx: ReassessContext): string {
+  if (ctx.move) return ` (${priceMoveLine(ctx.move)})`;
+  if (ctx.trigger === "price_move") return " (ПОВОД НЕ ПЕРЕДАН вызывающим — дефект пути, а не свойство рынка: какой рынок и на сколько сдвинулся, здесь неизвестно)";
+  return "";
 }
 
 export function heuristicReassess(ctx: ReassessContext): string {
@@ -415,7 +449,9 @@ export function heuristicReassess(ctx: ReassessContext): string {
     case "red_card":
       return `Удаление (${at}). Баланс сил изменился; переоцениваю вероятности и экспозицию по дисциплине «${ctx.strategyName}».`;
     case "price_move":
-      return `Значимое движение цены (${at}, счёт ${score}). Проверяю остаточный край против порога входа стратегии «${ctx.strategyName}».`;
+      // Повод НАЗВАН числами: без него эта строка была верна при любом движении любого рынка и потому
+      // не отличала переоценку от шаблона. Теперь её можно проверить постфактум против котировок.
+      return `Значимое движение цены${ctx.move ? `: ${priceMoveLine(ctx.move)}` : " (ПОВОД НЕ ПЕРЕДАН вызывающим — дефект пути)"} (${at}, счёт ${score}). Проверяю остаточный край против порога входа стратегии «${ctx.strategyName}».`;
     default:
       return `Переоценка (${at}, счёт ${score}) по стратегии «${ctx.strategyName}»: держу позицию, если край сохраняется.`;
   }
