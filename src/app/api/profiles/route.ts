@@ -231,6 +231,14 @@ export async function GET(req: Request) {
     // не в фиде / устарел / просрочен / завершён у провайдера / до начала. Прежняя диагностика
     // (`no_score_data_skip (15м > 15м)`) печатала возраст на первом же пересечении порога — число,
     // которое не могло быть другим, и из которого я вывел несуществующий дедлок каденции. Read-only.
+    // ?report=book_depth_volume → достаточно ли книги для ИЗМЕРЕННОЙ кривой ёмкости (capacity, часть 2).
+    // Отвечает не объёмом, а ПРИГОДНОСТЬЮ: сколько входов overreaction имеют книгу рядом по времени.
+    // Пороги названы в модуле ДО первого прогона. Read-only.
+    if (new URL(req.url).searchParams.get("report") === "book_depth_volume") {
+      const { buildBookDepthVolume, bookDepthVolumeLine } = await import("@/lib/bookDepthVolume");
+      const r = buildBookDepthVolume(db, new Date().toISOString());
+      return NextResponse.json({ ok: true, report: r, line: bookDepthVolumeLine(r) });
+    }
     // ?report=no_score_skip_cost → T7: во что обходится СЛЕПОТА СКАУТА. Матч с отказом
     // `no_score_data_skip` против остальных теннисных: ставки, оборот, P&L, доля побед — с разрезом по
     // стратегии-ОТКРЫВАТЕЛЮ, потому что сам отказ fail-closed и ничего не открывает. Read-only.
