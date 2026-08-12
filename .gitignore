@@ -31,3 +31,10 @@ tsconfig.tsbuildinfo
 preview/bundle.js
 preview/data.json
 preview/*.db
+
+# archive — дампы базы НЕ коммитятся: в них лежит таблица provider_keys (ключи внешних API).
+# Выгрузки и отчёты в archive/ коммитятся, они секретов не содержат. Решение о том, куда класть
+# сам дамп, принимает владелец — см. archive/<дата>/MANIFEST.md.
+archive/**/db/*.db
+archive/**/db/*.db-wal
+archive/**/db/*.db-shm
